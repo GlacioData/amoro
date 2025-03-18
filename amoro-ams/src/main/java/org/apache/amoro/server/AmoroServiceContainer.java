@@ -24,6 +24,7 @@ import io.javalin.http.staticfiles.Location;
 import org.apache.amoro.Constants;
 import org.apache.amoro.OptimizerProperties;
 import org.apache.amoro.api.AmoroTableMetastore;
+import org.apache.amoro.api.MaintainerService;
 import org.apache.amoro.api.OptimizingService;
 import org.apache.amoro.config.ConfigHelpers;
 import org.apache.amoro.config.Configurations;
@@ -103,10 +104,12 @@ public class AmoroServiceContainer {
   private OptimizerManager optimizerManager;
   private TableService tableService;
   private DefaultOptimizingService optimizingService;
+  private DefaultTableMaintainerService tableMaintainerService;
   private TerminalManager terminalManager;
   private Configurations serviceConfig;
   private TServer tableManagementServer;
   private TServer optimizingServiceServer;
+  private TServer maintainerServiceServer;
   private Javalin httpServer;
   private AmsServiceMetrics amsServiceMetrics;
 
@@ -164,6 +167,8 @@ public class AmoroServiceContainer {
     optimizingService =
         new DefaultOptimizingService(
             serviceConfig, catalogManager, tableManager, optimizerManager, tableService);
+
+    tableMaintainerService = new DefaultTableMaintainerService(catalogManager);
 
     LOG.info("Setting up AMS table executors...");
     AsyncTableExecutors.getInstance().setup(tableService, serviceConfig);
@@ -246,6 +251,7 @@ public class AmoroServiceContainer {
   private void startThriftService() {
     startThriftServer(tableManagementServer, "thrift-table-management-server-thread");
     startThriftServer(optimizingServiceServer, "thrift-optimizing-server-thread");
+    startThriftServer(maintainerServiceServer, "maintainer-optimizing-server-thread");
   }
 
   private void startThriftServer(TServer server, String threadName) {
@@ -384,6 +390,25 @@ public class AmoroServiceContainer {
             serviceConfig.getInteger(AmoroManagementConf.OPTIMIZING_SERVICE_THRIFT_BIND_PORT),
             Executors.newCachedThreadPool(
                 getThriftThreadFactory(Constants.THRIFT_OPTIMIZING_SERVICE_NAME)),
+            selectorThreads,
+            queueSizePerSelector,
+            maxMessageSize);
+
+    MaintainerService.Processor<MaintainerService.Iface> maintainerProcessor =
+        new MaintainerService.Processor<>(
+            ThriftServiceProxy.createProxy(
+                MaintainerService.Iface.class,
+                tableMaintainerService,
+                AmoroRuntimeException::normalize));
+
+    maintainerServiceServer =
+        createThriftServer(
+            maintainerProcessor,
+            Constants.THRIFT_OPTIMIZING_SERVICE_NAME,
+            bindHost,
+            1262,
+            Executors.newCachedThreadPool(
+                getThriftThreadFactory(Constants.THRIFT_MAINTAINER_SERVICE_NAME)),
             selectorThreads,
             queueSizePerSelector,
             maxMessageSize);
