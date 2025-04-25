@@ -25,4 +25,5 @@ public class Constants {
 
   public static final String THRIFT_TABLE_SERVICE_NAME = "TableMetastore";
   public static final String THRIFT_OPTIMIZING_SERVICE_NAME = "OptimizeManager";
+  public static final String THRIFT_MAINTAINER_SERVICE_NAME = "MaintainerManager";
 }

@@ -149,7 +149,7 @@ public class AuthenticatedHadoopFileIO extends HadoopFileIO
           FileSystem fs = getFs(path);
 
           try {
-            return fs.isDirectory(path);
+            return fs.getFileStatus(path).isDirectory();
           } catch (IOException e) {
             throw new UncheckedIOException("Fail to check file directory for %s", e);
           }

@@ -16,32 +16,30 @@
  * limitations under the License.
  */
 
-package org.apache.amoro;
+package org.apache.amoro.optimizing;
 
-import org.apache.amoro.table.TableIdentifier;
+import org.apache.amoro.api.CatalogMeta;
+import org.apache.amoro.maintainer.input.ExpireSnapshotInput;
+import org.apache.iceberg.Table;
 
-import java.io.Serializable;
-import java.util.Map;
+import java.util.Set;
 
-public interface AmoroTable<T> extends Serializable {
+public class IcebergExpireSnapshotInput extends ExpireSnapshotInput {
 
-  /** Returns the {@link TableIdentifier} of this table */
-  TableIdentifier id();
+  private final Table table;
 
-  /** Returns the name of this table */
-  default String name() {
-    return id().toString();
+  public IcebergExpireSnapshotInput(
+      String database,
+      Table table,
+      Long mustOlderThan,
+      Integer minCount,
+      Set<String> expireSnapshotNeedToExcludeFiles,
+      CatalogMeta catalogMeta) {
+    super(database, mustOlderThan, minCount, expireSnapshotNeedToExcludeFiles, catalogMeta);
+    this.table = table;
   }
 
-  /** Returns the {@link TableFormat} of this table */
-  TableFormat format();
-
-  /** Returns the properties of this table */
-  Map<String, String> properties();
-
-  /** Returns the original of this table */
-  T originalTable();
-
-  /** Returns the current snapshot of this table */
-  TableSnapshot currentSnapshot();
+  public Table getTable() {
+    return table;
+  }
 }

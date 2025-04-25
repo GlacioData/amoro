@@ -16,32 +16,29 @@
  * limitations under the License.
  */
 
-package org.apache.amoro;
+package org.apache.amoro.maintainer.api;
 
-import org.apache.amoro.table.TableIdentifier;
+import org.apache.amoro.api.CatalogMeta;
 
-import java.io.Serializable;
+import java.util.HashMap;
 import java.util.Map;
 
-public interface AmoroTable<T> extends Serializable {
+public class TableMaintainerDTO {
 
-  /** Returns the {@link TableIdentifier} of this table */
-  TableIdentifier id();
+  private HashMap<String, String> properties;
 
-  /** Returns the name of this table */
-  default String name() {
-    return id().toString();
+  private CatalogMeta catalogMeta;
+
+  public TableMaintainerDTO(Map<String, String> properties, CatalogMeta catalogMeta) {
+    this.properties = new HashMap<>(properties);
+    this.catalogMeta = catalogMeta;
   }
 
-  /** Returns the {@link TableFormat} of this table */
-  TableFormat format();
+  public HashMap<String, String> getProperties() {
+    return properties;
+  }
 
-  /** Returns the properties of this table */
-  Map<String, String> properties();
-
-  /** Returns the original of this table */
-  T originalTable();
-
-  /** Returns the current snapshot of this table */
-  TableSnapshot currentSnapshot();
+  public CatalogMeta getCatalogMeta() {
+    return catalogMeta;
+  }
 }

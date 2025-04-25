@@ -16,32 +16,35 @@
  * limitations under the License.
  */
 
-package org.apache.amoro;
+package org.apache.amoro.maintainer.api;
 
-import org.apache.amoro.table.TableIdentifier;
-
-import java.io.Serializable;
+import java.util.HashMap;
 import java.util.Map;
 
-public interface AmoroTable<T> extends Serializable {
+public class BaseMaintainerOutput implements TableMaintainerOptimizing.MaintainerOutput {
 
-  /** Returns the {@link TableIdentifier} of this table */
-  TableIdentifier id();
+  private String catalog;
+  private String database;
+  private String table;
+  private String type;
+  private Long lastTime;
 
-  /** Returns the name of this table */
-  default String name() {
-    return id().toString();
+  public BaseMaintainerOutput(
+      String catalog, String database, String table, String type, Long lastTime) {
+    this.catalog = catalog;
+    this.database = database;
+    this.table = table;
+    this.type = type;
+    this.lastTime = lastTime;
   }
 
-  /** Returns the {@link TableFormat} of this table */
-  TableFormat format();
-
-  /** Returns the properties of this table */
-  Map<String, String> properties();
-
-  /** Returns the original of this table */
-  T originalTable();
-
-  /** Returns the current snapshot of this table */
-  TableSnapshot currentSnapshot();
+  @Override
+  public Map<String, String> summary() {
+    HashMap<String, String> summary = new HashMap<>(8);
+    summary.put("catalog", catalog);
+    summary.put("database", database);
+    summary.put("table", table);
+    summary.put("type", type);
+    return summary;
+  }
 }

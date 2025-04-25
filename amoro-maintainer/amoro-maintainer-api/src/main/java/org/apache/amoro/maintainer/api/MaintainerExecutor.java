@@ -16,32 +16,24 @@
  * limitations under the License.
  */
 
-package org.apache.amoro;
-
-import org.apache.amoro.table.TableIdentifier;
+package org.apache.amoro.maintainer.api;
 
 import java.io.Serializable;
-import java.util.Map;
 
-public interface AmoroTable<T> extends Serializable {
+/**
+ * Self-optimizing executor for file merging, such as merging small files and converting
+ * equality-delete to position-delete.
+ */
+public interface MaintainerExecutor<O extends TableMaintainerOptimizing.MaintainerOutput>
+    extends Serializable {
 
-  /** Returns the {@link TableIdentifier} of this table */
-  TableIdentifier id();
+  /** Execute compaction for {@link TableMaintainerOptimizing.MaintainerInput} */
+  O execute();
 
-  /** Returns the name of this table */
-  default String name() {
-    return id().toString();
-  }
-
-  /** Returns the {@link TableFormat} of this table */
-  TableFormat format();
-
-  /** Returns the properties of this table */
-  Map<String, String> properties();
-
-  /** Returns the original of this table */
-  T originalTable();
-
-  /** Returns the current snapshot of this table */
-  TableSnapshot currentSnapshot();
+  /**
+   * execute type name
+   *
+   * @return name
+   */
+  MaintainerType type();
 }

@@ -16,32 +16,20 @@
  * limitations under the License.
  */
 
-package org.apache.amoro;
-
-import org.apache.amoro.table.TableIdentifier;
+package org.apache.amoro.maintainer.api;
 
 import java.io.Serializable;
 import java.util.Map;
 
-public interface AmoroTable<T> extends Serializable {
+public interface MaintainerExecutorFactory<I extends TableMaintainerOptimizing.MaintainerInput>
+    extends Serializable {
 
-  /** Returns the {@link TableIdentifier} of this table */
-  TableIdentifier id();
+  /**
+   * After constructing the factory through a parameterless constructor, it is necessary to call the
+   * initialize method to initialize the factory.
+   */
+  void initialize(Map<String, String> properties);
 
-  /** Returns the name of this table */
-  default String name() {
-    return id().toString();
-  }
-
-  /** Returns the {@link TableFormat} of this table */
-  TableFormat format();
-
-  /** Returns the properties of this table */
-  Map<String, String> properties();
-
-  /** Returns the original of this table */
-  T originalTable();
-
-  /** Returns the current snapshot of this table */
-  TableSnapshot currentSnapshot();
+  /** Create factory by input */
+  MaintainerExecutor<?> createExecutor(I input);
 }

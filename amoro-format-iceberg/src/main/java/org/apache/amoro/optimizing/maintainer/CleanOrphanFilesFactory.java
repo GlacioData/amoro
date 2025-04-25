@@ -16,32 +16,28 @@
  * limitations under the License.
  */
 
-package org.apache.amoro;
+package org.apache.amoro.optimizing.maintainer;
 
-import org.apache.amoro.table.TableIdentifier;
+import org.apache.amoro.maintainer.api.MaintainerExecutor;
+import org.apache.amoro.maintainer.api.MaintainerExecutorFactory;
+import org.apache.amoro.maintainer.output.CleanOrphanOutPut;
+import org.apache.amoro.optimizing.IcebergCleanOrphanInput;
+import org.apache.amoro.shade.guava32.com.google.common.collect.Maps;
 
-import java.io.Serializable;
 import java.util.Map;
 
-public interface AmoroTable<T> extends Serializable {
+/** Clean table dangling delete files */
+public class CleanOrphanFilesFactory implements MaintainerExecutorFactory<IcebergCleanOrphanInput> {
 
-  /** Returns the {@link TableIdentifier} of this table */
-  TableIdentifier id();
+  private Map<String, String> properties;
 
-  /** Returns the name of this table */
-  default String name() {
-    return id().toString();
+  @Override
+  public void initialize(Map<String, String> properties) {
+    this.properties = Maps.newHashMap(properties);
   }
 
-  /** Returns the {@link TableFormat} of this table */
-  TableFormat format();
-
-  /** Returns the properties of this table */
-  Map<String, String> properties();
-
-  /** Returns the original of this table */
-  T originalTable();
-
-  /** Returns the current snapshot of this table */
-  TableSnapshot currentSnapshot();
+  @Override
+  public MaintainerExecutor<CleanOrphanOutPut> createExecutor(IcebergCleanOrphanInput input) {
+    return new CleanOrphanFilesExecutor(input);
+  }
 }
