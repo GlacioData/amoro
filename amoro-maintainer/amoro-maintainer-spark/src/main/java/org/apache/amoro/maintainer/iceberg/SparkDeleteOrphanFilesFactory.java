@@ -16,32 +16,25 @@
  * limitations under the License.
  */
 
-package org.apache.amoro;
+package org.apache.amoro.maintainer.iceberg;
 
-import org.apache.amoro.table.TableIdentifier;
+import org.apache.amoro.maintainer.api.MaintainerExecutor;
+import org.apache.amoro.maintainer.iceberg.producer.DeleteOrphanFilesSparkExecutor;
+import org.apache.amoro.maintainer.output.CleanOrphanOutPut;
+import org.apache.amoro.optimizing.IcebergCleanOrphanInput;
+import org.apache.amoro.optimizing.maintainer.CleanOrphanFilesFactory;
+import org.apache.spark.sql.SparkSession;
 
-import java.io.Serializable;
-import java.util.Map;
+public class SparkDeleteOrphanFilesFactory extends CleanOrphanFilesFactory {
 
-public interface AmoroTable<T> extends Serializable {
+  private final SparkSession spark;
 
-  /** Returns the {@link TableIdentifier} of this table */
-  TableIdentifier id();
-
-  /** Returns the name of this table */
-  default String name() {
-    return id().toString();
+  public SparkDeleteOrphanFilesFactory(SparkSession spark) {
+    this.spark = spark;
   }
 
-  /** Returns the {@link TableFormat} of this table */
-  TableFormat format();
-
-  /** Returns the properties of this table */
-  Map<String, String> properties();
-
-  /** Returns the original of this table */
-  T originalTable();
-
-  /** Returns the current snapshot of this table */
-  TableSnapshot currentSnapshot();
+  @Override
+  public MaintainerExecutor<CleanOrphanOutPut> createExecutor(IcebergCleanOrphanInput input) {
+    return new DeleteOrphanFilesSparkExecutor(spark, input);
+  }
 }

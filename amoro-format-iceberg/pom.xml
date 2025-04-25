@@ -32,6 +32,12 @@
     <url>https://amoro.apache.org</url>
 
     <dependencies>
+
+        <dependency>
+            <groupId>org.apache.amoro</groupId>
+            <artifactId>amoro-maintainer-api</artifactId>
+        </dependency>
+
         <dependency>
             <groupId>org.apache.amoro</groupId>
             <artifactId>amoro-shade-thrift</artifactId>

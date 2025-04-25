@@ -16,32 +16,9 @@
  * limitations under the License.
  */
 
-package org.apache.amoro;
+package org.apache.amoro.server.manager;
 
-import org.apache.amoro.table.TableIdentifier;
-
-import java.io.Serializable;
-import java.util.Map;
-
-public interface AmoroTable<T> extends Serializable {
-
-  /** Returns the {@link TableIdentifier} of this table */
-  TableIdentifier id();
-
-  /** Returns the name of this table */
-  default String name() {
-    return id().toString();
-  }
-
-  /** Returns the {@link TableFormat} of this table */
-  TableFormat format();
-
-  /** Returns the properties of this table */
-  Map<String, String> properties();
-
-  /** Returns the original of this table */
-  T originalTable();
-
-  /** Returns the current snapshot of this table */
-  TableSnapshot currentSnapshot();
+public enum TableMaintainerType {
+  CLEAN_DANGLING,
+  CLEAN_ORPHAN
 }

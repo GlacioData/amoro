@@ -16,32 +16,27 @@
  * limitations under the License.
  */
 
-package org.apache.amoro;
+package org.apache.amoro.optimizing;
 
-import org.apache.amoro.table.TableIdentifier;
+import org.apache.amoro.api.CatalogMeta;
+import org.apache.amoro.maintainer.input.DanglingDeleteFilesInput;
+import org.apache.iceberg.Table;
 
-import java.io.Serializable;
-import java.util.Map;
+public class IcebergDanglingDeleteFilesInput extends DanglingDeleteFilesInput {
 
-public interface AmoroTable<T> extends Serializable {
+  private final Table table;
 
-  /** Returns the {@link TableIdentifier} of this table */
-  TableIdentifier id();
-
-  /** Returns the name of this table */
-  default String name() {
-    return id().toString();
+  public IcebergDanglingDeleteFilesInput(
+      String database,
+      CatalogMeta catalogMeta,
+      Table table,
+      boolean danglingFileCleanEnabled,
+      long lastDanglingFileCleanTime) {
+    super(database, catalogMeta, danglingFileCleanEnabled, lastDanglingFileCleanTime);
+    this.table = table;
   }
 
-  /** Returns the {@link TableFormat} of this table */
-  TableFormat format();
-
-  /** Returns the properties of this table */
-  Map<String, String> properties();
-
-  /** Returns the original of this table */
-  T originalTable();
-
-  /** Returns the current snapshot of this table */
-  TableSnapshot currentSnapshot();
+  public Table getTable() {
+    return table;
+  }
 }

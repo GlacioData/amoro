@@ -16,32 +16,24 @@
  * limitations under the License.
  */
 
-package org.apache.amoro;
+package org.apache.amoro.maintainer.output;
 
-import org.apache.amoro.table.TableIdentifier;
+import org.apache.amoro.maintainer.api.BaseMaintainerOutput;
+import org.apache.amoro.maintainer.api.MaintainerType;
 
-import java.io.Serializable;
 import java.util.Map;
 
-public interface AmoroTable<T> extends Serializable {
+public class DeleteFilesOutput extends BaseMaintainerOutput {
 
-  /** Returns the {@link TableIdentifier} of this table */
-  TableIdentifier id();
-
-  /** Returns the name of this table */
-  default String name() {
-    return id().toString();
+  public DeleteFilesOutput(
+      String catalog, String database, String table, String type, Long lastTime) {
+    super(catalog, database, table, type, lastTime);
   }
 
-  /** Returns the {@link TableFormat} of this table */
-  TableFormat format();
-
-  /** Returns the properties of this table */
-  Map<String, String> properties();
-
-  /** Returns the original of this table */
-  T originalTable();
-
-  /** Returns the current snapshot of this table */
-  TableSnapshot currentSnapshot();
+  @Override
+  public Map<String, String> summary() {
+    Map<String, String> summary = super.summary();
+    summary.put("type", MaintainerType.DANGLING_DELETE_FILES.name());
+    return summary;
+  }
 }

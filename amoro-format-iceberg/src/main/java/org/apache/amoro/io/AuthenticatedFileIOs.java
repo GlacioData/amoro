@@ -72,4 +72,12 @@ public class AuthenticatedFileIOs {
       return new AuthenticatedFileIOAdapter(io);
     }
   }
+
+  public static AuthenticatedFileIO buildAdaptIcebergFileIO(FileIO io) {
+    if (io instanceof HadoopFileIO) {
+      return new AuthenticatedFileIOAdapter(io);
+    } else {
+      return new AuthenticatedFileIOAdapter(io);
+    }
+  }
 }

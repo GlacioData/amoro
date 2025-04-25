@@ -16,32 +16,20 @@
  * limitations under the License.
  */
 
-package org.apache.amoro;
+package org.apache.amoro.maintainer.api;
 
-import org.apache.amoro.table.TableIdentifier;
+public class OptimizerTableMaintainerProperties {
 
-import java.io.Serializable;
-import java.util.Map;
+  // Resource properties
+  public static final String AMS_MAINTAINER_URI = "ams-optimizing-uri";
 
-public interface AmoroTable<T> extends Serializable {
+  // Resource container properties
+  public static final String EXPORT_PROPERTY_PREFIX = "export.";
 
-  /** Returns the {@link TableIdentifier} of this table */
-  TableIdentifier id();
-
-  /** Returns the name of this table */
-  default String name() {
-    return id().toString();
-  }
-
-  /** Returns the {@link TableFormat} of this table */
-  TableFormat format();
-
-  /** Returns the properties of this table */
-  Map<String, String> properties();
-
-  /** Returns the original of this table */
-  T originalTable();
-
-  /** Returns the current snapshot of this table */
-  TableSnapshot currentSnapshot();
+  // Resource group properties
+  public static final String MAINTAINER_EXECUTION_PARALLEL = "execution-parallel";
+  public static final String TABLE_MAINTAINER_TYPE = "type";
+  public static final String OPTIMIZER_CATALOG = "catalog";
+  public static final String OPTIMIZER_DATABASE = "database";
+  public static final String OPTIMIZER_TABLE = "table";
 }

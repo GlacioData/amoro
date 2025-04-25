@@ -42,12 +42,12 @@ ams:
     queue-size: 1000000
 
   refresh-tables:
-    thread-count: 10
-    interval: 1min # 60000
+    thread-count: 4
+    interval: 3min # 60000
     max-pending-partition-count: 100 # default 100
 
   self-optimizing:
-    commit-thread-count: 10
+    commit-thread-count: 2
     runtime-data-keep-days: 30
     runtime-data-expire-interval-hours: 1
     refresh-group-interval: 30s
@@ -63,37 +63,37 @@ ams:
 
   # optional features
   expire-snapshots:
-    enabled: true
-    thread-count: 10
+    enabled: false
+    thread-count: 2
 
   clean-orphan-files:
-    enabled: true
-    thread-count: 10
+    enabled: false
+    thread-count: 2
     interval: 1d
 
   clean-dangling-delete-files:
-    enabled: true
-    thread-count: 10
+    enabled: false
+    thread-count: 1
 
   sync-hive-tables:
-    enabled: false
-    thread-count: 10
+    enabled: true
+    thread-count: 2
 
   data-expiration:
-    enabled: true
+    enabled: false
     thread-count: 10
     interval: 1d
 
   auto-create-tags:
-    enabled: true
+    enabled: false
     thread-count: 3
     interval: 1min # 60000
 
   table-manifest-io:
-    thread-count: 20
+    thread-count: 4
 
   catalog-meta-cache:
-    expiration-interval: 60s
+    expiration-interval: 180s
 
   # Support for encrypted sensitive configuration items
   shade:
