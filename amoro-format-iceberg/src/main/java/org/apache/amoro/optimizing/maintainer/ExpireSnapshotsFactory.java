@@ -20,8 +20,8 @@ package org.apache.amoro.optimizing.maintainer;
 
 import org.apache.amoro.maintainer.api.MaintainerExecutor;
 import org.apache.amoro.maintainer.api.MaintainerExecutorFactory;
-import org.apache.amoro.maintainer.output.ExpireSnapshotsOutput;
 import org.apache.amoro.optimizing.IcebergExpireSnapshotInput;
+import org.apache.amoro.optimizing.IcebergExpireSnapshotsOutput;
 import org.apache.amoro.shade.guava32.com.google.common.collect.Maps;
 
 import java.util.Map;
@@ -38,7 +38,7 @@ public class ExpireSnapshotsFactory
   }
 
   @Override
-  public MaintainerExecutor<ExpireSnapshotsOutput> createExecutor(
+  public MaintainerExecutor<IcebergExpireSnapshotsOutput> createExecutor(
       IcebergExpireSnapshotInput input) {
     return new ExpireSnapshotsExecutor(input);
   }

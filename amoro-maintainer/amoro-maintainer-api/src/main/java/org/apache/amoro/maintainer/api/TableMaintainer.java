@@ -18,34 +18,14 @@
 
 package org.apache.amoro.maintainer.api;
 
-/**
- * API for maintaining table.
- *
- * <p>Includes: clean content files, clean metadata, clean dangling delete files, expire snapshots,
- * auto create tags.
- */
 public interface TableMaintainer {
 
-  /** Clean table orphan files. Includes: data files, metadata files. */
-  void cleanOrphanFiles();
-
-  /** Clean table dangling delete files. */
-  default void cleanDanglingDeleteFiles() {
-    // DO nothing by default
+  public enum Status {
+    RUNNING,
+    IDLE,
+    PENDING,
+    FAILED,
+    SUCCESS,
+    CANCELED // If Optimizing process failed, all tasks will be CANCELED except for SUCCESS tasks
   }
-
-  /**
-   * Expire snapshots. The optimizing based on the snapshot that the current table relies on will
-   * not expire according to TableRuntime.
-   */
-  void expireSnapshots();
-
-  /**
-   * Expire historical data based on the expiration field, and data that exceeds the retention
-   * period will be purged
-   */
-  void expireData();
-
-  /** Auto create tags for table. */
-  void autoCreateTags();
 }

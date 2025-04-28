@@ -19,27 +19,20 @@
 package org.apache.amoro.maintainer;
 
 import org.apache.amoro.AmoroTable;
-import org.apache.amoro.TableFormat;
 import org.apache.amoro.api.CatalogMeta;
 import org.apache.amoro.config.ConfigHelpers;
 import org.apache.amoro.config.Configurations;
 import org.apache.amoro.config.TableConfiguration;
-import org.apache.amoro.maintainer.api.MaintainerExecutor;
 import org.apache.amoro.maintainer.api.TableMaintainerConfig;
 import org.apache.amoro.maintainer.api.TableMaintainerDTO;
 import org.apache.amoro.maintainer.api.TableMaintainerExecutor;
-import org.apache.amoro.maintainer.output.CleanOrphanOutPut;
-import org.apache.amoro.maintainer.output.ExpireSnapshotsOutput;
+import org.apache.amoro.maintainer.iceberg.StandaloneMaintainerStarter;
 import org.apache.amoro.optimizing.IcebergCleanOrphanInput;
 import org.apache.amoro.optimizing.IcebergDanglingDeleteFilesInput;
-import org.apache.amoro.optimizing.IcebergDeleteFilesOutput;
 import org.apache.amoro.optimizing.IcebergExpireSnapshotInput;
-import org.apache.amoro.optimizing.maintainer.CleanOrphanFilesFactory;
-import org.apache.amoro.optimizing.maintainer.DanglingDeleteFilesCleaningFactory;
-import org.apache.amoro.optimizing.maintainer.ExpireSnapshotsFactory;
+import org.apache.amoro.optimizing.maintainer.IcebergTableMaintainerV2;
 import org.apache.amoro.server.catalog.CatalogBuilder;
 import org.apache.amoro.server.catalog.ServerCatalog;
-import org.apache.iceberg.Table;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -67,51 +60,30 @@ public class StandaloneMaintainer {
     ServerCatalog serverCatalog = CatalogBuilder.buildServerCatalog(catalogMeta, serverConfig);
     AmoroTable<?> amoroTableLoader =
         serverCatalog.loadTable(config.getDatabase(), config.getTable());
-    TableFormat format = amoroTableLoader.format();
-    if (TableFormat.ICEBERG.equals(format)) {
-      Table table = (Table) amoroTableLoader.originalTable();
-      ExpireSnapshotsFactory expireSnapshotsFactory = new ExpireSnapshotsFactory();
-      MaintainerExecutor<ExpireSnapshotsOutput> snapshotsFactoryExecutor =
-          expireSnapshotsFactory.createExecutor(
-              new IcebergExpireSnapshotInput(
-                  config.getDatabase(),
-                  table,
-                  configuration.getSnapshotTTLMinutes(),
-                  configuration.getSnapshotMinCount(),
-                  new HashSet<>(),
-                  catalogMeta));
-      ExpireSnapshotsOutput snapshotsOutput = snapshotsFactoryExecutor.execute();
-      LOG.info("snapshotsOutput : {}", snapshotsOutput);
-      table.refresh();
+    IcebergTableMaintainerV2 icebergTableMaintainerV2 =
+        StandaloneMaintainerStarter.ofTable(amoroTableLoader);
+    icebergTableMaintainerV2.expireSnapshots(
+        new IcebergExpireSnapshotInput(
+            config.getDatabase(),
+            StandaloneMaintainerStarter.asIcebergTable(amoroTableLoader),
+            configuration.getSnapshotTTLMinutes(),
+            configuration.getSnapshotMinCount(),
+            new HashSet<>(),
+            catalogMeta));
 
-      DanglingDeleteFilesCleaningFactory danglingDeleteFilesCleaningFactory =
-          new DanglingDeleteFilesCleaningFactory();
-      MaintainerExecutor<IcebergDeleteFilesOutput> cleaningFactoryExecutor =
-          danglingDeleteFilesCleaningFactory.createExecutor(
-              new IcebergDanglingDeleteFilesInput(
-                  config.getDatabase(),
-                  catalogMeta,
-                  table,
-                  configuration.isDeleteDanglingDeleteFilesEnabled(),
-                  1L));
-      IcebergDeleteFilesOutput icebergDeleteFilesOutput = cleaningFactoryExecutor.execute();
-      LOG.info("icebergDeleteFilesOutput : {}", icebergDeleteFilesOutput);
-      table.refresh();
+    icebergTableMaintainerV2.cleanDanglingDeleteFiles(
+        new IcebergDanglingDeleteFilesInput(
+            config.getDatabase(),
+            catalogMeta,
+            StandaloneMaintainerStarter.asIcebergTable(amoroTableLoader),
+            configuration.isDeleteDanglingDeleteFilesEnabled(),
+            1L));
 
-      CleanOrphanFilesFactory cleanOrphanFilesFactory = new CleanOrphanFilesFactory();
-      MaintainerExecutor<CleanOrphanOutPut> cleanOrphanFilesFactoryExecutor =
-          cleanOrphanFilesFactory.createExecutor(
-              new IcebergCleanOrphanInput(
-                  config.getDatabase(),
-                  table,
-                  configuration.getOrphanExistingMinutes(),
-                  catalogMeta));
-      CleanOrphanOutPut cleanOrphanOutPut = cleanOrphanFilesFactoryExecutor.execute();
-      LOG.info("cleanOrphanOutPut : {}", cleanOrphanOutPut);
-      table.refresh();
-
-    } else {
-      throw new RuntimeException("not support format with table maintainer");
-    }
+    icebergTableMaintainerV2.cleanOrphanFiles(
+        new IcebergCleanOrphanInput(
+            config.getDatabase(),
+            StandaloneMaintainerStarter.asIcebergTable(amoroTableLoader),
+            configuration.getOrphanExistingMinutes(),
+            catalogMeta));
   }
 }

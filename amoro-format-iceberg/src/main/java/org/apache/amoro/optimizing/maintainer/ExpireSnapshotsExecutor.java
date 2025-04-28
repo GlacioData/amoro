@@ -27,8 +27,8 @@ import org.apache.amoro.io.AuthenticatedFileIO;
 import org.apache.amoro.io.AuthenticatedFileIOs;
 import org.apache.amoro.maintainer.api.MaintainerExecutor;
 import org.apache.amoro.maintainer.api.MaintainerType;
-import org.apache.amoro.maintainer.output.ExpireSnapshotsOutput;
 import org.apache.amoro.optimizing.IcebergExpireSnapshotInput;
+import org.apache.amoro.optimizing.IcebergExpireSnapshotsOutput;
 import org.apache.amoro.shade.guava32.com.google.common.collect.Sets;
 import org.apache.amoro.table.TableMetaStore;
 import org.apache.amoro.utils.CatalogUtil;
@@ -45,7 +45,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
 
-public class ExpireSnapshotsExecutor implements MaintainerExecutor<ExpireSnapshotsOutput> {
+public class ExpireSnapshotsExecutor implements MaintainerExecutor<IcebergExpireSnapshotsOutput> {
 
   private static final Logger LOG = LoggerFactory.getLogger(ExpireSnapshotsExecutor.class);
 
@@ -77,7 +77,7 @@ public class ExpireSnapshotsExecutor implements MaintainerExecutor<ExpireSnapsho
   }
 
   @Override
-  public ExpireSnapshotsOutput execute() {
+  public IcebergExpireSnapshotsOutput execute() {
     LOG.info(
         "start expire snapshots older than {} and retain last {} snapshots, the exclude is {}",
         olderThan,
@@ -128,13 +128,14 @@ public class ExpireSnapshotsExecutor implements MaintainerExecutor<ExpireSnapsho
         toDeleteFiles.get(),
         table.name(),
         deletedFiles);
-    return new ExpireSnapshotsOutput(
+    return new IcebergExpireSnapshotsOutput(
         catalogMeta.getCatalogName(),
         database,
         table.name(),
         TableFormat.ICEBERG.name(),
         System.currentTimeMillis(),
-        toDeleteFiles.get());
+        toDeleteFiles.get(),
+        null);
   }
 
   @Override
