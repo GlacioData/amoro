@@ -16,14 +16,9 @@
  * limitations under the License.
  */
 
-package org.apache.amoro;
+package org.apache.amoro.server.manager;
 
-public class Constants {
-  public static final String INNER_TABLE_BASE = "base";
-  public static final String INNER_TABLE_CHANGE = "change";
-  public static final String EXTERNAL_RESOURCE_CONTAINER = "external";
-
-  public static final String THRIFT_TABLE_SERVICE_NAME = "TableMetastore";
-  public static final String THRIFT_OPTIMIZING_SERVICE_NAME = "OptimizeManager";
-  public static final String THRIFT_MAINTAINER_SERVICE_NAME = "MaintainerManager";
+public enum TableMaintainerType {
+  CLEAN_DANGLING,
+  CLEAN_ORPHAN
 }

@@ -16,14 +16,28 @@
  * limitations under the License.
  */
 
-package org.apache.amoro;
+package org.apache.amoro.optimizing.maintainer;
 
-public class Constants {
-  public static final String INNER_TABLE_BASE = "base";
-  public static final String INNER_TABLE_CHANGE = "change";
-  public static final String EXTERNAL_RESOURCE_CONTAINER = "external";
+import org.apache.amoro.optimizing.DanglingDeleteFilesInput;
+import org.apache.amoro.optimizing.OptimizingExecutor;
+import org.apache.amoro.optimizing.OptimizingExecutorFactory;
+import org.apache.amoro.shade.guava32.com.google.common.collect.Maps;
 
-  public static final String THRIFT_TABLE_SERVICE_NAME = "TableMetastore";
-  public static final String THRIFT_OPTIMIZING_SERVICE_NAME = "OptimizeManager";
-  public static final String THRIFT_MAINTAINER_SERVICE_NAME = "MaintainerManager";
+import java.util.Map;
+
+/** Clean table dangling delete files */
+public class DanglingDeleteFilesCleaningFactory
+    implements OptimizingExecutorFactory<DanglingDeleteFilesInput> {
+
+  private Map<String, String> properties;
+
+  @Override
+  public void initialize(Map<String, String> properties) {
+    this.properties = Maps.newHashMap(properties);
+  }
+
+  @Override
+  public OptimizingExecutor createExecutor(DanglingDeleteFilesInput input) {
+    return new DanglingDeleteFilesCleaningExecutor(input);
+  }
 }
