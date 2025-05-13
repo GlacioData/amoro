@@ -24,46 +24,54 @@ import org.apache.amoro.TableFormat;
 public class MaintainerResult {
 
   public Long id;
-  @StateField public String catalog_name;
-  @StateField public String db_name;
-  @StateField public String table_name;
-  @StateField public TableFormat table_format;
+  @StateField public String catalogName;
+  @StateField public String dbName;
+  @StateField public String tableName;
+  @StateField public TableFormat tableFormat;
   @StateField private TableMaintainer.Status status = TableMaintainer.Status.IDLE;
   @StateField private long createdTime;
   @StateField private long updatedTime;
   @StateField private int threadId = -1;
   @StateField private String failReason;
 
-  public String getCatalog_name() {
-    return catalog_name;
+  public Long getId() {
+    return id;
   }
 
-  public void setCatalog_name(String catalog_name) {
-    this.catalog_name = catalog_name;
+  public void setId(Long id) {
+    this.id = id;
   }
 
-  public String getDb_name() {
-    return db_name;
+  public String getCatalogName() {
+    return catalogName;
   }
 
-  public void setDb_name(String db_name) {
-    this.db_name = db_name;
+  public void setCatalogName(String catalogName) {
+    this.catalogName = catalogName;
   }
 
-  public String getTable_name() {
-    return table_name;
+  public String getDbName() {
+    return dbName;
   }
 
-  public void setTable_name(String table_name) {
-    this.table_name = table_name;
+  public void setDbName(String dbName) {
+    this.dbName = dbName;
   }
 
-  public TableFormat getTable_format() {
-    return table_format;
+  public String getTableName() {
+    return tableName;
   }
 
-  public void setTable_format(TableFormat table_format) {
-    this.table_format = table_format;
+  public void setTableName(String tableName) {
+    this.tableName = tableName;
+  }
+
+  public TableFormat getTableFormat() {
+    return tableFormat;
+  }
+
+  public void setTableFormat(TableFormat tableFormat) {
+    this.tableFormat = tableFormat;
   }
 
   public TableMaintainer.Status getStatus() {

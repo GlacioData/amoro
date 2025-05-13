@@ -20,7 +20,7 @@ package org.apache.amoro.maintainer.api;
 
 public interface TableMaintainer {
 
-  public enum Status {
+  enum Status {
     RUNNING,
     IDLE,
     PENDING,

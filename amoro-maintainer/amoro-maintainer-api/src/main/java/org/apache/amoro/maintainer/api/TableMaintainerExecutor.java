@@ -52,17 +52,17 @@ public class TableMaintainerExecutor {
               return (client.ackTableMetadata(
                   config.getCatalog(), config.getDatabase(), config.getTable(), config.getType()));
             });
-    Map<String, String> properties = executorTask.getProperties();
+    Map<String, String> properties = executorTask.getServerConfig();
     LOG.info("find ams properties:{}", properties.size());
     byte[] taskInput = executorTask.getTaskInput();
     CatalogMeta catalogMeta = SerializationUtil.simpleDeserialize(taskInput);
     return new TableMaintainerDTO(properties == null ? new HashMap<>() : properties, catalogMeta);
   }
 
-  public void sendTaskResultToAms(ExecutorTaskResult taskResult, String type) throws Exception {
+  public void sendTaskResultToAms(ExecutorTaskResult taskResult) throws Exception {
     abstractTableMaintainerOperator.callAms(
         client -> {
-          client.completeTask(type, taskResult);
+          client.completeTask(taskResult);
           return null;
         });
     LOG.info(
