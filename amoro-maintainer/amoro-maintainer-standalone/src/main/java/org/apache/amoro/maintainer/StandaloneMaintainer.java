@@ -20,16 +20,19 @@ package org.apache.amoro.maintainer;
 
 import org.apache.amoro.AmoroTable;
 import org.apache.amoro.api.CatalogMeta;
+import org.apache.amoro.api.ExecutorTaskResult;
 import org.apache.amoro.config.ConfigHelpers;
 import org.apache.amoro.config.Configurations;
 import org.apache.amoro.config.TableConfiguration;
 import org.apache.amoro.maintainer.api.TableMaintainerConfig;
 import org.apache.amoro.maintainer.api.TableMaintainerDTO;
 import org.apache.amoro.maintainer.api.TableMaintainerExecutor;
+import org.apache.amoro.maintainer.iceberg.MaintainerMetricReport;
 import org.apache.amoro.maintainer.iceberg.StandaloneMaintainerStarter;
 import org.apache.amoro.optimizing.IcebergCleanOrphanInput;
 import org.apache.amoro.optimizing.IcebergDanglingDeleteFilesInput;
 import org.apache.amoro.optimizing.IcebergExpireSnapshotInput;
+import org.apache.amoro.optimizing.IcebergExpireSnapshotsOutput;
 import org.apache.amoro.optimizing.maintainer.IcebergTableMaintainerV2;
 import org.apache.amoro.server.catalog.CatalogBuilder;
 import org.apache.amoro.server.catalog.ServerCatalog;
@@ -56,13 +59,14 @@ public class StandaloneMaintainer {
     Configurations serverConfig = ConfigHelpers.createConfiguration(properties1);
     LOG.info("GET AMS ServerConfig:{}", serverConfig);
     TableConfiguration configuration = ConfigUtils.parseTableConfig(properties);
-
+    MaintainerMetricReport report = new MaintainerMetricReport(executor);
     ServerCatalog serverCatalog = CatalogBuilder.buildServerCatalog(catalogMeta, serverConfig);
     AmoroTable<?> amoroTableLoader =
         serverCatalog.loadTable(config.getDatabase(), config.getTable());
     IcebergTableMaintainerV2 icebergTableMaintainerV2 =
         StandaloneMaintainerStarter.ofTable(amoroTableLoader);
-    icebergTableMaintainerV2.expireSnapshots(
+
+    IcebergExpireSnapshotsOutput icebergExpireSnapshotsOutput = icebergTableMaintainerV2.expireSnapshots(
         new IcebergExpireSnapshotInput(
             config.getDatabase(),
             StandaloneMaintainerStarter.asIcebergTable(amoroTableLoader),
@@ -70,14 +74,23 @@ public class StandaloneMaintainer {
             configuration.getSnapshotMinCount(),
             new HashSet<>(),
             catalogMeta));
+    ExecutorTaskResult executorTaskResult = new ExecutorTaskResult();
+    executorTaskResult.setCatalog(config.getCatalog());
+    executorTaskResult.setDatabase(config.getDatabase());
+    executorTaskResult.setTable(config.getTable());
+    executorTaskResult.setTableType("ExpireSnapshots");
+    executorTaskResult.setStatus(100);
+
+    report.reportMetrics(executorTaskResult);
 
     icebergTableMaintainerV2.cleanDanglingDeleteFiles(
         new IcebergDanglingDeleteFilesInput(
             config.getDatabase(),
             catalogMeta,
             StandaloneMaintainerStarter.asIcebergTable(amoroTableLoader),
-            configuration.isDeleteDanglingDeleteFilesEnabled(),
-            1L));
+            configuration.isDeleteDanglingDeleteFilesEnabled()));
+    executorTaskResult.setTableType("DanglingDeleteFiles");
+    report.reportMetrics(executorTaskResult);
 
     icebergTableMaintainerV2.cleanOrphanFiles(
         new IcebergCleanOrphanInput(
@@ -85,5 +98,7 @@ public class StandaloneMaintainer {
             StandaloneMaintainerStarter.asIcebergTable(amoroTableLoader),
             configuration.getOrphanExistingMinutes(),
             catalogMeta));
+    executorTaskResult.setTableType("cleanOrphanFiles");
+    report.reportMetrics(executorTaskResult);
   }
 }

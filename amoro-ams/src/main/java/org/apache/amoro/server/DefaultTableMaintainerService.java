@@ -25,13 +25,17 @@ import org.apache.amoro.api.ExecutorTaskId;
 import org.apache.amoro.api.ExecutorTaskResult;
 import org.apache.amoro.api.MaintainerService;
 import org.apache.amoro.config.Configurations;
+import org.apache.amoro.maintainer.api.MaintainerResult;
 import org.apache.amoro.server.catalog.CatalogManager;
+import org.apache.amoro.server.persistence.PersistentBase;
+import org.apache.amoro.server.persistence.mapper.MaintainerMapper;
 import org.apache.amoro.shade.thrift.org.apache.thrift.TException;
 import org.apache.amoro.utils.SerializationUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-public class DefaultTableMaintainerService implements MaintainerService.Iface {
+public class DefaultTableMaintainerService extends PersistentBase
+    implements MaintainerService.Iface {
 
   private static final Logger LOG = LoggerFactory.getLogger(DefaultTableMaintainerService.class);
 
@@ -57,15 +61,17 @@ public class DefaultTableMaintainerService implements MaintainerService.Iface {
   }
 
   @Override
-  public void completeTask(String type, ExecutorTaskResult taskResult)
-      throws AmoroException, TException {
+  public void completeTask(ExecutorTaskResult taskResult) throws AmoroException, TException {
     LOG.info("Completing task {} with result {}", taskResult.getTaskId(), taskResult);
+    MaintainerResult result = new MaintainerResult();
+
+    doAs(MaintainerMapper.class, mapper -> mapper.insertMaintainerReport(result));
   }
 
   public ExecutorTask extractProtocolTask(ExecutorTaskId taskId, CatalogMeta catalogMeta) {
     ExecutorTask optimizingTask = new ExecutorTask(taskId);
     optimizingTask.setTaskInput(SerializationUtil.simpleSerialize(catalogMeta));
-    optimizingTask.setProperties(serviceConfig.toMap());
+    optimizingTask.setServerConfig(serviceConfig.toMap());
     return optimizingTask;
   }
 }

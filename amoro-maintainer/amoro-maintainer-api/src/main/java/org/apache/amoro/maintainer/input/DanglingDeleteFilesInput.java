@@ -26,26 +26,20 @@ public class DanglingDeleteFilesInput extends BaseMaintainerInput {
 
   private final CatalogMeta catalogMeta;
   private final boolean danglingFileCleanEnabled;
-  private final long lastDanglingFileCleanTime;
 
   public DanglingDeleteFilesInput(
       String database,
       CatalogMeta catalogMeta,
-      boolean danglingFileCleanEnabled,
-      long lastDanglingFileCleanTime) {
+      boolean danglingFileCleanEnabled) {
     super(database);
     this.catalogMeta = catalogMeta;
     this.danglingFileCleanEnabled = danglingFileCleanEnabled;
-    this.lastDanglingFileCleanTime = lastDanglingFileCleanTime;
   }
 
   public boolean isDanglingFileCleanEnabled() {
     return danglingFileCleanEnabled;
   }
 
-  public long getLastDanglingFileCleanTime() {
-    return lastDanglingFileCleanTime;
-  }
 
   public CatalogMeta getCatalogMeta() {
     return catalogMeta;
@@ -55,7 +49,6 @@ public class DanglingDeleteFilesInput extends BaseMaintainerInput {
   public String toString() {
     return MoreObjects.toStringHelper(this)
         .add("danglingFileCleanEnabled", danglingFileCleanEnabled)
-        .add("lastDanglingFileCleanTime", lastDanglingFileCleanTime)
         .addValue(super.toString())
         .toString();
   }

@@ -102,8 +102,7 @@ public class SparkTableMaintainer {
             config.getDatabase(),
             catalogMeta,
             originalTable,
-            !configuration.isDeleteDanglingDeleteFilesEnabled(),
-            1L);
+            !configuration.isDeleteDanglingDeleteFilesEnabled());
     SparkDanglingDeleteFilesCleaningFactory factory =
         new SparkDanglingDeleteFilesCleaningFactory(spark);
     MaintainerExecutor<IcebergDeleteFilesOutput> factoryExecutor =
@@ -111,7 +110,7 @@ public class SparkTableMaintainer {
     IcebergDeleteFilesOutput icebergDeleteFilesOutput = factoryExecutor.execute();
     ExecutorTaskResult taskResult = new ExecutorTaskResult();
     taskResult.setSummary(icebergDeleteFilesOutput.summary());
-    executor.sendTaskResultToAms(taskResult, "DanglingDelete");
+    executor.sendTaskResultToAms(taskResult);
 
     originalTable.refresh();
 
@@ -128,7 +127,7 @@ public class SparkTableMaintainer {
                 catalogMeta));
     IcebergExpireSnapshotsOutput expireSnapshotsOutput = snapshotsFactoryExecutor.execute();
     taskResult.setSummary(expireSnapshotsOutput.summary());
-    executor.sendTaskResultToAms(taskResult, "ExpireSnapshot");
+    executor.sendTaskResultToAms(taskResult);
 
     originalTable.refresh();
 
@@ -141,7 +140,7 @@ public class SparkTableMaintainer {
     CleanOrphanOutPut cleanOrphanOutPut = deleteOrphanFilesFactoryExecutor.execute();
     LOG.info("cleanOrphanOutPut :{}", cleanOrphanOutPut);
     taskResult.setSummary(cleanOrphanOutPut.summary());
-    executor.sendTaskResultToAms(taskResult, "CleanOrphanFile");
+    executor.sendTaskResultToAms(taskResult);
 
     originalTable.refresh();
 
