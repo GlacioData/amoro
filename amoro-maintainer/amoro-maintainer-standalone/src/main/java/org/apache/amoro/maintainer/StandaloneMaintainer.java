@@ -29,8 +29,10 @@ import org.apache.amoro.maintainer.api.TableMaintainerDTO;
 import org.apache.amoro.maintainer.api.TableMaintainerExecutor;
 import org.apache.amoro.maintainer.iceberg.MaintainerMetricReport;
 import org.apache.amoro.maintainer.iceberg.StandaloneMaintainerStarter;
+import org.apache.amoro.maintainer.output.CleanOrphanOutPut;
 import org.apache.amoro.optimizing.IcebergCleanOrphanInput;
 import org.apache.amoro.optimizing.IcebergDanglingDeleteFilesInput;
+import org.apache.amoro.optimizing.IcebergDeleteFilesOutput;
 import org.apache.amoro.optimizing.IcebergExpireSnapshotInput;
 import org.apache.amoro.optimizing.IcebergExpireSnapshotsOutput;
 import org.apache.amoro.optimizing.maintainer.IcebergTableMaintainerV2;
@@ -66,39 +68,45 @@ public class StandaloneMaintainer {
     IcebergTableMaintainerV2 icebergTableMaintainerV2 =
         StandaloneMaintainerStarter.ofTable(amoroTableLoader);
 
-    IcebergExpireSnapshotsOutput icebergExpireSnapshotsOutput = icebergTableMaintainerV2.expireSnapshots(
-        new IcebergExpireSnapshotInput(
-            config.getDatabase(),
-            StandaloneMaintainerStarter.asIcebergTable(amoroTableLoader),
-            configuration.getSnapshotTTLMinutes(),
-            configuration.getSnapshotMinCount(),
-            new HashSet<>(),
-            catalogMeta));
+    IcebergExpireSnapshotsOutput icebergExpireSnapshotsOutput =
+        icebergTableMaintainerV2.expireSnapshots(
+            new IcebergExpireSnapshotInput(
+                config.getDatabase(),
+                StandaloneMaintainerStarter.asIcebergTable(amoroTableLoader),
+                configuration.getSnapshotTTLMinutes(),
+                configuration.getSnapshotMinCount(),
+                new HashSet<>(),
+                catalogMeta));
     ExecutorTaskResult executorTaskResult = new ExecutorTaskResult();
     executorTaskResult.setCatalog(config.getCatalog());
     executorTaskResult.setDatabase(config.getDatabase());
     executorTaskResult.setTable(config.getTable());
     executorTaskResult.setTableType("ExpireSnapshots");
     executorTaskResult.setStatus(100);
+    executorTaskResult.setSummary(icebergExpireSnapshotsOutput.summary());
 
     report.reportMetrics(executorTaskResult);
 
-    icebergTableMaintainerV2.cleanDanglingDeleteFiles(
-        new IcebergDanglingDeleteFilesInput(
-            config.getDatabase(),
-            catalogMeta,
-            StandaloneMaintainerStarter.asIcebergTable(amoroTableLoader),
-            configuration.isDeleteDanglingDeleteFilesEnabled()));
+    IcebergDeleteFilesOutput icebergDeleteFilesOutput =
+        icebergTableMaintainerV2.cleanDanglingDeleteFiles(
+            new IcebergDanglingDeleteFilesInput(
+                config.getDatabase(),
+                catalogMeta,
+                StandaloneMaintainerStarter.asIcebergTable(amoroTableLoader),
+                configuration.isDeleteDanglingDeleteFilesEnabled()));
     executorTaskResult.setTableType("DanglingDeleteFiles");
+    executorTaskResult.setSummary(icebergDeleteFilesOutput.summary());
     report.reportMetrics(executorTaskResult);
 
-    icebergTableMaintainerV2.cleanOrphanFiles(
-        new IcebergCleanOrphanInput(
-            config.getDatabase(),
-            StandaloneMaintainerStarter.asIcebergTable(amoroTableLoader),
-            configuration.getOrphanExistingMinutes(),
-            catalogMeta));
+    CleanOrphanOutPut cleanOrphanOutPut =
+        icebergTableMaintainerV2.cleanOrphanFiles(
+            new IcebergCleanOrphanInput(
+                config.getDatabase(),
+                StandaloneMaintainerStarter.asIcebergTable(amoroTableLoader),
+                configuration.getOrphanExistingMinutes(),
+                catalogMeta));
     executorTaskResult.setTableType("cleanOrphanFiles");
+    executorTaskResult.setSummary(cleanOrphanOutPut.summary());
     report.reportMetrics(executorTaskResult);
   }
 }

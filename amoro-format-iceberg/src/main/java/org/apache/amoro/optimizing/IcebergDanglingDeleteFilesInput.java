@@ -27,10 +27,7 @@ public class IcebergDanglingDeleteFilesInput extends DanglingDeleteFilesInput {
   private final Table table;
 
   public IcebergDanglingDeleteFilesInput(
-      String database,
-      CatalogMeta catalogMeta,
-      Table table,
-      boolean danglingFileCleanEnabled) {
+      String database, CatalogMeta catalogMeta, Table table, boolean danglingFileCleanEnabled) {
     super(database, catalogMeta, danglingFileCleanEnabled);
     this.table = table;
   }
