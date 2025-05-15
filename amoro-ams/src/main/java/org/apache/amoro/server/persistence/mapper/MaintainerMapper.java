@@ -27,12 +27,13 @@ import org.apache.ibatis.annotations.Param;
 public interface MaintainerMapper {
 
   @Insert(
-      "INSERT INTO optimizer (token, resource_id, group_name,container_name, start_time, touch_time, "
-          + "thread_count, total_memory, properties) VALUES (#{optimizer.token}, #{optimizer.resourceId, jdbcType=VARCHAR},"
-          + " #{optimizer.groupName}, #{optimizer.containerName},"
-          + " #{optimizer.startTime, typeHandler=org.apache.amoro.server.persistence.converter.Long2TsConverter},"
-          + " #{optimizer.touchTime, typeHandler=org.apache.amoro.server.persistence.converter.Long2TsConverter},"
-          + " #{optimizer.threadCount}, #{optimizer.memoryMb},"
-          + " #{optimizer.properties, typeHandler=org.apache.amoro.server.persistence.converter.Map2StringConverter})")
+      "INSERT INTO table_runtime_maintainer (catalog_name, db_name,table_name,table_format,maintainer_type,status,table_summary) VALUES ("
+          + "#{result.catalog_name},"
+          + "#{result.db_name},"
+          + "#{result.table_name},"
+          + "#{result.table_format},"
+          + "#{result.maintainer_type},"
+          + "#{result.status},"
+          + "#{result.summary,typeHandler=org.apache.amoro.server.persistence.converter.Map2StringConverter}")
   void insertMaintainerReport(@Param("result") MaintainerResult result);
 }

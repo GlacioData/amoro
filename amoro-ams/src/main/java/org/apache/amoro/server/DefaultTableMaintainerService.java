@@ -18,6 +18,7 @@
 
 package org.apache.amoro.server;
 
+import org.apache.amoro.TableFormat;
 import org.apache.amoro.api.AmoroException;
 import org.apache.amoro.api.CatalogMeta;
 import org.apache.amoro.api.ExecutorTask;
@@ -26,6 +27,7 @@ import org.apache.amoro.api.ExecutorTaskResult;
 import org.apache.amoro.api.MaintainerService;
 import org.apache.amoro.config.Configurations;
 import org.apache.amoro.maintainer.api.MaintainerResult;
+import org.apache.amoro.maintainer.api.TableMaintainer;
 import org.apache.amoro.server.catalog.CatalogManager;
 import org.apache.amoro.server.persistence.PersistentBase;
 import org.apache.amoro.server.persistence.mapper.MaintainerMapper;
@@ -64,7 +66,14 @@ public class DefaultTableMaintainerService extends PersistentBase
   public void completeTask(ExecutorTaskResult taskResult) throws AmoroException, TException {
     LOG.info("Completing task {} with result {}", taskResult.getTaskId(), taskResult);
     MaintainerResult result = new MaintainerResult();
-
+    result.setCatalogName(taskResult.getCatalog());
+    result.setDbName(taskResult.getDatabase());
+    result.setTableName(taskResult.getTable());
+    result.setTableFormat(TableFormat.ICEBERG);
+    result.setMaintainerType(taskResult.getTableType());
+    result.setStatus(TableMaintainer.Status.SUCCESS);
+    result.setSummary(taskResult.getSummary());
+    LOG.info("Completing task insert into with result {}", result);
     doAs(MaintainerMapper.class, mapper -> mapper.insertMaintainerReport(result));
   }
 

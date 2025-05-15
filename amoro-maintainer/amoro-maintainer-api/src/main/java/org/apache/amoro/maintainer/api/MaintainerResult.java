@@ -20,6 +20,9 @@ package org.apache.amoro.maintainer.api;
 
 import org.apache.amoro.StateField;
 import org.apache.amoro.TableFormat;
+import org.apache.commons.lang3.builder.ToStringBuilder;
+
+import java.util.Map;
 
 public class MaintainerResult {
 
@@ -28,11 +31,11 @@ public class MaintainerResult {
   @StateField public String dbName;
   @StateField public String tableName;
   @StateField public TableFormat tableFormat;
+  @StateField public String maintainerType;
   @StateField private TableMaintainer.Status status = TableMaintainer.Status.IDLE;
+  @StateField public Map<String, String> summary;
   @StateField private long createdTime;
   @StateField private long updatedTime;
-  @StateField private int threadId = -1;
-  @StateField private String failReason;
 
   public Long getId() {
     return id;
@@ -98,19 +101,35 @@ public class MaintainerResult {
     this.updatedTime = updatedTime;
   }
 
-  public int getThreadId() {
-    return threadId;
+  public String getMaintainerType() {
+    return maintainerType;
   }
 
-  public void setThreadId(int threadId) {
-    this.threadId = threadId;
+  public void setMaintainerType(String maintainerType) {
+    this.maintainerType = maintainerType;
   }
 
-  public String getFailReason() {
-    return failReason;
+  public Map<String, String> getSummary() {
+    return summary;
   }
 
-  public void setFailReason(String failReason) {
-    this.failReason = failReason;
+  public void setSummary(Map<String, String> summary) {
+    this.summary = summary;
+  }
+
+  @Override
+  public String toString() {
+    return new ToStringBuilder(this)
+        .append("id", id)
+        .append("catalogName", catalogName)
+        .append("dbName", dbName)
+        .append("tableName", tableName)
+        .append("tableFormat", tableFormat)
+        .append("maintainerType", maintainerType)
+        .append("status", status)
+        .append("summary", summary)
+        .append("createdTime", createdTime)
+        .append("updatedTime", updatedTime)
+        .toString();
   }
 }
