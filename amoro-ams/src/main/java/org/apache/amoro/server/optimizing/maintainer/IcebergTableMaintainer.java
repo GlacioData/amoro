@@ -27,6 +27,9 @@ import org.apache.amoro.iceberg.Constants;
 import org.apache.amoro.io.AuthenticatedFileIO;
 import org.apache.amoro.io.PathInfo;
 import org.apache.amoro.io.SupportsFileSystemOperations;
+import org.apache.amoro.optimizing.DanglingDeleteFilesInput;
+import org.apache.amoro.optimizing.DeleteFilesOutput;
+import org.apache.amoro.optimizing.maintainer.DanglingDeleteFilesCleaningExecutor;
 import org.apache.amoro.server.table.TableConfigurations;
 import org.apache.amoro.server.table.TableOrphanFilesCleaningMetrics;
 import org.apache.amoro.server.table.TableRuntime;
@@ -148,9 +151,11 @@ public class IcebergTableMaintainer implements TableMaintainer {
     TableConfiguration tableConfiguration = tableRuntime.getTableConfiguration();
 
     if (!tableConfiguration.isDeleteDanglingDeleteFilesEnabled()) {
+      tableRuntime.setLastCleanDanglingDeleteFilesTime(-1);
       return;
     }
 
+    tableRuntime.setLastCleanDanglingDeleteFilesTime(System.currentTimeMillis());
     Snapshot currentSnapshot = table.currentSnapshot();
     if (currentSnapshot == null) {
       return;
@@ -158,8 +163,17 @@ public class IcebergTableMaintainer implements TableMaintainer {
     Optional<String> totalDeleteFiles =
         Optional.ofNullable(currentSnapshot.summary().get(SnapshotSummary.TOTAL_DELETE_FILES_PROP));
     if (totalDeleteFiles.isPresent() && Long.parseLong(totalDeleteFiles.get()) > 0) {
+      // todo 实现一个新的提交接口，用于提交spark作业，并且返回提交状态即可，默认是spark shell，可以支持kyubbi
       // clear dangling delete files
-      cleanDanglingDeleteFiles();
+      DanglingDeleteFilesCleaningExecutor cleaningExecutor =
+          new DanglingDeleteFilesCleaningExecutor(
+              new DanglingDeleteFilesInput(
+                  table, tableConfiguration.isDeleteDanglingDeleteFilesEnabled(), 1L));
+      DeleteFilesOutput deleteFilesResult = cleaningExecutor.execute();
+      LOG.info(
+          "Dangling Delete Files Cleaning Executor result: table {} , {}",
+          table.name(),
+          deleteFilesResult.toString());
     } else {
       LOG.debug(
           "There are no delete files here, so there is no need to clean dangling delete file for table {}",

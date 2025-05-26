@@ -16,14 +16,39 @@
  * limitations under the License.
  */
 
-package org.apache.amoro;
+package org.apache.amoro.optimizing;
 
-public class Constants {
-  public static final String INNER_TABLE_BASE = "base";
-  public static final String INNER_TABLE_CHANGE = "change";
-  public static final String EXTERNAL_RESOURCE_CONTAINER = "external";
+import org.apache.iceberg.DeleteFile;
 
-  public static final String THRIFT_TABLE_SERVICE_NAME = "TableMetastore";
-  public static final String THRIFT_OPTIMIZING_SERVICE_NAME = "OptimizeManager";
-  public static final String THRIFT_MAINTAINER_SERVICE_NAME = "MaintainerManager";
+import java.util.Map;
+
+public class DeleteFilesOutput implements TableOptimizing.OptimizingOutput {
+
+  private final Map<String, String> summary;
+
+  private final DeleteFile[] deleteFiles;
+
+  public DeleteFilesOutput(DeleteFile[] deleteFiles, Map<String, String> summary) {
+    this.deleteFiles = deleteFiles;
+    this.summary = summary;
+  }
+
+  public DeleteFile[] getDeleteFiles() {
+    return deleteFiles;
+  }
+
+  @Override
+  public Map<String, String> summary() {
+    return summary;
+  }
+
+  @Override
+  public String toString() {
+    return "RewriteFilesOutput{"
+        + ", deleteFilesSize="
+        + (deleteFiles == null ? 0 : deleteFiles.length)
+        + ", summary="
+        + summary
+        + '}';
+  }
 }

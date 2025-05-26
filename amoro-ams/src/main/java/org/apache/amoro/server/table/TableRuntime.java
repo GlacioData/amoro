@@ -89,6 +89,7 @@ public class TableRuntime extends StatedPersistentBase {
   @StateField private volatile AbstractOptimizingEvaluator.PendingInput pendingInput;
   @StateField private volatile AbstractOptimizingEvaluator.PendingInput tableSummary;
   private volatile long lastPlanTime;
+  private volatile long lastCleanDanglingDeleteFilesTime;
   private final TableOptimizingMetrics optimizingMetrics;
   private final TableOrphanFilesCleaningMetrics orphanFilesCleaningMetrics;
   private final TableSummaryMetrics tableSummaryMetrics;
@@ -544,6 +545,14 @@ public class TableRuntime extends StatedPersistentBase {
 
   public void setLastPlanTime(long lastPlanTime) {
     this.lastPlanTime = lastPlanTime;
+  }
+
+  public long getLastCleanDanglingDeleteFilesTime() {
+    return lastCleanDanglingDeleteFilesTime;
+  }
+
+  public void setLastCleanDanglingDeleteFilesTime(long lastCleanDanglingDeleteFilesTime) {
+    this.lastCleanDanglingDeleteFilesTime = lastCleanDanglingDeleteFilesTime;
   }
 
   public long getTargetSnapshotId() {

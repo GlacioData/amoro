@@ -18,12 +18,18 @@
 
 package org.apache.amoro;
 
-public class Constants {
-  public static final String INNER_TABLE_BASE = "base";
-  public static final String INNER_TABLE_CHANGE = "change";
-  public static final String EXTERNAL_RESOURCE_CONTAINER = "external";
+public class OptimizerTableMaintainerProperties {
 
-  public static final String THRIFT_TABLE_SERVICE_NAME = "TableMetastore";
-  public static final String THRIFT_OPTIMIZING_SERVICE_NAME = "OptimizeManager";
-  public static final String THRIFT_MAINTAINER_SERVICE_NAME = "MaintainerManager";
+  // Resource properties
+  public static final String AMS_OPTIMIZER_URI = "ams-optimizing-uri";
+
+  // Resource container properties
+  public static final String EXPORT_PROPERTY_PREFIX = "export.";
+
+  // Resource group properties
+  public static final String OPTIMIZER_EXECUTION_PARALLEL = "execution-parallel";
+  public static final String TABLE_MAINTAINER_TYPE = "type";
+  public static final String OPTIMIZER_CATALOG = "catalog";
+  public static final String OPTIMIZER_DATABASE = "database";
+  public static final String OPTIMIZER_TABLE = "table";
 }
