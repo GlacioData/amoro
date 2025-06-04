@@ -18,6 +18,7 @@
 
 package org.apache.amoro.process;
 
+import org.apache.amoro.ServerTableIdentifier;
 import org.apache.amoro.TableRuntime;
 
 /**
@@ -61,5 +62,10 @@ public abstract class TableProcess<T extends TableProcessState> implements Amoro
   @Override
   public SimpleFuture getCompleteFuture() {
     return completeFuture;
+  }
+
+  @Override
+  public ServerTableIdentifier getTableIdentifier() {
+    return tableRuntime.getTableIdentifier();
   }
 }

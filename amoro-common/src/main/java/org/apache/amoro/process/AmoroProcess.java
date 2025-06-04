@@ -19,6 +19,7 @@
 package org.apache.amoro.process;
 
 import org.apache.amoro.Action;
+import org.apache.amoro.ServerTableIdentifier;
 
 import java.util.Map;
 
@@ -47,6 +48,8 @@ public interface AmoroProcess<T extends ProcessState> {
    * @return complete future of the process
    */
   SimpleFuture getCompleteFuture();
+
+  ServerTableIdentifier getTableIdentifier();
 
   /**
    * Get {@link ProcessState} of the process

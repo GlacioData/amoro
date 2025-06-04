@@ -19,6 +19,7 @@
 package org.apache.amoro.server.scheduler;
 
 import org.apache.amoro.Action;
+import org.apache.amoro.ServerTableIdentifier;
 import org.apache.amoro.TableRuntime;
 import org.apache.amoro.process.AmoroProcess;
 import org.apache.amoro.process.ManagedProcess;
@@ -216,6 +217,11 @@ public abstract class PeriodicExternalScheduler extends PeriodicTableScheduler {
     @Override
     public SimpleFuture getCompleteFuture() {
       return process.getCompleteFuture();
+    }
+
+    @Override
+    public ServerTableIdentifier getTableIdentifier() {
+      return process.getTableIdentifier();
     }
 
     @Override

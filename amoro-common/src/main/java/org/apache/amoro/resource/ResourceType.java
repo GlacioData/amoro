@@ -19,7 +19,8 @@
 package org.apache.amoro.resource;
 
 public enum ResourceType {
-  OPTIMIZER(0);
+  OPTIMIZER(0),
+  TABLE_MAINTAINER(1);
 
   private final int type;
 
