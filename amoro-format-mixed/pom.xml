@@ -37,7 +37,7 @@
         <module>amoro-mixed-flink</module>
         <module>amoro-mixed-spark</module>
         <module>amoro-mixed-hive</module>
-        <module>amoro-mixed-trino</module>
+<!--        <module>amoro-mixed-trino</module>-->
     </modules>
 
 </project>
