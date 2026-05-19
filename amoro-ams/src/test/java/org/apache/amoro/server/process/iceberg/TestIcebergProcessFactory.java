@@ -26,6 +26,7 @@ import org.apache.amoro.AmoroTable;
 import org.apache.amoro.IcebergActions;
 import org.apache.amoro.TableFormat;
 import org.apache.amoro.TableRuntime;
+import org.apache.amoro.config.DataExpirationConfig;
 import org.apache.amoro.config.TableConfiguration;
 import org.apache.amoro.optimizing.TableOptimizingCommitter;
 import org.apache.amoro.process.LocalExecutionEngine;
@@ -58,6 +59,7 @@ public class TestIcebergProcessFactory {
         "clean-orphan-files", IcebergActions.DELETE_ORPHANS, Duration.ofHours(24));
     assertSupportedAction(
         "clean-dangling-delete-files", IcebergActions.CLEAN_DANGLING_DELETE, Duration.ofHours(24));
+    assertSupportedAction("expire-data", IcebergActions.EXPIRE_DATA, Duration.ofHours(24));
   }
 
   @Test
@@ -71,6 +73,7 @@ public class TestIcebergProcessFactory {
         IcebergActions.CLEAN_DANGLING_DELETE,
         DanglingDeleteFilesCleaningProcess.class,
         0);
+    assertTriggerWhenDue("expire-data", IcebergActions.EXPIRE_DATA, DataExpiringProcess.class, 0);
   }
 
   @Test
@@ -83,6 +86,7 @@ public class TestIcebergProcessFactory {
         "clean-dangling-delete-files",
         IcebergActions.CLEAN_DANGLING_DELETE,
         System.currentTimeMillis());
+    assertTriggerNotDue("expire-data", IcebergActions.EXPIRE_DATA, System.currentTimeMillis());
   }
 
   @Test
@@ -91,6 +95,7 @@ public class TestIcebergProcessFactory {
     assertTriggerDisabled("clean-orphan-files", IcebergActions.DELETE_ORPHANS, false, 0);
     assertTriggerDisabled(
         "clean-dangling-delete-files", IcebergActions.CLEAN_DANGLING_DELETE, false, 0);
+    assertTriggerDisabled("expire-data", IcebergActions.EXPIRE_DATA, false, 0);
   }
 
   @Test
@@ -103,6 +108,19 @@ public class TestIcebergProcessFactory {
   public void testRecoverOrphanFilesCleaningProcess() {
     assertRecover(
         "clean-orphan-files", IcebergActions.DELETE_ORPHANS, OrphanFilesCleaningProcess.class);
+  }
+
+  @Test
+  public void testRecoverCleanDanglingDeleteProcess() {
+    assertRecover(
+        "clean-dangling-delete-files",
+        IcebergActions.CLEAN_DANGLING_DELETE,
+        DanglingDeleteFilesCleaningProcess.class);
+  }
+
+  @Test
+  public void testRecoverDataExpiringProcess() {
+    assertRecover("expire-data", IcebergActions.EXPIRE_DATA, DataExpiringProcess.class);
   }
 
   @Test
@@ -276,6 +294,8 @@ public class TestIcebergProcessFactory {
       tableConfiguration.setCleanOrphanEnabled(enabled);
     } else if ("clean-dangling-delete-files".equals(configKey)) {
       tableConfiguration.setDeleteDanglingDeleteFilesEnabled(enabled);
+    } else if ("expire-data".equals(configKey)) {
+      tableConfiguration.setExpiringDataConfig(new DataExpirationConfig().setEnabled(enabled));
     }
 
     TableRuntimeCleanupState cleanupState = new TableRuntimeCleanupState();
@@ -285,6 +305,8 @@ public class TestIcebergProcessFactory {
       cleanupState.setLastOrphanFilesCleanTime(lastTime);
     } else if ("clean-dangling-delete-files".equals(configKey)) {
       cleanupState.setLastDanglingDeleteFilesCleanTime(lastTime);
+    } else if ("expire-data".equals(configKey)) {
+      cleanupState.setLastDataExpiringTime(lastTime);
     }
 
     TableRuntime runtime = mock(TableRuntime.class);
