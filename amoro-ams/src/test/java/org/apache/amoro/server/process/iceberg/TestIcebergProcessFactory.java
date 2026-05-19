@@ -21,6 +21,7 @@ package org.apache.amoro.server.process.iceberg;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 
+import org.apache.amoro.Action;
 import org.apache.amoro.AmoroTable;
 import org.apache.amoro.IcebergActions;
 import org.apache.amoro.TableFormat;
@@ -29,6 +30,9 @@ import org.apache.amoro.config.TableConfiguration;
 import org.apache.amoro.optimizing.TableOptimizingCommitter;
 import org.apache.amoro.process.LocalExecutionEngine;
 import org.apache.amoro.process.ProcessTriggerStrategy;
+import org.apache.amoro.process.RecoverProcessFailedException;
+import org.apache.amoro.process.TableProcess;
+import org.apache.amoro.process.TableProcessStore;
 import org.apache.amoro.server.optimizing.KeyedTableCommit;
 import org.apache.amoro.server.optimizing.UnKeyedTableCommit;
 import org.apache.amoro.server.table.DefaultTableRuntime;
@@ -87,6 +91,73 @@ public class TestIcebergProcessFactory {
     assertTriggerDisabled("clean-orphan-files", IcebergActions.DELETE_ORPHANS, false, 0);
     assertTriggerDisabled(
         "clean-dangling-delete-files", IcebergActions.CLEAN_DANGLING_DELETE, false, 0);
+  }
+
+  @Test
+  public void testRecoverExpireSnapshotsProcess() {
+    assertRecover(
+        "expire-snapshots", IcebergActions.EXPIRE_SNAPSHOTS, SnapshotsExpiringProcess.class);
+  }
+
+  @Test
+  public void testRecoverOrphanFilesCleaningProcess() {
+    assertRecover(
+        "clean-orphan-files", IcebergActions.DELETE_ORPHANS, OrphanFilesCleaningProcess.class);
+  }
+
+  @Test
+  public void testRecoverUnsupportedActionThrows() {
+    IcebergProcessFactory factory = openedFactory("expire-snapshots");
+
+    LocalExecutionEngine localEngine = mock(LocalExecutionEngine.class);
+    doReturn(LocalExecutionEngine.ENGINE_NAME).when(localEngine).name();
+    factory.availableExecuteEngines(Arrays.asList(localEngine));
+
+    TableProcessStore store = mock(TableProcessStore.class);
+    doReturn(IcebergActions.REWRITE).when(store).getAction();
+
+    Assert.assertThrows(
+        RecoverProcessFailedException.class,
+        () -> factory.recover(mock(TableRuntime.class), store));
+  }
+
+  @Test
+  public void testRecoverWithoutLocalEngineThrows() {
+    IcebergProcessFactory factory = openedFactory("expire-snapshots");
+
+    TableProcessStore store = mock(TableProcessStore.class);
+    doReturn(IcebergActions.EXPIRE_SNAPSHOTS).when(store).getAction();
+
+    Assert.assertThrows(
+        RecoverProcessFailedException.class,
+        () -> factory.recover(mock(TableRuntime.class), store));
+  }
+
+  private void assertRecover(String configKey, Action action, Class<?> processClass) {
+    IcebergProcessFactory factory = openedFactory(configKey);
+
+    LocalExecutionEngine localEngine = mock(LocalExecutionEngine.class);
+    doReturn(LocalExecutionEngine.ENGINE_NAME).when(localEngine).name();
+    factory.availableExecuteEngines(Arrays.asList(localEngine));
+
+    TableProcessStore store = mock(TableProcessStore.class);
+    doReturn(action).when(store).getAction();
+
+    TableProcess process = factory.recover(mock(TableRuntime.class), store);
+
+    Assert.assertNotNull(process);
+    Assert.assertTrue(processClass.isInstance(process));
+    Assert.assertEquals(action, process.getAction());
+    Assert.assertEquals(LocalExecutionEngine.ENGINE_NAME, process.getExecutionEngine());
+  }
+
+  private IcebergProcessFactory openedFactory(String configKey) {
+    IcebergProcessFactory factory = new IcebergProcessFactory();
+    Map<String, String> properties = new HashMap<>();
+    properties.put(configKey + ".enabled", "true");
+    properties.put(configKey + ".interval", "1h");
+    factory.open(properties);
+    return factory;
   }
 
   private void assertSupportedAction(

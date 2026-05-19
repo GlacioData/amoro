@@ -41,8 +41,6 @@ import org.apache.amoro.shade.guava32.com.google.common.annotations.VisibleForTe
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.PrintWriter;
-import java.io.StringWriter;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -164,69 +162,71 @@ public class ProcessService extends PersistentBase {
           ActionCoordinatorScheduler scheduler =
               actionCoordinators.get(processMeta.getProcessType());
           if (tableRuntime != null && scheduler != null) {
-            DefaultTableProcessStore store = null;
-            try {
-              store =
-                  new DefaultTableProcessStore(
-                      processMeta.getProcessId(),
-                      tableRuntime,
-                      processMeta,
-                      scheduler.getAction(),
-                      ActionCoordinatorScheduler.PROCESS_MAX_RETRY_NUMBER);
-              TableProcess process = scheduler.recover(tableRuntime, store);
-              trackTableProcess(tableRuntime.getTableIdentifier(), store, process);
-              executeOrTraceProcess(store, process);
-            } catch (Exception e) {
-              LOG.warn(
-                  "Failed to recover active table process {}, tableId={}, processType={},"
-                      + " executionEngine={}, skip this process recovery.",
-                  processMeta.getProcessId(),
-                  processMeta.getTableId(),
-                  processMeta.getProcessType(),
-                  processMeta.getExecutionEngine(),
-                  e);
-              if (store != null) {
-                markRecoverFailed(store, processMeta, e);
-              }
-            }
+            recoverProcess(tableRuntime, scheduler, processMeta);
           }
         });
   }
 
-  private void markRecoverFailed(
-      DefaultTableProcessStore store, TableProcessMeta processMeta, Exception exception) {
-    boolean transitioned =
-        store.tryTransitState(
-            ProcessStatus.FAILED,
-            ProcessEvent.COMPLETE_FAILED,
-            processMeta.getExternalProcessIdentifier(),
-            buildRecoverFailureMessage(processMeta, exception),
-            store.getProcessParameters(),
-            store.getSummary());
-    if (!transitioned) {
-      LOG.warn(
-          "Failed to mark recovered table process {} as FAILED after recovery exception."
-              + " tableId={}, processType={}, executionEngine={}, externalProcessIdentifier={}",
+  /**
+   * Recover a single persisted process record. Any failure is contained here: the offending record
+   * is marked {@link ProcessStatus#FAILED} and skipped, so that one un-recoverable process record
+   * cannot abort the whole AMS startup (see AMORO-4223). The affected maintenance action will be
+   * re-scheduled by its periodic scheduler.
+   *
+   * @param tableRuntime table runtime
+   * @param scheduler coordinator scheduler for the process type
+   * @param processMeta persisted process metadata
+   */
+  private void recoverProcess(
+      TableRuntime tableRuntime,
+      ActionCoordinatorScheduler scheduler,
+      TableProcessMeta processMeta) {
+    DefaultTableProcessStore store =
+        new DefaultTableProcessStore(
+            processMeta.getProcessId(),
+            tableRuntime,
+            processMeta,
+            scheduler.getAction(),
+            processMeta.getRetryNumber());
+    try {
+      TableProcess process = scheduler.recover(tableRuntime, store);
+      trackTableProcess(tableRuntime.getTableIdentifier(), store, process);
+      executeOrTraceProcess(store, process);
+    } catch (Throwable t) {
+      LOG.error(
+          "Failed to recover table process {} (action {}) for table {}, marking it FAILED "
+              + "and skipping so AMS can continue to start up.",
           processMeta.getProcessId(),
-          processMeta.getTableId(),
-          processMeta.getProcessType(),
-          processMeta.getExecutionEngine(),
-          processMeta.getExternalProcessIdentifier());
+          scheduler.getAction(),
+          tableRuntime.getTableIdentifier(),
+          t);
+      markRecoverFailed(store, t);
     }
   }
 
-  private String buildRecoverFailureMessage(TableProcessMeta processMeta, Exception exception) {
-    StringWriter sw = new StringWriter();
-    exception.printStackTrace(new PrintWriter(sw));
-    return String.format(
-        "Failed to recover active table process %d, tableId=%d, processType=%s,"
-            + " executionEngine=%s, externalProcessIdentifier=%s.%n%s",
-        processMeta.getProcessId(),
-        processMeta.getTableId(),
-        processMeta.getProcessType(),
-        processMeta.getExecutionEngine(),
-        processMeta.getExternalProcessIdentifier(),
-        sw);
+  /**
+   * Best-effort mark an un-recoverable process as {@link ProcessStatus#FAILED} so it is not picked
+   * up again on the next AMS restart. Never throws.
+   *
+   * @param store process store
+   * @param cause the recovery failure
+   */
+  private void markRecoverFailed(DefaultTableProcessStore store, Throwable cause) {
+    try {
+      store.tryTransitState(
+          ProcessStatus.FAILED,
+          ProcessEvent.COMPLETE_FAILED,
+          store.getExternalProcessIdentifier(),
+          "Failed to recover process on AMS startup: " + cause.getMessage(),
+          store.getProcessParameters(),
+          store.getSummary());
+    } catch (Throwable t) {
+      LOG.error(
+          "Failed to mark un-recoverable table process {} as FAILED; it may be retried on the "
+              + "next AMS restart.",
+          store.getProcessId(),
+          t);
+    }
   }
 
   /**
@@ -421,7 +421,7 @@ public class ProcessService extends PersistentBase {
         process.getTableRuntime(),
         processMeta,
         process.getAction(),
-        ActionCoordinatorScheduler.PROCESS_MAX_RETRY_NUMBER);
+        processMeta.getRetryNumber());
   }
 
   /**
