@@ -52,6 +52,8 @@ public class TestIcebergProcessFactory {
     assertSupportedAction("expire-snapshots", IcebergActions.EXPIRE_SNAPSHOTS, Duration.ofHours(1));
     assertSupportedAction(
         "clean-orphan-files", IcebergActions.DELETE_ORPHANS, Duration.ofHours(24));
+    assertSupportedAction(
+        "clean-dangling-delete-files", IcebergActions.CLEAN_DANGLING_DELETE, Duration.ofHours(24));
   }
 
   @Test
@@ -60,6 +62,11 @@ public class TestIcebergProcessFactory {
         "expire-snapshots", IcebergActions.EXPIRE_SNAPSHOTS, SnapshotsExpiringProcess.class, 0);
     assertTriggerWhenDue(
         "clean-orphan-files", IcebergActions.DELETE_ORPHANS, OrphanFilesCleaningProcess.class, 0);
+    assertTriggerWhenDue(
+        "clean-dangling-delete-files",
+        IcebergActions.CLEAN_DANGLING_DELETE,
+        DanglingDeleteFilesCleaningProcess.class,
+        0);
   }
 
   @Test
@@ -68,12 +75,18 @@ public class TestIcebergProcessFactory {
         "expire-snapshots", IcebergActions.EXPIRE_SNAPSHOTS, System.currentTimeMillis());
     assertTriggerNotDue(
         "clean-orphan-files", IcebergActions.DELETE_ORPHANS, System.currentTimeMillis());
+    assertTriggerNotDue(
+        "clean-dangling-delete-files",
+        IcebergActions.CLEAN_DANGLING_DELETE,
+        System.currentTimeMillis());
   }
 
   @Test
   public void testTriggerActionDisabled() {
     assertTriggerDisabled("expire-snapshots", IcebergActions.EXPIRE_SNAPSHOTS, false, 0);
     assertTriggerDisabled("clean-orphan-files", IcebergActions.DELETE_ORPHANS, false, 0);
+    assertTriggerDisabled(
+        "clean-dangling-delete-files", IcebergActions.CLEAN_DANGLING_DELETE, false, 0);
   }
 
   private void assertSupportedAction(
@@ -190,6 +203,8 @@ public class TestIcebergProcessFactory {
       tableConfiguration.setExpireSnapshotEnabled(enabled);
     } else if ("clean-orphan-files".equals(configKey)) {
       tableConfiguration.setCleanOrphanEnabled(enabled);
+    } else if ("clean-dangling-delete-files".equals(configKey)) {
+      tableConfiguration.setDeleteDanglingDeleteFilesEnabled(enabled);
     }
 
     TableRuntimeCleanupState cleanupState = new TableRuntimeCleanupState();
@@ -197,11 +212,14 @@ public class TestIcebergProcessFactory {
       cleanupState.setLastSnapshotsExpiringTime(lastTime);
     } else if ("clean-orphan-files".equals(configKey)) {
       cleanupState.setLastOrphanFilesCleanTime(lastTime);
+    } else if ("clean-dangling-delete-files".equals(configKey)) {
+      cleanupState.setLastDanglingDeleteFilesCleanTime(lastTime);
     }
 
     TableRuntime runtime = mock(TableRuntime.class);
     doReturn(tableConfiguration).when(runtime).getTableConfiguration();
     doReturn(cleanupState).when(runtime).getState(DefaultTableRuntime.CLEANUP_STATE_KEY);
+
     return runtime;
   }
 }
