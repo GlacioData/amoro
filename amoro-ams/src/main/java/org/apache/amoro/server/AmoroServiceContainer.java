@@ -291,7 +291,6 @@ public class AmoroServiceContainer {
     addHandlerChain(optimizingService.getTableRuntimeHandler());
     addHandlerChain(processService.getTableHandlerChain());
     addHandlerChain(InlineTableExecutors.getInstance().getOptimizingCommitExecutor());
-    addHandlerChain(InlineTableExecutors.getInstance().getProcessDataExpiringExecutor());
     addHandlerChain(InlineTableExecutors.getInstance().getBlockerExpiringExecutor());
     addHandlerChain(InlineTableExecutors.getInstance().getTableRefreshingExecutor());
     tableService.initialize();
