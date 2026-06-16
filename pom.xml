@@ -54,6 +54,7 @@
         <module>amoro-format-mixed</module>
         <module>amoro-format-paimon</module>
         <module>dist</module>
+        <module>amoro-producer</module>
     </modules>
 
     <scm>
