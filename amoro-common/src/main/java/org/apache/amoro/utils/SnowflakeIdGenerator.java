@@ -28,6 +28,9 @@ package org.apache.amoro.utils;
  * same bit layout and {@link #extractTimestamp(long)} is universally decodable.
  */
 public class SnowflakeIdGenerator {
+  /** Global singleton instance for process ID generation. */
+  public static final SnowflakeIdGenerator INSTANCE = new SnowflakeIdGenerator();
+
   // Base timestamp (e.g., the start time of the service)
   private static final long EPOCH_SECONDS = 0L;
 
