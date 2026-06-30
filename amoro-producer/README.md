@@ -15,13 +15,20 @@
  - limitations under the License.
  -->
 
-# Amoro Producer Paimon 清理任务
+# Amoro Lakehouse Producer
 
-`amoro-producer` 提供可通过 `spark-submit` 提交的 Paimon 清理任务：
+`amoro-producer` 提供统一的 Lakehouse Producer 入口：
+`org.apache.amoro.producer.LakehouseProducer`。
 
-- Snapshot 清理入口类为 `org.apache.amoro.producer.PaimonExpireSnapshots`，任务会通过 Spark SQL 执行 `CALL sys.expire_snapshots`。
-- 孤儿文件清理入口类为 `org.apache.amoro.producer.PaimonRemoveOrphanFiles`，任务会通过 Spark SQL 执行 `CALL <catalog>.sys.remove_orphan_files`。
-- Manifest 合并入口类为 `org.apache.amoro.producer.PaimonCompactManifest`，任务会通过 Spark SQL 执行 `CALL <catalog>.sys.compact_manifest`。
+当前支持 Paimon format，提交任务时必须指定：
+
+- `--format paimon`
+- `--action <action>`
+- `--catalogName paimon`
+
+`--catalogName` 的默认值是 `spark_catalog`。Paimon 生产脚本必须显式传入
+`--catalogName paimon`，该参数用于整库扫描、`$options` 读取和 catalog-qualified
+procedure 调用。
 
 ## 打包
 
@@ -35,449 +42,562 @@
 amoro-producer/target/amoro-producer-0.9-SNAPSHOT-jar-with-dependencies.jar
 ```
 
-## Snapshot 清理参数说明
+## 通用参数
 
 | 参数 | 是否必填 | 默认值 | 说明 |
 |------|----------|--------|------|
-| `--databaseName` | 否 | 无 | 数据库名。仅传该参数时，任务会扫描并清理该库下全部非临时表。 |
-| `--tableName` | 否 | 无 | 表名。与 `--databaseName` 同时传入时，只清理指定表；单独传入时必须使用 `db.table` 格式。 |
+| `--format` | 是 | 无 | 表格式。Paimon 使用 `paimon`。 |
+| `--action` | 是 | 无 | action 名称：`compact`、`compact-manifest`、`expire-snapshots`、`remove-orphan-files`。 |
+| `--catalogName` | 否 | `spark_catalog` | Spark catalog 名称。Paimon 生产脚本应显式传 `paimon`。 |
+| `--databaseName` | 否 | 无 | 数据库名。仅传该参数时，扫描该库下全部非临时表。 |
+| `--tableName` | 否 | 无 | 表名。与 `--databaseName` 同时传入时只允许简单表名；单独传入时必须是 `db.table`。 |
+| `--tableNameRegex` | 否 | 无 | 整库模式表名过滤正则，仅支持 `--databaseName` 且未指定 `--tableName`。 |
+| `--retryTimes` | 否 | `3` | 重试次数。 |
+| `--continueOnTableFailure` | 否 | `true` | 单表失败后是否继续处理后续表。 |
+| `--help` / `-h` | 否 | 无 | 打印帮助信息。 |
+
+## compact
+
+执行 Paimon `compact` procedure。
+
+| 参数 | 是否必填 | 默认值 | 说明 |
+|------|----------|--------|------|
+| `--startBucket` | 否 | `0` | 从哪个 bucket 下标开始执行。 |
+| `--step` | 否 | `20` | 每次 compact 的 bucket 数量，生成闭区间 bucket range，例如 `0-19`。 |
+| `--compactStrategy` | 否 | `full` | 传给 `compact` 的 `compact_strategy`。 |
+| `--procedureOptions` | 否 | `target-file-size=256m` | 传给 `compact` 的 `options` 字符串，空字符串表示不拼接。 |
+| `--version` | 否 | 空字符串 | 设置为 `0.9` 时使用 Paimon 0.9 `partition_idle_time` SQL。 |
+| `--partitionIdleTime` | 否 | `1d` | `--version 0.9` 时传给 `compact` 的 `partition_idle_time`。 |
+
+示例：
+
+```bash
+./spark-submit \
+  --master yarn \
+  --deploy-mode cluster \
+  --conf spark.sql.catalog.paimon=org.apache.paimon.spark.SparkCatalog \
+  --conf spark.sql.defaultCatalog=paimon \
+  --conf spark.sql.extensions=org.apache.paimon.spark.extensions.PaimonSparkSessionExtensions \
+  --conf spark.sql.catalog.paimon.type=hive \
+  --conf spark.sql.catalog.paimon.warehouse=hdfs://warehouse/paimon \
+  --class org.apache.amoro.producer.LakehouseProducer \
+  amoro-producer-0.9-SNAPSHOT-jar-with-dependencies.jar \
+  --format paimon \
+  --action compact \
+  --catalogName paimon \
+  --databaseName ods \
+  --tableNameRegex '^ods_.*' \
+  --startBucket 0 \
+  --step 20 \
+  --compactStrategy full \
+  --procedureOptions target-file-size=256m
+```
+
+compact 会先读取目标表 `$options` 中的 `bucket` 配置：
+
+- 有效正整数 bucket 且未设置 `--version 0.9` 时，按 `--startBucket` 和 `--step`
+  生成 bucket range，并调用带 `buckets`、`compact_strategy`、`options` 的
+  `compact` SQL。
+- bucket 缺失、非整数、`<= 0` 或读取失败时，无论 version 如何，都执行
+  `CALL sys.compact(table => 'db.table')`。
+- 设置 `--version 0.9` 且读取到有效 bucket 时，执行带 `partition_idle_time`
+  的 SQL，不拼接 `buckets`、`compact_strategy` 或 `options`。
+
+其中非 bucket compact 和 `--version 0.9` bucket compact 使用
+`CALL sys.compact(...)`，依赖 Spark 的 `spark.sql.defaultCatalog` 指向 Paimon catalog。
+生产提交时应设置 `--conf spark.sql.defaultCatalog=paimon`，并与 `--catalogName paimon`
+保持一致。
+
+## compact-manifest
+
+执行 Paimon `compact_manifest` procedure。
+
+| 参数 | 是否必填 | 默认值 | 说明 |
+|------|----------|--------|------|
+| `--procedureOptions` | 否 | 空字符串 | 传给 `compact_manifest` 的 `options` 字符串，空字符串表示不拼接。 |
+
+示例：
+
+```bash
+./spark-submit \
+  --master yarn \
+  --deploy-mode cluster \
+  --conf spark.sql.catalog.paimon=org.apache.paimon.spark.SparkCatalog \
+  --conf spark.sql.extensions=org.apache.paimon.spark.extensions.PaimonSparkSessionExtensions \
+  --conf spark.sql.catalog.paimon.type=hive \
+  --conf spark.sql.catalog.paimon.warehouse=hdfs://warehouse/paimon \
+  --class org.apache.amoro.producer.LakehouseProducer \
+  amoro-producer-0.9-SNAPSHOT-jar-with-dependencies.jar \
+  --format paimon \
+  --action compact-manifest \
+  --catalogName paimon \
+  --databaseName ods \
+  --procedureOptions file-operation.thread-num=16
+```
+
+## expire-snapshots
+
+执行 Paimon `expire_snapshots` procedure。
+
+| 参数 | 是否必填 | 默认值 | 说明 |
+|------|----------|--------|------|
 | `--retainMax` | 否 | `20` | 传给 `expire_snapshots` 的 `retain_max`。 |
 | `--retainMin` | 否 | `10` | 传给 `expire_snapshots` 的 `retain_min`。 |
-| `--maxDeletes` | 否 | `550` | 单轮最多删除的 snapshot 数量。若返回删除数大于等于该值，则继续下一轮清理。 |
-| `--retryTimes` | 否 | `3` | 单轮 `expire_snapshots` SQL 失败后的最大重试次数。 |
-| `--continueOnTableFailure` | 否 | `true` | 单表清理失败后是否继续处理后续表。 |
-| `--procedureOptions` | 否 | `file-operation.thread-num=32,snapshot.expire.execution-mode=sync` | 传给 `expire_snapshots` 的 `options` 字符串。传空字符串时不拼接 `options` 参数。 |
-| `--help` / `-h` | 否 | 无 | 打印帮助信息。 |
+| `--maxDeletes` | 否 | `550` | 单轮最多删除的 snapshot 数量；删除数达到该值会继续下一轮。 |
+| `--procedureOptions` | 否 | `file-operation.thread-num=32,snapshot.expire.execution-mode=sync` | 传给 `expire_snapshots` 的 `options` 字符串，空字符串表示不拼接。 |
 
-参数组合规则：
+示例：
 
-| 参数组合 | 行为 |
-|----------|------|
-| `--databaseName db` | 清理 `db` 下所有非临时表。 |
-| `--databaseName db --tableName t1` | 只清理 `db.t1`。 |
-| `--tableName db.t1` | 只清理 `db.t1`。 |
-| `--tableName t1` | 非法参数，任务打印 usage 并以退出码 `2` 结束。 |
-| `--databaseName db --tableName db.t1` | 非法参数，任务打印 usage 并以退出码 `2` 结束。 |
+```bash
+./spark-submit \
+  --master yarn \
+  --deploy-mode cluster \
+  --conf spark.sql.catalog.paimon=org.apache.paimon.spark.SparkCatalog \
+  --conf spark.sql.extensions=org.apache.paimon.spark.extensions.PaimonSparkSessionExtensions \
+  --conf spark.sql.catalog.paimon.type=hive \
+  --conf spark.sql.catalog.paimon.warehouse=hdfs://warehouse/paimon \
+  --class org.apache.amoro.producer.LakehouseProducer \
+  amoro-producer-0.9-SNAPSHOT-jar-with-dependencies.jar \
+  --format paimon \
+  --action expire-snapshots \
+  --catalogName paimon \
+  --databaseName ods \
+  --retainMax 20 \
+  --retainMin 10 \
+  --maxDeletes 550 \
+  --procedureOptions file-operation.thread-num=32,snapshot.expire.execution-mode=sync
+```
 
-## 孤儿文件清理参数说明
+## remove-orphan-files
+
+执行 Paimon `remove_orphan_files` procedure。
 
 | 参数 | 是否必填 | 默认值 | 说明 |
 |------|----------|--------|------|
-| `--catalogName` | 否 | `paimon` | Paimon catalog 名称。任务会使用该 catalog 扫表并调用 `remove_orphan_files`。 |
-| `--databaseName` | 否 | 无 | 数据库名。仅传该参数时，任务会扫描并清理该库下全部非临时表。 |
-| `--tableName` | 否 | 无 | 表名。与 `--databaseName` 同时传入时，只清理指定表；单独传入时必须使用 `db.table` 格式。 |
 | `--parallelism` | 否 | `10` | 传给 `remove_orphan_files` 的 `parallelism`。 |
 | `--mode` | 否 | `distributed` | 传给 `remove_orphan_files` 的 `mode`。 |
-| `--retryTimes` | 否 | `3` | 单表 `remove_orphan_files` SQL 失败后的最大执行次数。 |
-| `--continueOnTableFailure` | 否 | `true` | 单表清理失败后是否继续处理后续表。 |
-| `--help` / `-h` | 否 | 无 | 打印帮助信息。 |
 
-孤儿文件清理的目标表参数组合规则与 Snapshot 清理保持一致。
-
-## Manifest 合并参数说明
-
-| 参数 | 是否必填 | 默认值 | 说明 |
-|------|----------|--------|------|
-| `--catalogName` | 否 | `paimon` | Paimon catalog 名称。任务会使用该 catalog 扫表并调用 `compact_manifest`。 |
-| `--databaseName` | 否 | 无 | 数据库名。仅传该参数时，任务会扫描并处理该库下全部非临时表。 |
-| `--tableName` | 否 | 无 | 表名。与 `--databaseName` 同时传入时，只处理指定表；单独传入时必须使用 `db.table` 格式。 |
-| `--procedureOptions` | 否 | 空字符串 | 传给 `compact_manifest` 的 `options` 字符串。传空字符串时不拼接 `options` 参数。 |
-| `--retryTimes` | 否 | `3` | 单表 `compact_manifest` SQL 失败后的最大执行次数。 |
-| `--continueOnTableFailure` | 否 | `true` | 单表 Manifest 合并失败后是否继续处理后续表。 |
-| `--help` / `-h` | 否 | 无 | 打印帮助信息。 |
-
-Manifest 合并的目标表参数组合规则与 Snapshot 清理保持一致。
-
-## Snapshot 清理 Spark Submit Demo
-
-以下示例基于 YARN cluster 模式提交，主类替换为
-`org.apache.amoro.producer.PaimonExpireSnapshots`，应用 JAR 替换为
-`amoro-producer-0.9-SNAPSHOT-jar-with-dependencies.jar`。示例中显式声明
-Paimon catalog，并通过 `spark.sql.defaultCatalog=paimon` 让 `--databaseName`
-按 Paimon catalog 下的库解析。
-
-### 按数据库清理
+示例：
 
 ```bash
 ./spark-submit \
-    --master yarn \
-    --deploy-mode cluster \
-    --driver-memory 8g \
-    --driver-cores 4 \
-    --executor-memory 4g \
-    --executor-cores 4 \
-    --conf spark.dynamicAllocation.enabled=true \
-    --conf spark.dynamicAllocation.minExecutors=1 \
-    --conf spark.dynamicAllocation.maxExecutors=2 \
-    --conf spark.dynamicAllocation.initialExecutors=1 \
-    --conf spark.dynamicAllocation.shuffleTracking.enabled=true \
-    --conf spark.driver.memoryOverhead=2g \
-    --conf spark.executor.memoryOverhead=2g \
-    --conf spark.driver.bindAddress=0.0.0.0 \
-    --conf spark.sql.shuffle.partitions=400 \
-    --conf spark.sql.cbo.enabled=true \
-    --conf spark.sql.files.maxPartitionBytes=512m \
-    --conf spark.default.parallelism=200 \
-    --conf spark.locality.wait=0s \
-    --conf spark.sql.crossJoin.enabled=true \
-    --conf spark.sql.adaptive.localShuffleReader.enabled=true \
-    --conf spark.sql.fuse.unionAllOnJoin.enabled=true \
-    --conf spark.sql.optimizer.runtime.bloomFilter.enabled=true \
-    --conf spark.sql.optimizer.enableMergeScalarAggsInInnerJoin=true \
-    --conf spark.sql.optimizer.pushdownAggregateBelowJoin=true \
-    --conf spark.sql.optimizer.inferDistinctFromIntersect=true \
-    --conf spark.sql.optimizer.groupSplitsByLocation=false \
-    --conf spark.sql.adaptive.amend.join.selection.enabled=true \
-    --conf spark.sql.mergeScalaSubquery.pullupAggFilter=true \
-    --conf spark.sql.execution.optimizeExpand=true \
-    --conf spark.sql.execution.optimizeExpand.ratio=5 \
-    --conf spark.sql.legacy.ctePrecedencePolicy=LEGACY \
-    --conf spark.sql.auto.reused.cte.enabled=true \
-    --conf spark.sql.auto.clear.cte.cache.enabled=true \
-    --conf spark.locality.wait.node=0s \
-    --conf spark.sql.sources.ignoreDataLocality=true \
-    --conf spark.driver.host=10.89.56.103 \
-    --conf spark.sql.catalog.paimon=org.apache.paimon.spark.SparkCatalog \
-    --conf spark.sql.extensions=org.apache.paimon.spark.extensions.PaimonSparkSessionExtensions \
-    --conf spark.sql.catalog.paimon.type=hive \
-    --conf spark.sql.catalog.paimon.warehouse=hdfs://slcluster01/hive_warehouse \
-    --conf spark.hadoop.net.topology.script.file.name=/dev/null \
-    --conf spark.sql.defaultCatalog=paimon \
-    --keytab /data/work/hadoop-shopline/etc/hadoop/sljdp.keytab \
-    --jars /tmp/paimon-hive-connector-3.1-1.5-SNAPSHOT.jar,/tmp/paimon-spark-3.5_2.12-1.5-SNAPSHOT.jar \
-    --principal sljdp@SLCLUSTER.COM \
-    --class org.apache.amoro.producer.PaimonExpireSnapshots \
-    /data/work/frame/amoro-0.9-SNAPSHOT/plugin/producer/amoro-producer-0.9-SNAPSHOT-jar-with-dependencies.jar \
-    --databaseName sl_oki_test \
-    --retainMax 20 \
-    --retainMin 10 \
-    --maxDeletes 550 \
-    --retryTimes 3 \
-    --continueOnTableFailure true \
-    --procedureOptions file-operation.thread-num=32,snapshot.expire.execution-mode=sync
+  --master yarn \
+  --deploy-mode cluster \
+  --conf spark.sql.catalog.paimon=org.apache.paimon.spark.SparkCatalog \
+  --conf spark.sql.extensions=org.apache.paimon.spark.extensions.PaimonSparkSessionExtensions \
+  --conf spark.sql.catalog.paimon.type=hive \
+  --conf spark.sql.catalog.paimon.warehouse=hdfs://warehouse/paimon \
+  --class org.apache.amoro.producer.LakehouseProducer \
+  amoro-producer-0.9-SNAPSHOT-jar-with-dependencies.jar \
+  --format paimon \
+  --action remove-orphan-files \
+  --catalogName paimon \
+  --databaseName ods \
+  --parallelism 10 \
+  --mode distributed
 ```
 
-### Snapshot 按单表清理
+## 生产 spark-submit 示例
+
+以下示例以 Paimon catalog `paimon`、数据库 `sl_oki_prod` 为例。`spark.driver.host`、
+`spark.sql.catalog.paimon.warehouse`、`--keytab`、`--principal`、`--jars` 和 producer jar
+路径需要替换为实际生产环境路径。
+
+如果目标库表数量很多，建议在整库模式下增加 `--tableNameRegex`，只处理命中正则的表。
+例如 `--tableNameRegex '^orders_.*'` 只处理 `sl_oki_prod` 下表名匹配该正则的表。
+
+### expire-snapshots
+
+整库快照过期：
 
 ```bash
 ./spark-submit \
-    --master yarn \
-    --deploy-mode cluster \
-    --driver-memory 8g \
-    --driver-cores 4 \
-    --executor-memory 4g \
-    --executor-cores 4 \
-    --conf spark.dynamicAllocation.enabled=true \
-    --conf spark.dynamicAllocation.minExecutors=1 \
-    --conf spark.dynamicAllocation.maxExecutors=2 \
-    --conf spark.dynamicAllocation.initialExecutors=1 \
-    --conf spark.dynamicAllocation.shuffleTracking.enabled=true \
-    --conf spark.driver.memoryOverhead=2g \
-    --conf spark.executor.memoryOverhead=2g \
-    --conf spark.driver.bindAddress=0.0.0.0 \
-    --conf spark.sql.shuffle.partitions=400 \
-    --conf spark.sql.cbo.enabled=true \
-    --conf spark.sql.files.maxPartitionBytes=512m \
-    --conf spark.default.parallelism=200 \
-    --conf spark.locality.wait=0s \
-    --conf spark.sql.crossJoin.enabled=true \
-    --conf spark.sql.adaptive.localShuffleReader.enabled=true \
-    --conf spark.sql.fuse.unionAllOnJoin.enabled=true \
-    --conf spark.sql.optimizer.runtime.bloomFilter.enabled=true \
-    --conf spark.sql.optimizer.enableMergeScalarAggsInInnerJoin=true \
-    --conf spark.sql.optimizer.pushdownAggregateBelowJoin=true \
-    --conf spark.sql.optimizer.inferDistinctFromIntersect=true \
-    --conf spark.sql.optimizer.groupSplitsByLocation=false \
-    --conf spark.sql.adaptive.amend.join.selection.enabled=true \
-    --conf spark.sql.mergeScalaSubquery.pullupAggFilter=true \
-    --conf spark.sql.execution.optimizeExpand=true \
-    --conf spark.sql.execution.optimizeExpand.ratio=5 \
-    --conf spark.sql.legacy.ctePrecedencePolicy=LEGACY \
-    --conf spark.sql.auto.reused.cte.enabled=true \
-    --conf spark.sql.auto.clear.cte.cache.enabled=true \
-    --conf spark.locality.wait.node=0s \
-    --conf spark.sql.sources.ignoreDataLocality=true \
-    --conf spark.driver.host=10.89.56.103 \
-    --conf spark.sql.catalog.paimon=org.apache.paimon.spark.SparkCatalog \
-    --conf spark.sql.extensions=org.apache.paimon.spark.extensions.PaimonSparkSessionExtensions \
-    --conf spark.sql.catalog.paimon.type=hive \
-    --conf spark.sql.catalog.paimon.warehouse=hdfs://slcluster01/hive_warehouse \
-    --conf spark.hadoop.net.topology.script.file.name=/dev/null \
-    --conf spark.sql.defaultCatalog=paimon \
-    --keytab /data/work/hadoop-shopline/etc/hadoop/sljdp.keytab \
-    --jars /tmp/paimon-hive-connector-3.1-1.5-SNAPSHOT.jar,/tmp/paimon-spark-3.5_2.12-1.5-SNAPSHOT.jar \
-    --principal sljdp@SLCLUSTER.COM \
-    --class org.apache.amoro.producer.PaimonExpireSnapshots \
-    /data/work/frame/amoro-0.9-SNAPSHOT/plugin/producer/amoro-producer-0.9-SNAPSHOT-jar-with-dependencies.jar \
-    --databaseName sl_oki_test \
-    --tableName t_order \
-    --retainMax 20 \
-    --retainMin 10 \
-    --maxDeletes 550 \
-    --retryTimes 3 \
-    --continueOnTableFailure true \
-    --procedureOptions file-operation.thread-num=32,snapshot.expire.execution-mode=sync
+  --master yarn \
+  --deploy-mode cluster \
+  --driver-memory 8g \
+  --driver-cores 4 \
+  --executor-memory 8g \
+  --executor-cores 2 \
+  --conf spark.dynamicAllocation.enabled=true \
+  --conf spark.dynamicAllocation.minExecutors=1 \
+  --conf spark.dynamicAllocation.maxExecutors=2 \
+  --conf spark.dynamicAllocation.initialExecutors=1 \
+  --conf spark.dynamicAllocation.shuffleTracking.enabled=true \
+  --conf spark.yarn.queue=real_time_merge \
+  --conf spark.driver.memoryOverhead=2g \
+  --conf spark.executor.memoryOverhead=2g \
+  --conf spark.driver.bindAddress=0.0.0.0 \
+  --conf spark.sql.shuffle.partitions=400 \
+  --conf spark.sql.cbo.enabled=true \
+  --conf spark.sql.files.maxPartitionBytes=512m \
+  --conf spark.default.parallelism=200 \
+  --conf spark.locality.wait=0s \
+  --conf spark.sql.crossJoin.enabled=true \
+  --conf spark.sql.adaptive.localShuffleReader.enabled=true \
+  --conf spark.sql.fuse.unionAllOnJoin.enabled=true \
+  --conf spark.sql.optimizer.runtime.bloomFilter.enabled=true \
+  --conf spark.sql.optimizer.enableMergeScalarAggsInInnerJoin=true \
+  --conf spark.sql.optimizer.pushdownAggregateBelowJoin=true \
+  --conf spark.sql.optimizer.inferDistinctFromIntersect=true \
+  --conf spark.sql.optimizer.groupSplitsByLocation=false \
+  --conf spark.sql.adaptive.amend.join.selection.enabled=true \
+  --conf spark.sql.mergeScalaSubquery.pullupAggFilter=true \
+  --conf spark.sql.execution.optimizeExpand=true \
+  --conf spark.sql.execution.optimizeExpand.ratio=5 \
+  --conf spark.sql.legacy.ctePrecedencePolicy=LEGACY \
+  --conf spark.sql.auto.reused.cte.enabled=true \
+  --conf spark.sql.auto.clear.cte.cache.enabled=true \
+  --conf spark.locality.wait.node=0s \
+  --conf spark.sql.sources.ignoreDataLocality=true \
+  --conf spark.driver.host=REPLACE_DRIVER_HOST \
+  --conf spark.sql.catalog.paimon=org.apache.paimon.spark.SparkCatalog \
+  --conf spark.sql.extensions=org.apache.paimon.spark.extensions.PaimonSparkSessionExtensions \
+  --conf spark.sql.catalog.paimon.type=hive \
+  --conf spark.sql.catalog.paimon.warehouse=REPLACE_PAIMON_WAREHOUSE \
+  --conf spark.hadoop.net.topology.script.file.name=/dev/null \
+  --conf spark.sql.defaultCatalog=paimon \
+  --keytab REPLACE_KEYTAB_FILE \
+  --jars REPLACE_PAIMON_HIVE_CONNECTOR_JAR,REPLACE_PAIMON_SPARK_JAR \
+  --principal REPLACE_PRINCIPAL \
+  --class org.apache.amoro.producer.LakehouseProducer \
+  REPLACE_AMORO_PRODUCER_JAR \
+  --format paimon \
+  --action expire-snapshots \
+  --catalogName paimon \
+  --databaseName sl_oki_prod \
+  --retryTimes 3 \
+  --continueOnTableFailure true \
+  --retainMax 20 \
+  --retainMin 10 \
+  --maxDeletes 550 \
+  --procedureOptions file-operation.thread-num=32,snapshot.expire.execution-mode=sync
 ```
 
-## 孤儿文件清理 Spark Submit Demo
-
-孤儿文件清理入口显式接收 `--catalogName`，示例中使用 `paimon`。如果生产环境
-catalog 名称不同，只需要调整 `--catalogName` 以及对应的
-`spark.sql.catalog.<catalog>` 配置。
-
-### 孤儿文件按数据库清理
+只处理命中正则的表：
 
 ```bash
 ./spark-submit \
-    --master yarn \
-    --deploy-mode cluster \
-    --driver-memory 8g \
-    --driver-cores 4 \
-    --executor-memory 4g \
-    --executor-cores 4 \
-    --conf spark.dynamicAllocation.enabled=true \
-    --conf spark.dynamicAllocation.minExecutors=1 \
-    --conf spark.dynamicAllocation.maxExecutors=2 \
-    --conf spark.dynamicAllocation.initialExecutors=1 \
-    --conf spark.dynamicAllocation.shuffleTracking.enabled=true \
-    --conf spark.driver.memoryOverhead=2g \
-    --conf spark.executor.memoryOverhead=2g \
-    --conf spark.driver.bindAddress=0.0.0.0 \
-    --conf spark.sql.shuffle.partitions=400 \
-    --conf spark.sql.cbo.enabled=true \
-    --conf spark.sql.files.maxPartitionBytes=512m \
-    --conf spark.default.parallelism=200 \
-    --conf spark.locality.wait=0s \
-    --conf spark.sql.crossJoin.enabled=true \
-    --conf spark.sql.adaptive.localShuffleReader.enabled=true \
-    --conf spark.sql.fuse.unionAllOnJoin.enabled=true \
-    --conf spark.sql.optimizer.runtime.bloomFilter.enabled=true \
-    --conf spark.sql.optimizer.enableMergeScalarAggsInInnerJoin=true \
-    --conf spark.sql.optimizer.pushdownAggregateBelowJoin=true \
-    --conf spark.sql.optimizer.inferDistinctFromIntersect=true \
-    --conf spark.sql.optimizer.groupSplitsByLocation=false \
-    --conf spark.sql.adaptive.amend.join.selection.enabled=true \
-    --conf spark.sql.mergeScalaSubquery.pullupAggFilter=true \
-    --conf spark.sql.execution.optimizeExpand=true \
-    --conf spark.sql.execution.optimizeExpand.ratio=5 \
-    --conf spark.sql.legacy.ctePrecedencePolicy=LEGACY \
-    --conf spark.sql.auto.reused.cte.enabled=true \
-    --conf spark.sql.auto.clear.cte.cache.enabled=true \
-    --conf spark.locality.wait.node=0s \
-    --conf spark.sql.sources.ignoreDataLocality=true \
-    --conf spark.driver.host=10.89.56.103 \
-    --conf spark.sql.catalog.paimon=org.apache.paimon.spark.SparkCatalog \
-    --conf spark.sql.extensions=org.apache.paimon.spark.extensions.PaimonSparkSessionExtensions \
-    --conf spark.sql.catalog.paimon.type=hive \
-    --conf spark.sql.catalog.paimon.warehouse=hdfs://slcluster01/hive_warehouse \
-    --conf spark.hadoop.net.topology.script.file.name=/dev/null \
-    --conf spark.sql.defaultCatalog=paimon \
-    --keytab /data/work/hadoop-shopline/etc/hadoop/sljdp.keytab \
-    --jars /tmp/paimon-hive-connector-3.1-1.5-SNAPSHOT.jar,/tmp/paimon-spark-3.5_2.12-1.5-SNAPSHOT.jar \
-    --principal sljdp@SLCLUSTER.COM \
-    --class org.apache.amoro.producer.PaimonRemoveOrphanFiles \
-    /data/work/frame/amoro-0.9-SNAPSHOT/plugin/producer/amoro-producer-0.9-SNAPSHOT-jar-with-dependencies.jar \
-    --catalogName paimon \
-    --databaseName sl_oki_test \
-    --parallelism 10 \
-    --mode distributed \
-    --retryTimes 3 \
-    --continueOnTableFailure true
+  --master yarn \
+  --deploy-mode cluster \
+  --driver-memory 8g \
+  --driver-cores 4 \
+  --executor-memory 8g \
+  --executor-cores 2 \
+  --conf spark.dynamicAllocation.enabled=true \
+  --conf spark.dynamicAllocation.minExecutors=1 \
+  --conf spark.dynamicAllocation.maxExecutors=2 \
+  --conf spark.dynamicAllocation.initialExecutors=1 \
+  --conf spark.dynamicAllocation.shuffleTracking.enabled=true \
+  --conf spark.yarn.queue=real_time_merge \
+  --conf spark.driver.memoryOverhead=2g \
+  --conf spark.executor.memoryOverhead=2g \
+  --conf spark.driver.bindAddress=0.0.0.0 \
+  --conf spark.sql.shuffle.partitions=400 \
+  --conf spark.sql.cbo.enabled=true \
+  --conf spark.sql.files.maxPartitionBytes=512m \
+  --conf spark.default.parallelism=200 \
+  --conf spark.locality.wait=0s \
+  --conf spark.sql.crossJoin.enabled=true \
+  --conf spark.sql.adaptive.localShuffleReader.enabled=true \
+  --conf spark.sql.fuse.unionAllOnJoin.enabled=true \
+  --conf spark.sql.optimizer.runtime.bloomFilter.enabled=true \
+  --conf spark.sql.optimizer.enableMergeScalarAggsInInnerJoin=true \
+  --conf spark.sql.optimizer.pushdownAggregateBelowJoin=true \
+  --conf spark.sql.optimizer.inferDistinctFromIntersect=true \
+  --conf spark.sql.optimizer.groupSplitsByLocation=false \
+  --conf spark.sql.adaptive.amend.join.selection.enabled=true \
+  --conf spark.sql.mergeScalaSubquery.pullupAggFilter=true \
+  --conf spark.sql.execution.optimizeExpand=true \
+  --conf spark.sql.execution.optimizeExpand.ratio=5 \
+  --conf spark.sql.legacy.ctePrecedencePolicy=LEGACY \
+  --conf spark.sql.auto.reused.cte.enabled=true \
+  --conf spark.sql.auto.clear.cte.cache.enabled=true \
+  --conf spark.locality.wait.node=0s \
+  --conf spark.sql.sources.ignoreDataLocality=true \
+  --conf spark.driver.host=REPLACE_DRIVER_HOST \
+  --conf spark.sql.catalog.paimon=org.apache.paimon.spark.SparkCatalog \
+  --conf spark.sql.extensions=org.apache.paimon.spark.extensions.PaimonSparkSessionExtensions \
+  --conf spark.sql.catalog.paimon.type=hive \
+  --conf spark.sql.catalog.paimon.warehouse=REPLACE_PAIMON_WAREHOUSE \
+  --conf spark.hadoop.net.topology.script.file.name=/dev/null \
+  --conf spark.sql.defaultCatalog=paimon \
+  --keytab REPLACE_KEYTAB_FILE \
+  --jars REPLACE_PAIMON_HIVE_CONNECTOR_JAR,REPLACE_PAIMON_SPARK_JAR \
+  --principal REPLACE_PRINCIPAL \
+  --class org.apache.amoro.producer.LakehouseProducer \
+  REPLACE_AMORO_PRODUCER_JAR \
+  --format paimon \
+  --action expire-snapshots \
+  --catalogName paimon \
+  --databaseName sl_oki_prod \
+  --tableNameRegex '^orders_.*' \
+  --retryTimes 3 \
+  --continueOnTableFailure true \
+  --retainMax 20 \
+  --retainMin 10 \
+  --maxDeletes 550 \
+  --procedureOptions file-operation.thread-num=32,snapshot.expire.execution-mode=sync
 ```
 
-### 孤儿文件按单表清理
+### compact
+
+整库小文件合并：
 
 ```bash
 ./spark-submit \
-    --master yarn \
-    --deploy-mode cluster \
-    --driver-memory 8g \
-    --driver-cores 4 \
-    --executor-memory 4g \
-    --executor-cores 4 \
-    --conf spark.dynamicAllocation.enabled=true \
-    --conf spark.dynamicAllocation.minExecutors=1 \
-    --conf spark.dynamicAllocation.maxExecutors=2 \
-    --conf spark.dynamicAllocation.initialExecutors=1 \
-    --conf spark.dynamicAllocation.shuffleTracking.enabled=true \
-    --conf spark.driver.memoryOverhead=2g \
-    --conf spark.executor.memoryOverhead=2g \
-    --conf spark.driver.bindAddress=0.0.0.0 \
-    --conf spark.sql.shuffle.partitions=400 \
-    --conf spark.sql.cbo.enabled=true \
-    --conf spark.sql.files.maxPartitionBytes=512m \
-    --conf spark.default.parallelism=200 \
-    --conf spark.locality.wait=0s \
-    --conf spark.sql.crossJoin.enabled=true \
-    --conf spark.sql.adaptive.localShuffleReader.enabled=true \
-    --conf spark.sql.fuse.unionAllOnJoin.enabled=true \
-    --conf spark.sql.optimizer.runtime.bloomFilter.enabled=true \
-    --conf spark.sql.optimizer.enableMergeScalarAggsInInnerJoin=true \
-    --conf spark.sql.optimizer.pushdownAggregateBelowJoin=true \
-    --conf spark.sql.optimizer.inferDistinctFromIntersect=true \
-    --conf spark.sql.optimizer.groupSplitsByLocation=false \
-    --conf spark.sql.adaptive.amend.join.selection.enabled=true \
-    --conf spark.sql.mergeScalaSubquery.pullupAggFilter=true \
-    --conf spark.sql.execution.optimizeExpand=true \
-    --conf spark.sql.execution.optimizeExpand.ratio=5 \
-    --conf spark.sql.legacy.ctePrecedencePolicy=LEGACY \
-    --conf spark.sql.auto.reused.cte.enabled=true \
-    --conf spark.sql.auto.clear.cte.cache.enabled=true \
-    --conf spark.locality.wait.node=0s \
-    --conf spark.sql.sources.ignoreDataLocality=true \
-    --conf spark.driver.host=10.89.56.103 \
-    --conf spark.sql.catalog.paimon=org.apache.paimon.spark.SparkCatalog \
-    --conf spark.sql.extensions=org.apache.paimon.spark.extensions.PaimonSparkSessionExtensions \
-    --conf spark.sql.catalog.paimon.type=hive \
-    --conf spark.sql.catalog.paimon.warehouse=hdfs://slcluster01/hive_warehouse \
-    --conf spark.hadoop.net.topology.script.file.name=/dev/null \
-    --conf spark.sql.defaultCatalog=paimon \
-    --keytab /data/work/hadoop-shopline/etc/hadoop/sljdp.keytab \
-    --jars /tmp/paimon-hive-connector-3.1-1.5-SNAPSHOT.jar,/tmp/paimon-spark-3.5_2.12-1.5-SNAPSHOT.jar \
-    --principal sljdp@SLCLUSTER.COM \
-    --class org.apache.amoro.producer.PaimonRemoveOrphanFiles \
-    /data/work/frame/amoro-0.9-SNAPSHOT/plugin/producer/amoro-producer-0.9-SNAPSHOT-jar-with-dependencies.jar \
-    --catalogName paimon \
-    --databaseName sl_oki_test \
-    --tableName t_order \
-    --parallelism 10 \
-    --mode distributed \
-    --retryTimes 3 \
-    --continueOnTableFailure true
+  --master yarn \
+  --deploy-mode cluster \
+  --driver-memory 8g \
+  --driver-cores 4 \
+  --executor-memory 8g \
+  --executor-cores 2 \
+  --conf spark.dynamicAllocation.enabled=true \
+  --conf spark.dynamicAllocation.minExecutors=1 \
+  --conf spark.dynamicAllocation.maxExecutors=2 \
+  --conf spark.dynamicAllocation.initialExecutors=1 \
+  --conf spark.dynamicAllocation.shuffleTracking.enabled=true \
+  --conf spark.yarn.queue=real_time_merge \
+  --conf spark.driver.memoryOverhead=2g \
+  --conf spark.executor.memoryOverhead=2g \
+  --conf spark.driver.bindAddress=0.0.0.0 \
+  --conf spark.sql.shuffle.partitions=400 \
+  --conf spark.sql.cbo.enabled=true \
+  --conf spark.sql.files.maxPartitionBytes=512m \
+  --conf spark.default.parallelism=200 \
+  --conf spark.locality.wait=0s \
+  --conf spark.sql.crossJoin.enabled=true \
+  --conf spark.sql.adaptive.localShuffleReader.enabled=true \
+  --conf spark.sql.fuse.unionAllOnJoin.enabled=true \
+  --conf spark.sql.optimizer.runtime.bloomFilter.enabled=true \
+  --conf spark.sql.optimizer.enableMergeScalarAggsInInnerJoin=true \
+  --conf spark.sql.optimizer.pushdownAggregateBelowJoin=true \
+  --conf spark.sql.optimizer.inferDistinctFromIntersect=true \
+  --conf spark.sql.optimizer.groupSplitsByLocation=false \
+  --conf spark.sql.adaptive.amend.join.selection.enabled=true \
+  --conf spark.sql.mergeScalaSubquery.pullupAggFilter=true \
+  --conf spark.sql.execution.optimizeExpand=true \
+  --conf spark.sql.execution.optimizeExpand.ratio=5 \
+  --conf spark.sql.legacy.ctePrecedencePolicy=LEGACY \
+  --conf spark.sql.auto.reused.cte.enabled=true \
+  --conf spark.sql.auto.clear.cte.cache.enabled=true \
+  --conf spark.locality.wait.node=0s \
+  --conf spark.sql.sources.ignoreDataLocality=true \
+  --conf spark.driver.host=REPLACE_DRIVER_HOST \
+  --conf spark.sql.catalog.paimon=org.apache.paimon.spark.SparkCatalog \
+  --conf spark.sql.extensions=org.apache.paimon.spark.extensions.PaimonSparkSessionExtensions \
+  --conf spark.sql.catalog.paimon.type=hive \
+  --conf spark.sql.catalog.paimon.warehouse=REPLACE_PAIMON_WAREHOUSE \
+  --conf spark.hadoop.net.topology.script.file.name=/dev/null \
+  --conf spark.sql.defaultCatalog=paimon \
+  --keytab REPLACE_KEYTAB_FILE \
+  --jars REPLACE_PAIMON_HIVE_CONNECTOR_JAR,REPLACE_PAIMON_SPARK_JAR \
+  --principal REPLACE_PRINCIPAL \
+  --class org.apache.amoro.producer.LakehouseProducer \
+  REPLACE_AMORO_PRODUCER_JAR \
+  --format paimon \
+  --action compact \
+  --catalogName paimon \
+  --databaseName sl_oki_prod \
+  --tableNameRegex '^orders_.*' \
+  --retryTimes 3 \
+  --continueOnTableFailure true \
+  --startBucket 0 \
+  --step 20 \
+  --compactStrategy full \
+  --procedureOptions target-file-size=256m
 ```
 
-## Manifest 合并 Spark Submit Demo
-
-Manifest 合并入口显式接收 `--catalogName`，示例中使用 `paimon`。如果生产环境
-catalog 名称不同，只需要调整 `--catalogName` 以及对应的
-`spark.sql.catalog.<catalog>` 配置。
-
-### Manifest 按数据库合并
+Paimon 0.9 bucket 表 compact 使用 `partition_idle_time`：
 
 ```bash
 ./spark-submit \
-    --master yarn \
-    --deploy-mode cluster \
-    --driver-memory 8g \
-    --driver-cores 4 \
-    --executor-memory 4g \
-    --executor-cores 4 \
-    --conf spark.dynamicAllocation.enabled=true \
-    --conf spark.dynamicAllocation.minExecutors=1 \
-    --conf spark.dynamicAllocation.maxExecutors=2 \
-    --conf spark.dynamicAllocation.initialExecutors=1 \
-    --conf spark.dynamicAllocation.shuffleTracking.enabled=true \
-    --conf spark.driver.memoryOverhead=2g \
-    --conf spark.executor.memoryOverhead=2g \
-    --conf spark.driver.bindAddress=0.0.0.0 \
-    --conf spark.sql.shuffle.partitions=400 \
-    --conf spark.sql.cbo.enabled=true \
-    --conf spark.sql.files.maxPartitionBytes=512m \
-    --conf spark.default.parallelism=200 \
-    --conf spark.locality.wait=0s \
-    --conf spark.sql.crossJoin.enabled=true \
-    --conf spark.sql.adaptive.localShuffleReader.enabled=true \
-    --conf spark.sql.fuse.unionAllOnJoin.enabled=true \
-    --conf spark.sql.optimizer.runtime.bloomFilter.enabled=true \
-    --conf spark.sql.optimizer.enableMergeScalarAggsInInnerJoin=true \
-    --conf spark.sql.optimizer.pushdownAggregateBelowJoin=true \
-    --conf spark.sql.optimizer.inferDistinctFromIntersect=true \
-    --conf spark.sql.optimizer.groupSplitsByLocation=false \
-    --conf spark.sql.adaptive.amend.join.selection.enabled=true \
-    --conf spark.sql.mergeScalaSubquery.pullupAggFilter=true \
-    --conf spark.sql.execution.optimizeExpand=true \
-    --conf spark.sql.execution.optimizeExpand.ratio=5 \
-    --conf spark.sql.legacy.ctePrecedencePolicy=LEGACY \
-    --conf spark.sql.auto.reused.cte.enabled=true \
-    --conf spark.sql.auto.clear.cte.cache.enabled=true \
-    --conf spark.locality.wait.node=0s \
-    --conf spark.sql.sources.ignoreDataLocality=true \
-    --conf spark.driver.host=10.89.56.103 \
-    --conf spark.sql.catalog.paimon=org.apache.paimon.spark.SparkCatalog \
-    --conf spark.sql.extensions=org.apache.paimon.spark.extensions.PaimonSparkSessionExtensions \
-    --conf spark.sql.catalog.paimon.type=hive \
-    --conf spark.sql.catalog.paimon.warehouse=hdfs://slcluster01/hive_warehouse \
-    --conf spark.hadoop.net.topology.script.file.name=/dev/null \
-    --conf spark.sql.defaultCatalog=paimon \
-    --keytab /data/work/hadoop-shopline/etc/hadoop/sljdp.keytab \
-    --jars /tmp/paimon-hive-connector-3.1-1.5-SNAPSHOT.jar,/tmp/paimon-spark-3.5_2.12-1.5-SNAPSHOT.jar \
-    --principal sljdp@SLCLUSTER.COM \
-    --class org.apache.amoro.producer.PaimonCompactManifest \
-    /data/work/frame/amoro-0.9-SNAPSHOT/plugin/producer/amoro-producer-0.9-SNAPSHOT-jar-with-dependencies.jar \
-    --catalogName paimon \
-    --databaseName sl_oki_test \
-    --retryTimes 3 \
-    --continueOnTableFailure true
+  --master yarn \
+  --deploy-mode cluster \
+  --driver-memory 8g \
+  --driver-cores 4 \
+  --executor-memory 8g \
+  --executor-cores 2 \
+  --conf spark.dynamicAllocation.enabled=true \
+  --conf spark.dynamicAllocation.minExecutors=1 \
+  --conf spark.dynamicAllocation.maxExecutors=2 \
+  --conf spark.dynamicAllocation.initialExecutors=1 \
+  --conf spark.dynamicAllocation.shuffleTracking.enabled=true \
+  --conf spark.yarn.queue=real_time_merge \
+  --conf spark.driver.memoryOverhead=2g \
+  --conf spark.executor.memoryOverhead=2g \
+  --conf spark.driver.bindAddress=0.0.0.0 \
+  --conf spark.sql.shuffle.partitions=400 \
+  --conf spark.sql.cbo.enabled=true \
+  --conf spark.sql.files.maxPartitionBytes=512m \
+  --conf spark.default.parallelism=200 \
+  --conf spark.locality.wait=0s \
+  --conf spark.sql.crossJoin.enabled=true \
+  --conf spark.sql.adaptive.localShuffleReader.enabled=true \
+  --conf spark.sql.fuse.unionAllOnJoin.enabled=true \
+  --conf spark.sql.optimizer.runtime.bloomFilter.enabled=true \
+  --conf spark.sql.optimizer.enableMergeScalarAggsInInnerJoin=true \
+  --conf spark.sql.optimizer.pushdownAggregateBelowJoin=true \
+  --conf spark.sql.optimizer.inferDistinctFromIntersect=true \
+  --conf spark.sql.optimizer.groupSplitsByLocation=false \
+  --conf spark.sql.adaptive.amend.join.selection.enabled=true \
+  --conf spark.sql.mergeScalaSubquery.pullupAggFilter=true \
+  --conf spark.sql.execution.optimizeExpand=true \
+  --conf spark.sql.execution.optimizeExpand.ratio=5 \
+  --conf spark.sql.legacy.ctePrecedencePolicy=LEGACY \
+  --conf spark.sql.auto.reused.cte.enabled=true \
+  --conf spark.sql.auto.clear.cte.cache.enabled=true \
+  --conf spark.locality.wait.node=0s \
+  --conf spark.sql.sources.ignoreDataLocality=true \
+  --conf spark.driver.host=REPLACE_DRIVER_HOST \
+  --conf spark.sql.catalog.paimon=org.apache.paimon.spark.SparkCatalog \
+  --conf spark.sql.extensions=org.apache.paimon.spark.extensions.PaimonSparkSessionExtensions \
+  --conf spark.sql.catalog.paimon.type=hive \
+  --conf spark.sql.catalog.paimon.warehouse=REPLACE_PAIMON_WAREHOUSE \
+  --conf spark.hadoop.net.topology.script.file.name=/dev/null \
+  --conf spark.sql.defaultCatalog=paimon \
+  --keytab REPLACE_KEYTAB_FILE \
+  --jars REPLACE_PAIMON_HIVE_CONNECTOR_JAR,REPLACE_PAIMON_SPARK_JAR \
+  --principal REPLACE_PRINCIPAL \
+  --class org.apache.amoro.producer.LakehouseProducer \
+  REPLACE_AMORO_PRODUCER_JAR \
+  --format paimon \
+  --action compact \
+  --catalogName paimon \
+  --databaseName sl_oki_prod \
+  --tableNameRegex '^orders_.*' \
+  --retryTimes 3 \
+  --continueOnTableFailure true \
+  --version 0.9 \
+  --partitionIdleTime 1d
 ```
 
-### Manifest 按单表合并
+### compact-manifest
+
+整库 manifest 合并：
 
 ```bash
 ./spark-submit \
-    --master yarn \
-    --deploy-mode cluster \
-    --driver-memory 8g \
-    --driver-cores 4 \
-    --executor-memory 4g \
-    --executor-cores 4 \
-    --conf spark.dynamicAllocation.enabled=true \
-    --conf spark.dynamicAllocation.minExecutors=1 \
-    --conf spark.dynamicAllocation.maxExecutors=2 \
-    --conf spark.dynamicAllocation.initialExecutors=1 \
-    --conf spark.dynamicAllocation.shuffleTracking.enabled=true \
-    --conf spark.driver.memoryOverhead=2g \
-    --conf spark.executor.memoryOverhead=2g \
-    --conf spark.driver.bindAddress=0.0.0.0 \
-    --conf spark.sql.shuffle.partitions=400 \
-    --conf spark.sql.cbo.enabled=true \
-    --conf spark.sql.files.maxPartitionBytes=512m \
-    --conf spark.default.parallelism=200 \
-    --conf spark.locality.wait=0s \
-    --conf spark.sql.crossJoin.enabled=true \
-    --conf spark.sql.adaptive.localShuffleReader.enabled=true \
-    --conf spark.sql.fuse.unionAllOnJoin.enabled=true \
-    --conf spark.sql.optimizer.runtime.bloomFilter.enabled=true \
-    --conf spark.sql.optimizer.enableMergeScalarAggsInInnerJoin=true \
-    --conf spark.sql.optimizer.pushdownAggregateBelowJoin=true \
-    --conf spark.sql.optimizer.inferDistinctFromIntersect=true \
-    --conf spark.sql.optimizer.groupSplitsByLocation=false \
-    --conf spark.sql.adaptive.amend.join.selection.enabled=true \
-    --conf spark.sql.mergeScalaSubquery.pullupAggFilter=true \
-    --conf spark.sql.execution.optimizeExpand=true \
-    --conf spark.sql.execution.optimizeExpand.ratio=5 \
-    --conf spark.sql.legacy.ctePrecedencePolicy=LEGACY \
-    --conf spark.sql.auto.reused.cte.enabled=true \
-    --conf spark.sql.auto.clear.cte.cache.enabled=true \
-    --conf spark.locality.wait.node=0s \
-    --conf spark.sql.sources.ignoreDataLocality=true \
-    --conf spark.driver.host=10.89.56.103 \
-    --conf spark.sql.catalog.paimon=org.apache.paimon.spark.SparkCatalog \
-    --conf spark.sql.extensions=org.apache.paimon.spark.extensions.PaimonSparkSessionExtensions \
-    --conf spark.sql.catalog.paimon.type=hive \
-    --conf spark.sql.catalog.paimon.warehouse=hdfs://slcluster01/hive_warehouse \
-    --conf spark.hadoop.net.topology.script.file.name=/dev/null \
-    --conf spark.sql.defaultCatalog=paimon \
-    --keytab /data/work/hadoop-shopline/etc/hadoop/sljdp.keytab \
-    --jars /tmp/paimon-hive-connector-3.1-1.5-SNAPSHOT.jar,/tmp/paimon-spark-3.5_2.12-1.5-SNAPSHOT.jar \
-    --principal sljdp@SLCLUSTER.COM \
-    --class org.apache.amoro.producer.PaimonCompactManifest \
-    /data/work/frame/amoro-0.9-SNAPSHOT/plugin/producer/amoro-producer-0.9-SNAPSHOT-jar-with-dependencies.jar \
-    --catalogName paimon \
-    --databaseName sl_oki_test \
-    --tableName t_order \
-    --retryTimes 3 \
-    --continueOnTableFailure true
+  --master yarn \
+  --deploy-mode cluster \
+  --driver-memory 8g \
+  --driver-cores 4 \
+  --executor-memory 8g \
+  --executor-cores 2 \
+  --conf spark.dynamicAllocation.enabled=true \
+  --conf spark.dynamicAllocation.minExecutors=1 \
+  --conf spark.dynamicAllocation.maxExecutors=2 \
+  --conf spark.dynamicAllocation.initialExecutors=1 \
+  --conf spark.dynamicAllocation.shuffleTracking.enabled=true \
+  --conf spark.yarn.queue=real_time_merge \
+  --conf spark.driver.memoryOverhead=2g \
+  --conf spark.executor.memoryOverhead=2g \
+  --conf spark.driver.bindAddress=0.0.0.0 \
+  --conf spark.sql.shuffle.partitions=400 \
+  --conf spark.sql.cbo.enabled=true \
+  --conf spark.sql.files.maxPartitionBytes=512m \
+  --conf spark.default.parallelism=200 \
+  --conf spark.locality.wait=0s \
+  --conf spark.sql.crossJoin.enabled=true \
+  --conf spark.sql.adaptive.localShuffleReader.enabled=true \
+  --conf spark.sql.fuse.unionAllOnJoin.enabled=true \
+  --conf spark.sql.optimizer.runtime.bloomFilter.enabled=true \
+  --conf spark.sql.optimizer.enableMergeScalarAggsInInnerJoin=true \
+  --conf spark.sql.optimizer.pushdownAggregateBelowJoin=true \
+  --conf spark.sql.optimizer.inferDistinctFromIntersect=true \
+  --conf spark.sql.optimizer.groupSplitsByLocation=false \
+  --conf spark.sql.adaptive.amend.join.selection.enabled=true \
+  --conf spark.sql.mergeScalaSubquery.pullupAggFilter=true \
+  --conf spark.sql.execution.optimizeExpand=true \
+  --conf spark.sql.execution.optimizeExpand.ratio=5 \
+  --conf spark.sql.legacy.ctePrecedencePolicy=LEGACY \
+  --conf spark.sql.auto.reused.cte.enabled=true \
+  --conf spark.sql.auto.clear.cte.cache.enabled=true \
+  --conf spark.locality.wait.node=0s \
+  --conf spark.sql.sources.ignoreDataLocality=true \
+  --conf spark.driver.host=REPLACE_DRIVER_HOST \
+  --conf spark.sql.catalog.paimon=org.apache.paimon.spark.SparkCatalog \
+  --conf spark.sql.extensions=org.apache.paimon.spark.extensions.PaimonSparkSessionExtensions \
+  --conf spark.sql.catalog.paimon.type=hive \
+  --conf spark.sql.catalog.paimon.warehouse=REPLACE_PAIMON_WAREHOUSE \
+  --conf spark.hadoop.net.topology.script.file.name=/dev/null \
+  --conf spark.sql.defaultCatalog=paimon \
+  --keytab REPLACE_KEYTAB_FILE \
+  --jars REPLACE_PAIMON_HIVE_CONNECTOR_JAR,REPLACE_PAIMON_SPARK_JAR \
+  --principal REPLACE_PRINCIPAL \
+  --class org.apache.amoro.producer.LakehouseProducer \
+  REPLACE_AMORO_PRODUCER_JAR \
+  --format paimon \
+  --action compact-manifest \
+  --catalogName paimon \
+  --databaseName sl_oki_prod \
+  --tableNameRegex '^orders_.*' \
+  --retryTimes 3 \
+  --continueOnTableFailure true \
+  --procedureOptions file-operation.thread-num=16
 ```
 
-## 运行注意事项
+### remove-orphan-files
 
-Spark 运行环境必须提前配置好 Paimon catalog，否则 `SHOW TABLES` 或
-`CALL sys.expire_snapshots`、`CALL <catalog>.sys.remove_orphan_files`、
-`CALL <catalog>.sys.compact_manifest` 会在运行期失败。
+整库删除孤儿文件：
 
-如果运行环境已经通过 Spark 安装目录或平台层提供 Paimon 相关 JAR，可以直接提交
-`amoro-producer-0.9-SNAPSHOT.jar`；如果希望单 JAR 提交，使用
-`amoro-producer-0.9-SNAPSHOT-jar-with-dependencies.jar`。
-
-`spark.dynamicAllocation.initialExecutors` 建议不要大于
-`spark.dynamicAllocation.maxExecutors`。上面的示例保留了原始提交命令中的资源参数，实际提交前请按集群策略调整。
+```bash
+./spark-submit \
+  --master yarn \
+  --deploy-mode cluster \
+  --driver-memory 8g \
+  --driver-cores 4 \
+  --executor-memory 8g \
+  --executor-cores 2 \
+  --conf spark.dynamicAllocation.enabled=true \
+  --conf spark.dynamicAllocation.minExecutors=1 \
+  --conf spark.dynamicAllocation.maxExecutors=2 \
+  --conf spark.dynamicAllocation.initialExecutors=1 \
+  --conf spark.dynamicAllocation.shuffleTracking.enabled=true \
+  --conf spark.yarn.queue=real_time_merge \
+  --conf spark.driver.memoryOverhead=2g \
+  --conf spark.executor.memoryOverhead=2g \
+  --conf spark.driver.bindAddress=0.0.0.0 \
+  --conf spark.sql.shuffle.partitions=400 \
+  --conf spark.sql.cbo.enabled=true \
+  --conf spark.sql.files.maxPartitionBytes=512m \
+  --conf spark.default.parallelism=200 \
+  --conf spark.locality.wait=0s \
+  --conf spark.sql.crossJoin.enabled=true \
+  --conf spark.sql.adaptive.localShuffleReader.enabled=true \
+  --conf spark.sql.fuse.unionAllOnJoin.enabled=true \
+  --conf spark.sql.optimizer.runtime.bloomFilter.enabled=true \
+  --conf spark.sql.optimizer.enableMergeScalarAggsInInnerJoin=true \
+  --conf spark.sql.optimizer.pushdownAggregateBelowJoin=true \
+  --conf spark.sql.optimizer.inferDistinctFromIntersect=true \
+  --conf spark.sql.optimizer.groupSplitsByLocation=false \
+  --conf spark.sql.adaptive.amend.join.selection.enabled=true \
+  --conf spark.sql.mergeScalaSubquery.pullupAggFilter=true \
+  --conf spark.sql.execution.optimizeExpand=true \
+  --conf spark.sql.execution.optimizeExpand.ratio=5 \
+  --conf spark.sql.legacy.ctePrecedencePolicy=LEGACY \
+  --conf spark.sql.auto.reused.cte.enabled=true \
+  --conf spark.sql.auto.clear.cte.cache.enabled=true \
+  --conf spark.locality.wait.node=0s \
+  --conf spark.sql.sources.ignoreDataLocality=true \
+  --conf spark.driver.host=REPLACE_DRIVER_HOST \
+  --conf spark.sql.catalog.paimon=org.apache.paimon.spark.SparkCatalog \
+  --conf spark.sql.extensions=org.apache.paimon.spark.extensions.PaimonSparkSessionExtensions \
+  --conf spark.sql.catalog.paimon.type=hive \
+  --conf spark.sql.catalog.paimon.warehouse=REPLACE_PAIMON_WAREHOUSE \
+  --conf spark.hadoop.net.topology.script.file.name=/dev/null \
+  --conf spark.sql.defaultCatalog=paimon \
+  --keytab REPLACE_KEYTAB_FILE \
+  --jars REPLACE_PAIMON_HIVE_CONNECTOR_JAR,REPLACE_PAIMON_SPARK_JAR \
+  --principal REPLACE_PRINCIPAL \
+  --class org.apache.amoro.producer.LakehouseProducer \
+  REPLACE_AMORO_PRODUCER_JAR \
+  --format paimon \
+  --action remove-orphan-files \
+  --catalogName paimon \
+  --databaseName sl_oki_prod \
+  --tableNameRegex '^orders_.*' \
+  --retryTimes 3 \
+  --continueOnTableFailure true \
+  --parallelism 10 \
+  --mode distributed
+```
