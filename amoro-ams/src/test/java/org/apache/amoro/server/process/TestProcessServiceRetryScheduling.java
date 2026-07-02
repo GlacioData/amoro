@@ -32,6 +32,8 @@ import org.apache.amoro.process.ProcessStatus;
 import org.apache.amoro.process.TableProcess;
 import org.apache.amoro.process.TableProcessStore;
 import org.apache.amoro.server.AMSManagerTestBase;
+import org.apache.amoro.server.persistence.PersistentBase;
+import org.apache.amoro.server.persistence.mapper.TableProcessMapper;
 import org.apache.amoro.table.StateKey;
 import org.junit.Assert;
 import org.junit.Test;
@@ -105,6 +107,24 @@ public class TestProcessServiceRetryScheduling extends AMSManagerTestBase {
       processService.recoverProcesses(Collections.singletonList(runtime));
 
       Assert.assertTrue(processService.getActiveTableProcess().isEmpty());
+      TableProcessMeta recoveredMeta = getProcessMeta(holder.getStore().getProcessId());
+      Assert.assertEquals(ProcessStatus.FAILED, recoveredMeta.getStatus());
+      Assert.assertTrue(recoveredMeta.getFinishTime() > 0);
+      Assert.assertTrue(recoveredMeta.getFailMessage().contains("recover failed for test"));
+      Assert.assertTrue(
+          recoveredMeta
+              .getFailMessage()
+              .contains(String.valueOf(holder.getStore().getProcessId())));
+      Assert.assertTrue(
+          recoveredMeta
+              .getFailMessage()
+              .contains(String.valueOf(runtime.getTableIdentifier().getId())));
+      Assert.assertTrue(recoveredMeta.getFailMessage().contains(RECOVER_FAIL_ACTION.getName()));
+      Assert.assertTrue(recoveredMeta.getFailMessage().contains(executeEngine.name()));
+      Assert.assertTrue(
+          recoveredMeta
+              .getFailMessage()
+              .contains(holder.getStore().getExternalProcessIdentifier()));
     } finally {
       shutdownExecutor(processService, "processExecutionPool");
       shutdownExecutor(processService, "retrySchedulingPool");
@@ -149,6 +169,8 @@ public class TestProcessServiceRetryScheduling extends AMSManagerTestBase {
 
       Assert.assertTrue(
           processService.getTableProcessInstances(failedRuntime.getTableIdentifier()).isEmpty());
+      Assert.assertEquals(
+          ProcessStatus.FAILED, getProcessMeta(failedHolder.getStore().getProcessId()).getStatus());
       Assert.assertEquals(
           1, processService.getTableProcessInstances(recoveredRuntime.getTableIdentifier()).size());
     } finally {
@@ -215,6 +237,16 @@ public class TestProcessServiceRetryScheduling extends AMSManagerTestBase {
       // Some fields only exist after the production change is applied.
     } catch (Exception e) {
       throw new RuntimeException(e);
+    }
+  }
+
+  private TableProcessMeta getProcessMeta(long processId) {
+    return new TableProcessMetaReader().getProcessMeta(processId);
+  }
+
+  private static class TableProcessMetaReader extends PersistentBase {
+    private TableProcessMeta getProcessMeta(long processId) {
+      return getAs(TableProcessMapper.class, mapper -> mapper.getProcessMeta(processId));
     }
   }
 
