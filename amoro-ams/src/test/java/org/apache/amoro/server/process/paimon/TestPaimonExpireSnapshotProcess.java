@@ -22,6 +22,9 @@ import org.apache.amoro.ServerTableIdentifier;
 import org.apache.amoro.TableFormat;
 import org.apache.amoro.TableRuntime;
 import org.apache.amoro.process.HttpRemoteSparkStandAloneSubmit;
+import org.apache.amoro.process.ProcessStatus;
+import org.apache.amoro.server.table.DefaultTableRuntime;
+import org.apache.amoro.server.table.cleanup.CleanupOperation;
 import org.junit.Assert;
 import org.junit.Test;
 import org.mockito.Mockito;
@@ -56,6 +59,20 @@ public class TestPaimonExpireSnapshotProcess {
   }
 
   @Test
+  public void testActionNameUsesPluralExpireSnapshots() {
+    TableRuntime runtime = Mockito.mock(TableRuntime.class);
+    Mockito.when(runtime.getTableIdentifier())
+        .thenReturn(ServerTableIdentifier.of("catalog", "db", "tbl", TableFormat.PAIMON));
+
+    HttpRemoteSparkStandAloneSubmit engine = new HttpRemoteSparkStandAloneSubmit();
+    engine.open(Collections.singletonMap("execute.user", "amoro"));
+
+    PaimonExpireSnapshotProcess process = new PaimonExpireSnapshotProcess(runtime, engine, 354);
+
+    Assert.assertEquals("EXPIRE-SNAPSHOTS", process.getAction().getName());
+  }
+
+  @Test
   public void testBuildExpireSnapshotsSqlContainsMaxDeletes() {
     TableRuntime runtime = Mockito.mock(TableRuntime.class);
     Mockito.when(runtime.getTableIdentifier())
@@ -76,5 +93,21 @@ public class TestPaimonExpireSnapshotProcess {
     Assert.assertTrue(sql.contains("table => 'default.orders'"));
     Assert.assertTrue(sql.contains("retain_max => 12"));
     Assert.assertTrue(sql.contains("max_deletes => 550"));
+  }
+
+  @Test
+  public void testAfterCompleteSuccessUpdatesLastCleanTime() {
+    DefaultTableRuntime runtime = Mockito.mock(DefaultTableRuntime.class);
+    Mockito.when(runtime.getTableIdentifier())
+        .thenReturn(ServerTableIdentifier.of("catalog", "default", "orders", TableFormat.PAIMON));
+
+    HttpRemoteSparkStandAloneSubmit engine = new HttpRemoteSparkStandAloneSubmit();
+    engine.open(Collections.singletonMap("execute.user", "amoro"));
+
+    PaimonExpireSnapshotProcess process = new PaimonExpireSnapshotProcess(runtime, engine, 354);
+    process.afterComplete(ProcessStatus.SUCCESS);
+
+    Mockito.verify(runtime)
+        .updateLastCleanTime(Mockito.eq(CleanupOperation.SNAPSHOTS_EXPIRING), Mockito.anyLong());
   }
 }

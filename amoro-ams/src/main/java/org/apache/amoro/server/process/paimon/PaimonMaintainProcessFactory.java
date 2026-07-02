@@ -26,6 +26,7 @@ import org.apache.amoro.config.ConfigOption;
 import org.apache.amoro.config.ConfigOptions;
 import org.apache.amoro.config.Configurations;
 import org.apache.amoro.process.ExecuteEngine;
+import org.apache.amoro.process.HttpRemoteSparkStandAloneSubmit;
 import org.apache.amoro.process.LocalExecutionEngine;
 import org.apache.amoro.process.ProcessFactory;
 import org.apache.amoro.process.ProcessTriggerStrategy;
@@ -42,11 +43,11 @@ import java.util.Collections;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
- * Process factory for Paimon table <em>maintenance</em> actions (currently metadata synchronization
- * only; the snapshot-expiration path lives on the {@code czy006/paimon-factory-refactor} feature
- * branch and is intentionally excluded from {@code dev-paimon-compact} until that branch merges).
+ * Process factory for Paimon table <em>maintenance</em> actions, including metadata synchronization
+ * and remote snapshot expiration.
  *
  * <p>Renamed from {@code PaimonProcessFactory} in AMORO-4200 to disambiguate from the optimizing
  * factory {@code org.apache.amoro.formats.paimon.process.PaimonProcessFactory} in the {@code
@@ -71,11 +72,34 @@ public class PaimonMaintainProcessFactory implements ProcessFactory {
   public static final ConfigOption<Integer> SYNC_TABLE_META_TRIGGER_PARALLELISM =
       ConfigOptions.key("sync-table-meta.trigger-parallelism").intType().defaultValue(1);
 
+  public static final ConfigOption<Boolean> SNAPSHOT_EXPIRE_ENABLED =
+      ConfigOptions.key("expire-snapshots.enabled").booleanType().defaultValue(false);
+
+  public static final ConfigOption<Duration> SNAPSHOT_EXPIRE_INTERVAL =
+      ConfigOptions.key("expire-snapshots.interval")
+          .durationType()
+          .defaultValue(Duration.ofHours(24));
+
+  public static final ConfigOption<Integer> SPARK_VERSION =
+      ConfigOptions.key("spark-version").intType().defaultValue(354);
+
   private final Map<Action, ProcessTriggerStrategy> actions = Maps.newHashMap();
+  private ExecuteEngine remoteEngine;
+  private int sparkVersion = SPARK_VERSION.defaultValue();
 
   @Override
   public void availableExecuteEngines(Collection<ExecuteEngine> allAvailableEngines) {
-    // No remote engines needed — sync-meta is an in-process periodic job.
+    this.remoteEngine = null;
+    if (allAvailableEngines == null) {
+      return;
+    }
+    for (ExecuteEngine engine : allAvailableEngines) {
+      if (engine instanceof HttpRemoteSparkStandAloneSubmit
+          || HttpRemoteSparkStandAloneSubmit.ENGINE_NAME.equals(engine.name())) {
+        this.remoteEngine = engine;
+        return;
+      }
+    }
   }
 
   @Override
@@ -98,6 +122,10 @@ public class PaimonMaintainProcessFactory implements ProcessFactory {
       return Optional.of(new PaimonTableMetaSyncProcess(tableRuntime));
     }
 
+    if (PaimonActions.EXPIRE_SNAPSHOTS.equals(action)) {
+      return triggerExpireSnapshots(tableRuntime);
+    }
+
     return Optional.empty();
   }
 
@@ -106,6 +134,15 @@ public class PaimonMaintainProcessFactory implements ProcessFactory {
       throws RecoverProcessFailedException {
     if (PaimonActions.SYNC_TABLE_META.equals(store.getAction())) {
       return new PaimonTableMetaSyncProcess(tableRuntime);
+    }
+    if (PaimonActions.EXPIRE_SNAPSHOTS.equals(store.getAction())) {
+      if (remoteEngine == null) {
+        throw new RecoverProcessFailedException(
+            "Cannot recover Paimon expire snapshots process without "
+                + HttpRemoteSparkStandAloneSubmit.ENGINE_NAME
+                + " execute engine");
+      }
+      return new PaimonExpireSnapshotProcess(tableRuntime, remoteEngine, sparkVersion);
     }
     throw new RecoverProcessFailedException(
         "Unsupported action for PaimonMaintainProcessFactory: " + store.getAction());
@@ -124,7 +161,15 @@ public class PaimonMaintainProcessFactory implements ProcessFactory {
           PaimonActions.SYNC_TABLE_META,
           new ProcessTriggerStrategy(interval, false, Math.max(parallelism, 1)));
     }
-    LOG.info("Apache Paimon Process Factory initialized actions {}.", this.actions);
+    if (configs.getBoolean(SNAPSHOT_EXPIRE_ENABLED)) {
+      Duration interval = configs.getDuration(SNAPSHOT_EXPIRE_INTERVAL);
+      this.sparkVersion = configs.getInteger(SPARK_VERSION);
+      this.actions.put(
+          PaimonActions.EXPIRE_SNAPSHOTS, ProcessTriggerStrategy.triggerAtFixRate(interval));
+    }
+    LOG.info(
+        "Apache Paimon Process Factory initialized actions {}.",
+        this.actions.keySet().stream().map(Action::getName).collect(Collectors.toList()));
   }
 
   @Override
@@ -143,5 +188,21 @@ public class PaimonMaintainProcessFactory implements ProcessFactory {
 
   private void resetConfiguredState() {
     actions.clear();
+    remoteEngine = null;
+    sparkVersion = SPARK_VERSION.defaultValue();
+  }
+
+  private Optional<TableProcess> triggerExpireSnapshots(TableRuntime tableRuntime) {
+    if (remoteEngine == null) {
+      LOG.warn(
+          "Skip Paimon expire snapshots for table {} because execute engine {} is not installed.",
+          tableRuntime.getTableIdentifier(),
+          HttpRemoteSparkStandAloneSubmit.ENGINE_NAME);
+      return Optional.empty();
+    }
+    ProcessTriggerStrategy strategy = actions.get(PaimonActions.EXPIRE_SNAPSHOTS);
+    return PaimonExpireSnapshotProcess.trigger(
+            tableRuntime, remoteEngine, sparkVersion, strategy.getTriggerInterval())
+        .map(process -> (TableProcess) process);
   }
 }

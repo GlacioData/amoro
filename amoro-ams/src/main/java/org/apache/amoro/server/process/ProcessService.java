@@ -162,16 +162,27 @@ public class ProcessService extends PersistentBase {
           ActionCoordinatorScheduler scheduler =
               actionCoordinators.get(processMeta.getProcessType());
           if (tableRuntime != null && scheduler != null) {
-            DefaultTableProcessStore store =
-                new DefaultTableProcessStore(
-                    processMeta.getProcessId(),
-                    tableRuntime,
-                    processMeta,
-                    scheduler.getAction(),
-                    ActionCoordinatorScheduler.PROCESS_MAX_RETRY_NUMBER);
-            TableProcess process = scheduler.recover(tableRuntime, store);
-            trackTableProcess(tableRuntime.getTableIdentifier(), store, process);
-            executeOrTraceProcess(store, process);
+            try {
+              DefaultTableProcessStore store =
+                  new DefaultTableProcessStore(
+                      processMeta.getProcessId(),
+                      tableRuntime,
+                      processMeta,
+                      scheduler.getAction(),
+                      ActionCoordinatorScheduler.PROCESS_MAX_RETRY_NUMBER);
+              TableProcess process = scheduler.recover(tableRuntime, store);
+              trackTableProcess(tableRuntime.getTableIdentifier(), store, process);
+              executeOrTraceProcess(store, process);
+            } catch (Exception e) {
+              LOG.warn(
+                  "Failed to recover active table process {}, tableId={}, processType={},"
+                      + " executionEngine={}, skip this process recovery.",
+                  processMeta.getProcessId(),
+                  processMeta.getTableId(),
+                  processMeta.getProcessType(),
+                  processMeta.getExecutionEngine(),
+                  e);
+            }
           }
         });
   }

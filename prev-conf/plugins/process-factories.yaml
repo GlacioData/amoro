@@ -16,7 +16,7 @@
 #
 
 process-factories:
-  - name: paimon
+  - name: paimon-maintain
     enabled: true
     priority: 100
     properties:
@@ -25,5 +25,9 @@ process-factories:
       sync-table-meta.trigger-parallelism: 2
       expire-snapshots.enabled: true
       expire-snapshots.interval: 24h
-      expire-snapshots.spark-version: 354
+      spark-version: 354
+  - name: paimon
+    enabled: true
+    priority: 100
+    properties:
       paimon-optimizer.enabled: true

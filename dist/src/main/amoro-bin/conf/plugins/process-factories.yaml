@@ -20,14 +20,17 @@ process-factories:
     enabled: true
     priority: 100
     properties:
-      sync-table-meta.enabled: true
-      sync-table-meta.interval: 1 h
-      sync-table-meta.trigger-parallelism: 1
+      sync-table-meta.enabled: false
+      sync-table-meta.interval: 48h
+      sync-table-meta.trigger-parallelism: 2
+      expire-snapshots.enabled: true
+      expire-snapshots.interval: 24h
+      spark-version: 354
   - name: paimon
     enabled: true
     priority: 100
     properties:
-      paimon-optimizer.enabled: false
+      paimon-optimizer.enabled: true
   - name: iceberg
     enabled: true
     priority: 100

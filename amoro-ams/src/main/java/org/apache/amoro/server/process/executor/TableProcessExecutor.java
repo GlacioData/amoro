@@ -25,6 +25,7 @@ import org.apache.amoro.process.ProcessStatusInfo;
 import org.apache.amoro.process.TableProcess;
 import org.apache.amoro.process.TableProcessStore;
 import org.apache.amoro.server.persistence.PersistentBase;
+import org.apache.amoro.shade.guava32.com.google.common.annotations.VisibleForTesting;
 import org.apache.amoro.shade.guava32.com.google.common.base.Strings;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -43,6 +44,7 @@ public class TableProcessExecutor extends PersistentBase implements Runnable {
   public ExecuteEngine executeEngine;
   protected TableProcess tableProcess;
   private final TableProcessStore store;
+  private final long pollIntervalMs;
   private Runnable finishedCallback;
 
   /**
@@ -53,9 +55,19 @@ public class TableProcessExecutor extends PersistentBase implements Runnable {
    */
   public TableProcessExecutor(
       TableProcess tableProcess, TableProcessStore store, ExecuteEngine executeEngine) {
+    this(tableProcess, store, executeEngine, DEFAULT_POLL_INTERVAL_MS);
+  }
+
+  @VisibleForTesting
+  TableProcessExecutor(
+      TableProcess tableProcess,
+      TableProcessStore store,
+      ExecuteEngine executeEngine,
+      long pollIntervalMs) {
     this.tableProcess = tableProcess;
     this.executeEngine = executeEngine;
     this.store = store;
+    this.pollIntervalMs = pollIntervalMs;
   }
 
   /** Submit or recover the process to engine, poll status and update store. */
@@ -113,12 +125,13 @@ public class TableProcessExecutor extends PersistentBase implements Runnable {
           return;
         }
         try {
-          Thread.sleep(DEFAULT_POLL_INTERVAL_MS);
+          Thread.sleep(pollIntervalMs);
         } catch (InterruptedException e) {
           throw e;
         }
         statusInfo = executeEngine.getStatusInfo(externalProcessIdentifier);
         status = statusInfo.getStatus();
+        persistRunningStatusIfNecessary(status, externalProcessIdentifier);
       }
       message = statusInfo.getMessage();
     } catch (Throwable t) {
@@ -235,6 +248,19 @@ public class TableProcessExecutor extends PersistentBase implements Runnable {
     return (status == ProcessStatus.PENDING
         || status == ProcessStatus.RUNNING
         || status == ProcessStatus.SUBMITTED);
+  }
+
+  private void persistRunningStatusIfNecessary(
+      ProcessStatus status, String externalProcessIdentifier) {
+    if (status == ProcessStatus.RUNNING && store.getStatus() != ProcessStatus.RUNNING) {
+      store.tryTransitState(
+          ProcessStatus.RUNNING,
+          ProcessEvent.SUBMIT_REQUESTED,
+          externalProcessIdentifier,
+          "Process is running.",
+          tableProcess.getProcessParameters(),
+          tableProcess.getSummary());
+    }
   }
 
   static String buildFailureMessage(Throwable throwable) {

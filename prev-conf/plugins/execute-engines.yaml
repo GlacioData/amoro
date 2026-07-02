@@ -26,5 +26,6 @@ execute-engines:
     enabled: true
     priority: 100
     properties:
-      default.thread-count: 10
-      table-meta-sync.thread-count: 3
+      execute.user: amoro
+      default-spark-version: 354
+      source-tag: AMORO
