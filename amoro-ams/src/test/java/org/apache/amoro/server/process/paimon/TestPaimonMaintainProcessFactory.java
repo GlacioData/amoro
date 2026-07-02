@@ -19,15 +19,19 @@
 package org.apache.amoro.server.process.paimon;
 
 import org.apache.amoro.PaimonActions;
+import org.apache.amoro.ServerTableIdentifier;
 import org.apache.amoro.TableFormat;
+import org.apache.amoro.process.HttpRemoteSparkStandAloneSubmit;
 import org.apache.amoro.process.LocalExecutionEngine;
 import org.apache.amoro.process.ProcessTriggerStrategy;
 import org.apache.amoro.process.TableProcess;
+import org.apache.amoro.process.TableProcessStore;
 import org.apache.amoro.server.table.DefaultTableRuntime;
 import org.junit.Assert;
 import org.junit.Test;
 import org.mockito.Mockito;
 
+import java.time.Duration;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
@@ -56,6 +60,25 @@ public class TestPaimonMaintainProcessFactory {
   }
 
   @Test
+  public void testExpireSnapshotsActionAndTriggerStrategy() {
+    PaimonMaintainProcessFactory factory = new PaimonMaintainProcessFactory();
+    Map<String, String> properties = new HashMap<>();
+    properties.put("sync-table-meta.enabled", "false");
+    properties.put("expire-snapshots.enabled", "true");
+    properties.put("expire-snapshots.interval", "24h");
+    properties.put("spark-version", "321");
+    factory.open(properties);
+
+    Assert.assertTrue(
+        factory.supportedActions().getOrDefault(TableFormat.PAIMON, Collections.emptySet()).stream()
+            .anyMatch(action -> action.equals(PaimonActions.EXPIRE_SNAPSHOTS)));
+
+    ProcessTriggerStrategy strategy =
+        factory.triggerStrategy(TableFormat.PAIMON, PaimonActions.EXPIRE_SNAPSHOTS);
+    Assert.assertEquals(Duration.ofHours(24), strategy.getTriggerInterval());
+  }
+
+  @Test
   public void testTriggerAndRecoverUseLocalEngine() throws Exception {
     PaimonMaintainProcessFactory factory = new PaimonMaintainProcessFactory();
     factory.open(Collections.singletonMap("sync-table-meta.enabled", "true"));
@@ -69,6 +92,80 @@ public class TestPaimonMaintainProcessFactory {
   }
 
   @Test
+  public void testTriggerExpireSnapshotsUseHttpSparkEngine() {
+    PaimonMaintainProcessFactory factory = new PaimonMaintainProcessFactory();
+    Map<String, String> properties = new HashMap<>();
+    properties.put("sync-table-meta.enabled", "false");
+    properties.put("expire-snapshots.enabled", "true");
+    properties.put("expire-snapshots.interval", "24h");
+    properties.put("spark-version", "321");
+    factory.open(properties);
+
+    HttpRemoteSparkStandAloneSubmit engine = new HttpRemoteSparkStandAloneSubmit();
+    engine.open(Collections.singletonMap("execute.user", "amoro"));
+    factory.availableExecuteEngines(Collections.singletonList(engine));
+
+    DefaultTableRuntime runtime = Mockito.mock(DefaultTableRuntime.class);
+    Mockito.when(runtime.getFormat()).thenReturn(TableFormat.PAIMON);
+    Mockito.when(runtime.getTableIdentifier())
+        .thenReturn(ServerTableIdentifier.of("catalog", "db", "tbl", TableFormat.PAIMON));
+    Mockito.when(runtime.getTableConfig()).thenReturn(Collections.emptyMap());
+    Mockito.when(runtime.getLastCleanTime(Mockito.any())).thenReturn(0L);
+
+    Optional<TableProcess> process = factory.trigger(runtime, PaimonActions.EXPIRE_SNAPSHOTS);
+
+    Assert.assertTrue(process.isPresent());
+    Assert.assertTrue(process.get() instanceof PaimonExpireSnapshotProcess);
+    Assert.assertEquals(
+        HttpRemoteSparkStandAloneSubmit.ENGINE_NAME, process.get().getExecutionEngine());
+    Assert.assertEquals("321", process.get().getProcessParameters().get("sparkVersion"));
+  }
+
+  @Test
+  public void testTriggerExpireSnapshotsWithoutHttpSparkEngineReturnsEmpty() {
+    PaimonMaintainProcessFactory factory = new PaimonMaintainProcessFactory();
+    Map<String, String> properties = new HashMap<>();
+    properties.put("sync-table-meta.enabled", "false");
+    properties.put("expire-snapshots.enabled", "true");
+    factory.open(properties);
+    factory.availableExecuteEngines(Collections.singletonList(new LocalExecutionEngine()));
+
+    DefaultTableRuntime runtime = Mockito.mock(DefaultTableRuntime.class);
+    Mockito.when(runtime.getFormat()).thenReturn(TableFormat.PAIMON);
+
+    Optional<TableProcess> process = factory.trigger(runtime, PaimonActions.EXPIRE_SNAPSHOTS);
+
+    Assert.assertFalse(process.isPresent());
+  }
+
+  @Test
+  public void testRecoverExpireSnapshotsUseHttpSparkEngine() throws Exception {
+    PaimonMaintainProcessFactory factory = new PaimonMaintainProcessFactory();
+    Map<String, String> properties = new HashMap<>();
+    properties.put("sync-table-meta.enabled", "false");
+    properties.put("expire-snapshots.enabled", "true");
+    properties.put("spark-version", "321");
+    factory.open(properties);
+
+    HttpRemoteSparkStandAloneSubmit engine = new HttpRemoteSparkStandAloneSubmit();
+    engine.open(Collections.singletonMap("execute.user", "amoro"));
+    factory.availableExecuteEngines(Collections.singletonList(engine));
+
+    DefaultTableRuntime runtime = Mockito.mock(DefaultTableRuntime.class);
+    Mockito.when(runtime.getTableIdentifier())
+        .thenReturn(ServerTableIdentifier.of("catalog", "db", "tbl", TableFormat.PAIMON));
+    Mockito.when(runtime.getTableConfig()).thenReturn(Collections.emptyMap());
+    TableProcessStore store = Mockito.mock(TableProcessStore.class);
+    Mockito.when(store.getAction()).thenReturn(PaimonActions.EXPIRE_SNAPSHOTS);
+
+    TableProcess process = factory.recover(runtime, store);
+
+    Assert.assertTrue(process instanceof PaimonExpireSnapshotProcess);
+    Assert.assertEquals(HttpRemoteSparkStandAloneSubmit.ENGINE_NAME, process.getExecutionEngine());
+    Assert.assertEquals("321", process.getProcessParameters().get("sparkVersion"));
+  }
+
+  @Test
   public void testOpenWithEmptyPropertiesUseDefaults() {
     PaimonMaintainProcessFactory factory = new PaimonMaintainProcessFactory();
     factory.open(Collections.emptyMap());
@@ -76,6 +173,7 @@ public class TestPaimonMaintainProcessFactory {
     Set<org.apache.amoro.Action> actions =
         factory.supportedActions().getOrDefault(TableFormat.PAIMON, Collections.emptySet());
     Assert.assertTrue(actions.contains(PaimonActions.SYNC_TABLE_META));
+    Assert.assertFalse(actions.contains(PaimonActions.EXPIRE_SNAPSHOTS));
 
     ProcessTriggerStrategy syncStrategy =
         factory.triggerStrategy(TableFormat.PAIMON, PaimonActions.SYNC_TABLE_META);
@@ -95,6 +193,7 @@ public class TestPaimonMaintainProcessFactory {
     Set<org.apache.amoro.Action> actions =
         factory.supportedActions().getOrDefault(TableFormat.PAIMON, Collections.emptySet());
     Assert.assertFalse(actions.contains(PaimonActions.SYNC_TABLE_META));
+    Assert.assertFalse(actions.contains(PaimonActions.EXPIRE_SNAPSHOTS));
   }
 
   @Test

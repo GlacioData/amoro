@@ -22,3 +22,10 @@ execute-engines:
     properties:
       pool.default.thread-count: 10
       pool.snapshots-expiring.thread-count: 10
+  - name: sl-spark-http
+    enabled: true
+    priority: 100
+    properties:
+      execute.user: amoro
+      default-spark-version: 354
+      source-tag: AMORO

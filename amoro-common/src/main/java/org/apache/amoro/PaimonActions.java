@@ -21,7 +21,7 @@ package org.apache.amoro;
 public class PaimonActions {
 
   public static final Action SYNC_TABLE_META = Action.register("sync-table-meta");
-  public static final Action EXPIRE_SNAPSHOTS = Action.register("expire-snapshot");
+  public static final Action EXPIRE_SNAPSHOTS = Action.register("expire-snapshots");
 
   private PaimonActions() {}
 }

@@ -41,6 +41,8 @@ import org.apache.amoro.shade.guava32.com.google.common.annotations.VisibleForTe
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.PrintWriter;
+import java.io.StringWriter;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -162,18 +164,69 @@ public class ProcessService extends PersistentBase {
           ActionCoordinatorScheduler scheduler =
               actionCoordinators.get(processMeta.getProcessType());
           if (tableRuntime != null && scheduler != null) {
-            DefaultTableProcessStore store =
-                new DefaultTableProcessStore(
-                    processMeta.getProcessId(),
-                    tableRuntime,
-                    processMeta,
-                    scheduler.getAction(),
-                    ActionCoordinatorScheduler.PROCESS_MAX_RETRY_NUMBER);
-            TableProcess process = scheduler.recover(tableRuntime, store);
-            trackTableProcess(tableRuntime.getTableIdentifier(), store, process);
-            executeOrTraceProcess(store, process);
+            DefaultTableProcessStore store = null;
+            try {
+              store =
+                  new DefaultTableProcessStore(
+                      processMeta.getProcessId(),
+                      tableRuntime,
+                      processMeta,
+                      scheduler.getAction(),
+                      ActionCoordinatorScheduler.PROCESS_MAX_RETRY_NUMBER);
+              TableProcess process = scheduler.recover(tableRuntime, store);
+              trackTableProcess(tableRuntime.getTableIdentifier(), store, process);
+              executeOrTraceProcess(store, process);
+            } catch (Exception e) {
+              LOG.warn(
+                  "Failed to recover active table process {}, tableId={}, processType={},"
+                      + " executionEngine={}, skip this process recovery.",
+                  processMeta.getProcessId(),
+                  processMeta.getTableId(),
+                  processMeta.getProcessType(),
+                  processMeta.getExecutionEngine(),
+                  e);
+              if (store != null) {
+                markRecoverFailed(store, processMeta, e);
+              }
+            }
           }
         });
+  }
+
+  private void markRecoverFailed(
+      DefaultTableProcessStore store, TableProcessMeta processMeta, Exception exception) {
+    boolean transitioned =
+        store.tryTransitState(
+            ProcessStatus.FAILED,
+            ProcessEvent.COMPLETE_FAILED,
+            processMeta.getExternalProcessIdentifier(),
+            buildRecoverFailureMessage(processMeta, exception),
+            store.getProcessParameters(),
+            store.getSummary());
+    if (!transitioned) {
+      LOG.warn(
+          "Failed to mark recovered table process {} as FAILED after recovery exception."
+              + " tableId={}, processType={}, executionEngine={}, externalProcessIdentifier={}",
+          processMeta.getProcessId(),
+          processMeta.getTableId(),
+          processMeta.getProcessType(),
+          processMeta.getExecutionEngine(),
+          processMeta.getExternalProcessIdentifier());
+    }
+  }
+
+  private String buildRecoverFailureMessage(TableProcessMeta processMeta, Exception exception) {
+    StringWriter sw = new StringWriter();
+    exception.printStackTrace(new PrintWriter(sw));
+    return String.format(
+        "Failed to recover active table process %d, tableId=%d, processType=%s,"
+            + " executionEngine=%s, externalProcessIdentifier=%s.%n%s",
+        processMeta.getProcessId(),
+        processMeta.getTableId(),
+        processMeta.getProcessType(),
+        processMeta.getExecutionEngine(),
+        processMeta.getExternalProcessIdentifier(),
+        sw);
   }
 
   /**

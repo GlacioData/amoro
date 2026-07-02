@@ -167,9 +167,89 @@ public class TestTableProcessExecutor {
     Assert.assertEquals("qid-1", store.getExternalProcessIdentifier());
     Assert.assertTrue(store.getFinishTime() > 0);
     Assert.assertEquals(
-        Arrays.asList(ProcessEvent.SUBMIT_REQUESTED.name(), ProcessEvent.COMPLETE_SUCCESS.name()),
+        Arrays.asList(
+            ProcessEvent.SUBMIT_REQUESTED.name(),
+            ProcessEvent.SUBMIT_REQUESTED.name(),
+            ProcessEvent.COMPLETE_SUCCESS.name()),
         store.getEvents());
     Assert.assertEquals(3, engine.getPollCount());
+  }
+
+  @Test
+  public void testPersistRunningStatusAfterSubmittedPoll() {
+    InMemoryTableProcessStore store = new InMemoryTableProcessStore();
+    SequencedExecuteEngine engine =
+        new SequencedExecuteEngine(
+            ProcessStatusInfo.of(ProcessStatus.SUBMITTED, ""),
+            Arrays.asList(
+                ProcessStatusInfo.of(ProcessStatus.RUNNING, ""),
+                ProcessStatusInfo.of(ProcessStatus.SUCCESS, "")));
+
+    TableProcessExecutor executor =
+        new TableProcessExecutor(new TestingTableProcess(), store, engine, 10L);
+
+    executor.run();
+
+    Assert.assertEquals(ProcessStatus.SUCCESS, store.getStatus());
+    Assert.assertEquals("qid-1", store.getExternalProcessIdentifier());
+    Assert.assertEquals(1, engine.getSubmitCount());
+    Assert.assertEquals(
+        Collections.singletonList(ProcessStatus.RUNNING),
+        store.transitionsTo(ProcessStatus.RUNNING));
+    Assert.assertEquals(
+        Arrays.asList(ProcessStatus.SUBMITTED, ProcessStatus.RUNNING, ProcessStatus.SUCCESS),
+        store.getTransitions());
+  }
+
+  @Test
+  public void testRecoveredSubmittedProcessPersistsRunningWithoutResubmit() {
+    InMemoryTableProcessStore store =
+        new InMemoryTableProcessStore(ProcessStatus.SUBMITTED, "qid-1");
+    SequencedExecuteEngine engine =
+        new SequencedExecuteEngine(
+            ProcessStatusInfo.of(ProcessStatus.SUBMITTED, ""),
+            Arrays.asList(
+                ProcessStatusInfo.of(ProcessStatus.RUNNING, ""),
+                ProcessStatusInfo.of(ProcessStatus.SUCCESS, "")));
+
+    TableProcessExecutor executor =
+        new TableProcessExecutor(new TestingTableProcess(), store, engine, 10L);
+
+    executor.run();
+
+    Assert.assertEquals(ProcessStatus.SUCCESS, store.getStatus());
+    Assert.assertEquals("qid-1", store.getExternalProcessIdentifier());
+    Assert.assertEquals(0, engine.getSubmitCount());
+    Assert.assertEquals(
+        Collections.singletonList(ProcessStatus.RUNNING),
+        store.transitionsTo(ProcessStatus.RUNNING));
+    Assert.assertEquals(
+        Arrays.asList(ProcessStatus.RUNNING, ProcessStatus.SUCCESS), store.getTransitions());
+  }
+
+  @Test
+  public void testPersistRunningStatusOnlyOnce() {
+    InMemoryTableProcessStore store = new InMemoryTableProcessStore();
+    SequencedExecuteEngine engine =
+        new SequencedExecuteEngine(
+            ProcessStatusInfo.of(ProcessStatus.SUBMITTED, ""),
+            Arrays.asList(
+                ProcessStatusInfo.of(ProcessStatus.RUNNING, ""),
+                ProcessStatusInfo.of(ProcessStatus.RUNNING, ""),
+                ProcessStatusInfo.of(ProcessStatus.SUCCESS, "")));
+
+    TableProcessExecutor executor =
+        new TableProcessExecutor(new TestingTableProcess(), store, engine, 10L);
+
+    executor.run();
+
+    Assert.assertEquals(ProcessStatus.SUCCESS, store.getStatus());
+    Assert.assertEquals(
+        Collections.singletonList(ProcessStatus.RUNNING),
+        store.transitionsTo(ProcessStatus.RUNNING));
+    Assert.assertEquals(
+        Arrays.asList(ProcessStatus.SUBMITTED, ProcessStatus.RUNNING, ProcessStatus.SUCCESS),
+        store.getTransitions());
   }
 
   private static class SequencedExecuteEngine implements ExecuteEngine {
@@ -177,6 +257,7 @@ public class TestTableProcessExecutor {
     private final ProcessStatusInfo firstStatus;
     private final List<ProcessStatusInfo> remainingStatuses;
     private final AtomicInteger pollCount = new AtomicInteger();
+    private final AtomicInteger submitCount = new AtomicInteger();
     private final AtomicInteger callSequence;
     private int firstPollOrder = -1;
 
@@ -222,6 +303,7 @@ public class TestTableProcessExecutor {
 
     @Override
     public String submitTableProcess(TableProcess tableProcess) {
+      submitCount.incrementAndGet();
       return "qid-1";
     }
 
@@ -244,6 +326,10 @@ public class TestTableProcessExecutor {
 
     public int getPollCount() {
       return pollCount.get();
+    }
+
+    public int getSubmitCount() {
+      return submitCount.get();
     }
 
     public int getFirstPollOrder() {
@@ -316,6 +402,14 @@ public class TestTableProcessExecutor {
     private String failMessage = "";
     private long finishTime = 0L;
     private final List<String> events = new ArrayList<>();
+    private final List<ProcessStatus> transitions = new ArrayList<>();
+
+    private InMemoryTableProcessStore() {}
+
+    private InMemoryTableProcessStore(ProcessStatus status, String externalProcessIdentifier) {
+      this.status = status;
+      this.externalProcessIdentifier = externalProcessIdentifier;
+    }
 
     @Override
     public long getProcessId() {
@@ -405,6 +499,7 @@ public class TestTableProcessExecutor {
         return false;
       }
       events.add(processEvent.name());
+      transitions.add(newStatus);
       this.status = newStatus;
       this.externalProcessIdentifier = externalProcessIdentifier;
       if (processEvent == ProcessEvent.COMPLETE_FAILED) {
@@ -469,6 +564,20 @@ public class TestTableProcessExecutor {
 
     public List<String> getEvents() {
       return events;
+    }
+
+    public List<ProcessStatus> getTransitions() {
+      return transitions;
+    }
+
+    public List<ProcessStatus> transitionsTo(ProcessStatus expected) {
+      List<ProcessStatus> result = new ArrayList<>();
+      for (ProcessStatus transition : transitions) {
+        if (transition == expected) {
+          result.add(transition);
+        }
+      }
+      return result;
     }
   }
 

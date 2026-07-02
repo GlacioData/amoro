@@ -83,6 +83,9 @@ public class HttpRemoteSparkStandAloneSubmit implements ExecuteEngine {
   private static final String PARAM_CONF = "conf";
   private static final String PARAM_CLIENT_IP = "clientIp";
 
+  private static final String DEFAULT_SPARK_SESSION_SQL_PREFIX =
+      "set spark.syntax.extension=true; set spark.paimon.version=1.3;";
+
   private final ObjectMapper objectMapper = new ObjectMapper();
 
   private String baseUrl;
@@ -292,7 +295,7 @@ public class HttpRemoteSparkStandAloneSubmit implements ExecuteEngine {
 
     ObjectNode requestNode = objectMapper.createObjectNode();
     requestNode.put(PARAM_JOB_TYPE, "sql");
-    requestNode.put(PARAM_HQL, hql);
+    requestNode.put(PARAM_HQL, prependDefaultSparkSessionSql(hql));
     requestNode.put(PARAM_CUR_USER, params.getOrDefault(PARAM_CUR_USER, executeUser));
     requestNode.put(PARAM_SOURCE_TAG, params.getOrDefault(PARAM_SOURCE_TAG, sourceTag));
     requestNode.put(
@@ -314,6 +317,10 @@ public class HttpRemoteSparkStandAloneSubmit implements ExecuteEngine {
     } catch (Exception e) {
       throw new RuntimeException("Failed to serialize submit request", e);
     }
+  }
+
+  private String prependDefaultSparkSessionSql(String hql) {
+    return DEFAULT_SPARK_SESSION_SQL_PREFIX + "\n" + hql;
   }
 
   private String doPost(String path, String jsonBody) {
