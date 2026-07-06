@@ -18,11 +18,13 @@
 
 package org.apache.amoro.formats.paimon.optimizing;
 
+import org.apache.amoro.table.FormatPendingInput;
+
 import java.util.Collection;
 import java.util.Map;
 
 /** Paimon-specific pending input metrics collected during the refresh phase. */
-public class PaimonPendingInput implements org.apache.amoro.table.FormatPendingInput {
+public class PaimonPendingInput implements FormatPendingInput {
 
   // ---- Workload dimension ----
   private int dataFileCount;

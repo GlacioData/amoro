@@ -23,6 +23,7 @@ import org.apache.amoro.TableFormat;
 import org.apache.amoro.TableSnapshot;
 import org.apache.amoro.config.OptimizingConfig;
 import org.apache.amoro.formats.paimon.optimizing.PaimonPendingInput;
+import org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeyOptimizingEvaluator;
 import org.apache.amoro.optimizing.OptimizationContext;
 import org.apache.amoro.optimizing.PendingInputResult;
 import org.apache.amoro.shade.guava32.com.google.common.collect.ImmutableMap;
@@ -127,7 +128,10 @@ public class PaimonTable implements AmoroTable<Table>, Serializable {
           boolean appendBucketUnaware = isAppendBucketUnawareTable();
           PaimonPendingInput pendingInput =
               appendBucketUnaware ? collectPaimonPendingInput() : new PaimonPendingInput();
-          boolean optimizingNecessary = appendBucketUnaware && isSelfOptimizingEnabled(context);
+          boolean selfOptimizingEnabled = isSelfOptimizingEnabled(context);
+          boolean optimizingNecessary =
+              selfOptimizingEnabled
+                  && (appendBucketUnaware || isPrimaryKeyHashOptimizingNecessary(context));
           return Optional.of(new PendingInputResult(pendingInput, optimizingNecessary));
         });
   }
@@ -163,6 +167,22 @@ public class PaimonTable implements AmoroTable<Table>, Serializable {
     }
     AppendOnlyFileStoreTable appendOnlyTable = (AppendOnlyFileStoreTable) table;
     return appendOnlyTable.bucketMode() == BucketMode.BUCKET_UNAWARE;
+  }
+
+  private boolean isPrimaryKeyHashOptimizingNecessary(OptimizationContext context) {
+    if (!(table instanceof FileStoreTable) || table instanceof AppendOnlyFileStoreTable) {
+      return false;
+    }
+    FileStoreTable fileStoreTable = (FileStoreTable) table;
+    return PaimonPrimaryKeyOptimizingEvaluator.evaluate(
+            fileStoreTable,
+            tableIdentifier.getTableName(),
+            context == null ? null : context.getOptimizingConfig(),
+            context == null ? 0L : context.getLastMinorOptimizingTime(),
+            context == null ? 0L : context.getLastFullOptimizingTime(),
+            null,
+            System.currentTimeMillis())
+        .necessary();
   }
 
   private PaimonPendingInput collectPaimonPendingInput() {
