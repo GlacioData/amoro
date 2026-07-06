@@ -22,6 +22,7 @@ public class PaimonActions {
 
   public static final Action SYNC_TABLE_META = Action.register("sync-table-meta");
   public static final Action EXPIRE_SNAPSHOTS = Action.register("expire-snapshots");
+  public static final Action CLEAN_ORPHANS = Action.register("clean-orphans");
 
   private PaimonActions() {}
 }
