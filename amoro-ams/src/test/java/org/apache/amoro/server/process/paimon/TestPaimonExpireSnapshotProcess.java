@@ -24,14 +24,16 @@ import org.apache.amoro.TableRuntime;
 import org.apache.amoro.process.HttpRemoteSparkStandAloneSubmit;
 import org.apache.amoro.process.ProcessStatus;
 import org.apache.amoro.server.table.DefaultTableRuntime;
-import org.apache.amoro.server.table.cleanup.CleanupOperation;
+import org.apache.amoro.server.table.cleanup.TableRuntimeCleanupState;
 import org.junit.Assert;
 import org.junit.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.function.Function;
 
 public class TestPaimonExpireSnapshotProcess {
 
@@ -107,7 +109,30 @@ public class TestPaimonExpireSnapshotProcess {
     PaimonExpireSnapshotProcess process = new PaimonExpireSnapshotProcess(runtime, engine, 354);
     process.afterComplete(ProcessStatus.SUCCESS);
 
+    @SuppressWarnings("unchecked")
+    ArgumentCaptor<Function<TableRuntimeCleanupState, TableRuntimeCleanupState>> updaterCaptor =
+        (ArgumentCaptor) ArgumentCaptor.forClass(Function.class);
     Mockito.verify(runtime)
-        .updateLastCleanTime(Mockito.eq(CleanupOperation.SNAPSHOTS_EXPIRING), Mockito.anyLong());
+        .updateState(Mockito.eq(DefaultTableRuntime.CLEANUP_STATE_KEY), updaterCaptor.capture());
+
+    TableRuntimeCleanupState updated =
+        updaterCaptor.getValue().apply(new TableRuntimeCleanupState());
+    Assert.assertTrue(updated.getLastSnapshotsExpiringTime() > 0);
+  }
+
+  @Test
+  public void testAfterCompleteFailureDoesNotUpdateLastCleanTime() {
+    DefaultTableRuntime runtime = Mockito.mock(DefaultTableRuntime.class);
+    Mockito.when(runtime.getTableIdentifier())
+        .thenReturn(ServerTableIdentifier.of("catalog", "default", "orders", TableFormat.PAIMON));
+
+    HttpRemoteSparkStandAloneSubmit engine = new HttpRemoteSparkStandAloneSubmit();
+    engine.open(Collections.singletonMap("execute.user", "amoro"));
+
+    PaimonExpireSnapshotProcess process = new PaimonExpireSnapshotProcess(runtime, engine, 354);
+    process.afterComplete(ProcessStatus.FAILED);
+
+    Mockito.verify(runtime, Mockito.never())
+        .updateState(Mockito.eq(DefaultTableRuntime.CLEANUP_STATE_KEY), Mockito.any());
   }
 }

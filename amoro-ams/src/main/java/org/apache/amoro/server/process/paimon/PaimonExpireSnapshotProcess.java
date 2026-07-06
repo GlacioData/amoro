@@ -27,7 +27,6 @@ import org.apache.amoro.process.HttpRemoteSparkStandAloneSubmit;
 import org.apache.amoro.process.ProcessStatus;
 import org.apache.amoro.process.TableProcess;
 import org.apache.amoro.server.table.DefaultTableRuntime;
-import org.apache.amoro.server.table.cleanup.CleanupOperation;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -61,16 +60,14 @@ public class PaimonExpireSnapshotProcess extends TableProcess {
 
   public static Optional<PaimonExpireSnapshotProcess> trigger(
       TableRuntime tableRuntime, ExecuteEngine engine, int sparkVersion, Duration interval) {
-    if (tableRuntime instanceof DefaultTableRuntime) {
-      DefaultTableRuntime prt = (DefaultTableRuntime) tableRuntime;
-      long lastExecuteTime = prt.getLastCleanTime(CleanupOperation.SNAPSHOTS_EXPIRING);
-      if (System.currentTimeMillis() - lastExecuteTime < interval.toMillis()) {
-        LOG.debug(
-            "Skip expire snapshots for table {}, last execute time: {}",
-            tableRuntime.getTableIdentifier(),
-            lastExecuteTime);
-        return Optional.empty();
-      }
+    long lastExecuteTime =
+        tableRuntime.getState(DefaultTableRuntime.CLEANUP_STATE_KEY).getLastSnapshotsExpiringTime();
+    if (System.currentTimeMillis() - lastExecuteTime < interval.toMillis()) {
+      LOG.debug(
+          "Skip expire snapshots for table {}, last execute time: {}",
+          tableRuntime.getTableIdentifier(),
+          lastExecuteTime);
+      return Optional.empty();
     }
     return Optional.of(new PaimonExpireSnapshotProcess(tableRuntime, engine, sparkVersion));
   }
@@ -112,9 +109,10 @@ public class PaimonExpireSnapshotProcess extends TableProcess {
 
   @Override
   public void afterComplete(ProcessStatus status) {
-    if (status == ProcessStatus.SUCCESS && tableRuntime instanceof DefaultTableRuntime) {
-      ((DefaultTableRuntime) tableRuntime)
-          .updateLastCleanTime(CleanupOperation.SNAPSHOTS_EXPIRING, System.currentTimeMillis());
+    if (status == ProcessStatus.SUCCESS) {
+      tableRuntime.updateState(
+          DefaultTableRuntime.CLEANUP_STATE_KEY,
+          cleanUp -> cleanUp.setLastSnapshotsExpiringTime(System.currentTimeMillis()));
       LOG.info(
           "Updated lastSnapshotsExpiringTime for table {} after successful expire snapshots",
           getTableIdentifier());
