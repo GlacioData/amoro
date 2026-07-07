@@ -46,8 +46,8 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
- * Process factory for Paimon table <em>maintenance</em> actions, including metadata synchronization
- * and remote snapshot expiration.
+ * Process factory for Paimon table <em>maintenance</em> actions, including metadata
+ * synchronization, remote snapshot expiration, and remote orphan file cleaning.
  *
  * <p>Renamed from {@code PaimonProcessFactory} in AMORO-4200 to disambiguate from the optimizing
  * factory {@code org.apache.amoro.formats.paimon.process.PaimonProcessFactory} in the {@code
@@ -79,6 +79,12 @@ public class PaimonMaintainProcessFactory implements ProcessFactory {
       ConfigOptions.key("expire-snapshots.interval")
           .durationType()
           .defaultValue(Duration.ofHours(24));
+
+  public static final ConfigOption<Boolean> CLEAN_ORPHANS_ENABLED =
+      ConfigOptions.key("clean-orphans.enabled").booleanType().defaultValue(true);
+
+  public static final ConfigOption<Duration> CLEAN_ORPHANS_INTERVAL =
+      ConfigOptions.key("clean-orphans.interval").durationType().defaultValue(Duration.ofHours(48));
 
   public static final ConfigOption<Integer> SPARK_VERSION =
       ConfigOptions.key("spark-version").intType().defaultValue(354);
@@ -126,6 +132,10 @@ public class PaimonMaintainProcessFactory implements ProcessFactory {
       return triggerExpireSnapshots(tableRuntime);
     }
 
+    if (PaimonActions.CLEAN_ORPHANS.equals(action)) {
+      return triggerCleanOrphans(tableRuntime);
+    }
+
     return Optional.empty();
   }
 
@@ -144,6 +154,15 @@ public class PaimonMaintainProcessFactory implements ProcessFactory {
       }
       return new PaimonExpireSnapshotProcess(tableRuntime, remoteEngine, sparkVersion);
     }
+    if (PaimonActions.CLEAN_ORPHANS.equals(store.getAction())) {
+      if (remoteEngine == null) {
+        throw new RecoverProcessFailedException(
+            "Cannot recover Paimon clean orphans process without "
+                + HttpRemoteSparkStandAloneSubmit.ENGINE_NAME
+                + " execute engine");
+      }
+      return new PaimonCleanOrphansProcess(tableRuntime, remoteEngine, sparkVersion);
+    }
     throw new RecoverProcessFailedException(
         "Unsupported action for PaimonMaintainProcessFactory: " + store.getAction());
   }
@@ -153,6 +172,7 @@ public class PaimonMaintainProcessFactory implements ProcessFactory {
     resetConfiguredState();
     Map<String, String> safeProperties = properties == null ? Collections.emptyMap() : properties;
     Configurations configs = Configurations.fromMap(safeProperties);
+    this.sparkVersion = configs.getInteger(SPARK_VERSION);
 
     if (configs.getBoolean(SYNC_TABLE_META_ENABLED)) {
       Duration interval = configs.getDuration(SYNC_TABLE_META_INTERVAL);
@@ -163,9 +183,13 @@ public class PaimonMaintainProcessFactory implements ProcessFactory {
     }
     if (configs.getBoolean(SNAPSHOT_EXPIRE_ENABLED)) {
       Duration interval = configs.getDuration(SNAPSHOT_EXPIRE_INTERVAL);
-      this.sparkVersion = configs.getInteger(SPARK_VERSION);
       this.actions.put(
           PaimonActions.EXPIRE_SNAPSHOTS, ProcessTriggerStrategy.triggerAtFixRate(interval));
+    }
+    if (configs.getBoolean(CLEAN_ORPHANS_ENABLED)) {
+      Duration interval = configs.getDuration(CLEAN_ORPHANS_INTERVAL);
+      this.actions.put(
+          PaimonActions.CLEAN_ORPHANS, ProcessTriggerStrategy.triggerAtFixRate(interval));
     }
     LOG.info(
         "Apache Paimon Process Factory initialized actions {}.",
@@ -202,6 +226,20 @@ public class PaimonMaintainProcessFactory implements ProcessFactory {
     }
     ProcessTriggerStrategy strategy = actions.get(PaimonActions.EXPIRE_SNAPSHOTS);
     return PaimonExpireSnapshotProcess.trigger(
+            tableRuntime, remoteEngine, sparkVersion, strategy.getTriggerInterval())
+        .map(process -> (TableProcess) process);
+  }
+
+  private Optional<TableProcess> triggerCleanOrphans(TableRuntime tableRuntime) {
+    if (remoteEngine == null) {
+      LOG.warn(
+          "Skip Paimon clean orphans for table {} because execute engine {} is not installed.",
+          tableRuntime.getTableIdentifier(),
+          HttpRemoteSparkStandAloneSubmit.ENGINE_NAME);
+      return Optional.empty();
+    }
+    ProcessTriggerStrategy strategy = actions.get(PaimonActions.CLEAN_ORPHANS);
+    return PaimonCleanOrphansProcess.trigger(
             tableRuntime, remoteEngine, sparkVersion, strategy.getTriggerInterval())
         .map(process -> (TableProcess) process);
   }

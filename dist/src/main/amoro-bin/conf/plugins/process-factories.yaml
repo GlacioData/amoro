@@ -25,6 +25,8 @@ process-factories:
       sync-table-meta.trigger-parallelism: 2
       expire-snapshots.enabled: true
       expire-snapshots.interval: 24h
+      clean-orphans.enabled: true
+      clean-orphans.interval: 48h
       spark-version: 354
   - name: paimon
     enabled: true

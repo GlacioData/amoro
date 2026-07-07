@@ -173,12 +173,122 @@ public class TestPaimonMaintainProcessFactory {
     Set<org.apache.amoro.Action> actions =
         factory.supportedActions().getOrDefault(TableFormat.PAIMON, Collections.emptySet());
     Assert.assertTrue(actions.contains(PaimonActions.SYNC_TABLE_META));
+    Assert.assertTrue(actions.contains(PaimonActions.CLEAN_ORPHANS));
     Assert.assertFalse(actions.contains(PaimonActions.EXPIRE_SNAPSHOTS));
 
     ProcessTriggerStrategy syncStrategy =
         factory.triggerStrategy(TableFormat.PAIMON, PaimonActions.SYNC_TABLE_META);
     Assert.assertEquals(1, syncStrategy.getTriggerParallelism());
     Assert.assertEquals(60 * 60 * 1000L, syncStrategy.getTriggerInterval().toMillis());
+
+    ProcessTriggerStrategy cleanOrphansStrategy =
+        factory.triggerStrategy(TableFormat.PAIMON, PaimonActions.CLEAN_ORPHANS);
+    Assert.assertEquals(Duration.ofHours(48), cleanOrphansStrategy.getTriggerInterval());
+  }
+
+  @Test
+  public void testTriggerCleanOrphansUseHttpSparkEngine() {
+    PaimonMaintainProcessFactory factory = new PaimonMaintainProcessFactory();
+    Map<String, String> properties = new HashMap<>();
+    properties.put("sync-table-meta.enabled", "false");
+    properties.put("clean-orphans.enabled", "true");
+    properties.put("clean-orphans.interval", "48h");
+    properties.put("spark-version", "321");
+    factory.open(properties);
+
+    HttpRemoteSparkStandAloneSubmit engine = new HttpRemoteSparkStandAloneSubmit();
+    engine.open(Collections.singletonMap("execute.user", "amoro"));
+    factory.availableExecuteEngines(Collections.singletonList(engine));
+
+    DefaultTableRuntime runtime = Mockito.mock(DefaultTableRuntime.class);
+    Mockito.when(runtime.getFormat()).thenReturn(TableFormat.PAIMON);
+    Mockito.when(runtime.getTableIdentifier())
+        .thenReturn(ServerTableIdentifier.of("catalog", "db", "tbl", TableFormat.PAIMON));
+    Mockito.when(runtime.getLastCleanTime(Mockito.any())).thenReturn(0L);
+
+    Optional<TableProcess> process = factory.trigger(runtime, PaimonActions.CLEAN_ORPHANS);
+
+    Assert.assertTrue(process.isPresent());
+    Assert.assertTrue(process.get() instanceof PaimonCleanOrphansProcess);
+    Assert.assertEquals(
+        HttpRemoteSparkStandAloneSubmit.ENGINE_NAME, process.get().getExecutionEngine());
+    Assert.assertEquals("321", process.get().getProcessParameters().get("sparkVersion"));
+  }
+
+  @Test
+  public void testTriggerCleanOrphansWithoutHttpSparkEngineReturnsEmpty() {
+    PaimonMaintainProcessFactory factory = new PaimonMaintainProcessFactory();
+    Map<String, String> properties = new HashMap<>();
+    properties.put("sync-table-meta.enabled", "false");
+    properties.put("clean-orphans.enabled", "true");
+    factory.open(properties);
+    factory.availableExecuteEngines(Collections.singletonList(new LocalExecutionEngine()));
+
+    DefaultTableRuntime runtime = Mockito.mock(DefaultTableRuntime.class);
+    Mockito.when(runtime.getFormat()).thenReturn(TableFormat.PAIMON);
+
+    Optional<TableProcess> process = factory.trigger(runtime, PaimonActions.CLEAN_ORPHANS);
+
+    Assert.assertFalse(process.isPresent());
+  }
+
+  @Test
+  public void testRecoverCleanOrphansUseHttpSparkEngine() throws Exception {
+    PaimonMaintainProcessFactory factory = new PaimonMaintainProcessFactory();
+    Map<String, String> properties = new HashMap<>();
+    properties.put("sync-table-meta.enabled", "false");
+    properties.put("clean-orphans.enabled", "true");
+    properties.put("spark-version", "321");
+    factory.open(properties);
+
+    HttpRemoteSparkStandAloneSubmit engine = new HttpRemoteSparkStandAloneSubmit();
+    engine.open(Collections.singletonMap("execute.user", "amoro"));
+    factory.availableExecuteEngines(Collections.singletonList(engine));
+
+    DefaultTableRuntime runtime = Mockito.mock(DefaultTableRuntime.class);
+    Mockito.when(runtime.getTableIdentifier())
+        .thenReturn(ServerTableIdentifier.of("catalog", "db", "tbl", TableFormat.PAIMON));
+    TableProcessStore store = Mockito.mock(TableProcessStore.class);
+    Mockito.when(store.getAction()).thenReturn(PaimonActions.CLEAN_ORPHANS);
+
+    TableProcess process = factory.recover(runtime, store);
+
+    Assert.assertTrue(process instanceof PaimonCleanOrphansProcess);
+    Assert.assertEquals(HttpRemoteSparkStandAloneSubmit.ENGINE_NAME, process.getExecutionEngine());
+    Assert.assertEquals("321", process.getProcessParameters().get("sparkVersion"));
+  }
+
+  @Test
+  public void testRecoverCleanOrphansWithoutHttpSparkEngineFails() throws Exception {
+    PaimonMaintainProcessFactory factory = new PaimonMaintainProcessFactory();
+    Map<String, String> properties = new HashMap<>();
+    properties.put("sync-table-meta.enabled", "false");
+    properties.put("clean-orphans.enabled", "true");
+    factory.open(properties);
+
+    DefaultTableRuntime runtime = Mockito.mock(DefaultTableRuntime.class);
+    TableProcessStore store = Mockito.mock(TableProcessStore.class);
+    Mockito.when(store.getAction()).thenReturn(PaimonActions.CLEAN_ORPHANS);
+
+    try {
+      factory.recover(runtime, store);
+      Assert.fail("Expected recover clean-orphans to fail without sl-spark-http engine");
+    } catch (Exception e) {
+      Assert.assertTrue(e.getMessage().contains("clean orphans"));
+      Assert.assertTrue(e.getMessage().contains(HttpRemoteSparkStandAloneSubmit.ENGINE_NAME));
+    }
+  }
+
+  @Test
+  public void testDisableCleanOrphansAction() {
+    PaimonMaintainProcessFactory factory = new PaimonMaintainProcessFactory();
+    Map<String, String> properties = new HashMap<>();
+    properties.put("clean-orphans.enabled", "false");
+    factory.open(properties);
+
+    Set<org.apache.amoro.Action> actions =
+        factory.supportedActions().getOrDefault(TableFormat.PAIMON, Collections.emptySet());
+    Assert.assertFalse(actions.contains(PaimonActions.CLEAN_ORPHANS));
   }
 
   @Test
@@ -193,6 +303,7 @@ public class TestPaimonMaintainProcessFactory {
     Set<org.apache.amoro.Action> actions =
         factory.supportedActions().getOrDefault(TableFormat.PAIMON, Collections.emptySet());
     Assert.assertFalse(actions.contains(PaimonActions.SYNC_TABLE_META));
+    Assert.assertTrue(actions.contains(PaimonActions.CLEAN_ORPHANS));
     Assert.assertFalse(actions.contains(PaimonActions.EXPIRE_SNAPSHOTS));
   }
 
