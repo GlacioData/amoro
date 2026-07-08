@@ -27,6 +27,7 @@ import org.apache.amoro.process.ProcessTriggerStrategy;
 import org.apache.amoro.process.TableProcess;
 import org.apache.amoro.process.TableProcessStore;
 import org.apache.amoro.server.table.DefaultTableRuntime;
+import org.apache.amoro.server.table.cleanup.TableRuntimeCleanupState;
 import org.junit.Assert;
 import org.junit.Test;
 import org.mockito.Mockito;
@@ -110,7 +111,8 @@ public class TestPaimonMaintainProcessFactory {
     Mockito.when(runtime.getTableIdentifier())
         .thenReturn(ServerTableIdentifier.of("catalog", "db", "tbl", TableFormat.PAIMON));
     Mockito.when(runtime.getTableConfig()).thenReturn(Collections.emptyMap());
-    Mockito.when(runtime.getLastCleanTime(Mockito.any())).thenReturn(0L);
+    Mockito.when(runtime.getState(DefaultTableRuntime.CLEANUP_STATE_KEY))
+        .thenReturn(new TableRuntimeCleanupState());
 
     Optional<TableProcess> process = factory.trigger(runtime, PaimonActions.EXPIRE_SNAPSHOTS);
 
@@ -119,6 +121,33 @@ public class TestPaimonMaintainProcessFactory {
     Assert.assertEquals(
         HttpRemoteSparkStandAloneSubmit.ENGINE_NAME, process.get().getExecutionEngine());
     Assert.assertEquals("321", process.get().getProcessParameters().get("sparkVersion"));
+  }
+
+  @Test
+  public void testTriggerExpireSnapshotsSkipWhenIntervalNotReached() {
+    PaimonMaintainProcessFactory factory = new PaimonMaintainProcessFactory();
+    Map<String, String> properties = new HashMap<>();
+    properties.put("sync-table-meta.enabled", "false");
+    properties.put("expire-snapshots.enabled", "true");
+    properties.put("expire-snapshots.interval", "24h");
+    factory.open(properties);
+
+    HttpRemoteSparkStandAloneSubmit engine = new HttpRemoteSparkStandAloneSubmit();
+    engine.open(Collections.singletonMap("execute.user", "amoro"));
+    factory.availableExecuteEngines(Collections.singletonList(engine));
+
+    DefaultTableRuntime runtime = Mockito.mock(DefaultTableRuntime.class);
+    Mockito.when(runtime.getFormat()).thenReturn(TableFormat.PAIMON);
+    Mockito.when(runtime.getTableIdentifier())
+        .thenReturn(ServerTableIdentifier.of("catalog", "db", "tbl", TableFormat.PAIMON));
+    Mockito.when(runtime.getState(DefaultTableRuntime.CLEANUP_STATE_KEY))
+        .thenReturn(
+            new TableRuntimeCleanupState()
+                .setLastSnapshotsExpiringTime(System.currentTimeMillis()));
+
+    Optional<TableProcess> process = factory.trigger(runtime, PaimonActions.EXPIRE_SNAPSHOTS);
+
+    Assert.assertFalse(process.isPresent());
   }
 
   @Test

@@ -18,13 +18,13 @@
 
 package org.apache.amoro.utils;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNull;
-import static org.junit.Assert.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.apache.amoro.shade.jackson2.com.fasterxml.jackson.databind.JsonNode;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -37,7 +37,6 @@ public class JacksonUtilTest {
 
   @Test
   public void jacksonTest() {
-
     JsonTestBean testObject = new JsonTestBean();
     testObject.setBoolValue(true);
     testObject.setIntValue(3);
@@ -85,7 +84,7 @@ public class JacksonUtilTest {
 
     Map<String, Object> expireSnapshots = new HashMap<>();
     expireSnapshots.put("enabled", true);
-    expireSnapshots.put("thread-count", 10);
+    expireSnapshots.put("interval", "1h");
     yamlMap.put("expire-snapshots", expireSnapshots);
 
     List<Map<String, Object>> containersList = new ArrayList<>();
@@ -114,8 +113,7 @@ public class JacksonUtilTest {
 
     JsonNode expiredSnapshots = yamlNode.get("expire-snapshots");
     assertTrue(JacksonUtil.getBoolean(expiredSnapshots, "enabled"));
-    Integer expectedThreadCount = 10;
-    assertEquals(expectedThreadCount, JacksonUtil.getInteger(expiredSnapshots, "thread-count"));
+    assertEquals("1h", JacksonUtil.getString(expiredSnapshots, "interval"));
     JsonNode containersNode = yamlNode.get("containers");
     assertEquals(2, containersNode.size());
     JsonNode secondNode = containersNode.get(1);

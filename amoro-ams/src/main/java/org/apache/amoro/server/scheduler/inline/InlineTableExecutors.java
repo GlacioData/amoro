@@ -28,34 +28,15 @@ public class InlineTableExecutors {
 
   private static final InlineTableExecutors instance = new InlineTableExecutors();
   private TableRuntimeRefreshExecutor tableRefreshingExecutor;
-  private OrphanFilesCleaningExecutor orphanFilesCleaningExecutor;
-  private DanglingDeleteFilesCleaningExecutor danglingDeleteFilesCleaningExecutor;
   private BlockerExpiringExecutor blockerExpiringExecutor;
   private OptimizingCommitExecutor optimizingCommitExecutor;
   private ProcessDataExpiringExecutor processDataExpiringExecutor;
-  private HiveCommitSyncExecutor hiveCommitSyncExecutor;
-  private TagsAutoCreatingExecutor tagsAutoCreatingExecutor;
-  private DataExpiringExecutor dataExpiringExecutor;
 
   public static InlineTableExecutors getInstance() {
     return instance;
   }
 
   public void setup(TableService tableService, Configurations conf) {
-    if (conf.getBoolean(AmoroManagementConf.CLEAN_ORPHAN_FILES_ENABLED)) {
-      this.orphanFilesCleaningExecutor =
-          new OrphanFilesCleaningExecutor(
-              tableService,
-              conf.getInteger(AmoroManagementConf.CLEAN_ORPHAN_FILES_THREAD_COUNT),
-              conf.get(AmoroManagementConf.CLEAN_ORPHAN_FILES_INTERVAL));
-    }
-    if (conf.getBoolean(AmoroManagementConf.CLEAN_DANGLING_DELETE_FILES_ENABLED)) {
-      this.danglingDeleteFilesCleaningExecutor =
-          new DanglingDeleteFilesCleaningExecutor(
-              tableService,
-              conf.getInteger(AmoroManagementConf.CLEAN_DANGLING_DELETE_FILES_THREAD_COUNT),
-              conf.get(AmoroManagementConf.CLEAN_DANGLING_DELETE_FILES_INTERVAL));
-    }
     this.optimizingCommitExecutor =
         new OptimizingCommitExecutor(
             tableService, conf.getInteger(AmoroManagementConf.OPTIMIZING_COMMIT_THREAD_COUNT));
@@ -77,43 +58,16 @@ public class InlineTableExecutors {
         new ProcessDataExpiringExecutor(
             tableService, optimizingKeepTime, expireInterval, processKeepTime);
     this.blockerExpiringExecutor = new BlockerExpiringExecutor(tableService);
-    if (conf.getBoolean(AmoroManagementConf.SYNC_HIVE_TABLES_ENABLED)) {
-      this.hiveCommitSyncExecutor =
-          new HiveCommitSyncExecutor(
-              tableService, conf.getInteger(AmoroManagementConf.SYNC_HIVE_TABLES_THREAD_COUNT));
-    }
     this.tableRefreshingExecutor =
         new TableRuntimeRefreshExecutor(
             tableService,
             conf.getInteger(AmoroManagementConf.REFRESH_TABLES_THREAD_COUNT),
             conf.get(AmoroManagementConf.REFRESH_TABLES_INTERVAL).toMillis(),
             conf.getInteger(AmoroManagementConf.REFRESH_MAX_PENDING_PARTITIONS));
-    if (conf.getBoolean(AmoroManagementConf.AUTO_CREATE_TAGS_ENABLED)) {
-      this.tagsAutoCreatingExecutor =
-          new TagsAutoCreatingExecutor(
-              tableService,
-              conf.getInteger(AmoroManagementConf.AUTO_CREATE_TAGS_THREAD_COUNT),
-              conf.get(AmoroManagementConf.AUTO_CREATE_TAGS_INTERVAL).toMillis());
-    }
-    if (conf.getBoolean(AmoroManagementConf.DATA_EXPIRATION_ENABLED)) {
-      this.dataExpiringExecutor =
-          new DataExpiringExecutor(
-              tableService,
-              conf.getInteger(AmoroManagementConf.DATA_EXPIRATION_THREAD_COUNT),
-              conf.get(AmoroManagementConf.DATA_EXPIRATION_INTERVAL));
-    }
   }
 
   public TableRuntimeRefreshExecutor getTableRefreshingExecutor() {
     return tableRefreshingExecutor;
-  }
-
-  public OrphanFilesCleaningExecutor getOrphanFilesCleaningExecutor() {
-    return orphanFilesCleaningExecutor;
-  }
-
-  public DanglingDeleteFilesCleaningExecutor getDanglingDeleteFilesCleaningExecutor() {
-    return danglingDeleteFilesCleaningExecutor;
   }
 
   public BlockerExpiringExecutor getBlockerExpiringExecutor() {
@@ -126,17 +80,5 @@ public class InlineTableExecutors {
 
   public ProcessDataExpiringExecutor getProcessDataExpiringExecutor() {
     return processDataExpiringExecutor;
-  }
-
-  public HiveCommitSyncExecutor getHiveCommitSyncExecutor() {
-    return hiveCommitSyncExecutor;
-  }
-
-  public TagsAutoCreatingExecutor getTagsAutoCreatingExecutor() {
-    return tagsAutoCreatingExecutor;
-  }
-
-  public DataExpiringExecutor getDataExpiringExecutor() {
-    return dataExpiringExecutor;
   }
 }

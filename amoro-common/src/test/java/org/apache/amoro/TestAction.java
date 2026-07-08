@@ -16,15 +16,23 @@
  * limitations under the License.
  */
 
-package org.apache.amoro.server.table.cleanup;
+package org.apache.amoro;
 
-/** Table cleanup operation enum. Defines different operation types for table cleanup tasks. */
-public enum CleanupOperation {
-  DANGLING_DELETE_FILES_CLEANING,
-  ORPHAN_FILES_CLEANING,
-  DATA_EXPIRING,
-  SNAPSHOTS_EXPIRING,
-  //  NONE indicates operation types where no cleanup process records are
-  //  saved in the table_runtime_state table.
-  NONE;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+
+import org.junit.jupiter.api.Test;
+
+public class TestAction {
+
+  /**
+   * {@link Action#toString()} must return the action name so that diagnostic logs print a readable
+   * name instead of {@code org.apache.amoro.Action@hash} (see AMORO-4223).
+   */
+  @Test
+  public void testToStringReturnsName() {
+    Action action = Action.register("expire-snapshots");
+    assertEquals("EXPIRE-SNAPSHOTS", action.toString());
+    assertEquals(action.getName(), action.toString());
+    assertEquals("recover action: EXPIRE-SNAPSHOTS", "recover action: " + action);
+  }
 }

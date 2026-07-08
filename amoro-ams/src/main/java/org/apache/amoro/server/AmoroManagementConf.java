@@ -156,95 +156,11 @@ public class AmoroManagementConf {
           .defaultValue(1000000)
           .withDescription("The queue size of the executors of the external catalog explorer.");
 
-  public static final ConfigOption<Boolean> EXPIRE_SNAPSHOTS_ENABLED =
-      ConfigOptions.key("expire-snapshots.enabled")
-          .booleanType()
-          .defaultValue(true)
-          .withDescription("Enable snapshots expiring.");
-
-  public static final ConfigOption<Integer> EXPIRE_SNAPSHOTS_THREAD_COUNT =
-      ConfigOptions.key("expire-snapshots.thread-count")
-          .intType()
-          .defaultValue(10)
-          .withDescription("The number of threads used for snapshots expiring.");
-
-  public static final ConfigOption<Duration> EXPIRE_SNAPSHOTS_INTERVAL =
-      ConfigOptions.key("expire-snapshots.interval")
-          .durationType()
-          .defaultValue(Duration.ofHours(1))
-          .withDescription("Interval for expiring snapshots.");
-
-  public static final ConfigOption<Boolean> CLEAN_ORPHAN_FILES_ENABLED =
-      ConfigOptions.key("clean-orphan-files.enabled")
-          .booleanType()
-          .defaultValue(true)
-          .withDescription("Enable orphan files cleaning.");
-
-  public static final ConfigOption<Integer> CLEAN_ORPHAN_FILES_THREAD_COUNT =
-      ConfigOptions.key("clean-orphan-files.thread-count")
-          .intType()
-          .defaultValue(10)
-          .withDescription("The number of threads used for orphan files cleaning.");
-
-  public static final ConfigOption<Duration> CLEAN_ORPHAN_FILES_INTERVAL =
-      ConfigOptions.key("clean-orphan-files.interval")
-          .durationType()
-          .defaultValue(Duration.ofDays(1))
-          .withDescription("Interval for cleaning orphan files.");
-
-  public static final ConfigOption<Boolean> CLEAN_DANGLING_DELETE_FILES_ENABLED =
-      ConfigOptions.key("clean-dangling-delete-files.enabled")
-          .booleanType()
-          .defaultValue(true)
-          .withDescription("Enable dangling delete files cleaning.");
-
-  public static final ConfigOption<Integer> CLEAN_DANGLING_DELETE_FILES_THREAD_COUNT =
-      ConfigOptions.key("clean-dangling-delete-files.thread-count")
-          .intType()
-          .defaultValue(10)
-          .withDescription("The number of threads used for dangling delete files cleaning.");
-
-  public static final ConfigOption<Duration> CLEAN_DANGLING_DELETE_FILES_INTERVAL =
-      ConfigOptions.key("clean-dangling-delete-files.interval")
-          .durationType()
-          .defaultValue(Duration.ofDays(1))
-          .withDescription("Interval for cleaning dangling delete files.");
-
-  public static final ConfigOption<Boolean> SYNC_HIVE_TABLES_ENABLED =
-      ConfigOptions.key("sync-hive-tables.enabled")
-          .booleanType()
-          .defaultValue(false)
-          .withDescription("Enable synchronizing Hive tables.");
-
-  public static final ConfigOption<Integer> SYNC_HIVE_TABLES_THREAD_COUNT =
-      ConfigOptions.key("sync-hive-tables.thread-count")
-          .intType()
-          .defaultValue(10)
-          .withDescription("The number of threads used for synchronizing Hive tables.");
-
   public static final ConfigOption<Integer> REFRESH_TABLES_THREAD_COUNT =
       ConfigOptions.key("refresh-tables.thread-count")
           .intType()
           .defaultValue(10)
           .withDescription("The number of threads used for refreshing tables.");
-
-  public static final ConfigOption<Boolean> AUTO_CREATE_TAGS_ENABLED =
-      ConfigOptions.key("auto-create-tags.enabled")
-          .booleanType()
-          .defaultValue(true)
-          .withDescription("Enable creating tags.");
-
-  public static final ConfigOption<Integer> AUTO_CREATE_TAGS_THREAD_COUNT =
-      ConfigOptions.key("auto-create-tags.thread-count")
-          .intType()
-          .defaultValue(3)
-          .withDescription("The number of threads used for creating tags.");
-
-  public static final ConfigOption<Duration> AUTO_CREATE_TAGS_INTERVAL =
-      ConfigOptions.key("auto-create-tags.interval")
-          .durationType()
-          .defaultValue(Duration.ofMinutes(1))
-          .withDescription("Interval for creating tags.");
 
   public static final ConfigOption<Duration> REFRESH_TABLES_INTERVAL =
       ConfigOptions.key("refresh-tables.interval")
@@ -698,24 +614,6 @@ public class AmoroManagementConf {
           .defaultValue("")
           .withDescription(
               "Comma-separated list of sensitive conf keys used to desensitize related value.");
-
-  /** configs of data expiration */
-  public static final ConfigOption<Boolean> DATA_EXPIRATION_ENABLED =
-      ConfigOptions.key("data-expiration.enabled")
-          .booleanType()
-          .defaultValue(true)
-          .withDescription("Enable data expiration");
-
-  public static final ConfigOption<Integer> DATA_EXPIRATION_THREAD_COUNT =
-      ConfigOptions.key("data-expiration.thread-count")
-          .intType()
-          .defaultValue(10)
-          .withDescription("The number of threads used for data expiring");
-  public static final ConfigOption<Duration> DATA_EXPIRATION_INTERVAL =
-      ConfigOptions.key("data-expiration.interval")
-          .durationType()
-          .defaultValue(Duration.ofDays(1))
-          .withDescription("Execute interval for data expiration");
 
   public static final String SYSTEM_CONFIG = "ams";
 

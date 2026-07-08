@@ -44,20 +44,8 @@ table td:last-child, table th:last-child { width: 40%; word-break: break-all; }
 | ---  | ------- | ----------- |
 | admin-password | admin | The administrator password |
 | admin-username | admin | The administrator account name. |
-| auto-create-tags.enabled | true | Enable creating tags. |
-| auto-create-tags.interval | 1 min | Interval for creating tags. |
-| auto-create-tags.thread-count | 3 | The number of threads used for creating tags. |
 | blocker.timeout | 1 min | Session timeout. Default unit is milliseconds if not specified. |
 | catalog-meta-cache.expiration-interval | 1 min | TTL for catalog metadata. |
-| clean-dangling-delete-files.enabled | true | Enable dangling delete files cleaning. |
-| clean-dangling-delete-files.interval | 1 d | Interval for cleaning dangling delete files. |
-| clean-dangling-delete-files.thread-count | 10 | The number of threads used for dangling delete files cleaning. |
-| clean-orphan-files.enabled | true | Enable orphan files cleaning. |
-| clean-orphan-files.interval | 1 d | Interval for cleaning orphan files. |
-| clean-orphan-files.thread-count | 10 | The number of threads used for orphan files cleaning. |
-| data-expiration.enabled | true | Enable data expiration |
-| data-expiration.interval | 1 d | Execute interval for data expiration |
-| data-expiration.thread-count | 10 | The number of threads used for data expiring |
 | database.auto-create-tables | true | Auto init table schema when started |
 | database.connection-pool-max-idle | 16 | Max idle connect count of database connect pool. |
 | database.connection-pool-max-total | 20 | Max connect count of database connect pool. |
@@ -67,9 +55,6 @@ table td:last-child, table th:last-child { width: 40%; word-break: break-all; }
 | database.type | derby | Database type. |
 | database.url | jdbc:derby:/tmp/amoro/derby;create=true | Database connection address |
 | database.username | root | The username for connecting to the database. |
-| expire-snapshots.enabled | true | Enable snapshots expiring. |
-| expire-snapshots.interval | 1 h | Interval for expiring snapshots. |
-| expire-snapshots.thread-count | 10 | The number of threads used for snapshots expiring. |
 | ha.bucket-assign.interval | 1 min | Interval for bucket assignment service to detect node changes and redistribute bucket IDs. |
 | ha.bucket-id.total-count | 100 | Total count of bucket IDs for assignment. Bucket IDs range from 1 to this value. |
 | ha.bucket-table-sync.interval | 1 min | Interval for syncing tables assigned to bucket IDs in master-slave mode. Each node periodically loads tables from database based on its assigned bucket IDs. |
@@ -131,8 +116,6 @@ table td:last-child, table th:last-child { width: 40%; word-break: break-all; }
 | self-optimizing.runtime-data-keep-time | 30 d | Duration that self-optimizing runtime data is retained. |
 | server-bind-host | 0.0.0.0 | The host bound to the server. |
 | server-expose-host |  | The exposed host of the server. |
-| sync-hive-tables.enabled | false | Enable synchronizing Hive tables. |
-| sync-hive-tables.thread-count | 10 | The number of threads used for synchronizing Hive tables. |
 | table-manifest-io.thread-count | 20 | Sets the size of the worker pool. The worker pool limits the number of tasks concurrently processing manifests in the base table implementation across all concurrent planning or commit operations. |
 | terminal.backend | local | Terminal backend implementation. local, kyuubi and custom are valid values. |
 | terminal.factory | &lt;undefined&gt; | Session factory implement of terminal, `terminal.backend` must be `custom` if this is set. |
