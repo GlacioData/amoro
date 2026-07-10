@@ -27,7 +27,6 @@ import org.apache.amoro.process.HttpRemoteSparkStandAloneSubmit;
 import org.apache.amoro.process.ProcessStatus;
 import org.apache.amoro.process.TableProcess;
 import org.apache.amoro.server.table.DefaultTableRuntime;
-import org.apache.amoro.server.table.cleanup.CleanupOperation;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -51,16 +50,14 @@ public class PaimonCleanOrphansProcess extends TableProcess {
 
   public static Optional<PaimonCleanOrphansProcess> trigger(
       TableRuntime tableRuntime, ExecuteEngine engine, int sparkVersion, Duration interval) {
-    if (tableRuntime instanceof DefaultTableRuntime) {
-      DefaultTableRuntime prt = (DefaultTableRuntime) tableRuntime;
-      long lastExecuteTime = prt.getLastCleanTime(CleanupOperation.ORPHAN_FILES_CLEANING);
-      if (System.currentTimeMillis() - lastExecuteTime < interval.toMillis()) {
-        LOG.debug(
-            "Skip clean orphans for table {}, last execute time: {}",
-            tableRuntime.getTableIdentifier(),
-            lastExecuteTime);
-        return Optional.empty();
-      }
+    long lastExecuteTime =
+        tableRuntime.getState(DefaultTableRuntime.CLEANUP_STATE_KEY).getLastOrphanFilesCleanTime();
+    if (System.currentTimeMillis() - lastExecuteTime < interval.toMillis()) {
+      LOG.debug(
+          "Skip clean orphans for table {}, last execute time: {}",
+          tableRuntime.getTableIdentifier(),
+          lastExecuteTime);
+      return Optional.empty();
     }
     return Optional.of(new PaimonCleanOrphansProcess(tableRuntime, engine, sparkVersion));
   }
@@ -102,9 +99,10 @@ public class PaimonCleanOrphansProcess extends TableProcess {
 
   @Override
   public void afterComplete(ProcessStatus status) {
-    if (status == ProcessStatus.SUCCESS && tableRuntime instanceof DefaultTableRuntime) {
-      ((DefaultTableRuntime) tableRuntime)
-          .updateLastCleanTime(CleanupOperation.ORPHAN_FILES_CLEANING, System.currentTimeMillis());
+    if (status == ProcessStatus.SUCCESS) {
+      tableRuntime.updateState(
+          DefaultTableRuntime.CLEANUP_STATE_KEY,
+          cleanUp -> cleanUp.setLastOrphanFilesCleanTime(System.currentTimeMillis()));
       LOG.info(
           "Updated lastOrphanFilesCleanTime for table {} after successful clean orphans",
           getTableIdentifier());

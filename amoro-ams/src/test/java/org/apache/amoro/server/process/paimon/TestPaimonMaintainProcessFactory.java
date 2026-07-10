@@ -233,7 +233,8 @@ public class TestPaimonMaintainProcessFactory {
     Mockito.when(runtime.getFormat()).thenReturn(TableFormat.PAIMON);
     Mockito.when(runtime.getTableIdentifier())
         .thenReturn(ServerTableIdentifier.of("catalog", "db", "tbl", TableFormat.PAIMON));
-    Mockito.when(runtime.getLastCleanTime(Mockito.any())).thenReturn(0L);
+    Mockito.when(runtime.getState(DefaultTableRuntime.CLEANUP_STATE_KEY))
+        .thenReturn(new TableRuntimeCleanupState());
 
     Optional<TableProcess> process = factory.trigger(runtime, PaimonActions.CLEAN_ORPHANS);
 
