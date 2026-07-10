@@ -24,9 +24,10 @@ import org.apache.amoro.TableRuntime;
 import org.apache.amoro.process.HttpRemoteSparkStandAloneSubmit;
 import org.apache.amoro.process.ProcessStatus;
 import org.apache.amoro.server.table.DefaultTableRuntime;
-import org.apache.amoro.server.table.cleanup.CleanupOperation;
+import org.apache.amoro.server.table.cleanup.TableRuntimeCleanupState;
 import org.junit.Assert;
 import org.junit.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 
 import java.time.Duration;
@@ -34,6 +35,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
+import java.util.function.Function;
 
 public class TestPaimonCleanOrphansProcess {
 
@@ -105,8 +107,15 @@ public class TestPaimonCleanOrphansProcess {
     PaimonCleanOrphansProcess process = new PaimonCleanOrphansProcess(runtime, engine, 354);
     process.afterComplete(ProcessStatus.SUCCESS);
 
+    @SuppressWarnings("unchecked")
+    ArgumentCaptor<Function<TableRuntimeCleanupState, TableRuntimeCleanupState>> updaterCaptor =
+        (ArgumentCaptor) ArgumentCaptor.forClass(Function.class);
     Mockito.verify(runtime)
-        .updateLastCleanTime(Mockito.eq(CleanupOperation.ORPHAN_FILES_CLEANING), Mockito.anyLong());
+        .updateState(Mockito.eq(DefaultTableRuntime.CLEANUP_STATE_KEY), updaterCaptor.capture());
+
+    TableRuntimeCleanupState updated =
+        updaterCaptor.getValue().apply(new TableRuntimeCleanupState());
+    Assert.assertTrue(updated.getLastOrphanFilesCleanTime() > 0);
   }
 
   @Test
@@ -114,8 +123,9 @@ public class TestPaimonCleanOrphansProcess {
     DefaultTableRuntime runtime = Mockito.mock(DefaultTableRuntime.class);
     Mockito.when(runtime.getTableIdentifier())
         .thenReturn(ServerTableIdentifier.of("catalog", "default", "orders", TableFormat.PAIMON));
-    Mockito.when(runtime.getLastCleanTime(CleanupOperation.ORPHAN_FILES_CLEANING))
-        .thenReturn(System.currentTimeMillis());
+    Mockito.when(runtime.getState(DefaultTableRuntime.CLEANUP_STATE_KEY))
+        .thenReturn(
+            new TableRuntimeCleanupState().setLastOrphanFilesCleanTime(System.currentTimeMillis()));
 
     HttpRemoteSparkStandAloneSubmit engine = new HttpRemoteSparkStandAloneSubmit();
     engine.open(Collections.singletonMap("execute.user", "amoro"));
