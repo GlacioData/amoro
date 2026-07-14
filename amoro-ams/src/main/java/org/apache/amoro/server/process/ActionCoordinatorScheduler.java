@@ -80,6 +80,11 @@ public class ActionCoordinatorScheduler extends PeriodicTableScheduler {
     return coordinator.getNextExecutingTime(tableRuntime);
   }
 
+  @Override
+  protected long getStartDelay(TableRuntime tableRuntime) {
+    return START_DELAY + coordinator.getNextExecutingTime(tableRuntime);
+  }
+
   /**
    * Whether the given table runtime is enabled for scheduling.
    *

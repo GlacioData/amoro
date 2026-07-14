@@ -18,6 +18,7 @@
 
 package org.apache.amoro.server.process.paimon;
 
+import org.apache.amoro.AmoroTable;
 import org.apache.amoro.PaimonActions;
 import org.apache.amoro.ServerTableIdentifier;
 import org.apache.amoro.TableFormat;
@@ -28,6 +29,9 @@ import org.apache.amoro.process.TableProcess;
 import org.apache.amoro.process.TableProcessStore;
 import org.apache.amoro.server.table.DefaultTableRuntime;
 import org.apache.amoro.server.table.cleanup.TableRuntimeCleanupState;
+import org.apache.paimon.FileStore;
+import org.apache.paimon.table.FileStoreTable;
+import org.apache.paimon.utils.SnapshotManager;
 import org.junit.Assert;
 import org.junit.Test;
 import org.mockito.Mockito;
@@ -80,6 +84,59 @@ public class TestPaimonMaintainProcessFactory {
   }
 
   @Test
+  public void testExpireSnapshotsUsesTableTimeRetainedGreaterThanOneHour() {
+    PaimonMaintainProcessFactory factory = new PaimonMaintainProcessFactory();
+    Map<String, String> properties = new HashMap<>();
+    properties.put("sync-table-meta.enabled", "false");
+    properties.put("expire-snapshots.enabled", "true");
+    properties.put("expire-snapshots.interval", "24h");
+    factory.open(properties);
+
+    DefaultTableRuntime runtime = Mockito.mock(DefaultTableRuntime.class);
+    Mockito.when(runtime.getTableConfig())
+        .thenReturn(Collections.singletonMap("snapshot.time-retained", "2 h"));
+
+    Assert.assertEquals(
+        Duration.ofHours(2),
+        factory.getTriggerInterval(runtime, TableFormat.PAIMON, PaimonActions.EXPIRE_SNAPSHOTS));
+  }
+
+  @Test
+  public void testExpireSnapshotsFallsBackToGlobalIntervalForUnsupportedRetentions() {
+    PaimonMaintainProcessFactory factory = new PaimonMaintainProcessFactory();
+    Map<String, String> properties = new HashMap<>();
+    properties.put("sync-table-meta.enabled", "false");
+    properties.put("expire-snapshots.enabled", "true");
+    properties.put("expire-snapshots.interval", "6h");
+    factory.open(properties);
+
+    DefaultTableRuntime runtime = Mockito.mock(DefaultTableRuntime.class);
+
+    Mockito.when(runtime.getTableConfig()).thenReturn(Collections.emptyMap());
+    Assert.assertEquals(
+        Duration.ofHours(6),
+        factory.getTriggerInterval(runtime, TableFormat.PAIMON, PaimonActions.EXPIRE_SNAPSHOTS));
+
+    Mockito.when(runtime.getTableConfig())
+        .thenReturn(Collections.singletonMap("snapshot.time-retained", "1 h"));
+    Assert.assertEquals(
+        Duration.ofHours(6),
+        factory.getTriggerInterval(runtime, TableFormat.PAIMON, PaimonActions.EXPIRE_SNAPSHOTS));
+
+    Mockito.when(runtime.getTableConfig())
+        .thenReturn(Collections.singletonMap("snapshot.time-retained", "30 min"));
+    Assert.assertEquals(
+        Duration.ofHours(6),
+        factory.getTriggerInterval(runtime, TableFormat.PAIMON, PaimonActions.EXPIRE_SNAPSHOTS));
+
+    Mockito.when(runtime.getTableConfig())
+        .thenReturn(Collections.singletonMap("snapshot.time-retained", "invalid"));
+    Assert.assertEquals(
+        Duration.ofHours(6),
+        factory.getTriggerInterval(runtime, TableFormat.PAIMON, PaimonActions.EXPIRE_SNAPSHOTS));
+  }
+
+  @Test
   public void testTriggerAndRecoverUseLocalEngine() throws Exception {
     PaimonMaintainProcessFactory factory = new PaimonMaintainProcessFactory();
     factory.open(Collections.singletonMap("sync-table-meta.enabled", "true"));
@@ -113,6 +170,7 @@ public class TestPaimonMaintainProcessFactory {
     Mockito.when(runtime.getTableConfig()).thenReturn(Collections.emptyMap());
     Mockito.when(runtime.getState(DefaultTableRuntime.CLEANUP_STATE_KEY))
         .thenReturn(new TableRuntimeCleanupState());
+    mockSnapshotCount(runtime, 11);
 
     Optional<TableProcess> process = factory.trigger(runtime, PaimonActions.EXPIRE_SNAPSHOTS);
 
@@ -346,5 +404,21 @@ public class TestPaimonMaintainProcessFactory {
     Set<org.apache.amoro.Action> actions =
         factory.supportedActions().getOrDefault(TableFormat.PAIMON, Collections.emptySet());
     Assert.assertTrue(actions.isEmpty());
+  }
+
+  private void mockSnapshotCount(DefaultTableRuntime runtime, long snapshotCount) {
+    AmoroTable<?> amoroTable = Mockito.mock(AmoroTable.class);
+    FileStoreTable fileStoreTable = Mockito.mock(FileStoreTable.class);
+    FileStore<?> fileStore = Mockito.mock(FileStore.class);
+    SnapshotManager snapshotManager = Mockito.mock(SnapshotManager.class);
+    Mockito.when(((AmoroTable) amoroTable).originalTable()).thenReturn(fileStoreTable);
+    Mockito.doReturn(fileStore).when(fileStoreTable).store();
+    Mockito.when(fileStore.snapshotManager()).thenReturn(snapshotManager);
+    try {
+      Mockito.when(snapshotManager.snapshotCount()).thenReturn(snapshotCount);
+    } catch (Exception e) {
+      throw new RuntimeException(e);
+    }
+    Mockito.doReturn(amoroTable).when(runtime).loadTable();
   }
 }

@@ -45,7 +45,7 @@ public abstract class PeriodicTableScheduler extends RuntimeHandlerChain {
 
   protected final Logger logger = LoggerFactory.getLogger(getClass());
 
-  private static final long START_DELAY = 10 * 1000L;
+  protected static final long START_DELAY = 10 * 1000L;
 
   protected final Set<ServerTableIdentifier> scheduledTables =
       Collections.synchronizedSet(new HashSet<>());
@@ -84,7 +84,7 @@ public abstract class PeriodicTableScheduler extends RuntimeHandlerChain {
         .forEach(
             tableRuntime -> {
               if (scheduledTables.add(tableRuntime.getTableIdentifier())) {
-                scheduleTableExecution(tableRuntime, getStartDelay());
+                scheduleTableExecution(tableRuntime, getStartDelay(tableRuntime));
               }
             });
 
@@ -151,7 +151,7 @@ public abstract class PeriodicTableScheduler extends RuntimeHandlerChain {
 
   @Override
   public void handleTableAdded(AmoroTable<?> table, TableRuntime tableRuntime) {
-    scheduleIfNecessary(tableRuntime, getStartDelay());
+    scheduleIfNecessary(tableRuntime, getStartDelay(tableRuntime));
   }
 
   @Override
@@ -191,6 +191,10 @@ public abstract class PeriodicTableScheduler extends RuntimeHandlerChain {
 
   protected long getStartDelay() {
     return START_DELAY + getExecutorDelay();
+  }
+
+  protected long getStartDelay(TableRuntime tableRuntime) {
+    return getStartDelay();
   }
 
   protected AmoroTable<?> loadTable(TableRuntime tableRuntime) {

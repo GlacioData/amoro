@@ -119,6 +119,16 @@ public class PaimonMaintainProcessFactory implements ProcessFactory {
   }
 
   @Override
+  public Duration getTriggerInterval(TableRuntime tableRuntime, TableFormat format, Action action) {
+    Duration defaultInterval = triggerStrategy(format, action).getTriggerInterval();
+    if (TableFormat.PAIMON.equals(format) && PaimonActions.EXPIRE_SNAPSHOTS.equals(action)) {
+      return PaimonExpireSnapshotProcess.resolveTriggerInterval(
+          tableRuntime.getTableConfig(), defaultInterval);
+    }
+    return defaultInterval;
+  }
+
+  @Override
   public Optional<TableProcess> trigger(TableRuntime tableRuntime, Action action) {
     if (!actions.containsKey(action)) {
       return Optional.empty();
@@ -224,9 +234,9 @@ public class PaimonMaintainProcessFactory implements ProcessFactory {
           HttpRemoteSparkStandAloneSubmit.ENGINE_NAME);
       return Optional.empty();
     }
-    ProcessTriggerStrategy strategy = actions.get(PaimonActions.EXPIRE_SNAPSHOTS);
-    return PaimonExpireSnapshotProcess.trigger(
-            tableRuntime, remoteEngine, sparkVersion, strategy.getTriggerInterval())
+    Duration interval =
+        getTriggerInterval(tableRuntime, TableFormat.PAIMON, PaimonActions.EXPIRE_SNAPSHOTS);
+    return PaimonExpireSnapshotProcess.trigger(tableRuntime, remoteEngine, sparkVersion, interval)
         .map(process -> (TableProcess) process);
   }
 
