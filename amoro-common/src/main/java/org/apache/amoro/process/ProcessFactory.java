@@ -28,6 +28,7 @@ import org.apache.amoro.optimizing.TableOptimizingPlanner;
 import org.apache.amoro.shade.guava32.com.google.common.collect.Lists;
 import org.apache.amoro.table.StateKey;
 
+import java.time.Duration;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
@@ -52,6 +53,12 @@ public interface ProcessFactory extends ActivePlugin {
   /** How to trigger a process for the action. */
   default ProcessTriggerStrategy triggerStrategy(TableFormat format, Action action) {
     return ProcessTriggerStrategy.METADATA_TRIGGER;
+  }
+
+  /** Get the trigger interval for an action on a specific table. */
+  default Duration getTriggerInterval(
+      TableRuntime tableRuntime, TableFormat format, Action action) {
+    return triggerStrategy(format, action).getTriggerInterval();
   }
 
   /** Declare which table formats this factory supports for optimizing planning/commit. */

@@ -89,8 +89,7 @@ public class DefaultActionCoordinator implements ActionCoordinator {
 
   @Override
   public long getNextExecutingTime(TableRuntime tableRuntime) {
-    // Fixed-rate scheduling based on configured trigger interval.
-    return strategy.getTriggerInterval().toMillis();
+    return factory.getTriggerInterval(tableRuntime, format, action).toMillis();
   }
 
   @Override
