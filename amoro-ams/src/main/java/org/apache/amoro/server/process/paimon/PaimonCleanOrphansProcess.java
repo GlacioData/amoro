@@ -22,10 +22,12 @@ import org.apache.amoro.Action;
 import org.apache.amoro.PaimonActions;
 import org.apache.amoro.ServerTableIdentifier;
 import org.apache.amoro.TableRuntime;
+import org.apache.amoro.TableSnapshot;
 import org.apache.amoro.process.ExecuteEngine;
 import org.apache.amoro.process.HttpRemoteSparkStandAloneSubmit;
 import org.apache.amoro.process.ProcessStatus;
 import org.apache.amoro.process.TableProcess;
+import org.apache.amoro.process.TableProcessStore;
 import org.apache.amoro.server.table.DefaultTableRuntime;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -39,27 +41,112 @@ import java.util.Optional;
 public class PaimonCleanOrphansProcess extends TableProcess {
 
   private static final Logger LOG = LoggerFactory.getLogger(PaimonCleanOrphansProcess.class);
+  private static final String TRIGGER_TIME_SUMMARY_KEY = "clean-orphans-trigger-time";
 
   private final int sparkVersion;
+  private final long triggerTime;
 
   public PaimonCleanOrphansProcess(
       TableRuntime tableRuntime, ExecuteEngine engine, int sparkVersion) {
+    this(tableRuntime, engine, sparkVersion, System.currentTimeMillis());
+  }
+
+  private PaimonCleanOrphansProcess(
+      TableRuntime tableRuntime, ExecuteEngine engine, int sparkVersion, long triggerTime) {
     super(tableRuntime, engine);
     this.sparkVersion = sparkVersion;
+    this.triggerTime = triggerTime;
   }
 
   public static Optional<PaimonCleanOrphansProcess> trigger(
-      TableRuntime tableRuntime, ExecuteEngine engine, int sparkVersion, Duration interval) {
+      TableRuntime tableRuntime,
+      ExecuteEngine engine,
+      int sparkVersion,
+      Duration interval,
+      Duration staticTableThreshold) {
+    long now = System.currentTimeMillis();
     long lastExecuteTime =
         tableRuntime.getState(DefaultTableRuntime.CLEANUP_STATE_KEY).getLastOrphanFilesCleanTime();
-    if (System.currentTimeMillis() - lastExecuteTime < interval.toMillis()) {
+    // Preserve the existing interval gate and avoid loading Paimon metadata before it is due.
+    if (now - lastExecuteTime < interval.toMillis()) {
       LOG.debug(
           "Skip clean orphans for table {}, last execute time: {}",
           tableRuntime.getTableIdentifier(),
           lastExecuteTime);
       return Optional.empty();
     }
-    return Optional.of(new PaimonCleanOrphansProcess(tableRuntime, engine, sparkVersion));
+
+    long lastCommitTime = getLastSnapshotCommitTime(tableRuntime);
+    // lastOrphanFilesCleanTime stores both successful cleanup trigger and static-table decision
+    // times. Evaluate static status first so data committed after a static decision, but stale by
+    // the next scheduler run, is not incorrectly submitted to Spark.
+    if (now - lastCommitTime >= staticTableThreshold.toMillis()) {
+      tableRuntime.updateState(
+          DefaultTableRuntime.CLEANUP_STATE_KEY,
+          cleanUp -> cleanUp.setLastOrphanFilesCleanTime(now));
+      LOG.info(
+          "Skip clean orphans for static table {}, last snapshot commit time: {}, "
+              + "static table threshold: {}",
+          tableRuntime.getTableIdentifier(),
+          lastCommitTime,
+          staticTableThreshold);
+      return Optional.empty();
+    }
+
+    // Submit a new cleanup task only when the Snapshot was committed after the last successful
+    // cleanup trigger or static-table decision.
+    if (lastCommitTime <= lastExecuteTime) {
+      LOG.debug(
+          "Skip clean orphans for table {}, no new snapshot since last clean or static check time: {}",
+          tableRuntime.getTableIdentifier(),
+          lastExecuteTime);
+      return Optional.empty();
+    }
+    return Optional.of(new PaimonCleanOrphansProcess(tableRuntime, engine, sparkVersion, now));
+  }
+
+  static PaimonCleanOrphansProcess recover(
+      TableRuntime tableRuntime, ExecuteEngine engine, int sparkVersion, TableProcessStore store) {
+    return new PaimonCleanOrphansProcess(
+        tableRuntime, engine, sparkVersion, restoreTriggerTime(store));
+  }
+
+  private static long getLastSnapshotCommitTime(TableRuntime tableRuntime) {
+    TableSnapshot snapshot;
+    try {
+      snapshot = tableRuntime.loadTable().currentSnapshot();
+    } catch (RuntimeException e) {
+      throw new IllegalStateException(
+          "Cannot read latest Paimon snapshot for table " + tableRuntime.getTableIdentifier(), e);
+    }
+    if (snapshot == null) {
+      throw new IllegalStateException(
+          "Cannot clean orphans for table "
+              + tableRuntime.getTableIdentifier()
+              + " because no Paimon snapshot exists");
+    }
+    return snapshot.commitTime();
+  }
+
+  private static long restoreTriggerTime(TableProcessStore store) {
+    Map<String, String> summary = store.getSummary();
+    String triggerTime = summary == null ? null : summary.get(TRIGGER_TIME_SUMMARY_KEY);
+    if (triggerTime != null) {
+      try {
+        long parsedTriggerTime = Long.parseLong(triggerTime);
+        if (parsedTriggerTime > 0) {
+          return parsedTriggerTime;
+        }
+      } catch (NumberFormatException e) {
+        LOG.warn(
+            "Ignore invalid clean orphans trigger time {} for process {}",
+            triggerTime,
+            store.getProcessId());
+      }
+    }
+
+    long createTime = store.getCreateTime();
+    return createTime > 0 ? createTime : System.currentTimeMillis();
   }
 
   @Override
@@ -94,6 +181,7 @@ public class PaimonCleanOrphansProcess extends TableProcess {
     Map<String, String> summary = new HashMap<>();
     summary.put("table", getTableIdentifier().toString());
     summary.put("action", getAction().getName());
+    summary.put(TRIGGER_TIME_SUMMARY_KEY, String.valueOf(triggerTime));
     return summary;
   }
 
@@ -102,10 +190,12 @@ public class PaimonCleanOrphansProcess extends TableProcess {
     if (status == ProcessStatus.SUCCESS) {
       tableRuntime.updateState(
           DefaultTableRuntime.CLEANUP_STATE_KEY,
-          cleanUp -> cleanUp.setLastOrphanFilesCleanTime(System.currentTimeMillis()));
+          cleanUp -> cleanUp.setLastOrphanFilesCleanTime(triggerTime));
       LOG.info(
-          "Updated lastOrphanFilesCleanTime for table {} after successful clean orphans",
-          getTableIdentifier());
+          "Updated lastOrphanFilesCleanTime for table {} to clean orphans trigger time {} after "
+              + "successful execution",
+          getTableIdentifier(),
+          triggerTime);
     }
   }
 

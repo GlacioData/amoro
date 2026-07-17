@@ -22,8 +22,11 @@ import org.apache.amoro.AmoroTable;
 import org.apache.amoro.PaimonActions;
 import org.apache.amoro.ServerTableIdentifier;
 import org.apache.amoro.TableFormat;
+import org.apache.amoro.TableSnapshot;
+import org.apache.amoro.config.ConfigurationException;
 import org.apache.amoro.process.HttpRemoteSparkStandAloneSubmit;
 import org.apache.amoro.process.LocalExecutionEngine;
+import org.apache.amoro.process.ProcessStatus;
 import org.apache.amoro.process.ProcessTriggerStrategy;
 import org.apache.amoro.process.TableProcess;
 import org.apache.amoro.process.TableProcessStore;
@@ -34,6 +37,7 @@ import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.utils.SnapshotManager;
 import org.junit.Assert;
 import org.junit.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 
 import java.time.Duration;
@@ -42,6 +46,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Function;
 
 public class TestPaimonMaintainProcessFactory {
 
@@ -182,6 +187,48 @@ public class TestPaimonMaintainProcessFactory {
   }
 
   @Test
+  public void testCleanOrphansStaticTableThresholdDefaultsToSixDays() {
+    Assert.assertEquals(
+        Duration.ofDays(6),
+        PaimonMaintainProcessFactory.CLEAN_ORPHANS_STATIC_TABLE_THRESHOLD.defaultValue());
+  }
+
+  @Test
+  public void testTriggerCleanOrphansUsesConfiguredStaticTableThreshold() {
+    PaimonMaintainProcessFactory factory = new PaimonMaintainProcessFactory();
+    Map<String, String> properties = new HashMap<>();
+    properties.put("sync-table-meta.enabled", "false");
+    properties.put("clean-orphans.static-table-threshold", "4d");
+    factory.open(properties);
+
+    HttpRemoteSparkStandAloneSubmit engine = new HttpRemoteSparkStandAloneSubmit();
+    engine.open(Collections.singletonMap("execute.user", "amoro"));
+    factory.availableExecuteEngines(Collections.singletonList(engine));
+
+    DefaultTableRuntime runtime = Mockito.mock(DefaultTableRuntime.class);
+    Mockito.when(runtime.getFormat()).thenReturn(TableFormat.PAIMON);
+    Mockito.when(runtime.getTableIdentifier())
+        .thenReturn(ServerTableIdentifier.of("catalog", "db", "tbl", TableFormat.PAIMON));
+    Mockito.when(runtime.getState(DefaultTableRuntime.CLEANUP_STATE_KEY))
+        .thenReturn(new TableRuntimeCleanupState());
+    mockCurrentSnapshot(runtime, System.currentTimeMillis() - Duration.ofDays(5).toMillis());
+
+    Assert.assertFalse(factory.trigger(runtime, PaimonActions.CLEAN_ORPHANS).isPresent());
+  }
+
+  @Test(expected = IllegalArgumentException.class)
+  public void testOpenRejectsZeroCleanOrphansStaticTableThreshold() {
+    PaimonMaintainProcessFactory factory = new PaimonMaintainProcessFactory();
+    factory.open(Collections.singletonMap("clean-orphans.static-table-threshold", "0s"));
+  }
+
+  @Test(expected = ConfigurationException.class)
+  public void testOpenRejectsNegativeCleanOrphansStaticTableThreshold() {
+    PaimonMaintainProcessFactory factory = new PaimonMaintainProcessFactory();
+    factory.open(Collections.singletonMap("clean-orphans.static-table-threshold", "-1s"));
+  }
+
+  @Test
   public void testTriggerExpireSnapshotsSkipWhenIntervalNotReached() {
     PaimonMaintainProcessFactory factory = new PaimonMaintainProcessFactory();
     Map<String, String> properties = new HashMap<>();
@@ -293,6 +340,7 @@ public class TestPaimonMaintainProcessFactory {
         .thenReturn(ServerTableIdentifier.of("catalog", "db", "tbl", TableFormat.PAIMON));
     Mockito.when(runtime.getState(DefaultTableRuntime.CLEANUP_STATE_KEY))
         .thenReturn(new TableRuntimeCleanupState());
+    mockCurrentSnapshot(runtime, System.currentTimeMillis());
 
     Optional<TableProcess> process = factory.trigger(runtime, PaimonActions.CLEAN_ORPHANS);
 
@@ -338,12 +386,27 @@ public class TestPaimonMaintainProcessFactory {
         .thenReturn(ServerTableIdentifier.of("catalog", "db", "tbl", TableFormat.PAIMON));
     TableProcessStore store = Mockito.mock(TableProcessStore.class);
     Mockito.when(store.getAction()).thenReturn(PaimonActions.CLEAN_ORPHANS);
+    Mockito.when(store.getSummary())
+        .thenReturn(Collections.singletonMap("clean-orphans-trigger-time", "123456789"));
 
     TableProcess process = factory.recover(runtime, store);
 
     Assert.assertTrue(process instanceof PaimonCleanOrphansProcess);
     Assert.assertEquals(HttpRemoteSparkStandAloneSubmit.ENGINE_NAME, process.getExecutionEngine());
     Assert.assertEquals("321", process.getProcessParameters().get("sparkVersion"));
+    process.afterComplete(ProcessStatus.SUCCESS);
+
+    @SuppressWarnings("unchecked")
+    ArgumentCaptor<Function<TableRuntimeCleanupState, TableRuntimeCleanupState>> updaterCaptor =
+        (ArgumentCaptor) ArgumentCaptor.forClass(Function.class);
+    Mockito.verify(runtime)
+        .updateState(Mockito.eq(DefaultTableRuntime.CLEANUP_STATE_KEY), updaterCaptor.capture());
+    Assert.assertEquals(
+        123456789L,
+        updaterCaptor
+            .getValue()
+            .apply(new TableRuntimeCleanupState())
+            .getLastOrphanFilesCleanTime());
   }
 
   @Test
@@ -419,6 +482,14 @@ public class TestPaimonMaintainProcessFactory {
     } catch (Exception e) {
       throw new RuntimeException(e);
     }
+    Mockito.doReturn(amoroTable).when(runtime).loadTable();
+  }
+
+  private void mockCurrentSnapshot(DefaultTableRuntime runtime, long snapshotCommitTime) {
+    AmoroTable<?> amoroTable = Mockito.mock(AmoroTable.class);
+    TableSnapshot snapshot = Mockito.mock(TableSnapshot.class);
+    Mockito.when(snapshot.commitTime()).thenReturn(snapshotCommitTime);
+    Mockito.when(((AmoroTable) amoroTable).currentSnapshot()).thenReturn(snapshot);
     Mockito.doReturn(amoroTable).when(runtime).loadTable();
   }
 }

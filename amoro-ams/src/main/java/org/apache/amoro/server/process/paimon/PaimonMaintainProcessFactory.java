@@ -86,12 +86,19 @@ public class PaimonMaintainProcessFactory implements ProcessFactory {
   public static final ConfigOption<Duration> CLEAN_ORPHANS_INTERVAL =
       ConfigOptions.key("clean-orphans.interval").durationType().defaultValue(Duration.ofHours(48));
 
+  public static final ConfigOption<Duration> CLEAN_ORPHANS_STATIC_TABLE_THRESHOLD =
+      ConfigOptions.key("clean-orphans.static-table-threshold")
+          .durationType()
+          .defaultValue(Duration.ofDays(6));
+
   public static final ConfigOption<Integer> SPARK_VERSION =
       ConfigOptions.key("spark-version").intType().defaultValue(354);
 
   private final Map<Action, ProcessTriggerStrategy> actions = Maps.newHashMap();
   private ExecuteEngine remoteEngine;
   private int sparkVersion = SPARK_VERSION.defaultValue();
+  private Duration cleanOrphansStaticTableThreshold =
+      CLEAN_ORPHANS_STATIC_TABLE_THRESHOLD.defaultValue();
 
   @Override
   public void availableExecuteEngines(Collection<ExecuteEngine> allAvailableEngines) {
@@ -171,7 +178,7 @@ public class PaimonMaintainProcessFactory implements ProcessFactory {
                 + HttpRemoteSparkStandAloneSubmit.ENGINE_NAME
                 + " execute engine");
       }
-      return new PaimonCleanOrphansProcess(tableRuntime, remoteEngine, sparkVersion);
+      return PaimonCleanOrphansProcess.recover(tableRuntime, remoteEngine, sparkVersion, store);
     }
     throw new RecoverProcessFailedException(
         "Unsupported action for PaimonMaintainProcessFactory: " + store.getAction());
@@ -183,6 +190,13 @@ public class PaimonMaintainProcessFactory implements ProcessFactory {
     Map<String, String> safeProperties = properties == null ? Collections.emptyMap() : properties;
     Configurations configs = Configurations.fromMap(safeProperties);
     this.sparkVersion = configs.getInteger(SPARK_VERSION);
+    this.cleanOrphansStaticTableThreshold =
+        configs.getDuration(CLEAN_ORPHANS_STATIC_TABLE_THRESHOLD);
+    if (cleanOrphansStaticTableThreshold.isZero()
+        || cleanOrphansStaticTableThreshold.isNegative()) {
+      throw new IllegalArgumentException(
+          CLEAN_ORPHANS_STATIC_TABLE_THRESHOLD.key() + " must be greater than zero");
+    }
 
     if (configs.getBoolean(SYNC_TABLE_META_ENABLED)) {
       Duration interval = configs.getDuration(SYNC_TABLE_META_INTERVAL);
@@ -224,6 +238,7 @@ public class PaimonMaintainProcessFactory implements ProcessFactory {
     actions.clear();
     remoteEngine = null;
     sparkVersion = SPARK_VERSION.defaultValue();
+    cleanOrphansStaticTableThreshold = CLEAN_ORPHANS_STATIC_TABLE_THRESHOLD.defaultValue();
   }
 
   private Optional<TableProcess> triggerExpireSnapshots(TableRuntime tableRuntime) {
@@ -250,7 +265,11 @@ public class PaimonMaintainProcessFactory implements ProcessFactory {
     }
     ProcessTriggerStrategy strategy = actions.get(PaimonActions.CLEAN_ORPHANS);
     return PaimonCleanOrphansProcess.trigger(
-            tableRuntime, remoteEngine, sparkVersion, strategy.getTriggerInterval())
+            tableRuntime,
+            remoteEngine,
+            sparkVersion,
+            strategy.getTriggerInterval(),
+            cleanOrphansStaticTableThreshold)
         .map(process -> (TableProcess) process);
   }
 }
