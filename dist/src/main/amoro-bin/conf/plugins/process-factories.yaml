@@ -27,6 +27,7 @@ process-factories:
       expire-snapshots.interval: 24h
       clean-orphans.enabled: true
       clean-orphans.interval: 48h
+      clean-orphans.static-table-threshold: 6d
       spark-version: 354
   - name: paimon
     enabled: true

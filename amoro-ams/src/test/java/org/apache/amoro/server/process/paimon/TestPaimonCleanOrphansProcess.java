@@ -18,9 +18,11 @@
 
 package org.apache.amoro.server.process.paimon;
 
+import org.apache.amoro.AmoroTable;
 import org.apache.amoro.ServerTableIdentifier;
 import org.apache.amoro.TableFormat;
 import org.apache.amoro.TableRuntime;
+import org.apache.amoro.TableSnapshot;
 import org.apache.amoro.process.HttpRemoteSparkStandAloneSubmit;
 import org.apache.amoro.process.ProcessStatus;
 import org.apache.amoro.server.table.DefaultTableRuntime;
@@ -38,6 +40,9 @@ import java.util.Optional;
 import java.util.function.Function;
 
 public class TestPaimonCleanOrphansProcess {
+
+  private static final Duration CLEAN_ORPHANS_INTERVAL = Duration.ofHours(48);
+  private static final Duration STATIC_TABLE_THRESHOLD = Duration.ofDays(6);
 
   @Test
   public void testGetProcessParametersUseExecuteUser() {
@@ -105,6 +110,7 @@ public class TestPaimonCleanOrphansProcess {
     engine.open(Collections.singletonMap("execute.user", "amoro"));
 
     PaimonCleanOrphansProcess process = new PaimonCleanOrphansProcess(runtime, engine, 354);
+    long triggerTime = Long.parseLong(process.getSummary().get("clean-orphans-trigger-time"));
     process.afterComplete(ProcessStatus.SUCCESS);
 
     @SuppressWarnings("unchecked")
@@ -115,7 +121,20 @@ public class TestPaimonCleanOrphansProcess {
 
     TableRuntimeCleanupState updated =
         updaterCaptor.getValue().apply(new TableRuntimeCleanupState());
-    Assert.assertTrue(updated.getLastOrphanFilesCleanTime() > 0);
+    Assert.assertEquals(triggerTime, updated.getLastOrphanFilesCleanTime());
+  }
+
+  @Test
+  public void testAfterCompleteFailureDoesNotUpdateLastCleanTime() {
+    DefaultTableRuntime runtime = Mockito.mock(DefaultTableRuntime.class);
+    Mockito.when(runtime.getTableIdentifier())
+        .thenReturn(ServerTableIdentifier.of("catalog", "default", "orders", TableFormat.PAIMON));
+
+    PaimonCleanOrphansProcess process = new PaimonCleanOrphansProcess(runtime, openedEngine(), 354);
+    process.afterComplete(ProcessStatus.FAILED);
+
+    Mockito.verify(runtime, Mockito.never())
+        .updateState(Mockito.eq(DefaultTableRuntime.CLEANUP_STATE_KEY), Mockito.any());
   }
 
   @Test
@@ -131,8 +150,163 @@ public class TestPaimonCleanOrphansProcess {
     engine.open(Collections.singletonMap("execute.user", "amoro"));
 
     Optional<PaimonCleanOrphansProcess> process =
-        PaimonCleanOrphansProcess.trigger(runtime, engine, 354, Duration.ofHours(48));
+        PaimonCleanOrphansProcess.trigger(
+            runtime, engine, 354, CLEAN_ORPHANS_INTERVAL, STATIC_TABLE_THRESHOLD);
 
     Assert.assertFalse(process.isPresent());
+    Mockito.verify(runtime, Mockito.never()).loadTable();
+  }
+
+  @Test
+  public void testTriggerSkipsStaticTableAndRecordsCheckTime() {
+    long beforeTrigger = System.currentTimeMillis();
+    DefaultTableRuntime runtime =
+        runtimeWithSnapshot(beforeTrigger - STATIC_TABLE_THRESHOLD.toMillis() - 1, 0L);
+
+    Optional<PaimonCleanOrphansProcess> process = trigger(runtime);
+
+    Assert.assertFalse(process.isPresent());
+    Assert.assertTrue(updatedLastCleanTime(runtime) >= beforeTrigger);
+  }
+
+  @Test
+  public void testTriggerRefreshesStaticTableCheckTime() {
+    long beforeTrigger = System.currentTimeMillis();
+    DefaultTableRuntime runtime =
+        runtimeWithSnapshot(
+            beforeTrigger - STATIC_TABLE_THRESHOLD.toMillis() - 1,
+            beforeTrigger - CLEAN_ORPHANS_INTERVAL.toMillis() - 1);
+
+    Optional<PaimonCleanOrphansProcess> process = trigger(runtime);
+
+    Assert.assertFalse(process.isPresent());
+    Assert.assertTrue(updatedLastCleanTime(runtime) >= beforeTrigger);
+  }
+
+  @Test
+  public void testTriggerSkipsWhenNoNewSnapshotSinceLastCleanOrStaticCheck() {
+    long now = System.currentTimeMillis();
+    DefaultTableRuntime runtime =
+        runtimeWithSnapshot(
+            now - Duration.ofDays(3).toMillis(), now - CLEAN_ORPHANS_INTERVAL.toMillis() - 1);
+
+    Optional<PaimonCleanOrphansProcess> process = trigger(runtime);
+
+    Assert.assertFalse(process.isPresent());
+    Mockito.verify(runtime, Mockito.never())
+        .updateState(Mockito.eq(DefaultTableRuntime.CLEANUP_STATE_KEY), Mockito.any());
+  }
+
+  @Test
+  public void testTriggerCreatesProcessForNewNonStaticSnapshot() {
+    long now = System.currentTimeMillis();
+    DefaultTableRuntime runtime =
+        runtimeWithSnapshot(
+            now - Duration.ofHours(1).toMillis(), now - CLEAN_ORPHANS_INTERVAL.toMillis() - 1);
+
+    Assert.assertTrue(trigger(runtime).isPresent());
+  }
+
+  @Test
+  public void testTriggerCreatesProcessForSnapshotCommittedAfterPreviousTrigger() {
+    DefaultTableRuntime firstRuntime = runtimeWithSnapshot(System.currentTimeMillis(), 0L);
+    PaimonCleanOrphansProcess firstProcess = trigger(firstRuntime).get();
+    firstProcess.afterComplete(ProcessStatus.SUCCESS);
+    long firstTriggerTime = updatedLastCleanTime(firstRuntime);
+
+    DefaultTableRuntime nextRuntime = runtimeWithSnapshot(firstTriggerTime + 1, firstTriggerTime);
+    Optional<PaimonCleanOrphansProcess> nextProcess =
+        PaimonCleanOrphansProcess.trigger(
+            nextRuntime, openedEngine(), 354, Duration.ZERO, STATIC_TABLE_THRESHOLD);
+
+    Assert.assertTrue(nextProcess.isPresent());
+  }
+
+  @Test
+  public void testTriggerSkipsNewSnapshotWhenItHasBecomeStatic() {
+    long beforeTrigger = System.currentTimeMillis();
+    DefaultTableRuntime runtime =
+        runtimeWithSnapshot(
+            beforeTrigger - Duration.ofDays(7).toMillis(),
+            beforeTrigger - Duration.ofDays(10).toMillis());
+
+    Optional<PaimonCleanOrphansProcess> process = trigger(runtime);
+
+    Assert.assertFalse(process.isPresent());
+    Assert.assertTrue(updatedLastCleanTime(runtime) >= beforeTrigger);
+  }
+
+  @Test
+  public void testTriggerFailsWhenNoSnapshotExists() {
+    DefaultTableRuntime runtime = runtimeWithSnapshot(null, 0L);
+
+    try {
+      trigger(runtime);
+      Assert.fail("Expected clean orphans trigger to fail when no snapshot exists");
+    } catch (IllegalStateException e) {
+      Assert.assertTrue(e.getMessage().contains("no Paimon snapshot exists"));
+      Assert.assertTrue(e.getMessage().contains("orders"));
+    }
+  }
+
+  @Test
+  public void testTriggerFailsWhenSnapshotCannotBeRead() {
+    DefaultTableRuntime runtime = Mockito.mock(DefaultTableRuntime.class);
+    Mockito.when(runtime.getTableIdentifier())
+        .thenReturn(ServerTableIdentifier.of("catalog", "default", "orders", TableFormat.PAIMON));
+    Mockito.when(runtime.getState(DefaultTableRuntime.CLEANUP_STATE_KEY))
+        .thenReturn(new TableRuntimeCleanupState());
+    AmoroTable<?> amoroTable = Mockito.mock(AmoroTable.class);
+    Mockito.when(((AmoroTable) amoroTable).currentSnapshot())
+        .thenThrow(new RuntimeException("metadata unavailable"));
+    Mockito.doReturn(amoroTable).when(runtime).loadTable();
+
+    try {
+      trigger(runtime);
+      Assert.fail("Expected clean orphans trigger to fail when snapshot cannot be read");
+    } catch (IllegalStateException e) {
+      Assert.assertTrue(e.getMessage().contains("Cannot read latest Paimon snapshot"));
+      Assert.assertTrue(e.getMessage().contains("orders"));
+      Assert.assertEquals("metadata unavailable", e.getCause().getMessage());
+    }
+  }
+
+  private Optional<PaimonCleanOrphansProcess> trigger(DefaultTableRuntime runtime) {
+    return PaimonCleanOrphansProcess.trigger(
+        runtime, openedEngine(), 354, CLEAN_ORPHANS_INTERVAL, STATIC_TABLE_THRESHOLD);
+  }
+
+  private DefaultTableRuntime runtimeWithSnapshot(Long snapshotCommitTime, long lastCleanTime) {
+    DefaultTableRuntime runtime = Mockito.mock(DefaultTableRuntime.class);
+    Mockito.when(runtime.getTableIdentifier())
+        .thenReturn(ServerTableIdentifier.of("catalog", "default", "orders", TableFormat.PAIMON));
+    Mockito.when(runtime.getState(DefaultTableRuntime.CLEANUP_STATE_KEY))
+        .thenReturn(new TableRuntimeCleanupState().setLastOrphanFilesCleanTime(lastCleanTime));
+    AmoroTable<?> amoroTable = Mockito.mock(AmoroTable.class);
+    if (snapshotCommitTime != null) {
+      TableSnapshot snapshot = Mockito.mock(TableSnapshot.class);
+      Mockito.when(snapshot.commitTime()).thenReturn(snapshotCommitTime);
+      Mockito.when(((AmoroTable) amoroTable).currentSnapshot()).thenReturn(snapshot);
+    }
+    Mockito.doReturn(amoroTable).when(runtime).loadTable();
+    return runtime;
+  }
+
+  private HttpRemoteSparkStandAloneSubmit openedEngine() {
+    HttpRemoteSparkStandAloneSubmit engine = new HttpRemoteSparkStandAloneSubmit();
+    engine.open(Collections.singletonMap("execute.user", "amoro"));
+    return engine;
+  }
+
+  private long updatedLastCleanTime(DefaultTableRuntime runtime) {
+    @SuppressWarnings("unchecked")
+    ArgumentCaptor<Function<TableRuntimeCleanupState, TableRuntimeCleanupState>> updaterCaptor =
+        (ArgumentCaptor) ArgumentCaptor.forClass(Function.class);
+    Mockito.verify(runtime)
+        .updateState(Mockito.eq(DefaultTableRuntime.CLEANUP_STATE_KEY), updaterCaptor.capture());
+    return updaterCaptor
+        .getValue()
+        .apply(new TableRuntimeCleanupState())
+        .getLastOrphanFilesCleanTime();
   }
 }
