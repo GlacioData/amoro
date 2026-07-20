@@ -62,11 +62,11 @@ amoro-producer/target/amoro-producer-0.9-SNAPSHOT-jar-with-dependencies.jar
 
 | 参数 | 是否必填 | 默认值 | 说明 |
 |------|----------|--------|------|
-| `--startBucket` | 否 | `0` | 从哪个 bucket 下标开始执行。 |
-| `--step` | 否 | `20` | 每次 compact 的 bucket 数量，生成闭区间 bucket range，例如 `0-19`。 |
-| `--compactStrategy` | 否 | `full` | 传给 `compact` 的 `compact_strategy`。 |
-| `--procedureOptions` | 否 | `target-file-size=256m` | 传给 `compact` 的 `options` 字符串，空字符串表示不拼接。 |
-| `--version` | 否 | 空字符串 | 设置为 `0.9` 时使用 Paimon 0.9 `partition_idle_time` SQL。 |
+| `--startBucket` | 否 | `0` | 仅 `--version 1.3` 生效；从哪个 bucket 下标开始执行。 |
+| `--step` | 否 | `20` | 仅 `--version 1.3` 生效；每次 compact 的 bucket 数量，生成闭区间 bucket range，例如 `0-19`。 |
+| `--compactStrategy` | 否 | `full` | 仅 `--version 1.3` 生效；传给 `compact` 的 `compact_strategy`。 |
+| `--procedureOptions` | 否 | `target-file-size=256m` | 仅 `--version 1.3` 生效；传给 `compact` 的 `options` 字符串，空字符串表示不拼接。 |
+| `--version` | 否 | `0.9` | 仅支持 `0.9` 和 `1.3`。`0.9` 使用 `partition_idle_time` SQL；`1.3` 使用分桶 SQL。 |
 | `--partitionIdleTime` | 否 | `1d` | `--version 0.9` 时传给 `compact` 的 `partition_idle_time`。 |
 
 示例：
@@ -84,6 +84,7 @@ amoro-producer/target/amoro-producer-0.9-SNAPSHOT-jar-with-dependencies.jar
   amoro-producer-0.9-SNAPSHOT-jar-with-dependencies.jar \
   --format paimon \
   --action compact \
+  --version 1.3 \
   --catalogName paimon \
   --databaseName ods \
   --tableNameRegex '^ods_.*' \
@@ -93,17 +94,17 @@ amoro-producer/target/amoro-producer-0.9-SNAPSHOT-jar-with-dependencies.jar
   --procedureOptions target-file-size=256m
 ```
 
-compact 会先读取目标表 `$options` 中的 `bucket` 配置：
+compact 按 `--version` 选择 SQL：
 
-- 有效正整数 bucket 且未设置 `--version 0.9` 时，按 `--startBucket` 和 `--step`
+- `--version 0.9`（默认）不读取目标表 `$options`，不执行分桶逻辑，只执行：
+  `CALL sys.compact(table => 'db.table', partition_idle_time => '1d')`。
+- `--version 1.3` 时先读取目标表 `$options` 中的 `bucket` 配置；有效正整数 bucket 时，按 `--startBucket` 和 `--step`
   生成 bucket range，并调用带 `buckets`、`compact_strategy`、`options` 的
   `compact` SQL。
-- bucket 缺失、非整数、`<= 0` 或读取失败时，无论 version 如何，都执行
+- `--version 1.3` 下 bucket 缺失、非整数、`<= 0` 或读取失败时，执行
   `CALL sys.compact(table => 'db.table')`。
-- 设置 `--version 0.9` 且读取到有效 bucket 时，执行带 `partition_idle_time`
-  的 SQL，不拼接 `buckets`、`compact_strategy` 或 `options`。
 
-其中非 bucket compact 和 `--version 0.9` bucket compact 使用
+其中 0.9 compact 和 1.3 的非 bucket compact 使用
 `CALL sys.compact(...)`，依赖 Spark 的 `spark.sql.defaultCatalog` 指向 Paimon catalog。
 生产提交时应设置 `--conf spark.sql.defaultCatalog=paimon`，并与 `--catalogName paimon`
 保持一致。
@@ -396,6 +397,7 @@ compact 会先读取目标表 `$options` 中的 `bucket` 配置：
   REPLACE_AMORO_PRODUCER_JAR \
   --format paimon \
   --action compact \
+  --version 1.3 \
   --catalogName paimon \
   --databaseName sl_oki_prod \
   --tableNameRegex '^orders_.*' \
@@ -407,7 +409,7 @@ compact 会先读取目标表 `$options` 中的 `bucket` 配置：
   --procedureOptions target-file-size=256m
 ```
 
-Paimon 0.9 bucket 表 compact 使用 `partition_idle_time`：
+Paimon 0.9 compact（默认；也可显式指定版本）使用 `partition_idle_time`，不读取或按 bucket 分片：
 
 ```bash
 ./spark-submit \

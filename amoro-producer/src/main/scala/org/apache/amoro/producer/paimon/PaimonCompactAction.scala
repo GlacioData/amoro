@@ -55,26 +55,27 @@ class PaimonCompactAction(runner: PaimonSqlRunner = SparkPaimonSqlRunner) extend
       step = parseInt(optionValue(commandLine, "step", "20"), "--step"),
       compactStrategy = optionValue(commandLine, "compactStrategy", "full"),
       procedureOptions = optionValue(commandLine, "procedureOptions", "target-file-size=256m"),
-      version = optionValue(commandLine, "version", ""),
+      version = optionValue(commandLine, "version", "0.9"),
       partitionIdleTime = optionValue(commandLine, "partitionIdleTime", "1d"))
   }
 
   override def validate(common: CommonProducerConfig, actionConfig: ActionConfig): Unit = {
     val config = asCompactConfig(actionConfig)
     validateRetryTimes(common.retryTimes)
-    if (config.startBucket < 0) {
-      throw new IllegalArgumentException("--startBucket 不能小于 0")
+    if (!PaimonCompactAction.isSupportedVersion(config)) {
+      throw new IllegalArgumentException("--version 目前仅支持 0.9 或 1.3")
     }
-    if (config.step <= 0) {
-      throw new IllegalArgumentException("--step 必须大于 0")
-    }
-    if (config.compactStrategy.trim.isEmpty) {
-      throw new IllegalArgumentException("--compactStrategy 的值不能为空")
-    }
-    if (config.version.trim.nonEmpty && !PaimonCompactAction.isPaimon09(config)) {
-      throw new IllegalArgumentException("--version 目前仅支持 0.9")
-    }
-    if (PaimonCompactAction.isPaimon09(config) && config.partitionIdleTime.trim.isEmpty) {
+    if (PaimonCompactAction.isPaimon13(config)) {
+      if (config.startBucket < 0) {
+        throw new IllegalArgumentException("--startBucket 不能小于 0")
+      }
+      if (config.step <= 0) {
+        throw new IllegalArgumentException("--step 必须大于 0")
+      }
+      if (config.compactStrategy.trim.isEmpty) {
+        throw new IllegalArgumentException("--compactStrategy 的值不能为空")
+      }
+    } else if (config.partitionIdleTime.trim.isEmpty) {
       throw new IllegalArgumentException("--partitionIdleTime 的值不能为空")
     }
   }
@@ -86,59 +87,59 @@ class PaimonCompactAction(runner: PaimonSqlRunner = SparkPaimonSqlRunner) extend
     val config = asCompactConfig(actionConfig)
     validateRetryTimes(context.common.retryTimes)
     val startNs = System.nanoTime()
-    val bucketNumResult = readBucketNum(context, table)
 
     val tasks: Seq[ActionTaskResult] =
-      bucketNumResult match {
-        case Left(_) =>
-          Seq(runTask(
+      if (PaimonCompactAction.isPaimon09(config)) {
+        val taskName = s"partition_idle_time=${config.partitionIdleTime.trim}"
+        Seq(
+          runTask(
             context,
             table,
-            "non-bucket",
-            PaimonCompactAction.buildNonBucketCompactSql(table)))
-
-        case Right(bucketNum) if config.startBucket > bucketNum - 1 =>
-          val reason = s"startBucket(${config.startBucket}) > 最大 bucket id(${bucketNum - 1})"
-          return result(
-            status = ActionStatus.Skipped,
-            tasks =
-              Seq(
-                ActionTaskResult(
-                  name = "skipped",
-                  status = ActionStatus.Skipped,
-                  message = Some(reason),
-                  metrics = Map("table" -> table.raw))),
-            message = Some(reason),
-            table = table,
-            startNs = startNs)
-
-        case Right(_) if PaimonCompactAction.isPaimon09(config) =>
-          val taskName = s"partition_idle_time=${config.partitionIdleTime.trim}"
-          Seq(
-            runTask(
+            taskName,
+            PaimonCompactAction.buildCompactSql(
+              context.common.catalogName,
+              config,
+              table,
+              bucketRange = "")))
+      } else {
+        readBucketNum(context, table) match {
+          case Left(_) =>
+            Seq(runTask(
               context,
               table,
-              taskName,
-              PaimonCompactAction.buildCompactSql(
-                context.common.catalogName,
-                config,
-                table,
-                bucketRange = "")))
+              "non-bucket",
+              PaimonCompactAction.buildNonBucketCompactSql(table)))
 
-        case Right(bucketNum) =>
-          PaimonCompactAction
-            .buildBucketRanges(config.startBucket, config.step, bucketNum)
-            .map { bucketRange =>
-              runTask(
-                context,
-                table,
-                bucketRange,
-                PaimonCompactAction.buildCompactSql(
-                  context.common.catalogName,
-                  config,
+          case Right(bucketNum) if config.startBucket > bucketNum - 1 =>
+            val reason = s"startBucket(${config.startBucket}) > 最大 bucket id(${bucketNum - 1})"
+            return result(
+              status = ActionStatus.Skipped,
+              tasks =
+                Seq(
+                  ActionTaskResult(
+                    name = "skipped",
+                    status = ActionStatus.Skipped,
+                    message = Some(reason),
+                    metrics = Map("table" -> table.raw))),
+              message = Some(reason),
+              table = table,
+              startNs = startNs)
+
+          case Right(bucketNum) =>
+            PaimonCompactAction
+              .buildBucketRanges(config.startBucket, config.step, bucketNum)
+              .map { bucketRange =>
+                runTask(
+                  context,
                   table,
-                  bucketRange))
-            }
+                  bucketRange,
+                  PaimonCompactAction.buildCompactSql(
+                    context.common.catalogName,
+                    config,
+                    table,
+                    bucketRange))
+              }
+        }
       }
 
     val status =
@@ -309,6 +310,9 @@ class PaimonCompactAction(runner: PaimonSqlRunner = SparkPaimonSqlRunner) extend
 
 object PaimonCompactAction {
 
+  private val Paimon09 = "0.9"
+  private val Paimon13 = "1.3"
+
   private[paimon] def buildBucketRanges(
       startBucket: Int,
       step: Int,
@@ -368,6 +372,14 @@ object PaimonCompactAction {
   }
 
   private[paimon] def isPaimon09(config: PaimonCompactConfig): Boolean = {
-    config.version.trim == "0.9"
+    config.version.trim == Paimon09
+  }
+
+  private[paimon] def isPaimon13(config: PaimonCompactConfig): Boolean = {
+    config.version.trim == Paimon13
+  }
+
+  private[paimon] def isSupportedVersion(config: PaimonCompactConfig): Boolean = {
+    isPaimon09(config) || isPaimon13(config)
   }
 }

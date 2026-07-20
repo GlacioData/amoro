@@ -38,30 +38,45 @@ class PaimonCompactActionTest {
     assertEquals(20, config.step)
     assertEquals("full", config.compactStrategy)
     assertEquals("target-file-size=256m", config.procedureOptions)
-    assertEquals("", config.version)
+    assertEquals("0.9", config.version)
     assertEquals("1d", config.partitionIdleTime)
   }
 
   @Test
-  def validateRejectsInvalidActionArguments(): Unit = {
+  def validateRejectsUnsupportedVersionAndInvalidPaimon13Arguments(): Unit = {
     val action = new PaimonCompactAction()
     val common = commonConfig()
 
     assertThrows(
       classOf[IllegalArgumentException],
-      () => action.validate(common, PaimonCompactConfig(-1, 20, "full", "", "", "1d")))
+      () => action.validate(common, PaimonCompactConfig(-1, 20, "full", "", "1.3", "1d")))
     assertThrows(
       classOf[IllegalArgumentException],
-      () => action.validate(common, PaimonCompactConfig(0, 0, "full", "", "", "1d")))
+      () => action.validate(common, PaimonCompactConfig(0, 0, "full", "", "1.3", "1d")))
     assertThrows(
       classOf[IllegalArgumentException],
-      () => action.validate(common, PaimonCompactConfig(0, 20, " ", "", "", "1d")))
+      () => action.validate(common, PaimonCompactConfig(0, 20, " ", "", "1.3", "1d")))
+    assertThrows(
+      classOf[IllegalArgumentException],
+      () => action.validate(common, PaimonCompactConfig(0, 20, "full", "", "", "1d")))
     assertThrows(
       classOf[IllegalArgumentException],
       () => action.validate(common, PaimonCompactConfig(0, 20, "full", "", "1.0", "1d")))
     assertThrows(
       classOf[IllegalArgumentException],
       () => action.validate(common, PaimonCompactConfig(0, 20, "full", "", "0.9", " ")))
+  }
+
+  @Test
+  def validatePaimon09IgnoresBucketOnlyArguments(): Unit = {
+    new PaimonCompactAction().validate(
+      commonConfig(),
+      PaimonCompactConfig(-1, 0, " ", "", "0.9", "1d"))
+  }
+
+  @Test
+  def validateAcceptsPaimon13BucketArguments(): Unit = {
+    new PaimonCompactAction().validate(commonConfig(), paimon13Config)
   }
 
   @Test
@@ -136,7 +151,7 @@ class PaimonCompactActionTest {
     val bucketSql =
       PaimonCompactAction.buildCompactSql(
         catalogName = "paimon",
-        config = config.copy(version = ""),
+        config = config.copy(version = "1.3"),
         table = table,
         bucketRange = "1-2")
     val paimon09Sql =
@@ -169,7 +184,7 @@ class PaimonCompactActionTest {
         step = 20,
         compactStrategy = "full's",
         procedureOptions = "target-file-size=256m,path='x'",
-        version = "",
+        version = "1.3",
         partitionIdleTime = "1d")
 
     val sql =
@@ -191,7 +206,7 @@ class PaimonCompactActionTest {
     val sql =
       PaimonCompactAction.buildCompactSql(
         catalogName = "paimon",
-        config = PaimonCompactConfig(0, 20, "full", "", "", "1d"),
+        config = PaimonCompactConfig(0, 20, "full", "", "1.3", "1d"),
         table = table,
         bucketRange = "0-19")
 
@@ -233,8 +248,8 @@ class PaimonCompactActionTest {
     val failingBucketRunner = new FakeRunner(bucketFailure = true)
     val missingBucketRunner = new FakeRunner(bucketRows = Seq.empty)
 
-    new PaimonCompactAction(failingBucketRunner).execute(context(), table, defaultConfig)
-    new PaimonCompactAction(missingBucketRunner).execute(context(), table, defaultConfig)
+    new PaimonCompactAction(failingBucketRunner).execute(context(), table, paimon13Config)
+    new PaimonCompactAction(missingBucketRunner).execute(context(), table, paimon13Config)
 
     assertEquals(Seq("CALL sys.compact(\ntable => 'db.t1'\n)"), compactSqls(failingBucketRunner))
     assertEquals(Seq("CALL sys.compact(\ntable => 'db.t1'\n)"), compactSqls(missingBucketRunner))
@@ -245,8 +260,8 @@ class PaimonCompactActionTest {
     val nonIntegerBucketRunner = new FakeRunner(bucketRows = Seq(Row("abc")))
     val nonPositiveBucketRunner = new FakeRunner(bucketRows = Seq(Row("0")))
 
-    new PaimonCompactAction(nonIntegerBucketRunner).execute(context(), table, defaultConfig)
-    new PaimonCompactAction(nonPositiveBucketRunner).execute(context(), table, defaultConfig)
+    new PaimonCompactAction(nonIntegerBucketRunner).execute(context(), table, paimon13Config)
+    new PaimonCompactAction(nonPositiveBucketRunner).execute(context(), table, paimon13Config)
 
     assertEquals(Seq("CALL sys.compact(\ntable => 'db.t1'\n)"), compactSqls(nonIntegerBucketRunner))
     assertEquals(
@@ -259,7 +274,7 @@ class PaimonCompactActionTest {
     val runner = new FakeRunner(bucketRows = Seq(Row("3")))
     val result =
       new PaimonCompactAction(runner)
-        .execute(context(), table, defaultConfig.copy(startBucket = 3))
+        .execute(context(), table, paimon13Config.copy(startBucket = 3))
 
     assertEquals(ActionStatus.Skipped, result.status)
     assertTrue(compactSqls(runner).isEmpty)
@@ -269,7 +284,7 @@ class PaimonCompactActionTest {
   def executeRetriesFailedRangeUntilSuccess(): Unit = {
     val runner = new FakeRunner(bucketRows = Seq(Row("41")), failAttemptsByRange = Map("0-19" -> 1))
     val result =
-      new PaimonCompactAction(runner).execute(context(retryTimes = 2), table, defaultConfig)
+      new PaimonCompactAction(runner).execute(context(retryTimes = 2), table, paimon13Config)
 
     assertEquals(ActionStatus.Success, result.status)
     assertEquals(2, compactSqls(runner).count(_.contains("buckets => '0-19'")))
@@ -280,7 +295,7 @@ class PaimonCompactActionTest {
   def executeContinuesAfterRangeRetryExhaustedAndReturnsFailedResult(): Unit = {
     val runner = new FakeRunner(bucketRows = Seq(Row("41")), failAttemptsByRange = Map("0-19" -> 2))
     val result =
-      new PaimonCompactAction(runner).execute(context(retryTimes = 2), table, defaultConfig)
+      new PaimonCompactAction(runner).execute(context(retryTimes = 2), table, paimon13Config)
 
     assertEquals(ActionStatus.Failed, result.status)
     assertEquals(ActionStatus.Failed, result.tasks.find(_.name == "0-19").get.status)
@@ -289,14 +304,15 @@ class PaimonCompactActionTest {
   }
 
   @Test
-  def executePaimon09BucketTableRunsSinglePartitionIdleTimeTask(): Unit = {
-    val runner = new FakeRunner(bucketRows = Seq(Row("41")))
+  def executePaimon09SkipsBucketLookupAndRunsSinglePartitionIdleTimeTask(): Unit = {
+    val runner = new FakeRunner(bucketRows = Seq(Row("3")))
     val result =
       new PaimonCompactAction(runner)
-        .execute(context(), table, defaultConfig.copy(version = "0.9", partitionIdleTime = "1d"))
+        .execute(context(), table, defaultConfig.copy(startBucket = 3, partitionIdleTime = "1d"))
 
     assertEquals(ActionStatus.Success, result.status)
     assertEquals(Seq("partition_idle_time=1d"), result.tasks.map(_.name))
+    assertFalse(runner.sqls.exists(_.contains("$options")))
     assertEquals(1, compactSqls(runner).size)
     assertTrue(compactSqls(runner).head.contains("partition_idle_time => '1d'"))
     assertFalse(compactSqls(runner).head.contains("buckets =>"))
@@ -345,8 +361,10 @@ class PaimonCompactActionTest {
       step = 20,
       compactStrategy = "full",
       procedureOptions = "target-file-size=256m",
-      version = "",
+      version = "0.9",
       partitionIdleTime = "1d")
+
+  private val paimon13Config = defaultConfig.copy(version = "1.3")
 
   private object DummyAdapter extends LakeFormatAdapter {
     override def format: String = "paimon"
