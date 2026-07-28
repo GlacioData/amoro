@@ -57,11 +57,14 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 @DisplayName("PaimonPrimaryKeyOptimizingPlanner")
 class TestPaimonPrimaryKeyOptimizingPlanner {
@@ -129,23 +132,20 @@ class TestPaimonPrimaryKeyOptimizingPlanner {
                 id,
                 defaultConfig(),
                 runtimeOptions(
-                    "num-sorted-run.compaction-trigger",
-                    "2",
-                    PaimonPrimaryKeyOptions.MAJOR_FILE_COUNT_THRESHOLD,
-                    "3"))
+                    "num-sorted-run.compaction-trigger", "2", "num-sorted-run.stop-trigger", "2"))
             .plan();
 
     assertEquals(OptimizingType.MAJOR, result.getOptimizingType());
     assertFalse(result.getTasks().isEmpty());
     for (PaimonPrimaryKeyCompactionTask task : result.getTasks()) {
       assertEquals(OptimizingType.MAJOR, task.getInput().getOptimizingType());
-      assertTrue(task.getInput().isFullCompaction());
+      assertFalse(task.getInput().isFullCompaction());
     }
   }
 
   @Test
-  @DisplayName("explicit Paimon stop trigger is used as MAJOR threshold")
-  void explicitPaimonStopTriggerIsUsedAsMajorThreshold(@TempDir Path warehouse) throws Exception {
+  @DisplayName("R equal to explicit Paimon stop trigger remains MINOR")
+  void sortedRunsEqualToExplicitStopTriggerRemainMinor(@TempDir Path warehouse) throws Exception {
     Catalog catalog = fsCatalog(warehouse);
     Map<String, String> options = primaryKeyOptions();
     options.put("bucket", "1");
@@ -162,14 +162,14 @@ class TestPaimonPrimaryKeyOptimizingPlanner {
                     "num-sorted-run.compaction-trigger", "2", "num-sorted-run.stop-trigger", "3"))
             .plan();
 
-    assertEquals(OptimizingType.MAJOR, result.getOptimizingType());
+    assertEquals(OptimizingType.MINOR, result.getOptimizingType());
     assertFalse(result.getTasks().isEmpty());
-    assertTrue(result.getTasks().get(0).getInput().isFullCompaction());
+    assertFalse(result.getTasks().get(0).getInput().isFullCompaction());
   }
 
   @Test
-  @DisplayName("MAJOR default threshold uses effective minor plus three")
-  void majorDefaultThresholdUsesEffectiveMinorPlusThree(@TempDir Path warehouse) throws Exception {
+  @DisplayName("R equal to default Paimon stop trigger remains MINOR")
+  void sortedRunsEqualToDefaultStopTriggerRemainMinor(@TempDir Path warehouse) throws Exception {
     Catalog catalog = fsCatalog(warehouse);
     Map<String, String> options = primaryKeyOptions();
     options.put("bucket", "1");
@@ -185,9 +185,9 @@ class TestPaimonPrimaryKeyOptimizingPlanner {
                 runtimeOptions("num-sorted-run.compaction-trigger", "2"))
             .plan();
 
-    assertEquals(OptimizingType.MAJOR, result.getOptimizingType());
+    assertEquals(OptimizingType.MINOR, result.getOptimizingType());
     assertFalse(result.getTasks().isEmpty());
-    assertTrue(result.getTasks().get(0).getInput().isFullCompaction());
+    assertFalse(result.getTasks().get(0).getInput().isFullCompaction());
   }
 
   @Test
@@ -212,6 +212,42 @@ class TestPaimonPrimaryKeyOptimizingPlanner {
     assertEquals(OptimizingType.MINOR, result.getOptimizingType());
     assertFalse(result.getTasks().isEmpty());
     assertFalse(result.getTasks().get(0).getInput().isFullCompaction());
+  }
+
+  @Test
+  @DisplayName("single MAJOR plan caps all tasks by active bucket ratio")
+  void singleMajorPlanCapsAllTasksByActiveBucketRatio(@TempDir Path warehouse) throws Exception {
+    Catalog catalog = fsCatalog(warehouse);
+    Map<String, String> options = primaryKeyOptions();
+    options.put("bucket", "-1");
+    options.put("write-only", "true");
+    options.put("num-sorted-run.compaction-trigger", "99");
+    Identifier id = createPrimaryKeyTable(catalog, "t_dynamic_major_cap", options);
+    for (int bucket = 0; bucket < 10; bucket++) {
+      writeBucketCommits(catalog.getTable(id), bucket, 2);
+    }
+
+    OptimizingPlanResult<PaimonPrimaryKeyCompactionTask> result =
+        planner(
+                catalog,
+                id,
+                defaultConfig(),
+                runtimeOptions(
+                    "num-sorted-run.compaction-trigger", "1", "num-sorted-run.stop-trigger", "1"))
+            .plan();
+
+    assertEquals(OptimizingType.MAJOR, result.getOptimizingType());
+    assertEquals(4, result.getTasks().size());
+    Set<String> selectedBuckets = new HashSet<>();
+    for (PaimonPrimaryKeyCompactionTask task : result.getTasks()) {
+      assertEquals(1, task.getInput().getUnits().size());
+      assertFalse(task.getInput().isFullCompaction());
+      selectedBuckets.add(
+          Arrays.toString(task.getInput().getUnits().get(0).getPartitionBytes())
+              + ':'
+              + task.getInput().getUnits().get(0).getBucket());
+    }
+    assertEquals(4, selectedBuckets.size());
   }
 
   @Test
@@ -431,15 +467,12 @@ class TestPaimonPrimaryKeyOptimizingPlanner {
                 id,
                 defaultConfig(),
                 runtimeOptions(
-                    "num-sorted-run.compaction-trigger",
-                    "2",
-                    PaimonPrimaryKeyOptions.MAJOR_FILE_COUNT_THRESHOLD,
-                    "3"))
+                    "num-sorted-run.compaction-trigger", "2", "num-sorted-run.stop-trigger", "2"))
             .plan();
 
     assertEquals(OptimizingType.MAJOR, result.getOptimizingType());
     assertFalse(result.getTasks().isEmpty());
-    assertTrue(result.getTasks().get(0).getInput().isFullCompaction());
+    assertFalse(result.getTasks().get(0).getInput().isFullCompaction());
   }
 
   @Test
@@ -481,10 +514,7 @@ class TestPaimonPrimaryKeyOptimizingPlanner {
                 id,
                 defaultConfig().setMinorLeastInterval(Integer.MAX_VALUE),
                 runtimeOptions(
-                    "num-sorted-run.compaction-trigger",
-                    "2",
-                    PaimonPrimaryKeyOptions.MAJOR_FILE_COUNT_THRESHOLD,
-                    "3"),
+                    "num-sorted-run.compaction-trigger", "2", "num-sorted-run.stop-trigger", "2"),
                 System.currentTimeMillis(),
                 0L)
             .plan();
@@ -494,9 +524,8 @@ class TestPaimonPrimaryKeyOptimizingPlanner {
   }
 
   @Test
-  @DisplayName("private major threshold smaller than minor returns empty plan")
-  void privateMajorThresholdSmallerThanMinorReturnsEmptyPlan(@TempDir Path warehouse)
-      throws Exception {
+  @DisplayName("deprecated private major threshold is ignored")
+  void deprecatedPrivateMajorThresholdIsIgnored(@TempDir Path warehouse) throws Exception {
     Catalog catalog = fsCatalog(warehouse);
     Map<String, String> options = primaryKeyOptions();
     options.put("bucket", "1");
@@ -516,7 +545,9 @@ class TestPaimonPrimaryKeyOptimizingPlanner {
                     "2"))
             .plan();
 
-    assertTrue(result.getTasks().isEmpty());
+    assertEquals(OptimizingType.MINOR, result.getOptimizingType());
+    assertFalse(result.getTasks().isEmpty());
+    assertFalse(result.getTasks().get(0).getInput().isFullCompaction());
   }
 
   @Test
@@ -647,6 +678,16 @@ class TestPaimonPrimaryKeyOptimizingPlanner {
                   BinaryString.fromString(partition + "-" + i),
                   BinaryString.fromString(partition))),
           null);
+    }
+  }
+
+  private static void writeBucketCommits(Table table, int bucket, int count) throws Exception {
+    for (int i = 0; i < count; i++) {
+      int id = bucket * 100 + i;
+      writeRecords(
+          table,
+          Collections.singletonList(GenericRow.of(id, BinaryString.fromString("name-" + id))),
+          bucket);
     }
   }
 

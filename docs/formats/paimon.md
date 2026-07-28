@@ -44,9 +44,9 @@ package and put it in the 'lib' directory of the Amoro installation package.
 ## Self-optimizing for BUCKET_UNAWARE tables
 
 Amoro can automatically merge small files for Paimon AppendOnly tables whose bucket
-is set to `-1` (the `BUCKET_UNAWARE` mode). Primary-key tables and tables with a
-fixed positive bucket count are skipped — the planner treats them as out-of-scope
-and does not touch them.
+is set to `-1` (the `BUCKET_UNAWARE` mode). This AppendOnly planner does not handle
+primary-key tables or tables with a fixed positive bucket count. Eligible primary-key
+tables use the independent planner described below.
 
 ### Enable the optimizer plugin
 
@@ -97,10 +97,99 @@ compacted-files, compacted-bytes, produced-files, produced-bytes
 
 ### Limitations in the first version
 
-* Only AppendOnly tables (`bucket=-1`, no primary key) are supported. Dynamic-
-  bucket and HASH_FIXED tables are planned follow-ups.
+* This AppendOnly path only supports AppendOnly tables (`bucket=-1`, no primary key).
+  Primary-key HASH_FIXED and HASH_DYNAMIC tables use a separate path and configuration.
 * REST Catalog is not tested; FileSystem and Hive Metastore catalogs are the
   tested code paths.
 * Paimon-specific metrics (compaction lag, rewrite throughput) are not yet
   exposed to Dashboard — the first version reuses the standard `optimizing_*`
   metric family.
+
+## Paimon 主键表单次规划与执行语义
+
+Paimon 主键表优化仅覆盖同时满足以下条件的表：
+
+* 表属性 `paimon-optimizer.primary-key.enabled=true`；
+* 存在主键；
+* bucket 模式为 `HASH_FIXED` 或 `HASH_DYNAMIC`；
+* 未开启 `pk-clustering-override`。
+
+AppendOnly 优化路径、Iceberg 及其他表格式不使用本节策略。
+
+### MINOR、MAJOR 与 FULL
+
+规划器固定读取一次目标 snapshot 的全部 live data files，并为每个
+`partition + bucket` 重建 Paimon `Levels`：
+
+```text
+R = L0 文件数 + 非空高 level 数
+C = num-sorted-run.compaction-trigger
+S = num-sorted-run.stop-trigger
+N = Paimon 1.4.2 官方 normal CompactStrategy 的 pick() 存在候选
+M = N && R > S
+```
+
+其中 `N` 不是文件数阈值的近似值。它完整沿用 Paimon 1.4.2 的
+Universal、early-full、off-peak、force-up-L0 与 lookup 优先级；规划端按真实执行链最多探测两次 `pick()`。
+
+单次决策顺序如下：
+
+1. 存在 `M`：只规划 MAJOR，并忽略 MINOR interval；
+2. 不存在 `M`、存在 `N` 且 MINOR interval 到期：规划全部 `N` 为 MINOR；
+3. 否则继续判断既有 FULL interval 与 partition idle 条件；
+4. 仍不满足则本轮不规划。
+
+执行映射固定为：
+
+```text
+MINOR -> compact(false)
+MAJOR -> compact(false)
+FULL  -> compact(true)
+```
+
+MAJOR 是 Amoro 对“存在 normal compaction 候选且 `R>S`”的高压分类，不是
+Paimon FULL compaction。Paimon 的 normal strategy 可能因 size amplification、size ratio、early-full
+等规则选择较大的高 level 文件，所以 MAJOR 记录中出现大文件不等于执行了 `compact(true)`。
+
+### MAJOR 单次 bucket 上限
+
+配置项：
+
+```text
+paimon-optimizer.primary-key.major.max-bucket-ratio
+```
+
+默认有效值为 `0.33`。配置使用十进制精确计算，先按 `RoundingMode.DOWN`
+截取两位，再将低于 `0.33` 的值钳制为 `0.33`。例如：
+
+```text
+0.302 -> 0.30 -> 0.33
+0.339 -> 0.33
+0.341 -> 0.34
+```
+
+blank、非十进制、`NaN`、无穷或原始值大于 `1.00` 时，本轮主键表规划拒绝执行。
+若固定 snapshot 中共有 `A` 个 active buckets，则单次 MAJOR 最多选择：
+
+```text
+B = ceil(A * effectiveRatio)
+```
+
+候选按以下顺序确定性排序后取前 `B` 个：
+
+```text
+R DESC
+physical file count DESC
+file size DESC
+serialized partition bytes unsigned ASC
+bucket ASC
+```
+
+已废弃的 `paimon-optimizer.primary-key.major.file-count-threshold` 只记录 WARN 并忽略，
+即使其值无法解析也不会改变规划结果。
+
+### 升级说明
+
+该修正不提供旧 Paimon 主键 PROCESS payload 的无损接管。升级前应先 drain 或终止旧版本正在运行的
+Paimon 主键表优化 PROCESS，再统一升级 AMS 与 Optimizer。重启后每轮直接基于当时捕获的新 snapshot
+重新规划，不持久化 bucket cursor、候选文件列表或跨轮公平状态。

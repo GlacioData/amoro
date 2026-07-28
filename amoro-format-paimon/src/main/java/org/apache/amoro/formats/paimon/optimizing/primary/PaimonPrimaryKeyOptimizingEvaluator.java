@@ -21,25 +21,40 @@ package org.apache.amoro.formats.paimon.optimizing.primary;
 import org.apache.amoro.config.OptimizingConfig;
 import org.apache.amoro.optimizing.OptimizingType;
 import org.apache.paimon.CoreOptions;
+import org.apache.paimon.KeyValueFileStore;
 import org.apache.paimon.Snapshot;
 import org.apache.paimon.data.BinaryRow;
-import org.apache.paimon.manifest.BucketEntry;
+import org.apache.paimon.io.DataFileMeta;
+import org.apache.paimon.manifest.ManifestEntry;
 import org.apache.paimon.manifest.PartitionEntry;
+import org.apache.paimon.mergetree.Levels;
+import org.apache.paimon.mergetree.compact.CompactStrategy;
+import org.apache.paimon.mergetree.compact.EarlyFullCompaction;
+import org.apache.paimon.mergetree.compact.ForceUpLevel0Compaction;
+import org.apache.paimon.mergetree.compact.OffPeakHours;
+import org.apache.paimon.mergetree.compact.UniversalCompaction;
 import org.apache.paimon.predicate.Predicate;
 import org.apache.paimon.table.AppendOnlyFileStoreTable;
 import org.apache.paimon.table.BucketMode;
 import org.apache.paimon.table.FileStoreTable;
+import org.apache.paimon.table.source.snapshot.SnapshotReader;
 import org.apache.paimon.utils.SerializationUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.nio.ByteBuffer;
 import java.time.Duration;
 import java.util.ArrayList;
-import java.util.HashSet;
+import java.util.Arrays;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
-import java.util.Set;
 
 /** Shared no-side-effect evaluator for Paimon primary-key HASH table optimizing. */
 public class PaimonPrimaryKeyOptimizingEvaluator {
@@ -47,21 +62,28 @@ public class PaimonPrimaryKeyOptimizingEvaluator {
   private static final Logger LOG =
       LoggerFactory.getLogger(PaimonPrimaryKeyOptimizingEvaluator.class);
 
-  private static final String NUM_SORTED_RUN_COMPACTION_TRIGGER =
-      "num-sorted-run.compaction-trigger";
-  private static final String NUM_SORTED_RUN_STOP_TRIGGER = "num-sorted-run.stop-trigger";
+  private static final Comparator<PaimonBucketCompactionUnit> MAJOR_PRIORITY =
+      Comparator.comparingLong(PaimonBucketCompactionUnit::getSortedRunCount)
+          .reversed()
+          .thenComparing(
+              Comparator.comparingLong(PaimonBucketCompactionUnit::getFileCount).reversed())
+          .thenComparing(
+              Comparator.comparingLong(PaimonBucketCompactionUnit::getFileSizeInBytes).reversed())
+          .thenComparing(
+              (left, right) -> compareUnsigned(left.getPartitionBytes(), right.getPartitionBytes()))
+          .thenComparingInt(PaimonBucketCompactionUnit::getBucket);
 
   private PaimonPrimaryKeyOptimizingEvaluator() {}
 
   public static boolean supports(FileStoreTable table) {
-    if (table == null || table instanceof AppendOnlyFileStoreTable) {
+    if (!supportsTableShape(table)) {
       return false;
     }
-    if (table.primaryKeys() == null || table.primaryKeys().isEmpty()) {
+    try {
+      return !CoreOptions.fromMap(table.options()).pkClusteringOverride();
+    } catch (RuntimeException e) {
       return false;
     }
-    return table.bucketMode() == BucketMode.HASH_FIXED
-        || table.bucketMode() == BucketMode.HASH_DYNAMIC;
   }
 
   public static PaimonPrimaryKeyOptimizingEvaluation evaluate(
@@ -72,7 +94,7 @@ public class PaimonPrimaryKeyOptimizingEvaluator {
       long lastFullOptimizingTime,
       Predicate partitionFilter,
       long planTime) {
-    if (!supports(table)) {
+    if (!supportsTableShape(table)) {
       return PaimonPrimaryKeyOptimizingEvaluation.empty(-1L);
     }
 
@@ -82,9 +104,11 @@ public class PaimonPrimaryKeyOptimizingEvaluator {
       return PaimonPrimaryKeyOptimizingEvaluation.empty(-1L);
     }
 
-    PaimonPrimaryKeyOptions primaryKeyOptions;
+    final PaimonPrimaryKeyOptions primaryKeyOptions;
+    final CoreOptions coreOptions;
     try {
       primaryKeyOptions = PaimonPrimaryKeyOptions.from(table.options());
+      coreOptions = CoreOptions.fromMap(table.options());
     } catch (RuntimeException e) {
       LOG.warn(
           "Paimon primary-key optimizing options are invalid for table [{}], skip planning.",
@@ -95,65 +119,183 @@ public class PaimonPrimaryKeyOptimizingEvaluator {
     if (!primaryKeyOptions.enabled()) {
       return PaimonPrimaryKeyOptimizingEvaluation.empty(-1L);
     }
-
-    Optional<Snapshot> latestSnapshot = table.latestSnapshot();
-    if (!latestSnapshot.isPresent()) {
+    if (coreOptions.pkClusteringOverride()) {
+      LOG.warn(
+          "Paimon primary-key table [{}] enables pk-clustering-override; skip primary-key "
+              + "self-optimizing planning.",
+          tableName);
       return PaimonPrimaryKeyOptimizingEvaluation.empty(-1L);
     }
-    long targetSnapshotId = latestSnapshot.get().id();
 
-    CoreOptions coreOptions = CoreOptions.fromMap(table.options());
-    int effectiveMinor = effectiveMinor(table, coreOptions, effectiveConfig);
-    if (primaryKeyOptions.majorFileCountThreshold().isPresent()
-        && primaryKeyOptions.majorFileCountThreshold().get() < effectiveMinor) {
+    final long targetSnapshotId;
+    try {
+      Optional<Snapshot> latestSnapshot = table.latestSnapshot();
+      if (!latestSnapshot.isPresent()) {
+        return PaimonPrimaryKeyOptimizingEvaluation.empty(-1L);
+      }
+      targetSnapshotId = latestSnapshot.get().id();
+    } catch (RuntimeException e) {
       LOG.warn(
-          "Paimon primary-key table [{}] has {}={} smaller than effective minor threshold {}, "
-              + "skip planning.",
+          "Failed to capture latest snapshot for Paimon primary-key table [{}]; skip planning.",
           tableName,
-          PaimonPrimaryKeyOptions.MAJOR_FILE_COUNT_THRESHOLD,
-          primaryKeyOptions.majorFileCountThreshold().get(),
-          effectiveMinor);
-      return PaimonPrimaryKeyOptimizingEvaluation.empty(targetSnapshotId);
+          e);
+      return PaimonPrimaryKeyOptimizingEvaluation.empty(-1L);
     }
-    long effectiveMajor = effectiveMajor(table, coreOptions, primaryKeyOptions, effectiveMinor);
 
-    List<PaimonBucketCompactionUnit> allUnits = bucketUnits(table);
-    List<PaimonBucketCompactionUnit> minorCandidates = new ArrayList<>();
-    List<PaimonBucketCompactionUnit> majorCandidates = new ArrayList<>();
-    for (PaimonBucketCompactionUnit unit : allUnits) {
-      if (unit.getFileCount() >= effectiveMinor) {
-        minorCandidates.add(unit);
-        if (unit.getFileCount() >= effectiveMajor) {
-          majorCandidates.add(unit);
+    try {
+      if (!(table.store() instanceof KeyValueFileStore)) {
+        LOG.warn(
+            "Paimon primary-key table [{}] does not expose a KeyValueFileStore; skip planning.",
+            tableName);
+        return PaimonPrimaryKeyOptimizingEvaluation.empty(targetSnapshotId);
+      }
+      KeyValueFileStore store = (KeyValueFileStore) table.store();
+      SnapshotFiles snapshotFiles = scanSnapshot(table, targetSnapshotId);
+      List<PaimonBucketCompactionUnit> allUnits = new ArrayList<>();
+      List<PaimonBucketCompactionUnit> normalCandidates = new ArrayList<>();
+      List<PaimonBucketCompactionUnit> majorCandidates = new ArrayList<>();
+      int stopTrigger = coreOptions.numSortedRunStopTrigger();
+
+      for (BucketFiles bucketFiles : snapshotFiles.buckets.values()) {
+        Levels levels =
+            new Levels(store.newKeyComparator(), bucketFiles.files, coreOptions.numLevels());
+        long sortedRunCount = levels.numberOfSortedRuns();
+        PaimonBucketCompactionUnit unit = bucketFiles.toUnit(sortedRunCount);
+        allUnits.add(unit);
+        if (hasNormalCompactionCandidate(coreOptions, levels)) {
+          normalCandidates.add(unit);
+          if (sortedRunCount > stopTrigger) {
+            majorCandidates.add(unit);
+          }
         }
       }
-    }
 
-    if (!majorCandidates.isEmpty()) {
-      return PaimonPrimaryKeyOptimizingEvaluation.of(
-          majorCandidates, OptimizingType.MAJOR, true, targetSnapshotId);
-    }
-    if (!minorCandidates.isEmpty()) {
-      if (reachMinorInterval(effectiveConfig, lastMinorOptimizingTime, planTime)) {
+      if (!majorCandidates.isEmpty()) {
+        List<PaimonBucketCompactionUnit> selected =
+            selectMajorCandidates(
+                majorCandidates, allUnits.size(), primaryKeyOptions.majorMaxBucketRatio());
         return PaimonPrimaryKeyOptimizingEvaluation.of(
-            minorCandidates, OptimizingType.MINOR, false, targetSnapshotId);
+            selected, OptimizingType.MAJOR, false, targetSnapshotId);
       }
+      if (!normalCandidates.isEmpty()
+          && reachMinorInterval(effectiveConfig, lastMinorOptimizingTime, planTime)) {
+        return PaimonPrimaryKeyOptimizingEvaluation.of(
+            normalCandidates, OptimizingType.MINOR, false, targetSnapshotId);
+      }
+      return evaluateFull(
+          table,
+          tableName,
+          snapshotFiles,
+          allUnits,
+          primaryKeyOptions,
+          effectiveConfig,
+          lastFullOptimizingTime,
+          planTime,
+          targetSnapshotId);
+    } catch (RuntimeException e) {
+      LOG.warn(
+          "Failed to evaluate fixed snapshot [{}] for Paimon primary-key table [{}]; skip "
+              + "planning without falling back to latest snapshot.",
+          targetSnapshotId,
+          tableName,
+          e);
       return PaimonPrimaryKeyOptimizingEvaluation.empty(targetSnapshotId);
     }
-    return evaluateFull(
-        table,
-        tableName,
-        allUnits,
-        primaryKeyOptions,
-        effectiveConfig,
-        lastFullOptimizingTime,
-        planTime,
-        targetSnapshotId);
+  }
+
+  private static boolean supportsTableShape(FileStoreTable table) {
+    if (table == null || table instanceof AppendOnlyFileStoreTable) {
+      return false;
+    }
+    if (table.primaryKeys() == null || table.primaryKeys().isEmpty()) {
+      return false;
+    }
+    return table.bucketMode() == BucketMode.HASH_FIXED
+        || table.bucketMode() == BucketMode.HASH_DYNAMIC;
+  }
+
+  private static SnapshotFiles scanSnapshot(FileStoreTable table, long targetSnapshotId) {
+    SnapshotReader reader = table.newSnapshotReader().withSnapshot(targetSnapshotId);
+    SnapshotFiles snapshotFiles = new SnapshotFiles(reader);
+    Iterator<ManifestEntry> entries = reader.readFileIterator();
+    while (entries.hasNext()) {
+      ManifestEntry entry = entries.next();
+      snapshotFiles.add(entry.partition(), entry.bucket(), entry.file());
+    }
+    return snapshotFiles;
+  }
+
+  private static boolean hasNormalCompactionCandidate(CoreOptions options, Levels levels) {
+    CompactStrategy strategy = createCompactStrategy(options);
+    for (int pick = 0; pick < 2; pick++) {
+      if (strategy.pick(levels.numberOfLevels(), levels.levelSortedRuns()).isPresent()) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private static CompactStrategy createCompactStrategy(CoreOptions options) {
+    UniversalCompaction universal =
+        new UniversalCompaction(
+            options.maxSizeAmplificationPercent(),
+            options.sortedRunSizeRatio(),
+            options.numSortedRunCompactionTrigger(),
+            EarlyFullCompaction.create(options),
+            OffPeakHours.create(options));
+    if (options.needLookup()) {
+      Integer compactMaxInterval = null;
+      switch (options.lookupCompact()) {
+        case GENTLE:
+          compactMaxInterval = options.lookupCompactMaxInterval();
+          break;
+        case RADICAL:
+          break;
+        default:
+          throw new IllegalArgumentException(
+              "Unsupported Paimon lookup compact mode: " + options.lookupCompact());
+      }
+      return new ForceUpLevel0Compaction(universal, compactMaxInterval);
+    }
+    if (options.compactionForceUpLevel0()) {
+      return new ForceUpLevel0Compaction(universal, null);
+    }
+    return universal;
+  }
+
+  static List<PaimonBucketCompactionUnit> selectMajorCandidates(
+      List<PaimonBucketCompactionUnit> candidates,
+      int activeBucketCount,
+      BigDecimal maxBucketRatio) {
+    int maximum =
+        maxBucketRatio
+            .multiply(BigDecimal.valueOf(activeBucketCount))
+            .setScale(0, RoundingMode.CEILING)
+            .intValueExact();
+    List<PaimonBucketCompactionUnit> sorted = new ArrayList<>(candidates);
+    sorted.sort(MAJOR_PRIORITY);
+    if (sorted.size() > maximum) {
+      return new ArrayList<>(sorted.subList(0, maximum));
+    }
+    return sorted;
+  }
+
+  private static int compareUnsigned(byte[] left, byte[] right) {
+    int sharedLength = Math.min(left.length, right.length);
+    for (int index = 0; index < sharedLength; index++) {
+      int leftByte = left[index] & 0xFF;
+      int rightByte = right[index] & 0xFF;
+      if (leftByte != rightByte) {
+        return leftByte - rightByte;
+      }
+    }
+    return Integer.compare(left.length, right.length);
   }
 
   private static PaimonPrimaryKeyOptimizingEvaluation evaluateFull(
       FileStoreTable table,
       String tableName,
+      SnapshotFiles snapshotFiles,
       List<PaimonBucketCompactionUnit> allUnits,
       PaimonPrimaryKeyOptions primaryKeyOptions,
       OptimizingConfig optimizingConfig,
@@ -175,8 +317,20 @@ public class PaimonPrimaryKeyOptimizingEvaluator {
     }
 
     Duration idleTime = primaryKeyOptions.partitionIdleTime().get();
-    List<PaimonBucketCompactionUnit> fullCandidates =
-        idleUnits(table, allUnits, idleTime, planTime);
+    if (!table.partitionKeys().isEmpty()) {
+      snapshotFiles.loadPartitionWatermarks();
+    }
+    List<PaimonBucketCompactionUnit> fullCandidates = new ArrayList<>();
+    for (PaimonBucketCompactionUnit unit : allUnits) {
+      long lastCreationTime = unit.getLastFileCreationTime();
+      if (!table.partitionKeys().isEmpty()) {
+        lastCreationTime =
+            snapshotFiles.partitionLastCreationTime.get(ByteBuffer.wrap(unit.getPartitionBytes()));
+      }
+      if (isIdle(lastCreationTime, idleTime, planTime)) {
+        fullCandidates.add(unit);
+      }
+    }
     if (fullCandidates.isEmpty()) {
       return PaimonPrimaryKeyOptimizingEvaluation.empty(targetSnapshotId);
     }
@@ -218,93 +372,94 @@ public class PaimonPrimaryKeyOptimizingEvaluator {
         && planTime - lastMinorOptimizingTime > optimizingConfig.getMinorLeastInterval();
   }
 
-  private static List<PaimonBucketCompactionUnit> idleUnits(
-      FileStoreTable table,
-      List<PaimonBucketCompactionUnit> units,
-      Duration idleTime,
-      long planTime) {
-    if (table.partitionKeys().isEmpty()) {
-      return idleBucketUnits(units, idleTime, planTime);
-    }
-    return idlePartitionBucketUnits(table, units, idleTime, planTime);
-  }
-
-  private static List<PaimonBucketCompactionUnit> idleBucketUnits(
-      List<PaimonBucketCompactionUnit> units, Duration idleTime, long planTime) {
-    List<PaimonBucketCompactionUnit> idleUnits = new ArrayList<>();
-    for (PaimonBucketCompactionUnit unit : units) {
-      if (isIdle(unit.getLastFileCreationTime(), idleTime, planTime)) {
-        idleUnits.add(unit);
-      }
-    }
-    return idleUnits;
-  }
-
-  private static List<PaimonBucketCompactionUnit> idlePartitionBucketUnits(
-      FileStoreTable table,
-      List<PaimonBucketCompactionUnit> units,
-      Duration idleTime,
-      long planTime) {
-    Set<ByteBuffer> idlePartitions = new HashSet<>();
-    for (PartitionEntry entry : table.newSnapshotReader().partitionEntries()) {
-      if (isIdle(entry.lastFileCreationTime(), idleTime, planTime)) {
-        idlePartitions.add(partitionKey(entry.partition()));
-      }
-    }
-    List<PaimonBucketCompactionUnit> idleUnits = new ArrayList<>();
-    for (PaimonBucketCompactionUnit unit : units) {
-      if (idlePartitions.contains(ByteBuffer.wrap(unit.getPartitionBytes()))) {
-        idleUnits.add(unit);
-      }
-    }
-    return idleUnits;
-  }
-
   private static boolean isIdle(long lastFileCreationTime, Duration idleTime, long planTime) {
     long idleMillis = idleTime.toMillis();
     return idleMillis == 0 || planTime - lastFileCreationTime >= idleMillis;
   }
 
-  private static List<PaimonBucketCompactionUnit> bucketUnits(FileStoreTable table) {
-    List<PaimonBucketCompactionUnit> units = new ArrayList<>();
-    for (BucketEntry entry : table.newSnapshotReader().bucketEntries()) {
-      BinaryRow partition = entry.partition();
-      units.add(
-          new PaimonBucketCompactionUnit(
-              SerializationUtils.serializeBinaryRow(partition),
-              entry.bucket(),
-              entry.fileCount(),
-              entry.fileSizeInBytes(),
-              entry.recordCount(),
-              entry.lastFileCreationTime()));
+  private static class SnapshotFiles {
+
+    private final SnapshotReader reader;
+    private final Map<BucketKey, BucketFiles> buckets = new LinkedHashMap<>();
+    private final Map<ByteBuffer, Long> partitionLastCreationTime = new HashMap<>();
+
+    private SnapshotFiles(SnapshotReader reader) {
+      this.reader = reader;
     }
-    return units;
+
+    private void add(BinaryRow partition, int bucket, DataFileMeta file) {
+      byte[] partitionBytes = SerializationUtils.serializeBinaryRow(partition);
+      BucketKey key = new BucketKey(partitionBytes, bucket);
+      buckets.computeIfAbsent(key, ignored -> new BucketFiles(partitionBytes, bucket)).add(file);
+    }
+
+    private void loadPartitionWatermarks() {
+      for (PartitionEntry entry : reader.partitionEntries()) {
+        byte[] partitionBytes = SerializationUtils.serializeBinaryRow(entry.partition());
+        partitionLastCreationTime.put(
+            ByteBuffer.wrap(partitionBytes), entry.lastFileCreationTime());
+      }
+    }
   }
 
-  private static int effectiveMinor(
-      FileStoreTable table, CoreOptions coreOptions, OptimizingConfig optimizingConfig) {
-    int configured =
-        table.options().containsKey(NUM_SORTED_RUN_COMPACTION_TRIGGER)
-            ? coreOptions.numSortedRunCompactionTrigger()
-            : optimizingConfig.getMinorLeastFileCount();
-    return Math.max(1, configured);
+  private static class BucketFiles {
+
+    private final byte[] partitionBytes;
+    private final int bucket;
+    private final List<DataFileMeta> files = new ArrayList<>();
+    private long fileSizeInBytes;
+    private long recordCount;
+    private long lastFileCreationTime;
+
+    private BucketFiles(byte[] partitionBytes, int bucket) {
+      this.partitionBytes = Arrays.copyOf(partitionBytes, partitionBytes.length);
+      this.bucket = bucket;
+    }
+
+    private void add(DataFileMeta file) {
+      files.add(file);
+      fileSizeInBytes += file.fileSize();
+      recordCount += file.rowCount();
+      lastFileCreationTime = Math.max(lastFileCreationTime, file.creationTimeEpochMillis());
+    }
+
+    private PaimonBucketCompactionUnit toUnit(long sortedRunCount) {
+      return new PaimonBucketCompactionUnit(
+          Arrays.copyOf(partitionBytes, partitionBytes.length),
+          bucket,
+          files.size(),
+          sortedRunCount,
+          fileSizeInBytes,
+          recordCount,
+          lastFileCreationTime);
+    }
   }
 
-  private static long effectiveMajor(
-      FileStoreTable table,
-      CoreOptions coreOptions,
-      PaimonPrimaryKeyOptions primaryKeyOptions,
-      int effectiveMinor) {
-    if (primaryKeyOptions.majorFileCountThreshold().isPresent()) {
-      return primaryKeyOptions.majorFileCountThreshold().get();
-    }
-    if (table.options().containsKey(NUM_SORTED_RUN_STOP_TRIGGER)) {
-      return coreOptions.numSortedRunStopTrigger();
-    }
-    return effectiveMinor + 3L;
-  }
+  private static class BucketKey {
 
-  private static ByteBuffer partitionKey(BinaryRow partition) {
-    return ByteBuffer.wrap(SerializationUtils.serializeBinaryRow(partition));
+    private final byte[] partitionBytes;
+    private final int bucket;
+
+    private BucketKey(byte[] partitionBytes, int bucket) {
+      this.partitionBytes = Arrays.copyOf(partitionBytes, partitionBytes.length);
+      this.bucket = bucket;
+    }
+
+    @Override
+    public boolean equals(Object other) {
+      if (this == other) {
+        return true;
+      }
+      if (!(other instanceof BucketKey)) {
+        return false;
+      }
+      BucketKey that = (BucketKey) other;
+      return bucket == that.bucket && Arrays.equals(partitionBytes, that.partitionBytes);
+    }
+
+    @Override
+    public int hashCode() {
+      return 31 * Arrays.hashCode(partitionBytes) + bucket;
+    }
   }
 }
