@@ -23,6 +23,14 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyMap;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 import org.apache.amoro.config.OptimizingConfig;
 import org.apache.amoro.formats.paimon.PaimonCatalogFactory;
@@ -33,12 +41,15 @@ import org.apache.amoro.optimizing.OptimizingPlanResult;
 import org.apache.amoro.optimizing.OptimizingType;
 import org.apache.amoro.table.TableIdentifier;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.paimon.Snapshot;
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.Identifier;
+import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.data.BinaryString;
 import org.apache.paimon.data.GenericRow;
 import org.apache.paimon.options.CatalogOptions;
 import org.apache.paimon.schema.Schema;
+import org.apache.paimon.table.BucketMode;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.Table;
 import org.apache.paimon.table.sink.BatchTableCommit;
@@ -46,6 +57,7 @@ import org.apache.paimon.table.sink.BatchTableWrite;
 import org.apache.paimon.table.sink.BatchWriteBuilder;
 import org.apache.paimon.table.sink.CommitMessage;
 import org.apache.paimon.types.DataTypes;
+import org.apache.paimon.utils.SerializationUtils;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -55,6 +67,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 @DisplayName("PaimonPrimaryKeyCompactionExecutor")
 class TestPaimonPrimaryKeyCompactionExecutor {
@@ -138,19 +151,41 @@ class TestPaimonPrimaryKeyCompactionExecutor {
             () -> new PaimonPrimaryKeyCompactionExecutor(minorFull).execute());
     assertTrue(minorFullEx.getMessage().contains("requires fullCompaction=false"));
 
-    PaimonPrimaryKeyCompactionInput majorNonFull =
+    PaimonPrimaryKeyCompactionInput majorFull =
         copyInput(
             valid,
             valid.getUnits(),
             OptimizingType.MAJOR,
+            true,
+            valid.getCommitUser(),
+            valid.getCommitIdentifier());
+    IllegalStateException majorFullEx =
+        assertThrows(
+            IllegalStateException.class,
+            () -> new PaimonPrimaryKeyCompactionExecutor(majorFull).execute());
+    assertTrue(majorFullEx.getMessage().contains("requires fullCompaction=false"));
+
+    PaimonPrimaryKeyCompactionInput fullNonFull =
+        copyInput(
+            valid,
+            valid.getUnits(),
+            OptimizingType.FULL,
             false,
             valid.getCommitUser(),
             valid.getCommitIdentifier());
-    IllegalStateException majorNonFullEx =
+    IllegalStateException fullNonFullEx =
         assertThrows(
             IllegalStateException.class,
-            () -> new PaimonPrimaryKeyCompactionExecutor(majorNonFull).execute());
-    assertTrue(majorNonFullEx.getMessage().contains("requires fullCompaction=true"));
+            () -> new PaimonPrimaryKeyCompactionExecutor(fullNonFull).execute());
+    assertTrue(fullNonFullEx.getMessage().contains("requires fullCompaction=true"));
+  }
+
+  @Test
+  @DisplayName("executor forwards exact native fullCompaction flag")
+  void executorForwardsExactNativeFullCompactionFlag() throws Exception {
+    assertNativeFullCompactionFlag(OptimizingType.MINOR, false);
+    assertNativeFullCompactionFlag(OptimizingType.MAJOR, false);
+    assertNativeFullCompactionFlag(OptimizingType.FULL, true);
   }
 
   @Test
@@ -203,15 +238,49 @@ class TestPaimonPrimaryKeyCompactionExecutor {
   }
 
   @Test
-  @DisplayName("MINOR executor produces commit messages without committing a snapshot")
-  void minorExecutorProducesCommitMessages(@TempDir Path warehouse) throws Exception {
+  @DisplayName("execute rejects PK clustering override before creating a writer")
+  void executorRejectsPkClusteringOverrideBeforeCreatingWriter(@TempDir Path warehouse)
+      throws Exception {
+    Catalog catalog = fsCatalog(warehouse);
+    Map<String, String> options = primaryKeyOptions();
+    options.put("deletion-vectors.enabled", "true");
+    options.put("clustering.columns", "name");
+    options.put("pk-clustering-override", "true");
+    Identifier id = createPrimaryKeyTable(catalog, "t_clustering_override", options);
+    FileStoreTable table = spy((FileStoreTable) catalog.getTable(id));
+    PaimonPrimaryKeyCompactionInput input =
+        new PaimonPrimaryKeyCompactionInput(
+            wrap(table, id.getObjectName()),
+            Collections.singletonList(
+                new PaimonBucketCompactionUnit(new byte[] {0}, 0, 1L, 1L, 1L, 1L)),
+            OptimizingType.MINOR,
+            false,
+            1L,
+            "user",
+            1L);
+
+    IllegalStateException ex =
+        assertThrows(
+            IllegalStateException.class,
+            () -> new PaimonPrimaryKeyCompactionExecutor(input).execute());
+
+    assertTrue(ex.getMessage().contains("pk-clustering-override"), ex::getMessage);
+    verify(table, never()).copy(anyMap());
+  }
+
+  @Test
+  @DisplayName("MINOR executor continues after a newer snapshot without committing it")
+  void minorExecutorContinuesAfterNewerSnapshot(@TempDir Path warehouse) throws Exception {
     Catalog catalog = fsCatalog(warehouse);
     Identifier id = createPrimaryKeyTable(catalog, "t_minor_execute", primaryKeyOptions());
     writeCommits(catalog.getTable(id), 2);
     List<PaimonPrimaryKeyCompactionTask> tasks = planMinorTasks(catalog, id);
     assertFalse(tasks.isEmpty());
     PaimonPrimaryKeyCompactionTask task = tasks.get(0);
-    long snapshotBefore = latestSnapshotId(catalog, id);
+    assertEquals(task.getInput().getTargetSnapshotId(), latestSnapshotId(catalog, id));
+    writeCommits(catalog.getTable(id), 1);
+    long concurrentSnapshotId = latestSnapshotId(catalog, id);
+    assertTrue(concurrentSnapshotId > task.getInput().getTargetSnapshotId());
 
     PaimonPrimaryKeyCompactionOutput output =
         new PaimonPrimaryKeyCompactionExecutor(task.getInput()).execute();
@@ -223,12 +292,12 @@ class TestPaimonPrimaryKeyCompactionExecutor {
     assertEquals(sumRecords(task.getInput().getUnits()), output.getCompactedRecordCount());
     assertTrue(output.getProducedFileCount() > 0);
     assertTrue(output.getProducedFileSize() > 0);
-    assertEquals(snapshotBefore, latestSnapshotId(catalog, id));
+    assertEquals(concurrentSnapshotId, latestSnapshotId(catalog, id));
   }
 
   @Test
-  @DisplayName("MAJOR executor produces commit messages with full compaction")
-  void majorExecutorProducesCommitMessages(@TempDir Path warehouse) throws Exception {
+  @DisplayName("MAJOR executor continues after a newer snapshot with normal compaction")
+  void majorExecutorContinuesAfterNewerSnapshot(@TempDir Path warehouse) throws Exception {
     Catalog catalog = fsCatalog(warehouse);
     Map<String, String> options = primaryKeyOptions();
     options.put("num-sorted-run.compaction-trigger", "99");
@@ -237,8 +306,11 @@ class TestPaimonPrimaryKeyCompactionExecutor {
     List<PaimonPrimaryKeyCompactionTask> tasks = planMajorTasks(catalog, id);
     assertFalse(tasks.isEmpty());
     PaimonPrimaryKeyCompactionTask task = tasks.get(0);
-    assertTrue(task.getInput().isFullCompaction());
-    long snapshotBefore = latestSnapshotId(catalog, id);
+    assertFalse(task.getInput().isFullCompaction());
+    assertEquals(task.getInput().getTargetSnapshotId(), latestSnapshotId(catalog, id));
+    writeCommits(catalog.getTable(id), 1);
+    long concurrentSnapshotId = latestSnapshotId(catalog, id);
+    assertTrue(concurrentSnapshotId > task.getInput().getTargetSnapshotId());
 
     PaimonPrimaryKeyCompactionOutput output =
         new PaimonPrimaryKeyCompactionExecutor(task.getInput()).execute();
@@ -248,7 +320,7 @@ class TestPaimonPrimaryKeyCompactionExecutor {
     assertTrue(output.getCompactedFileCount() >= output.getProducedFileCount());
     assertTrue(output.getCompactedFileSize() > 0);
     assertTrue(output.getProducedFileSize() > 0);
-    assertEquals(snapshotBefore, latestSnapshotId(catalog, id));
+    assertEquals(concurrentSnapshotId, latestSnapshotId(catalog, id));
   }
 
   @Test
@@ -294,6 +366,36 @@ class TestPaimonPrimaryKeyCompactionExecutor {
     assertEquals(0L, output.getProducedFileCount());
   }
 
+  @Test
+  @DisplayName("FULL executor returns no-op output when latest snapshot is missing")
+  void fullExecutorNoOpsWhenLatestSnapshotIsMissing() {
+    FileStoreTable table = mock(FileStoreTable.class);
+    when(table.primaryKeys()).thenReturn(Collections.singletonList("id"));
+    when(table.bucketMode()).thenReturn(BucketMode.HASH_FIXED);
+    when(table.options()).thenReturn(Collections.emptyMap());
+    when(table.latestSnapshot()).thenReturn(Optional.empty());
+    PaimonPrimaryKeyCompactionInput input =
+        new PaimonPrimaryKeyCompactionInput(
+            wrap(table, "t_full_missing_snapshot"),
+            Collections.singletonList(
+                new PaimonBucketCompactionUnit(
+                    SerializationUtils.serializeBinaryRow(BinaryRow.EMPTY_ROW), 0, 1L, 1L, 1L, 1L)),
+            OptimizingType.FULL,
+            true,
+            10L,
+            "user",
+            1L);
+
+    PaimonPrimaryKeyCompactionOutput output =
+        new PaimonPrimaryKeyCompactionExecutor(input).execute();
+
+    assertTrue(output.getCommitMessageBytesList().isEmpty());
+    assertEquals(0, output.getCompactedBucketCount());
+    assertEquals(0L, output.getCompactedFileCount());
+    assertEquals(0L, output.getProducedFileCount());
+    verify(table, never()).copy(anyMap());
+  }
+
   private static PaimonPrimaryKeyCompactionInput copyInput(
       PaimonPrimaryKeyCompactionInput input,
       List<PaimonBucketCompactionUnit> units,
@@ -306,6 +408,45 @@ class TestPaimonPrimaryKeyCompactionExecutor {
         input.isFullCompaction(),
         commitUser,
         commitIdentifier);
+  }
+
+  private static void assertNativeFullCompactionFlag(
+      OptimizingType optimizingType, boolean expectedFullCompaction) throws Exception {
+    FileStoreTable table = mock(FileStoreTable.class);
+    when(table.primaryKeys()).thenReturn(Collections.singletonList("id"));
+    when(table.bucketMode()).thenReturn(BucketMode.HASH_FIXED);
+    when(table.options()).thenReturn(Collections.emptyMap());
+    FileStoreTable compactTable = mock(FileStoreTable.class);
+    when(table.copy(anyMap())).thenReturn(compactTable);
+    BatchWriteBuilder writeBuilder = mock(BatchWriteBuilder.class);
+    BatchTableWrite write = mock(BatchTableWrite.class);
+    when(compactTable.newBatchWriteBuilder()).thenReturn(writeBuilder);
+    when(writeBuilder.newWrite()).thenReturn(write);
+    when(write.withIOManager(any())).thenReturn(write);
+    when(write.prepareCommit()).thenReturn(Collections.emptyList());
+
+    long targetSnapshotId = 10L;
+    if (optimizingType == OptimizingType.FULL) {
+      Snapshot snapshot = mock(Snapshot.class);
+      when(snapshot.id()).thenReturn(targetSnapshotId);
+      when(table.latestSnapshot()).thenReturn(Optional.of(snapshot));
+    }
+    PaimonPrimaryKeyCompactionInput input =
+        new PaimonPrimaryKeyCompactionInput(
+            wrap(table, "t_native_" + optimizingType.name().toLowerCase()),
+            Collections.singletonList(
+                new PaimonBucketCompactionUnit(
+                    SerializationUtils.serializeBinaryRow(BinaryRow.EMPTY_ROW), 0, 1L, 1L, 1L, 1L)),
+            optimizingType,
+            expectedFullCompaction,
+            targetSnapshotId,
+            "user",
+            1L);
+
+    new PaimonPrimaryKeyCompactionExecutor(input).execute();
+
+    verify(write).compact(any(BinaryRow.class), eq(0), eq(expectedFullCompaction));
+    verify(write).prepareCommit();
   }
 
   private static PaimonPrimaryKeyCompactionInput copyInput(
@@ -340,10 +481,7 @@ class TestPaimonPrimaryKeyCompactionExecutor {
                 catalog,
                 id,
                 runtimeOptions(
-                    "num-sorted-run.compaction-trigger",
-                    "2",
-                    PaimonPrimaryKeyOptions.MAJOR_FILE_COUNT_THRESHOLD,
-                    "3"))
+                    "num-sorted-run.compaction-trigger", "2", "num-sorted-run.stop-trigger", "2"))
             .plan();
     assertEquals(OptimizingType.MAJOR, result.getOptimizingType());
     return result.getTasks();

@@ -20,10 +20,12 @@ package org.apache.amoro.formats.paimon.optimizing.primary;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.junit.jupiter.api.Test;
 
+import java.math.BigDecimal;
 import java.time.Duration;
 import java.util.HashMap;
 import java.util.Map;
@@ -36,7 +38,7 @@ class TestPaimonPrimaryKeyOptions {
 
     assertFalse(options.enabled());
     assertFalse(options.partitionIdleTime().isPresent());
-    assertFalse(options.majorFileCountThreshold().isPresent());
+    assertEquals(new BigDecimal("0.33"), options.majorMaxBucketRatio());
   }
 
   @Test
@@ -44,14 +46,61 @@ class TestPaimonPrimaryKeyOptions {
     Map<String, String> props = new HashMap<>();
     props.put(PaimonPrimaryKeyOptions.ENABLED, "true");
     props.put(PaimonPrimaryKeyOptions.PARTITION_IDLE_TIME, "PT30M");
-    props.put(PaimonPrimaryKeyOptions.MAJOR_FILE_COUNT_THRESHOLD, "12");
+    props.put(PaimonPrimaryKeyOptions.MAJOR_MAX_BUCKET_RATIO, "0.302");
 
     PaimonPrimaryKeyOptions options = PaimonPrimaryKeyOptions.from(props);
 
     assertTrue(options.enabled());
     assertEquals(
         Duration.ofMinutes(30), options.partitionIdleTime().orElseThrow(AssertionError::new));
-    assertEquals(12L, options.majorFileCountThreshold().orElseThrow(AssertionError::new));
+    assertEquals(new BigDecimal("0.33"), options.majorMaxBucketRatio());
+  }
+
+  @Test
+  void clampsMajorMaxBucketRatioBelowMinimum() {
+    Map<String, String> props = new HashMap<>();
+    props.put(PaimonPrimaryKeyOptions.MAJOR_MAX_BUCKET_RATIO, "0.329");
+
+    PaimonPrimaryKeyOptions options = PaimonPrimaryKeyOptions.from(props);
+
+    assertEquals(new BigDecimal("0.33"), options.majorMaxBucketRatio());
+  }
+
+  @Test
+  void truncatesMajorMaxBucketRatioWithoutFloatingPointArithmetic() {
+    Map<String, String> props = new HashMap<>();
+    props.put(PaimonPrimaryKeyOptions.MAJOR_MAX_BUCKET_RATIO, "0.341");
+
+    PaimonPrimaryKeyOptions options = PaimonPrimaryKeyOptions.from(props);
+
+    assertEquals(new BigDecimal("0.34"), options.majorMaxBucketRatio());
+
+    props.put(PaimonPrimaryKeyOptions.MAJOR_MAX_BUCKET_RATIO, "0.339");
+    assertEquals(new BigDecimal("0.33"), PaimonPrimaryKeyOptions.from(props).majorMaxBucketRatio());
+
+    props.put(PaimonPrimaryKeyOptions.MAJOR_MAX_BUCKET_RATIO, "1.000");
+    assertEquals(new BigDecimal("1.00"), PaimonPrimaryKeyOptions.from(props).majorMaxBucketRatio());
+  }
+
+  @Test
+  void rejectsInvalidMajorMaxBucketRatios() {
+    for (String value : new String[] {"", "not-a-number", "NaN", "Infinity", "1.001"}) {
+      Map<String, String> props = new HashMap<>();
+      props.put(PaimonPrimaryKeyOptions.MAJOR_MAX_BUCKET_RATIO, value);
+
+      assertThrows(
+          IllegalArgumentException.class, () -> PaimonPrimaryKeyOptions.from(props), value);
+    }
+  }
+
+  @Test
+  void ignoresDeprecatedMajorFileCountThresholdEvenWhenInvalid() {
+    Map<String, String> props = new HashMap<>();
+    props.put(PaimonPrimaryKeyOptions.MAJOR_FILE_COUNT_THRESHOLD, "not-a-number");
+
+    PaimonPrimaryKeyOptions options = PaimonPrimaryKeyOptions.from(props);
+
+    assertEquals(new BigDecimal("0.33"), options.majorMaxBucketRatio());
   }
 
   @Test

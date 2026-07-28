@@ -77,6 +77,10 @@ public class PaimonPrimaryKeyCompactionExecutor
               + ", primaryKeys="
               + table.primaryKeys());
     }
+    if (CoreOptions.fromMap(table.options()).pkClusteringOverride()) {
+      throw new IllegalStateException(
+          "PaimonPrimaryKeyCompactionExecutor does not support pk-clustering-override=true.");
+    }
 
     if (shouldSkipStaleFull(table)) {
       return noOpOutput();
@@ -141,15 +145,25 @@ public class PaimonPrimaryKeyCompactionExecutor
     if (input.getOptimizingType() == null) {
       throw new IllegalStateException("PaimonPrimaryKeyCompactionInput is missing optimizingType.");
     }
-    if (input.getOptimizingType() == OptimizingType.MINOR && input.isFullCompaction()) {
-      throw new IllegalStateException(
-          "Paimon primary-key MINOR compaction requires fullCompaction=false.");
-    }
-    if (input.getOptimizingType() != OptimizingType.MINOR && !input.isFullCompaction()) {
-      throw new IllegalStateException(
-          "Paimon primary-key "
-              + input.getOptimizingType()
-              + " compaction requires fullCompaction=true.");
+    switch (input.getOptimizingType()) {
+      case MINOR:
+      case MAJOR:
+        if (input.isFullCompaction()) {
+          throw new IllegalStateException(
+              "Paimon primary-key "
+                  + input.getOptimizingType()
+                  + " compaction requires fullCompaction=false.");
+        }
+        break;
+      case FULL:
+        if (!input.isFullCompaction()) {
+          throw new IllegalStateException(
+              "Paimon primary-key FULL compaction requires fullCompaction=true.");
+        }
+        break;
+      default:
+        throw new IllegalStateException(
+            "Unsupported Paimon primary-key optimizing type: " + input.getOptimizingType());
     }
   }
 

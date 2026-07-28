@@ -30,6 +30,7 @@ public class PaimonBucketCompactionUnit implements Serializable {
   private byte[] partitionBytes;
   private int bucket;
   private long fileCount;
+  private long sortedRunCount;
   private long fileSizeInBytes;
   private long recordCount;
   private long lastFileCreationTime;
@@ -43,9 +44,28 @@ public class PaimonBucketCompactionUnit implements Serializable {
       long fileSizeInBytes,
       long recordCount,
       long lastFileCreationTime) {
+    this(
+        partitionBytes,
+        bucket,
+        fileCount,
+        fileCount,
+        fileSizeInBytes,
+        recordCount,
+        lastFileCreationTime);
+  }
+
+  public PaimonBucketCompactionUnit(
+      byte[] partitionBytes,
+      int bucket,
+      long fileCount,
+      long sortedRunCount,
+      long fileSizeInBytes,
+      long recordCount,
+      long lastFileCreationTime) {
     this.partitionBytes = partitionBytes;
     this.bucket = bucket;
     this.fileCount = fileCount;
+    this.sortedRunCount = sortedRunCount;
     this.fileSizeInBytes = fileSizeInBytes;
     this.recordCount = recordCount;
     this.lastFileCreationTime = lastFileCreationTime;
@@ -61,6 +81,10 @@ public class PaimonBucketCompactionUnit implements Serializable {
 
   public long getFileCount() {
     return fileCount;
+  }
+
+  public long getSortedRunCount() {
+    return sortedRunCount;
   }
 
   public long getFileSizeInBytes() {
@@ -81,6 +105,7 @@ public class PaimonBucketCompactionUnit implements Serializable {
         .add("partitionBytes", Arrays.toString(partitionBytes))
         .add("bucket", bucket)
         .add("fileCount", fileCount)
+        .add("sortedRunCount", sortedRunCount)
         .add("fileSizeInBytes", fileSizeInBytes)
         .add("recordCount", recordCount)
         .add("lastFileCreationTime", lastFileCreationTime)
