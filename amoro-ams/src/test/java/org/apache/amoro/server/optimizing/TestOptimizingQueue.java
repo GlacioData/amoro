@@ -47,6 +47,9 @@ import org.apache.amoro.metrics.MetricKey;
 import org.apache.amoro.metrics.MetricRegistry;
 import org.apache.amoro.optimizing.RewriteFilesOutput;
 import org.apache.amoro.optimizing.TableOptimizing;
+import org.apache.amoro.optimizing.TableOptimizingCommitter;
+import org.apache.amoro.optimizing.TableOptimizingCommitter.CommitMode;
+import org.apache.amoro.process.ProcessFactory;
 import org.apache.amoro.process.ProcessStatus;
 import org.apache.amoro.resource.ResourceGroup;
 import org.apache.amoro.server.catalog.CatalogManager;
@@ -886,8 +889,7 @@ public class TestOptimizingQueue extends AMSTableTestBase {
   }
 
   @Test
-  public void testPaimonCommittingRunningCompletedProcessIsEligibleForReplayOnRecovery()
-      throws Exception {
+  public void testPlannedCommittingProcessIsNotRecoveryReplay() throws Exception {
     DefaultTableRuntime runtime = initTableWithFiles();
     OptimizingQueue queue = buildOptimizingGroupService(runtime);
     TaskRuntime<?> task = queue.pollTask(optimizerThread, MAX_POLLING_TIME);
@@ -904,12 +906,85 @@ public class TestOptimizingQueue extends AMSTableTestBase {
     Assert.assertNotNull(process);
     Assert.assertEquals(ProcessStatus.RUNNING, process.getStatus());
 
+    Assert.assertFalse(canReplayPaimonCommittingProcess(queue, process));
+    queue.dispose();
+  }
+
+  @Test
+  public void testResolveRecoveryCommitModeRequiresAllReplayConditions() {
+    Assert.assertEquals(
+        CommitMode.RECOVERY_REPLAY,
+        OptimizingQueue.resolveRecoveryCommitMode(
+            TableFormat.PAIMON, OptimizingStatus.COMMITTING, ProcessStatus.RUNNING, true));
+    Assert.assertEquals(
+        CommitMode.NORMAL,
+        OptimizingQueue.resolveRecoveryCommitMode(
+            TableFormat.ICEBERG, OptimizingStatus.COMMITTING, ProcessStatus.RUNNING, true));
+    Assert.assertEquals(
+        CommitMode.NORMAL,
+        OptimizingQueue.resolveRecoveryCommitMode(
+            TableFormat.PAIMON, OptimizingStatus.MINOR_OPTIMIZING, ProcessStatus.RUNNING, true));
+    Assert.assertEquals(
+        CommitMode.NORMAL,
+        OptimizingQueue.resolveRecoveryCommitMode(
+            TableFormat.PAIMON, OptimizingStatus.COMMITTING, ProcessStatus.FAILED, true));
+    Assert.assertEquals(
+        CommitMode.NORMAL,
+        OptimizingQueue.resolveRecoveryCommitMode(
+            TableFormat.PAIMON, OptimizingStatus.COMMITTING, ProcessStatus.RUNNING, false));
+  }
+
+  @Test
+  public void testRecoveredPaimonProcessPropagatesRecoveryReplayMode() throws Exception {
+    DefaultTableRuntime runtime = initTableWithFiles();
+    OptimizingQueue originalQueue = buildOptimizingGroupService(runtime);
+    TaskRuntime<?> task = originalQueue.pollTask(optimizerThread, MAX_POLLING_TIME);
+    Assert.assertNotNull(task);
+    task.ack(optimizerThread);
+    task.complete(
+        optimizerThread,
+        new OptimizingTaskResult(task.getTaskId(), optimizerThread.getThreadId())
+            .setTaskOutput(
+                SerializationUtil.simpleSerialize(new RewriteFilesOutput(null, null, null))));
+    Assert.assertEquals(OptimizingStatus.COMMITTING, runtime.getOptimizingStatus());
+
     DefaultTableRuntime paimonRuntime = Mockito.spy(runtime);
     Mockito.doReturn(TableFormat.PAIMON).when(paimonRuntime).getFormat();
+    RecordingCommitter recordingCommitter = new RecordingCommitter();
+    ProcessFactory factory = Mockito.mock(ProcessFactory.class);
+    Mockito.when(factory.supportedFormats()).thenReturn(Collections.singleton(TableFormat.PAIMON));
+    Mockito.when(
+            factory.createCommitter(
+                Mockito.any(),
+                Mockito.anyLong(),
+                Mockito.anyLong(),
+                Mockito.anyCollection(),
+                Mockito.anyMap(),
+                Mockito.anyMap()))
+        .thenReturn(recordingCommitter);
+    ProcessFactoryRouter replayRouter =
+        new ProcessFactoryRouter(Collections.singletonList(factory));
+    OptimizingQueue recoveryQueue =
+        new OptimizingQueue(
+            CATALOG_MANAGER,
+            new ResourceGroup.Builder("paimon-recovery-test", "local").build(),
+            quotaProvider,
+            planExecutor,
+            Collections.singletonList(paimonRuntime),
+            1,
+            replayRouter);
 
-    Assert.assertTrue(canReplayPaimonCommittingProcess(queue, process, paimonRuntime));
-    Assert.assertFalse(canReplayPaimonCommittingProcess(queue, process, runtime));
-    queue.dispose();
+    OptimizingProcess recoveredProcess = paimonRuntime.getOptimizingProcess();
+    Assert.assertNotNull(recoveredProcess);
+    Assert.assertEquals(CommitMode.RECOVERY_REPLAY, commitMode(recoveredProcess));
+    Assert.assertTrue(canReplayPaimonCommittingProcess(recoveryQueue, recoveredProcess));
+
+    recoveredProcess.commit();
+
+    Assert.assertEquals(CommitMode.RECOVERY_REPLAY, recordingCommitter.commitMode);
+    Assert.assertEquals(0, recordingCommitter.legacyCommitCount);
+    recoveryQueue.dispose();
+    originalQueue.dispose();
   }
 
   @Test
@@ -1162,6 +1237,7 @@ public class TestOptimizingQueue extends AMSTableTestBase {
     Method getFormat = process.getClass().getDeclaredMethod("getFormat");
     getFormat.setAccessible(true);
     Assert.assertEquals(tableRuntime.getFormat(), getFormat.invoke(process));
+    Assert.assertEquals(CommitMode.NORMAL, commitMode(process));
 
     queue.dispose();
   }
@@ -1215,14 +1291,34 @@ public class TestOptimizingQueue extends AMSTableTestBase {
     field.set(runtime, process);
   }
 
-  private boolean canReplayPaimonCommittingProcess(
-      OptimizingQueue queue, OptimizingProcess process, DefaultTableRuntime tableRuntime)
+  private boolean canReplayPaimonCommittingProcess(OptimizingQueue queue, OptimizingProcess process)
       throws Exception {
     Method method =
         OptimizingQueue.class.getDeclaredMethod(
-            "canReplayPaimonCommittingProcess", process.getClass(), DefaultTableRuntime.class);
+            "canReplayPaimonCommittingProcess", process.getClass());
     method.setAccessible(true);
-    return (boolean) method.invoke(queue, process, tableRuntime);
+    return (boolean) method.invoke(queue, process);
+  }
+
+  private CommitMode commitMode(OptimizingProcess process) throws ReflectiveOperationException {
+    Method method = process.getClass().getDeclaredMethod("getCommitMode");
+    method.setAccessible(true);
+    return (CommitMode) method.invoke(process);
+  }
+
+  private static class RecordingCommitter implements TableOptimizingCommitter {
+    private CommitMode commitMode;
+    private int legacyCommitCount;
+
+    @Override
+    public void commit() {
+      legacyCommitCount++;
+    }
+
+    @Override
+    public void commit(CommitMode mode) {
+      commitMode = mode;
+    }
   }
 
   private boolean invokePrepareOwnerForPlanning(

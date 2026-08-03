@@ -22,6 +22,7 @@ import org.apache.amoro.exception.OptimizingCommitException;
 import org.apache.amoro.formats.paimon.PaimonTable;
 import org.apache.amoro.optimizing.OptimizingType;
 import org.apache.amoro.optimizing.TableOptimizingCommitter;
+import org.apache.amoro.optimizing.TableOptimizingCommitter.CommitMode;
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.Snapshot;
 import org.apache.paimon.table.FileStoreTable;
@@ -36,6 +37,7 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.TimeUnit;
 
 public class PaimonPrimaryKeyTableCommit implements TableOptimizingCommitter {
 
@@ -64,6 +66,11 @@ public class PaimonPrimaryKeyTableCommit implements TableOptimizingCommitter {
 
   @Override
   public void commit() throws OptimizingCommitException {
+    commit(CommitMode.NORMAL);
+  }
+
+  @Override
+  public void commit(CommitMode mode) throws OptimizingCommitException {
     if (successTasks == null || successTasks.isEmpty()) {
       LOG.info("PaimonPrimaryKeyTableCommit: no success tasks for table={} - skip commit.", name());
       return;
@@ -88,14 +95,18 @@ public class PaimonPrimaryKeyTableCommit implements TableOptimizingCommitter {
           name());
       return;
     }
+    if (mode == null) {
+      throw new OptimizingCommitException(
+          "Paimon primary-key commit mode must not be null for table=" + name(), false);
+    }
 
     try {
       if (paimonTable == null) {
-        commitMessages(messages, identity);
+        commitMessages(messages, identity.commitUser, identity.commitIdentifier, mode);
       } else {
         paimonTable.doAs(
             () -> {
-              commitMessages(messages, identity);
+              commitMessages(messages, identity.commitUser, identity.commitIdentifier, mode);
               return null;
             });
       }
@@ -223,23 +234,162 @@ public class PaimonPrimaryKeyTableCommit implements TableOptimizingCommitter {
     return !latestSnapshot.isPresent() || latestSnapshot.get().id() != identity.targetSnapshotId;
   }
 
-  private void commitMessages(List<CommitMessage> messages, CommitIdentity identity)
+  void commitMessages(
+      List<CommitMessage> messages, String commitUser, long commitIdentifier, CommitMode mode)
       throws OptimizingCommitException {
-    try (StreamTableCommit commit = table.newCommit(identity.commitUser)) {
-      int committed =
-          commit.filterAndCommit(Collections.singletonMap(identity.commitIdentifier, messages));
-      LOG.info(
-          "PaimonPrimaryKeyTableCommit: committed {} identifier(s), {} messages for table={} "
-              + "commitUser={} identifier={}",
-          committed,
-          messages.size(),
-          name(),
-          identity.commitUser,
-          identity.commitIdentifier);
-    } catch (Exception e) {
-      throw new OptimizingCommitException(
-          "Paimon primary-key commit failed for table=" + name(), e);
+    if (mode == CommitMode.RECOVERY_REPLAY) {
+      try {
+        filterAndCommitOnce(messages, commitUser, commitIdentifier, mode, "recovery");
+      } catch (Exception failure) {
+        throw filterFailure(commitIdentifier, mode, "recovery", failure);
+      }
+      return;
     }
+
+    long directStartNanos = System.nanoTime();
+    LOG.info(
+        "PaimonPrimaryKeyTableCommit: commit start mode={} api=commit stage=direct table={} "
+            + "commitUser={} identifier={} messageCount={}",
+        mode,
+        name(),
+        commitUser,
+        commitIdentifier,
+        messages.size());
+    Exception directFailure;
+    try {
+      directCommitOnce(messages, commitUser, commitIdentifier);
+      LOG.info(
+          "PaimonPrimaryKeyTableCommit: commit success mode={} api=commit stage=direct table={} "
+              + "commitUser={} identifier={} messageCount={} elapsedMs={}",
+          mode,
+          name(),
+          commitUser,
+          commitIdentifier,
+          messages.size(),
+          elapsedMillis(directStartNanos));
+      return;
+    } catch (Exception failure) {
+      directFailure = failure;
+      LOG.warn(
+          "PaimonPrimaryKeyTableCommit: commit failed mode={} api=commit stage=direct table={} "
+              + "commitUser={} identifier={} messageCount={} elapsedMs={}, "
+              + "trying one idempotent fallback",
+          mode,
+          name(),
+          commitUser,
+          commitIdentifier,
+          messages.size(),
+          elapsedMillis(directStartNanos),
+          failure);
+    }
+
+    try {
+      filterAndCommitOnce(messages, commitUser, commitIdentifier, mode, "fallback");
+    } catch (Exception fallbackFailure) {
+      OptimizingCommitException finalFailure =
+          new OptimizingCommitException(
+              "Paimon primary-key direct commit and idempotent fallback failed for table="
+                  + name()
+                  + " identifier="
+                  + commitIdentifier,
+              fallbackFailure);
+      finalFailure.addSuppressed(directFailure);
+      throw finalFailure;
+    }
+  }
+
+  private void directCommitOnce(
+      List<CommitMessage> messages, String commitUser, long commitIdentifier) throws Exception {
+    try (StreamTableCommit directCommit = table.newCommit(commitUser)) {
+      directCommit.commit(commitIdentifier, messages);
+    }
+  }
+
+  private int filterAndCommitOnce(
+      List<CommitMessage> messages,
+      String commitUser,
+      long commitIdentifier,
+      CommitMode mode,
+      String stage)
+      throws Exception {
+    long startNanos = System.nanoTime();
+    LOG.info(
+        "PaimonPrimaryKeyTableCommit: commit start mode={} api=filterAndCommit stage={} table={} "
+            + "commitUser={} identifier={} messageCount={}",
+        mode,
+        stage,
+        name(),
+        commitUser,
+        commitIdentifier,
+        messages.size());
+    int committed;
+    try (StreamTableCommit commit = table.newCommit(commitUser)) {
+      committed = commit.filterAndCommit(Collections.singletonMap(commitIdentifier, messages));
+    } catch (Exception failure) {
+      LOG.warn(
+          "PaimonPrimaryKeyTableCommit: commit failed mode={} api=filterAndCommit stage={} table={} "
+              + "commitUser={} identifier={} messageCount={} elapsedMs={}",
+          mode,
+          stage,
+          name(),
+          commitUser,
+          commitIdentifier,
+          messages.size(),
+          elapsedMillis(startNanos),
+          failure);
+      throw failure;
+    }
+    if (committed != 0 && committed != 1) {
+      IllegalStateException failure =
+          new IllegalStateException(
+              "filterAndCommit returned "
+                  + committed
+                  + " for one commit identity; expected 0 or 1");
+      LOG.warn(
+          "PaimonPrimaryKeyTableCommit: commit failed mode={} api=filterAndCommit stage={} table={} "
+              + "commitUser={} identifier={} messageCount={} elapsedMs={}",
+          mode,
+          stage,
+          name(),
+          commitUser,
+          commitIdentifier,
+          messages.size(),
+          elapsedMillis(startNanos),
+          failure);
+      throw failure;
+    }
+    LOG.info(
+        "PaimonPrimaryKeyTableCommit: commit success mode={} api=filterAndCommit stage={} table={} "
+            + "commitUser={} identifier={} messageCount={} committedIdentifiers={} elapsedMs={}",
+        mode,
+        stage,
+        name(),
+        commitUser,
+        commitIdentifier,
+        messages.size(),
+        committed,
+        elapsedMillis(startNanos));
+    return committed;
+  }
+
+  private OptimizingCommitException filterFailure(
+      long commitIdentifier, CommitMode mode, String stage, Exception failure) {
+    return new OptimizingCommitException(
+        "Paimon primary-key filterAndCommit failed in mode="
+            + mode
+            + " stage="
+            + stage
+            + " for table="
+            + name()
+            + " identifier="
+            + commitIdentifier
+            + ": "
+            + failure.getMessage(),
+        failure);
+  }
+
+  private static long elapsedMillis(long startNanos) {
+    return TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
   }
 
   private String name() {

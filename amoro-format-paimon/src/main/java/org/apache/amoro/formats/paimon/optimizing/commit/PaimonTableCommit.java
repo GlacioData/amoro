@@ -23,6 +23,7 @@ import org.apache.amoro.formats.paimon.PaimonTable;
 import org.apache.amoro.formats.paimon.optimizing.PaimonCompactionOutput;
 import org.apache.amoro.formats.paimon.optimizing.PaimonCompactionTask;
 import org.apache.amoro.optimizing.TableOptimizingCommitter;
+import org.apache.amoro.optimizing.TableOptimizingCommitter.CommitMode;
 import org.apache.paimon.table.AppendOnlyFileStoreTable;
 import org.apache.paimon.table.sink.CommitMessage;
 import org.apache.paimon.table.sink.CommitMessageSerializer;
@@ -34,14 +35,18 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 
 /**
  * AMS-side committer for Paimon BUCKET_UNAWARE compaction.
  *
  * <p>Deserialises every {@link CommitMessage} carried by {@link PaimonCompactionTask#getOutput()},
  * then performs a single atomic commit via Paimon's {@link
- * AppendOnlyFileStoreTable#newCommit(String)} and {@link StreamTableCommit#filterAndCommit} so
- * replaying the same {@code (commitUser, commitIdentifier)} is filtered before touching files.
+ * AppendOnlyFileStoreTable#newCommit(String)}. A normal first attempt uses {@link
+ * StreamTableCommit#commit(long, List)} without scanning historical snapshots. Recovery replay, and
+ * the single fallback after an ambiguous normal failure, use {@link
+ * StreamTableCommit#filterAndCommit} to preserve idempotency for the same {@code (commitUser,
+ * commitIdentifier)}.
  *
  * <p>The caller is expected to pass the persisted plan commit identifier from {@link
  * org.apache.amoro.formats.paimon.optimizing.PaimonCompactionInput#getCommitIdentifier()}.
@@ -96,9 +101,14 @@ public class PaimonTableCommit implements TableOptimizingCommitter {
 
   @Override
   public void commit() throws OptimizingCommitException {
+    commit(CommitMode.NORMAL);
+  }
+
+  @Override
+  public void commit(CommitMode mode) throws OptimizingCommitException {
     if (successTasks == null || successTasks.isEmpty()) {
       LOG.info(
-          "PaimonTableCommit: no success tasks for table={} commitUser={} — skip commit.",
+          "PaimonTableCommit: no success tasks for table={} commitUser={} - skip commit.",
           table.name(),
           commitUser);
       return;
@@ -143,13 +153,17 @@ public class PaimonTableCommit implements TableOptimizingCommitter {
               + table.name(),
           /* causedByVersionMismatch */ false);
     }
+    if (mode == null) {
+      throw new OptimizingCommitException(
+          "Paimon commit mode must not be null for table=" + table.name(), false);
+    }
     try {
       if (paimonTable == null) {
-        commitMessages(messages);
+        commitMessages(messages, mode);
       } else {
         paimonTable.doAs(
             () -> {
-              commitMessages(messages);
+              commitMessages(messages, mode);
               return null;
             });
       }
@@ -157,27 +171,159 @@ public class PaimonTableCommit implements TableOptimizingCommitter {
       if (e.getCause() instanceof OptimizingCommitException) {
         throw (OptimizingCommitException) e.getCause();
       }
-      throw e;
+      throw new OptimizingCommitException(
+          "Paimon commit failed for table=" + table.name() + " identifier=" + commitIdentifier, e);
     }
   }
 
-  private void commitMessages(List<CommitMessage> messages) throws OptimizingCommitException {
-    try (StreamTableCommit commit = table.newCommit(commitUser)) {
-      int committed = commit.filterAndCommit(Collections.singletonMap(commitIdentifier, messages));
+  void commitMessages(List<CommitMessage> messages, CommitMode mode)
+      throws OptimizingCommitException {
+    if (mode == CommitMode.RECOVERY_REPLAY) {
+      try {
+        filterAndCommitOnce(messages, mode, "recovery");
+      } catch (Exception failure) {
+        throw filterFailure(mode, "recovery", failure);
+      }
+      return;
+    }
+
+    long directStartNanos = System.nanoTime();
+    LOG.info(
+        "PaimonTableCommit: commit start mode={} api=commit stage=direct table={} "
+            + "commitUser={} identifier={} messageCount={}",
+        mode,
+        table.name(),
+        commitUser,
+        commitIdentifier,
+        messages.size());
+    Exception directFailure;
+    try {
+      directCommitOnce(messages);
       LOG.info(
-          "PaimonTableCommit: committed {} identifier(s), {} messages for table={} "
-              + "commitUser={} identifier={}",
-          committed,
-          messages.size(),
+          "PaimonTableCommit: commit success mode={} api=commit stage=direct table={} "
+              + "commitUser={} identifier={} messageCount={} elapsedMs={}",
+          mode,
           table.name(),
           commitUser,
-          commitIdentifier);
-    } catch (RuntimeException e) {
-      throw new OptimizingCommitException(
-          "Paimon commit failed for table=" + table.name() + " identifier=" + commitIdentifier, e);
-    } catch (Exception e) {
-      throw new OptimizingCommitException(
-          "Unexpected error closing Paimon commit for table=" + table.name(), e);
+          commitIdentifier,
+          messages.size(),
+          elapsedMillis(directStartNanos));
+      return;
+    } catch (Exception failure) {
+      directFailure = failure;
+      LOG.warn(
+          "PaimonTableCommit: commit failed mode={} api=commit stage=direct table={} "
+              + "commitUser={} identifier={} messageCount={} elapsedMs={}, "
+              + "trying one idempotent fallback",
+          mode,
+          table.name(),
+          commitUser,
+          commitIdentifier,
+          messages.size(),
+          elapsedMillis(directStartNanos),
+          failure);
     }
+
+    try {
+      filterAndCommitOnce(messages, mode, "fallback");
+    } catch (Exception fallbackFailure) {
+      OptimizingCommitException finalFailure =
+          new OptimizingCommitException(
+              "Paimon commit failed: direct commit and idempotent fallback failed for table="
+                  + table.name()
+                  + " identifier="
+                  + commitIdentifier,
+              fallbackFailure);
+      finalFailure.addSuppressed(directFailure);
+      throw finalFailure;
+    }
+  }
+
+  private void directCommitOnce(List<CommitMessage> messages) throws Exception {
+    try (StreamTableCommit directCommit = table.newCommit(commitUser)) {
+      directCommit.commit(commitIdentifier, messages);
+    }
+  }
+
+  private int filterAndCommitOnce(List<CommitMessage> messages, CommitMode mode, String stage)
+      throws Exception {
+    long startNanos = System.nanoTime();
+    LOG.info(
+        "PaimonTableCommit: commit start mode={} api=filterAndCommit stage={} table={} "
+            + "commitUser={} identifier={} messageCount={}",
+        mode,
+        stage,
+        table.name(),
+        commitUser,
+        commitIdentifier,
+        messages.size());
+    int committed;
+    try (StreamTableCommit commit = table.newCommit(commitUser)) {
+      committed = commit.filterAndCommit(Collections.singletonMap(commitIdentifier, messages));
+    } catch (Exception failure) {
+      LOG.warn(
+          "PaimonTableCommit: commit failed mode={} api=filterAndCommit stage={} table={} "
+              + "commitUser={} identifier={} messageCount={} elapsedMs={}",
+          mode,
+          stage,
+          table.name(),
+          commitUser,
+          commitIdentifier,
+          messages.size(),
+          elapsedMillis(startNanos),
+          failure);
+      throw failure;
+    }
+    if (committed != 0 && committed != 1) {
+      IllegalStateException failure =
+          new IllegalStateException(
+              "filterAndCommit returned "
+                  + committed
+                  + " for one commit identity; expected 0 or 1");
+      LOG.warn(
+          "PaimonTableCommit: commit failed mode={} api=filterAndCommit stage={} table={} "
+              + "commitUser={} identifier={} messageCount={} elapsedMs={}",
+          mode,
+          stage,
+          table.name(),
+          commitUser,
+          commitIdentifier,
+          messages.size(),
+          elapsedMillis(startNanos),
+          failure);
+      throw failure;
+    }
+    LOG.info(
+        "PaimonTableCommit: commit success mode={} api=filterAndCommit stage={} table={} "
+            + "commitUser={} identifier={} messageCount={} committedIdentifiers={} elapsedMs={}",
+        mode,
+        stage,
+        table.name(),
+        commitUser,
+        commitIdentifier,
+        messages.size(),
+        committed,
+        elapsedMillis(startNanos));
+    return committed;
+  }
+
+  private OptimizingCommitException filterFailure(
+      CommitMode mode, String stage, Exception failure) {
+    return new OptimizingCommitException(
+        "Paimon filterAndCommit failed in mode="
+            + mode
+            + " stage="
+            + stage
+            + " for table="
+            + table.name()
+            + " identifier="
+            + commitIdentifier
+            + ": "
+            + failure.getMessage(),
+        failure);
+  }
+
+  private static long elapsedMillis(long startNanos) {
+    return TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
   }
 }

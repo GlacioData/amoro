@@ -29,6 +29,7 @@ import java.nio.ByteBuffer;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 
 @DisplayName("Test optimizing SPI interfaces after moving to amoro-common")
 public class TestOptimizingSpiInterfaces {
@@ -96,6 +97,19 @@ public class TestOptimizingSpiInterfaces {
     assertNotNull(deserialized);
     assertEquals("value1", deserialized.getOptions().get("key1"));
     assertEquals("value2", deserialized.getOptions().get("key2"));
+  }
+
+  @Test
+  @DisplayName("Commit mode overload should preserve legacy committer behavior")
+  void testCommitModeOverloadPreservesLegacyCommitterBehavior() throws Exception {
+    AtomicInteger commitCount = new AtomicInteger();
+    TableOptimizingCommitter legacyCommitter = commitCount::incrementAndGet;
+
+    legacyCommitter.commit(TableOptimizingCommitter.CommitMode.NORMAL);
+    assertEquals(1, commitCount.get());
+
+    legacyCommitter.commit(TableOptimizingCommitter.CommitMode.RECOVERY_REPLAY);
+    assertEquals(2, commitCount.get());
   }
 
   private BaseOptimizingInput createTestInput() {
