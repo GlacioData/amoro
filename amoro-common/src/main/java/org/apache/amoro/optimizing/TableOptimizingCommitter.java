@@ -27,6 +27,22 @@ import org.apache.amoro.exception.OptimizingCommitException;
  */
 public interface TableOptimizingCommitter {
 
+  /** Describes whether a commit is a normal first attempt or a replay after AMS recovery. */
+  enum CommitMode {
+    NORMAL,
+    RECOVERY_REPLAY
+  }
+
   /** Commit the optimizing results to the table. */
   void commit() throws OptimizingCommitException;
+
+  /**
+   * Commit the optimizing results using the requested mode.
+   *
+   * <p>The default implementation preserves compatibility for format committers that do not need
+   * recovery-specific behavior.
+   */
+  default void commit(CommitMode mode) throws OptimizingCommitException {
+    commit();
+  }
 }

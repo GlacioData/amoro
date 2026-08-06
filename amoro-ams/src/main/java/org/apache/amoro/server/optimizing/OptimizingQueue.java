@@ -33,6 +33,7 @@ import org.apache.amoro.optimizing.MetricsSummary;
 import org.apache.amoro.optimizing.OptimizingPlanResult;
 import org.apache.amoro.optimizing.OptimizingType;
 import org.apache.amoro.optimizing.TableOptimizingCommitter;
+import org.apache.amoro.optimizing.TableOptimizingCommitter.CommitMode;
 import org.apache.amoro.optimizing.TableOptimizingPlanner;
 import org.apache.amoro.optimizing.TaskMetricsSummary;
 import org.apache.amoro.optimizing.TaskProperties;
@@ -161,7 +162,7 @@ public class OptimizingQueue extends PersistentBase {
       tableRuntime.resetTaskQuotas(
           System.currentTimeMillis() - AmoroServiceConstants.QUOTA_LOOK_BACK_TIME);
 
-      if (canReplayPaimonCommittingProcess(process, tableRuntime)) {
+      if (canReplayPaimonCommittingProcess(process)) {
         LOG.info(
             "Paimon process {} on table {} is already COMMITTING with completed tasks during"
                 + " recovery, keeping it for commit replay",
@@ -222,13 +223,22 @@ public class OptimizingQueue extends PersistentBase {
         && tableRuntime.getOptimizingStatus() != OptimizingStatus.COMMITTING;
   }
 
-  private boolean canReplayPaimonCommittingProcess(
-      TableOptimizingProcess process, DefaultTableRuntime tableRuntime) {
-    return tableRuntime.getFormat() == TableFormat.PAIMON
-        && process != null
-        && process.getStatus() == ProcessStatus.RUNNING
-        && tableRuntime.getOptimizingStatus() == OptimizingStatus.COMMITTING
-        && process.allTasksPrepared();
+  private boolean canReplayPaimonCommittingProcess(TableOptimizingProcess process) {
+    return process != null && process.getCommitMode() == CommitMode.RECOVERY_REPLAY;
+  }
+
+  @VisibleForTesting
+  static CommitMode resolveRecoveryCommitMode(
+      TableFormat format,
+      OptimizingStatus recoveredOptimizingStatus,
+      ProcessStatus processStatus,
+      boolean allTasksPrepared) {
+    return format == TableFormat.PAIMON
+            && recoveredOptimizingStatus == OptimizingStatus.COMMITTING
+            && processStatus == ProcessStatus.RUNNING
+            && allTasksPrepared
+        ? CommitMode.RECOVERY_REPLAY
+        : CommitMode.NORMAL;
   }
 
   private void resetTableForRecovery(
@@ -750,6 +760,7 @@ public class OptimizingQueue extends PersistentBase {
     private final long planTime;
     private final long targetSnapshotId;
     private final long targetChangeSnapshotId;
+    private final CommitMode commitMode;
     // Widened to StagedTaskDescriptor<?,?,?> so non-Iceberg formats (Paimon today, Mixed-Hive
     // tomorrow) share the same process/queue machinery without unchecked downcasts.
     private final Map<OptimizingTaskId, TaskRuntime<? extends StagedTaskDescriptor<?, ?, ?>>>
@@ -802,6 +813,7 @@ public class OptimizingQueue extends PersistentBase {
       planTime = planResult.getPlanTime();
       targetSnapshotId = planResult.getTargetSnapshotId();
       targetChangeSnapshotId = planResult.getTargetChangeSnapshotId();
+      commitMode = CommitMode.NORMAL;
       loadTaskRuntimes(planResult.getTasks());
       fromSequence = planResult.getFromSequence();
       toSequence = planResult.getToSequence();
@@ -819,6 +831,7 @@ public class OptimizingQueue extends PersistentBase {
       targetSnapshotId = processState.getTargetSnapshotId();
       targetChangeSnapshotId = processState.getTargetChangeSnapshotId();
       planTime = processMeta.getCreateTime();
+      OptimizingStatus recoveredOptimizingStatus = tableRuntime.getOptimizingStatus();
       if (processState.getFromSequence() != null) {
         fromSequence = processState.getFromSequence();
       }
@@ -828,6 +841,8 @@ public class OptimizingQueue extends PersistentBase {
       this.status = processMeta.getStatus();
       tableRuntime.recover(this);
       loadTaskRuntimes(this);
+      commitMode =
+          resolveRecoveryCommitMode(format, recoveredOptimizingStatus, status, allTasksPrepared());
     }
 
     private int getQuotaLimit() {
@@ -849,6 +864,10 @@ public class OptimizingQueue extends PersistentBase {
 
     TableFormat getFormat() {
       return format;
+    }
+
+    CommitMode getCommitMode() {
+      return commitMode;
     }
 
     @Override
@@ -1092,7 +1111,7 @@ public class OptimizingQueue extends PersistentBase {
             persistAndSetCompleted(false);
             return;
           }
-          buildCommit().commit();
+          buildCommit().commit(commitMode);
           if (allTasksPrepared()) {
             status = ProcessStatus.SUCCESS;
           } else if (taskMap.values().stream()

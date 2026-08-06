@@ -47,6 +47,7 @@ import org.apache.amoro.optimizing.OptimizingType;
 import org.apache.amoro.optimizing.RewriteFilesInput;
 import org.apache.amoro.optimizing.RewriteStageTask;
 import org.apache.amoro.optimizing.TableOptimizingCommitter;
+import org.apache.amoro.optimizing.TableOptimizingCommitter.CommitMode;
 import org.apache.amoro.optimizing.TaskMetricsSummary;
 import org.apache.amoro.optimizing.TaskProperties;
 import org.apache.amoro.process.StagedTaskDescriptor;
@@ -440,6 +441,15 @@ public class TestPaimonOptimizingE2E {
     assertEquals(9009L, firstSnapshot.commitIdentifier());
     assertEquals(rowsBefore, readRowStrings(afterFirstCommit));
 
+    appendRows(
+        catalog.getTable(id), GenericRow.of(9999, BinaryString.fromString("after-first-commit")));
+    AppendOnlyFileStoreTable beforeReplay = (AppendOnlyFileStoreTable) catalog.getTable(id);
+    long snapshotBeforeReplay = beforeReplay.snapshotManager().latestSnapshot().id();
+    List<String> rowsBeforeReplay = readRowStrings(beforeReplay);
+    assertTrue(
+        snapshotBeforeReplay > snapshotAfterFirst,
+        "Fixture must place another commit user's snapshot after the compact snapshot");
+
     factory
         .createCommitter(
             wrapped,
@@ -448,14 +458,15 @@ public class TestPaimonOptimizingE2E {
             asDescriptors(recoveredSuccessTasks),
             Collections.emptyMap(),
             Collections.emptyMap())
-        .commit();
+        .commit(CommitMode.RECOVERY_REPLAY);
 
     AppendOnlyFileStoreTable afterReplay = (AppendOnlyFileStoreTable) catalog.getTable(id);
     assertEquals(
-        snapshotAfterFirst,
+        snapshotBeforeReplay,
         afterReplay.snapshotManager().latestSnapshot().id(),
-        "Recovered replay must reuse the same commitUser + commitIdentifier and create no snapshot");
-    assertEquals(rowsBefore, readRowStrings(afterReplay));
+        "Recovered replay must find the original identity behind newer snapshots and create no "
+            + "snapshot");
+    assertEquals(rowsBeforeReplay, readRowStrings(afterReplay));
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -590,6 +601,19 @@ public class TestPaimonOptimizingE2E {
       }
     }
     return catalog.getTable(id);
+  }
+
+  private static void appendRows(Table table, GenericRow... rows) throws Exception {
+    BatchWriteBuilder builder = table.newBatchWriteBuilder();
+    try (BatchTableWrite write = builder.newWrite()) {
+      for (GenericRow row : rows) {
+        write.write(row);
+      }
+      List<CommitMessage> messages = write.prepareCommit();
+      try (BatchTableCommit commit = builder.newCommit()) {
+        commit.commit(messages);
+      }
+    }
   }
 
   private static long countDataFiles(AppendOnlyFileStoreTable table) throws Exception {

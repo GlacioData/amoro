@@ -19,8 +19,17 @@
 package org.apache.amoro.formats.paimon.optimizing.commit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyMap;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 import org.apache.amoro.exception.OptimizingCommitException;
 import org.apache.amoro.formats.paimon.PaimonCatalogFactory;
@@ -30,6 +39,7 @@ import org.apache.amoro.formats.paimon.optimizing.PaimonCompactionOutput;
 import org.apache.amoro.formats.paimon.optimizing.PaimonCompactionTask;
 import org.apache.amoro.formats.paimon.optimizing.plan.PaimonOptimizingPlanner;
 import org.apache.amoro.optimizing.OptimizingPlanResult;
+import org.apache.amoro.optimizing.TableOptimizingCommitter.CommitMode;
 import org.apache.amoro.table.TableIdentifier;
 import org.apache.amoro.utils.SerializationUtil;
 import org.apache.hadoop.conf.Configuration;
@@ -51,11 +61,13 @@ import org.apache.paimon.table.sink.BatchWriteBuilder;
 import org.apache.paimon.table.sink.CommitMessage;
 import org.apache.paimon.table.sink.CommitMessageImpl;
 import org.apache.paimon.table.sink.CommitMessageSerializer;
+import org.apache.paimon.table.sink.TableCommitImpl;
 import org.apache.paimon.table.source.ReadBuilder;
 import org.apache.paimon.types.DataTypes;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.mockito.InOrder;
 
 import java.nio.ByteBuffer;
 import java.nio.file.Path;
@@ -265,7 +277,7 @@ public class TestPaimonTableCommit {
     PaimonTableCommit replay =
         new PaimonTableCommit(
             (AppendOnlyFileStoreTable) catalog.getTable(id), tasks, commitUser, commitIdentifier);
-    replay.commit();
+    replay.commit(CommitMode.RECOVERY_REPLAY);
 
     AppendOnlyFileStoreTable afterReplay = (AppendOnlyFileStoreTable) catalog.getTable(id);
     assertEquals(
@@ -273,6 +285,160 @@ public class TestPaimonTableCommit {
         afterReplay.snapshotManager().latestSnapshot().id(),
         "Replay with the same commit identifier must not create a new snapshot");
     assertEquals(rowsBefore, readRowStrings(afterReplay), "Replay must preserve row content");
+  }
+
+  @Test
+  @DisplayName("NORMAL mode uses direct commit without historical filtering")
+  void testNormalModeUsesDirectCommit() throws Exception {
+    AppendOnlyFileStoreTable table = mock(AppendOnlyFileStoreTable.class);
+    TableCommitImpl directCommit = mock(TableCommitImpl.class);
+    List<CommitMessage> messages = Collections.singletonList(mock(CommitMessage.class));
+    when(table.name()).thenReturn("direct-table");
+    when(table.newCommit("direct-user")).thenReturn(directCommit);
+
+    new PaimonTableCommit(table, Collections.emptyList(), "direct-user", 101L)
+        .commitMessages(messages, CommitMode.NORMAL);
+
+    verify(directCommit).commit(101L, messages);
+    verify(directCommit, never()).filterAndCommit(anyMap());
+    verify(directCommit).close();
+    verify(table).newCommit("direct-user");
+  }
+
+  @Test
+  @DisplayName("NORMAL failure retries once with a fresh filterAndCommit")
+  void testNormalFailureFallsBackWithFreshCommit() throws Exception {
+    AppendOnlyFileStoreTable table = mock(AppendOnlyFileStoreTable.class);
+    TableCommitImpl directCommit = mock(TableCommitImpl.class);
+    TableCommitImpl fallbackCommit = mock(TableCommitImpl.class);
+    List<CommitMessage> messages = Collections.singletonList(mock(CommitMessage.class));
+    RuntimeException directFailure = new RuntimeException("direct-failure");
+    when(table.name()).thenReturn("fallback-table");
+    when(table.newCommit("fallback-user")).thenReturn(directCommit, fallbackCommit);
+    doThrow(directFailure).when(directCommit).commit(102L, messages);
+    when(fallbackCommit.filterAndCommit(Collections.singletonMap(102L, messages))).thenReturn(1);
+
+    new PaimonTableCommit(table, Collections.emptyList(), "fallback-user", 102L)
+        .commitMessages(messages, CommitMode.NORMAL);
+
+    InOrder order = inOrder(table, directCommit, fallbackCommit);
+    order.verify(table).newCommit("fallback-user");
+    order.verify(directCommit).commit(102L, messages);
+    order.verify(directCommit).close();
+    order.verify(table).newCommit("fallback-user");
+    order.verify(fallbackCommit).filterAndCommit(Collections.singletonMap(102L, messages));
+    order.verify(fallbackCommit).close();
+    verify(table, times(2)).newCommit("fallback-user");
+  }
+
+  @Test
+  @DisplayName("RECOVERY_REPLAY mode only uses filterAndCommit")
+  void testRecoveryReplayOnlyUsesFilterAndCommit() throws Exception {
+    AppendOnlyFileStoreTable table = mock(AppendOnlyFileStoreTable.class);
+    TableCommitImpl replayCommit = mock(TableCommitImpl.class);
+    List<CommitMessage> messages = Collections.singletonList(mock(CommitMessage.class));
+    when(table.name()).thenReturn("replay-table");
+    when(table.newCommit("replay-user")).thenReturn(replayCommit);
+    when(replayCommit.filterAndCommit(Collections.singletonMap(103L, messages))).thenReturn(0);
+
+    new PaimonTableCommit(table, Collections.emptyList(), "replay-user", 103L)
+        .commitMessages(messages, CommitMode.RECOVERY_REPLAY);
+
+    verify(replayCommit, never()).commit(103L, messages);
+    verify(replayCommit).filterAndCommit(Collections.singletonMap(103L, messages));
+    verify(replayCommit).close();
+    verify(table).newCommit("replay-user");
+  }
+
+  @Test
+  @DisplayName("A direct close failure triggers the idempotent fallback")
+  void testDirectCloseFailureTriggersFallback() throws Exception {
+    AppendOnlyFileStoreTable table = mock(AppendOnlyFileStoreTable.class);
+    TableCommitImpl directCommit = mock(TableCommitImpl.class);
+    TableCommitImpl fallbackCommit = mock(TableCommitImpl.class);
+    List<CommitMessage> messages = Collections.singletonList(mock(CommitMessage.class));
+    Exception closeFailure = new Exception("direct-close-failure");
+    when(table.name()).thenReturn("close-failure-table");
+    when(table.newCommit("close-failure-user")).thenReturn(directCommit, fallbackCommit);
+    doThrow(closeFailure).when(directCommit).close();
+    when(fallbackCommit.filterAndCommit(Collections.singletonMap(106L, messages))).thenReturn(0);
+
+    new PaimonTableCommit(table, Collections.emptyList(), "close-failure-user", 106L)
+        .commitMessages(messages, CommitMode.NORMAL);
+
+    verify(directCommit).commit(106L, messages);
+    verify(fallbackCommit).filterAndCommit(Collections.singletonMap(106L, messages));
+    verify(table, times(2)).newCommit("close-failure-user");
+  }
+
+  @Test
+  @DisplayName("Error bypasses fallback and propagates unchanged")
+  void testErrorBypassesFallback() {
+    AppendOnlyFileStoreTable table = mock(AppendOnlyFileStoreTable.class);
+    TableCommitImpl directCommit = mock(TableCommitImpl.class);
+    List<CommitMessage> messages = Collections.singletonList(mock(CommitMessage.class));
+    AssertionError directError = new AssertionError("direct-error");
+    when(table.name()).thenReturn("error-table");
+    when(table.newCommit("error-user")).thenReturn(directCommit);
+    doThrow(directError).when(directCommit).commit(107L, messages);
+
+    AssertionError failure =
+        assertThrows(
+            AssertionError.class,
+            () ->
+                new PaimonTableCommit(table, Collections.emptyList(), "error-user", 107L)
+                    .commitMessages(messages, CommitMode.NORMAL));
+
+    assertSame(directError, failure);
+    verify(table).newCommit("error-user");
+  }
+
+  @Test
+  @DisplayName("filterAndCommit rejects an impossible committed count")
+  void testFilterAndCommitRejectsImpossibleCount() {
+    AppendOnlyFileStoreTable table = mock(AppendOnlyFileStoreTable.class);
+    TableCommitImpl replayCommit = mock(TableCommitImpl.class);
+    List<CommitMessage> messages = Collections.singletonList(mock(CommitMessage.class));
+    when(table.name()).thenReturn("invalid-count-table");
+    when(table.newCommit("invalid-count-user")).thenReturn(replayCommit);
+    when(replayCommit.filterAndCommit(Collections.singletonMap(104L, messages))).thenReturn(2);
+
+    OptimizingCommitException failure =
+        assertThrows(
+            OptimizingCommitException.class,
+            () ->
+                new PaimonTableCommit(table, Collections.emptyList(), "invalid-count-user", 104L)
+                    .commitMessages(messages, CommitMode.RECOVERY_REPLAY));
+
+    assertTrue(failure.getMessage().contains("filterAndCommit"));
+    assertTrue(failure.getMessage().contains("2"));
+  }
+
+  @Test
+  @DisplayName("Dual failure keeps fallback as cause and direct failure as suppressed")
+  void testDualFailurePreservesBothCauses() {
+    AppendOnlyFileStoreTable table = mock(AppendOnlyFileStoreTable.class);
+    TableCommitImpl directCommit = mock(TableCommitImpl.class);
+    TableCommitImpl fallbackCommit = mock(TableCommitImpl.class);
+    List<CommitMessage> messages = Collections.singletonList(mock(CommitMessage.class));
+    RuntimeException directFailure = new RuntimeException("direct-failure");
+    RuntimeException fallbackFailure = new RuntimeException("fallback-failure");
+    when(table.name()).thenReturn("dual-failure-table");
+    when(table.newCommit("dual-failure-user")).thenReturn(directCommit, fallbackCommit);
+    doThrow(directFailure).when(directCommit).commit(105L, messages);
+    when(fallbackCommit.filterAndCommit(Collections.singletonMap(105L, messages)))
+        .thenThrow(fallbackFailure);
+
+    OptimizingCommitException failure =
+        assertThrows(
+            OptimizingCommitException.class,
+            () ->
+                new PaimonTableCommit(table, Collections.emptyList(), "dual-failure-user", 105L)
+                    .commitMessages(messages, CommitMode.NORMAL));
+
+    assertSame(fallbackFailure, failure.getCause());
+    assertEquals(1, failure.getSuppressed().length);
+    assertSame(directFailure, failure.getSuppressed()[0]);
   }
 
   @Test
