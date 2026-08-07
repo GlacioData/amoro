@@ -299,7 +299,7 @@ export default defineComponent({
                   <UDetails ref="detailRef" @set-base-detail-info="setBaseDetailInfo" @table-not-found="handleTableNotFound" />
                 </a-tab-pane>
                 <a-tab-pane v-if="detailLoaded" key="Files" :tab="$t('files')">
-                  <UFiles :has-partition="baseInfo.hasPartition" />
+                  <UFiles :has-partition="baseInfo.hasPartition" :table-format="baseInfo.tableFormat" />
                 </a-tab-pane>
                 <a-tab-pane v-for="tab in tabConfigs" :key="tab.key" :tab="$t(tab.label)">
                   <component :is="`U${tab.key}`" />

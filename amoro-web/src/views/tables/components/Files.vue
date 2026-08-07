@@ -23,9 +23,16 @@ import { useRoute } from 'vue-router'
 import { usePagination } from '@/hooks/usePagination'
 import type { BreadcrumbPartitionItem, IColumns, PartitionItem } from '@/types/common.type'
 import { getPartitionFiles, getPartitionTable } from '@/services/table.service'
-import { dateFormat } from '@/utils'
+import { dateFormat, utcDateFormat } from '@/utils'
 
-const props = defineProps<{ hasPartition: boolean }>()
+const props = defineProps<{ hasPartition: boolean, tableFormat?: string }>()
+
+// Paimon reports commit times as raw epoch millis with no server-side timezone; rendering them in
+// UTC keeps the Files page deterministic for Paimon. Every other lake format keeps using local
+// time via dateFormat, so this is scoped strictly to tableFormat === 'PAIMON'.
+function formatTime(val: number | string) {
+  return props.tableFormat?.toUpperCase() === 'PAIMON' ? utcDateFormat(val) : dateFormat(val)
+}
 const hasBreadcrumb = ref<boolean>(false)
 const { t } = useI18n()
 const columns: IColumns[] = shallowReactive([
@@ -79,7 +86,7 @@ async function getTableInfo() {
     const { list, total } = result
     pagination.total = total;
     (list || []).forEach((p: PartitionItem) => {
-      p.lastCommitTime = p.lastCommitTime ? dateFormat(p.lastCommitTime) : ''
+      p.lastCommitTime = p.lastCommitTime ? formatTime(p.lastCommitTime) : ''
       dataSource.push(p)
     })
   }
@@ -135,7 +142,7 @@ async function getFiles() {
     const { list, total } = result
     breadcrumbPagination.total = total;
     (list || []).forEach((p: BreadcrumbPartitionItem) => {
-      p.commitTime = p.commitTime && p.commitTime !== -1 ? dateFormat(p.commitTime) : ''
+      p.commitTime = p.commitTime && p.commitTime !== -1 ? formatTime(p.commitTime) : ''
       breadcrumbDataSource.push(p)
     })
   }

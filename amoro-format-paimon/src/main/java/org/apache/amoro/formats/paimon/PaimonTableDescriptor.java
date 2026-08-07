@@ -18,8 +18,6 @@
 
 package org.apache.amoro.formats.paimon;
 
-import static org.apache.paimon.operation.FileStoreScan.Plan.groupByPartFiles;
-
 import org.apache.amoro.AmoroTable;
 import org.apache.amoro.TableFormat;
 import org.apache.amoro.api.CommitMetaProducer;
@@ -53,7 +51,9 @@ import org.apache.paimon.FileStore;
 import org.apache.paimon.Snapshot;
 import org.apache.paimon.consumer.ConsumerManager;
 import org.apache.paimon.data.BinaryRow;
-import org.apache.paimon.io.DataFileMeta;
+import org.apache.paimon.data.GenericRow;
+import org.apache.paimon.data.serializer.InternalRowSerializer;
+import org.apache.paimon.fs.Path;
 import org.apache.paimon.manifest.FileKind;
 import org.apache.paimon.manifest.ManifestEntry;
 import org.apache.paimon.manifest.ManifestFile;
@@ -61,8 +61,11 @@ import org.apache.paimon.manifest.ManifestFileMeta;
 import org.apache.paimon.manifest.ManifestList;
 import org.apache.paimon.table.DataTable;
 import org.apache.paimon.table.FileStoreTable;
+import org.apache.paimon.types.RowType;
 import org.apache.paimon.utils.BranchManager;
 import org.apache.paimon.utils.FileStorePathFactory;
+import org.apache.paimon.utils.InternalRowPartitionComputer;
+import org.apache.paimon.utils.PartitionPathUtils;
 import org.apache.paimon.utils.SnapshotManager;
 import org.jetbrains.annotations.NotNull;
 import org.slf4j.Logger;
@@ -75,6 +78,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -82,10 +86,11 @@ import java.util.Set;
 import java.util.SortedMap;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.function.BiFunction;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 /** Descriptor for Paimon format tables. */
@@ -98,6 +103,13 @@ public class PaimonTableDescriptor implements FormatTableDescriptor {
   private static final String PAIMON_OPTIMIZING_TYPE_FULL = "FULL";
   private static final String PAIMON_OPTIMIZING_TYPE_MAJOR = "MAJOR";
   private static final String PAIMON_OPTIMIZING_TYPE_MINOR = "MINOR";
+
+  /**
+   * Matches the trailing {@code bucket-<n>} segment of a partition identifier, where {@code <n>} is
+   * a possibly-negative integer. Anchored to the end because the bucket is always the leaf segment
+   * of a Paimon partition path.
+   */
+  private static final Pattern BUCKET_PATTERN = Pattern.compile("bucket-(-?\\d+)$");
 
   private ExecutorService executor;
 
@@ -365,7 +377,7 @@ public class PaimonTableDescriptor implements FormatTableDescriptor {
                 null,
                 "BASE_FILE",
                 getFileCreationTimeMillis(entry),
-                partitionString(entry.partition(), entry.bucket(), fileStorePathFactory),
+                canonicalPartitionBucket(entry.partition(), entry.bucket(), fileStorePathFactory),
                 fullFilePath(store, entry),
                 entry.file().fileSize(),
                 entry.kind().name()));
@@ -397,27 +409,31 @@ public class PaimonTableDescriptor implements FormatTableDescriptor {
     FileStore<?> store = table.store();
     FileStorePathFactory fileStorePathFactory = store.pathFactory();
     List<ManifestEntry> files = store.newScan().plan().files(FileKind.ADD);
-    Map<BinaryRow, Map<Integer, List<ManifestEntry>>> groupByPartFiles = groupByPartFiles(files);
+
+    // Accumulate per partition/bucket in a single pass. The canonical partition string is a stable,
+    // unique key for each (partition, bucket) pair, so it doubles as the output identifier and
+    // avoids the unreliable BinaryRow-as-Map-key problem. The accumulator keeps only aggregate
+    // numbers, never a List<ManifestEntry>, so the extra space scales with partition/bucket count
+    // rather than file count.
+    Map<String, PartitionStats> statsByPartition = new HashMap<>();
+    for (ManifestEntry manifestEntry : files) {
+      String partitionSt =
+          canonicalPartitionBucket(
+              manifestEntry.partition(), manifestEntry.bucket(), fileStorePathFactory);
+      PartitionStats stats =
+          statsByPartition.computeIfAbsent(partitionSt, k -> new PartitionStats());
+      stats.fileCount++;
+      stats.fileSize += manifestEntry.file().fileSize();
+      stats.lastCommitTime =
+          Math.max(stats.lastCommitTime, getFileCreationTimeMillis(manifestEntry));
+    }
 
     List<PartitionBaseInfo> partitionBaseInfoList = new ArrayList<>();
-    for (Map.Entry<BinaryRow, Map<Integer, List<ManifestEntry>>> groupByPartitionEntry :
-        groupByPartFiles.entrySet()) {
-      for (Map.Entry<Integer, List<ManifestEntry>> groupByBucketEntry :
-          groupByPartitionEntry.getValue().entrySet()) {
-        String partitionSt =
-            partitionString(
-                groupByPartitionEntry.getKey(), groupByBucketEntry.getKey(), fileStorePathFactory);
-        int fileCount = 0;
-        long fileSize = 0;
-        long lastCommitTime = 0;
-        for (ManifestEntry manifestEntry : groupByBucketEntry.getValue()) {
-          fileCount++;
-          fileSize += manifestEntry.file().fileSize();
-          lastCommitTime = Math.max(lastCommitTime, getFileCreationTimeMillis(manifestEntry));
-        }
-        partitionBaseInfoList.add(
-            new PartitionBaseInfo(partitionSt, 0, fileCount, fileSize, lastCommitTime));
-      }
+    for (Map.Entry<String, PartitionStats> entry : statsByPartition.entrySet()) {
+      PartitionStats stats = entry.getValue();
+      partitionBaseInfoList.add(
+          new PartitionBaseInfo(
+              entry.getKey(), 0, stats.fileCount, stats.fileSize, stats.lastCommitTime));
     }
     return partitionBaseInfoList;
   }
@@ -432,65 +448,40 @@ public class PaimonTableDescriptor implements FormatTableDescriptor {
       AmoroTable<?> amoroTable, String partition, Integer specId) {
     FileStoreTable table = getTable(amoroTable);
     FileStore<?> store = table.store();
-
-    // Cache file add snapshot id
-    Map<DataFileMeta, Long> fileSnapshotIdMap = new ConcurrentHashMap<>();
-    ManifestList manifestList = store.manifestListFactory().create();
-    ManifestFile manifestFile = store.manifestFileFactory().create();
-    Iterator<Snapshot> snapshots;
-    try {
-      snapshots = store.snapshotManager().snapshots();
-    } catch (IOException e) {
-      throw new RuntimeException(e);
-    }
-
-    List<CompletableFuture<Void>> futures = new ArrayList<>();
-    while (snapshots.hasNext()) {
-      Snapshot snapshot = snapshots.next();
-      futures.add(
-          CompletableFuture.runAsync(
-              () ->
-                  doAs(
-                      amoroTable,
-                      () -> {
-                        List<ManifestFileMeta> deltaManifests =
-                            manifestList.readDeltaManifests(snapshot);
-                        for (ManifestFileMeta manifestFileMeta : deltaManifests) {
-                          List<ManifestEntry> manifestEntries =
-                              manifestFile.read(manifestFileMeta.fileName());
-                          for (ManifestEntry manifestEntry : manifestEntries) {
-                            fileSnapshotIdMap.put(manifestEntry.file(), snapshot.id());
-                          }
-                        }
-                        return null;
-                      }),
-              executor));
-    }
-
-    try {
-      CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).get();
-    } catch (InterruptedException e) {
-      // ignore
-    } catch (ExecutionException e) {
-      throw new RuntimeException(e);
-    }
-
     FileStorePathFactory fileStorePathFactory = store.pathFactory();
-    List<ManifestEntry> files = store.newScan().plan().files(FileKind.ADD);
+
+    // A single current Scan, scoped to the target partition/bucket when the table is partitioned.
+    // There is no more Snapshot-history walk, no per-snapshot delta-manifest read and no
+    // file-to-snapshot map: commitId is allowed to be null by contract and is not worth a full
+    // history scan.
+    List<ManifestEntry> files;
+    if (table.partitionKeys().isEmpty()) {
+      // Non-partitioned table: ignore the partition input (the frontend sends the literal "null"),
+      // and return every current ADD file.
+      files = store.newScan().plan().files(FileKind.ADD);
+    } else {
+      PartitionTarget target = parsePartitionTarget(store, partition);
+      if (target == null) {
+        // Unresolvable input must yield an empty result; never fall back to a full-table scan.
+        return Collections.emptyList();
+      }
+      files =
+          store
+              .newScan()
+              .withPartitionBucket(target.partition, target.bucket)
+              .plan()
+              .files(FileKind.ADD);
+    }
+
     List<PartitionFileBaseInfo> partitionFileBases = new ArrayList<>();
     for (ManifestEntry manifestEntry : files) {
-      String partitionSt =
-          partitionString(manifestEntry.partition(), manifestEntry.bucket(), fileStorePathFactory);
-      if (partition != null && !table.partitionKeys().isEmpty() && !partition.equals(partitionSt)) {
-        continue;
-      }
-      Long snapshotId = fileSnapshotIdMap.get(manifestEntry.file());
       partitionFileBases.add(
           new PartitionFileBaseInfo(
-              snapshotId == null ? null : snapshotId.toString(),
+              null,
               "INSERT_FILE",
               getFileCreationTimeMillis(manifestEntry),
-              partitionSt,
+              canonicalPartitionBucket(
+                  manifestEntry.partition(), manifestEntry.bucket(), fileStorePathFactory),
               0,
               fullFilePath(store, manifestEntry),
               manifestEntry.file().fileSize()));
@@ -796,6 +787,24 @@ public class PaimonTableDescriptor implements FormatTableDescriptor {
     public BucketStatistics() {}
   }
 
+  /** Resolved partition/bucket target used to push both filters into a single current Scan. */
+  private static class PartitionTarget {
+    final BinaryRow partition;
+    final int bucket;
+
+    PartitionTarget(BinaryRow partition, int bucket) {
+      this.partition = partition;
+      this.bucket = bucket;
+    }
+  }
+
+  /** Mutable per partition/bucket accumulator; keeps only numbers, never file references. */
+  private static class PartitionStats {
+    int fileCount = 0;
+    long fileSize = 0;
+    long lastCommitTime = 0;
+  }
+
   @NotNull
   private AmoroSnapshotsOfTable getSnapshotsOfTable(FileStore<?> store, Snapshot snapshot) {
     Map<String, String> summary = new HashMap<>();
@@ -946,10 +955,96 @@ public class PaimonTableDescriptor implements FormatTableDescriptor {
         new HashMap<>());
   }
 
-  private String partitionString(
-      BinaryRow partition, Integer bucket, FileStorePathFactory fileStorePathFactory) {
+  /**
+   * Builds the canonical partition identifier from a Paimon {@link BinaryRow} partition and bucket.
+   *
+   * <p>{@link FileStorePathFactory#getPartitionString(BinaryRow)} returns the partition path with a
+   * trailing {@code /} for non-empty partitions and {@code ""} for an un-partitioned row. This
+   * method drops exactly that one trailing slash (never a global replacement, so escaped partition
+   * values are untouched) and appends a single {@code /bucket-<n>} separator, or just {@code
+   * bucket-<n>} when there are no partition fields.
+   *
+   * <p>The partition list, file list and snapshot detail views all share this single helper so
+   * their output format stays identical.
+   */
+  private String canonicalPartitionBucket(
+      BinaryRow partition, int bucket, FileStorePathFactory fileStorePathFactory) {
     String partitionString = fileStorePathFactory.getPartitionString(partition);
-    return partitionString + "/bucket-" + bucket;
+    if (partitionString.isEmpty()) {
+      return "bucket-" + bucket;
+    }
+    // generatePartitionPath always appends exactly one trailing '/', drop only that one.
+    return partitionString.substring(0, partitionString.length() - 1) + "/bucket-" + bucket;
+  }
+
+  /**
+   * Parses a request partition identifier into a {@link BinaryRow} partition plus bucket so the
+   * scan can push both down via {@code withPartitionBucket}.
+   *
+   * <p>The parsing deliberately reuses Paimon's own utilities instead of hand-rolled string
+   * splitting: the trailing {@code bucket-<n>} is recognised, the redundant separator before it is
+   * collapsed (this is what accepts legacy double-slash input), and the remaining spec is recovered
+   * through {@link PartitionPathUtils#extractPartitionSpecFromPath(Path)} and converted to a {@link
+   * BinaryRow} with {@link InternalRowPartitionComputer#convertSpecToInternalRow}. Validation is
+   * "BinaryRow constructed + spec field set equals the table partition fields" — it does NOT
+   * require the regenerated string to match the input character-for-character, otherwise legitimate
+   * legacy {@code //} input would be rejected.
+   *
+   * @return the resolved target, or {@code null} when the input cannot be mapped to a valid
+   *     partition/bucket. Callers must return an empty file list in that case and must not fall
+   *     back to an unfiltered full-table scan.
+   */
+  private PartitionTarget parsePartitionTarget(FileStore<?> store, String partition) {
+    if (partition == null) {
+      return null;
+    }
+    Matcher matcher = BUCKET_PATTERN.matcher(partition);
+    if (!matcher.find()) {
+      return null;
+    }
+    int bucket;
+    try {
+      bucket = Integer.parseInt(matcher.group(1));
+    } catch (NumberFormatException e) {
+      // Overflow / non-numeric; the regex already rejected non-digits, this guards huge values.
+      return null;
+    }
+    // Drop the bucket segment and any separator slashes preceding it (handles legacy '//' input).
+    String partitionPart = partition.substring(0, matcher.start());
+    while (partitionPart.endsWith("/")) {
+      partitionPart = partitionPart.substring(0, partitionPart.length() - 1);
+    }
+    if (partitionPart.isEmpty()) {
+      return null;
+    }
+    try {
+      LinkedHashMap<String, String> spec =
+          PartitionPathUtils.extractPartitionSpecFromPath(new Path(partitionPart));
+      RowType partitionType = store.partitionType();
+      if (!spec.keySet().equals(new HashSet<>(partitionType.getFieldNames()))) {
+        return null;
+      }
+      BinaryRow binaryPartition = toBinaryPartition(spec, store);
+      return new PartitionTarget(binaryPartition, bucket);
+    } catch (RuntimeException e) {
+      return null;
+    }
+  }
+
+  /**
+   * Converts a partition spec (field name {@code ->} external string value) into the internal
+   * {@link BinaryRow} form used by the scan. Mirrors the package-private {@code
+   * PartitionPredicate.createBinaryPartitions} using only public Paimon API: {@code
+   * convertSpecToInternalRow} casts each value to its partition type and {@link
+   * InternalRowSerializer#toBinaryRow} serialises a stable copy.
+   */
+  private BinaryRow toBinaryPartition(Map<String, String> spec, FileStore<?> store) {
+    RowType partitionType = store.partitionType();
+    String defaultPartValue = store.options().partitionDefaultName();
+    GenericRow row =
+        InternalRowPartitionComputer.convertSpecToInternalRow(
+            spec, partitionType, defaultPartValue);
+    return new InternalRowSerializer(partitionType).toBinaryRow(row).copy();
   }
 
   private String fullFilePath(FileStore<?> store, ManifestEntry manifestEntry) {
