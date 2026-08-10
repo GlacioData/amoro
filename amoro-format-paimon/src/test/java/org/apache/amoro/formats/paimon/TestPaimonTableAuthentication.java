@@ -44,11 +44,37 @@ import java.nio.ByteBuffer;
 import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.Callable;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 @DisplayName("PaimonTable authentication context")
 public class TestPaimonTableAuthentication {
+
+  @Test
+  @DisplayName("catalog creation runs under TableMetaStore doAs when auth context exists")
+  void testCatalogCreationRunsWithTableMetaStoreDoAs(@TempDir Path warehouse) {
+    AtomicBoolean insideDoAs = new AtomicBoolean(false);
+    TableMetaStore metaStore = doAsMetaStore(insideDoAs);
+    when(metaStore.getHiveSiteLocation()).thenReturn(Optional.empty());
+    when(metaStore.getAuthMethod()).thenReturn(TableMetaStore.AUTH_METHOD_KERBEROS);
+    when(metaStore.getConfiguration())
+        .thenAnswer(
+            invocation -> {
+              assertTrue(insideDoAs.get());
+              return new Configuration();
+            });
+
+    Map<String, String> properties = new HashMap<>();
+    properties.put(CatalogOptions.WAREHOUSE.key(), warehouse.toUri().toString());
+    PaimonCatalogFactory factory = new PaimonCatalogFactory();
+    Map<String, String> catalogProperties =
+        factory.convertCatalogProperties("test_catalog", "hadoop", properties);
+
+    assertNotNull(factory.create("test_catalog", "hadoop", catalogProperties, metaStore));
+
+    verify(metaStore).doAs(any());
+  }
 
   @Test
   @DisplayName("currentSnapshot runs under TableMetaStore doAs when auth context exists")

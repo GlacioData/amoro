@@ -77,8 +77,11 @@ public class PaimonCatalogFactory implements FormatCatalogFactory {
         return new PaimonCatalog(catalog, name, properties, metaStore);
       }
     } else {
-      Catalog catalog = paimonCatalog(catalogProperties, metaStore.getConfiguration());
-      return new PaimonCatalog(catalog, name, properties, metaStore);
+      return metaStore.doAs(
+          () -> {
+            Catalog catalog = paimonCatalog(catalogProperties, metaStore.getConfiguration());
+            return new PaimonCatalog(catalog, name, properties, metaStore);
+          });
     }
   }
 
