@@ -178,6 +178,37 @@ export const dateFormat = (() => {
   }
 })()
 
+/**
+ * Same shape as {@link dateFormat} but formats the epoch millisecond in UTC instead of the browser's
+ * local time zone. The Paimon Files page uses this so commit times render deterministically as UTC
+ * regardless of the viewer's time zone; every other page/format keeps using {@link dateFormat}.
+ */
+export const utcDateFormat = (() => {
+  const padZero = function (val: string) {
+    const value = val || ''
+    return value.length < 2 ? `0${value}` : value
+  }
+  const MAPS: any = {
+    yyyy: (date: { getUTCFullYear: () => number }) => date.getUTCFullYear(),
+    MM: (date: { getUTCMonth: () => number }) => padZero(String(date.getUTCMonth() + 1)),
+    dd: (date: { getUTCDate: () => number }) => padZero(String(date.getUTCDate())),
+    HH: (date: { getUTCHours: () => number }) => padZero(String(date.getUTCHours())),
+    mm: (date: { getUTCMinutes: () => number }) => padZero(String(date.getUTCMinutes())),
+    ss: (date: { getUTCSeconds: () => number }) => padZero(String(date.getUTCSeconds())),
+  }
+
+  const trunk = new RegExp(Object.keys(MAPS).join('|'), 'g')
+
+  return function (val: string | number, format = 'yyyy-MM-dd  HH:mm:ss') {
+    if (!val) {
+      return ''
+    }
+    let value: number | Date = +val
+    value = new Date(value)
+    return format.replace(trunk, capture => MAPS[capture](value))
+  }
+})()
+
 export function debounce(func: any, timeout = 300) {
   let timer: number | undefined
   return (...args: any) => {

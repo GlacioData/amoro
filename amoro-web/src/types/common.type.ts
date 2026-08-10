@@ -153,7 +153,7 @@ export interface BreadcrumbPartitionItem {
   fileType: string
   size: string
   commitTime: number | string
-  commitId: string
+  commitId: string | null
   path: string
 }
 
