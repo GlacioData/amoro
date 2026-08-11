@@ -18,6 +18,8 @@
 
 package org.apache.amoro.table;
 
+import org.apache.amoro.table.health.TableHealthDetails;
+
 public class TableSummary {
   private long totalFileSize = 0L;
   private int totalFileCount = 0;
@@ -28,6 +30,7 @@ public class TableSummary {
   private int positionalDeleteScore = 0;
   private long pendingFileSize = 0L;
   private int pendingFileCount = 0;
+  private TableHealthDetails healthDetails;
 
   public TableSummary copy() {
     TableSummary summary = new TableSummary();
@@ -39,6 +42,7 @@ public class TableSummary {
     summary.setPositionalDeleteScore(this.positionalDeleteScore);
     summary.setPendingFileSize(this.pendingFileSize);
     summary.setPendingFileCount(this.pendingFileCount);
+    summary.setHealthDetails(this.healthDetails);
     return summary;
   }
 
@@ -104,5 +108,13 @@ public class TableSummary {
 
   public void setPendingFileCount(int pendingFileCount) {
     this.pendingFileCount = pendingFileCount;
+  }
+
+  public TableHealthDetails getHealthDetails() {
+    return healthDetails;
+  }
+
+  public void setHealthDetails(TableHealthDetails healthDetails) {
+    this.healthDetails = healthDetails;
   }
 }

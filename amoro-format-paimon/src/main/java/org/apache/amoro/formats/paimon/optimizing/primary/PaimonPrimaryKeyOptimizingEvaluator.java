@@ -19,6 +19,7 @@
 package org.apache.amoro.formats.paimon.optimizing.primary;
 
 import org.apache.amoro.config.OptimizingConfig;
+import org.apache.amoro.formats.paimon.optimizing.health.PaimonHealthEvaluationContext;
 import org.apache.amoro.optimizing.OptimizingType;
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.KeyValueFileStore;
@@ -70,7 +71,9 @@ public class PaimonPrimaryKeyOptimizingEvaluator {
           .thenComparing(
               Comparator.comparingLong(PaimonBucketCompactionUnit::getFileSizeInBytes).reversed())
           .thenComparing(
-              (left, right) -> compareUnsigned(left.getPartitionBytes(), right.getPartitionBytes()))
+              (left, right) ->
+                  PaimonPrimaryKeySnapshotAnalysis.compareUnsigned(
+                      left.getPartitionBytes(), right.getPartitionBytes()))
           .thenComparingInt(PaimonBucketCompactionUnit::getBucket);
 
   private PaimonPrimaryKeyOptimizingEvaluator() {}
@@ -127,13 +130,13 @@ public class PaimonPrimaryKeyOptimizingEvaluator {
       return PaimonPrimaryKeyOptimizingEvaluation.empty(-1L);
     }
 
-    final long targetSnapshotId;
+    final Snapshot targetSnapshot;
     try {
       Optional<Snapshot> latestSnapshot = table.latestSnapshot();
       if (!latestSnapshot.isPresent()) {
         return PaimonPrimaryKeyOptimizingEvaluation.empty(-1L);
       }
-      targetSnapshotId = latestSnapshot.get().id();
+      targetSnapshot = latestSnapshot.get();
     } catch (RuntimeException e) {
       LOG.warn(
           "Failed to capture latest snapshot for Paimon primary-key table [{}]; skip planning.",
@@ -147,10 +150,10 @@ public class PaimonPrimaryKeyOptimizingEvaluator {
         LOG.warn(
             "Paimon primary-key table [{}] does not expose a KeyValueFileStore; skip planning.",
             tableName);
-        return PaimonPrimaryKeyOptimizingEvaluation.empty(targetSnapshotId);
+        return PaimonPrimaryKeyOptimizingEvaluation.empty(targetSnapshot.id());
       }
       KeyValueFileStore store = (KeyValueFileStore) table.store();
-      SnapshotFiles snapshotFiles = scanSnapshot(table, targetSnapshotId);
+      SnapshotFiles snapshotFiles = scanSnapshot(table, targetSnapshot);
       List<PaimonBucketCompactionUnit> allUnits = new ArrayList<>();
       List<PaimonBucketCompactionUnit> normalCandidates = new ArrayList<>();
       List<PaimonBucketCompactionUnit> majorCandidates = new ArrayList<>();
@@ -175,12 +178,12 @@ public class PaimonPrimaryKeyOptimizingEvaluator {
             selectMajorCandidates(
                 majorCandidates, allUnits.size(), primaryKeyOptions.majorMaxBucketRatio());
         return PaimonPrimaryKeyOptimizingEvaluation.of(
-            selected, OptimizingType.MAJOR, false, targetSnapshotId);
+            selected, OptimizingType.MAJOR, false, targetSnapshot.id());
       }
       if (!normalCandidates.isEmpty()
           && reachMinorInterval(effectiveConfig, lastMinorOptimizingTime, planTime)) {
         return PaimonPrimaryKeyOptimizingEvaluation.of(
-            normalCandidates, OptimizingType.MINOR, false, targetSnapshotId);
+            normalCandidates, OptimizingType.MINOR, false, targetSnapshot.id());
       }
       return evaluateFull(
           table,
@@ -191,16 +194,150 @@ public class PaimonPrimaryKeyOptimizingEvaluator {
           effectiveConfig,
           lastFullOptimizingTime,
           planTime,
-          targetSnapshotId);
+          targetSnapshot.id());
     } catch (RuntimeException e) {
       LOG.warn(
           "Failed to evaluate fixed snapshot [{}] for Paimon primary-key table [{}]; skip "
               + "planning without falling back to latest snapshot.",
+          targetSnapshot.id(),
+          tableName,
+          e);
+      return PaimonPrimaryKeyOptimizingEvaluation.empty(targetSnapshot.id());
+    }
+  }
+
+  /**
+   * Evaluate health and the existing HASH optimizing decision from one fixed-snapshot analysis.
+   * KEY_DYNAMIC deliberately returns health only and never exposes planner units.
+   */
+  public static PaimonPrimaryKeyOptimizingEvaluation evaluate(
+      FileStoreTable table,
+      String tableName,
+      PaimonHealthEvaluationContext healthContext,
+      OptimizingConfig optimizingConfig,
+      long lastMinorOptimizingTime,
+      long lastFullOptimizingTime,
+      Predicate partitionFilter,
+      long planTime) {
+    if (!supportsHealthShape(table)) {
+      return PaimonPrimaryKeyOptimizingEvaluation.empty(healthContext.snapshotId());
+    }
+
+    PaimonPrimaryKeySnapshotAnalysis analysis =
+        PaimonPrimaryKeySnapshotAnalysis.analyze(table, healthContext);
+    return evaluate(
+        table,
+        tableName,
+        healthContext,
+        analysis,
+        optimizingConfig,
+        lastMinorOptimizingTime,
+        lastFullOptimizingTime,
+        partitionFilter,
+        planTime);
+  }
+
+  /** Decide HASH optimizing from reusable facts already scanned for the exact health key. */
+  public static PaimonPrimaryKeyOptimizingEvaluation evaluate(
+      FileStoreTable table,
+      String tableName,
+      PaimonHealthEvaluationContext healthContext,
+      PaimonPrimaryKeySnapshotAnalysis analysis,
+      OptimizingConfig optimizingConfig,
+      long lastMinorOptimizingTime,
+      long lastFullOptimizingTime,
+      Predicate partitionFilter,
+      long planTime) {
+    if (!healthContext.key().equals(analysis.key())) {
+      throw new IllegalArgumentException(
+          "Paimon primary-key analysis key does not match the captured planning context");
+    }
+    long targetSnapshotId = healthContext.snapshotId();
+    if (healthContext.bucketMode() == BucketMode.KEY_DYNAMIC || !analysis.validForPlanning()) {
+      return PaimonPrimaryKeyOptimizingEvaluation.healthOnly(targetSnapshotId, analysis);
+    }
+
+    OptimizingConfig effectiveConfig =
+        optimizingConfig == null ? defaultOptimizingConfig() : optimizingConfig;
+    if (hasUnsupportedFilter(tableName, effectiveConfig, partitionFilter)) {
+      return PaimonPrimaryKeyOptimizingEvaluation.healthOnly(targetSnapshotId, analysis);
+    }
+
+    final PaimonPrimaryKeyOptions primaryKeyOptions;
+    final CoreOptions coreOptions;
+    try {
+      primaryKeyOptions = PaimonPrimaryKeyOptions.from(table.options());
+      coreOptions = healthContext.coreOptions().get();
+    } catch (RuntimeException e) {
+      LOG.warn(
+          "Paimon primary-key optimizing options are invalid for table [{}], skip planning.",
+          tableName,
+          e);
+      return PaimonPrimaryKeyOptimizingEvaluation.healthOnly(targetSnapshotId, analysis);
+    }
+    if (!primaryKeyOptions.enabled() || coreOptions.pkClusteringOverride()) {
+      return PaimonPrimaryKeyOptimizingEvaluation.healthOnly(targetSnapshotId, analysis);
+    }
+
+    try {
+      List<PaimonBucketCompactionUnit> allUnits = new ArrayList<>();
+      List<PaimonBucketCompactionUnit> normalCandidates = new ArrayList<>();
+      List<PaimonBucketCompactionUnit> majorCandidates = new ArrayList<>();
+      int stopTrigger = coreOptions.numSortedRunStopTrigger();
+      for (PaimonPrimaryKeySnapshotAnalysis.BucketFacts facts : analysis.bucketFacts()) {
+        PaimonBucketCompactionUnit unit = facts.unit();
+        allUnits.add(unit);
+        if (hasNormalCompactionCandidate(coreOptions, facts.levels())) {
+          normalCandidates.add(unit);
+          if (unit.getSortedRunCount() > stopTrigger) {
+            majorCandidates.add(unit);
+          }
+        }
+      }
+
+      if (!majorCandidates.isEmpty()) {
+        List<PaimonBucketCompactionUnit> selected =
+            selectMajorCandidates(
+                majorCandidates, allUnits.size(), primaryKeyOptions.majorMaxBucketRatio());
+        return PaimonPrimaryKeyOptimizingEvaluation.of(
+            selected, OptimizingType.MAJOR, false, targetSnapshotId, analysis);
+      }
+      if (!normalCandidates.isEmpty()
+          && reachMinorInterval(effectiveConfig, lastMinorOptimizingTime, planTime)) {
+        return PaimonPrimaryKeyOptimizingEvaluation.of(
+            normalCandidates, OptimizingType.MINOR, false, targetSnapshotId, analysis);
+      }
+      return evaluateFull(
+          table,
+          tableName,
+          analysis,
+          allUnits,
+          primaryKeyOptions,
+          effectiveConfig,
+          lastFullOptimizingTime,
+          planTime,
+          targetSnapshotId);
+    } catch (RuntimeException e) {
+      LOG.warn(
+          "Failed to decide optimizing for analyzed Paimon primary-key snapshot [{}] of table "
+              + "[{}]; keep health result and skip planning.",
           targetSnapshotId,
           tableName,
           e);
-      return PaimonPrimaryKeyOptimizingEvaluation.empty(targetSnapshotId);
+      return PaimonPrimaryKeyOptimizingEvaluation.healthOnly(targetSnapshotId, analysis);
     }
+  }
+
+  private static boolean supportsHealthShape(FileStoreTable table) {
+    if (table == null || table instanceof AppendOnlyFileStoreTable) {
+      return false;
+    }
+    if (table.primaryKeys() == null || table.primaryKeys().isEmpty()) {
+      return false;
+    }
+    return table.bucketMode() == BucketMode.HASH_FIXED
+        || table.bucketMode() == BucketMode.HASH_DYNAMIC
+        || table.bucketMode() == BucketMode.KEY_DYNAMIC;
   }
 
   private static boolean supportsTableShape(FileStoreTable table) {
@@ -214,8 +351,8 @@ public class PaimonPrimaryKeyOptimizingEvaluator {
         || table.bucketMode() == BucketMode.HASH_DYNAMIC;
   }
 
-  private static SnapshotFiles scanSnapshot(FileStoreTable table, long targetSnapshotId) {
-    SnapshotReader reader = table.newSnapshotReader().withSnapshot(targetSnapshotId);
+  private static SnapshotFiles scanSnapshot(FileStoreTable table, Snapshot targetSnapshot) {
+    SnapshotReader reader = table.newSnapshotReader().withSnapshot(targetSnapshot);
     SnapshotFiles snapshotFiles = new SnapshotFiles(reader);
     Iterator<ManifestEntry> entries = reader.readFileIterator();
     while (entries.hasNext()) {
@@ -280,18 +417,6 @@ public class PaimonPrimaryKeyOptimizingEvaluator {
     return sorted;
   }
 
-  private static int compareUnsigned(byte[] left, byte[] right) {
-    int sharedLength = Math.min(left.length, right.length);
-    for (int index = 0; index < sharedLength; index++) {
-      int leftByte = left[index] & 0xFF;
-      int rightByte = right[index] & 0xFF;
-      if (leftByte != rightByte) {
-        return leftByte - rightByte;
-      }
-    }
-    return Integer.compare(left.length, right.length);
-  }
-
   private static PaimonPrimaryKeyOptimizingEvaluation evaluateFull(
       FileStoreTable table,
       String tableName,
@@ -336,6 +461,52 @@ public class PaimonPrimaryKeyOptimizingEvaluator {
     }
     return PaimonPrimaryKeyOptimizingEvaluation.of(
         fullCandidates, OptimizingType.FULL, true, targetSnapshotId);
+  }
+
+  private static PaimonPrimaryKeyOptimizingEvaluation evaluateFull(
+      FileStoreTable table,
+      String tableName,
+      PaimonPrimaryKeySnapshotAnalysis analysis,
+      List<PaimonBucketCompactionUnit> allUnits,
+      PaimonPrimaryKeyOptions primaryKeyOptions,
+      OptimizingConfig optimizingConfig,
+      long lastFullOptimizingTime,
+      long planTime,
+      long targetSnapshotId) {
+    int fullTriggerInterval = optimizingConfig.getFullTriggerInterval();
+    if (fullTriggerInterval <= 0
+        || planTime - lastFullOptimizingTime < fullTriggerInterval
+        || allUnits.isEmpty()) {
+      return PaimonPrimaryKeyOptimizingEvaluation.healthOnly(targetSnapshotId, analysis);
+    }
+    if (!primaryKeyOptions.partitionIdleTime().isPresent()) {
+      LOG.warn(
+          "Paimon primary-key table [{}] requires {} for FULL planning, skip planning.",
+          tableName,
+          PaimonPrimaryKeyOptions.PARTITION_IDLE_TIME);
+      return PaimonPrimaryKeyOptimizingEvaluation.healthOnly(targetSnapshotId, analysis);
+    }
+
+    Duration idleTime = primaryKeyOptions.partitionIdleTime().get();
+    List<PaimonBucketCompactionUnit> fullCandidates = new ArrayList<>();
+    for (PaimonBucketCompactionUnit unit : allUnits) {
+      long lastCreationTime = unit.getLastFileCreationTime();
+      if (!table.partitionKeys().isEmpty()) {
+        Long partitionWatermark = analysis.partitionWatermark(unit.getPartitionBytes());
+        if (partitionWatermark == null) {
+          throw new IllegalStateException("Missing partition watermark for analyzed bucket");
+        }
+        lastCreationTime = partitionWatermark;
+      }
+      if (isIdle(lastCreationTime, idleTime, planTime)) {
+        fullCandidates.add(unit);
+      }
+    }
+    if (fullCandidates.isEmpty()) {
+      return PaimonPrimaryKeyOptimizingEvaluation.healthOnly(targetSnapshotId, analysis);
+    }
+    return PaimonPrimaryKeyOptimizingEvaluation.of(
+        fullCandidates, OptimizingType.FULL, true, targetSnapshotId, analysis);
   }
 
   private static OptimizingConfig defaultOptimizingConfig() {

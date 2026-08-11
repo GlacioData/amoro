@@ -20,25 +20,44 @@ package org.apache.amoro.optimizing;
 
 import org.apache.amoro.table.FormatPendingInput;
 
+import java.util.Optional;
+
 /** Result of a format-specific pending input evaluation. */
 public class PendingInputResult {
 
   private final FormatPendingInput pendingInput;
   private final FormatPendingInput optimizingPendingInput;
   private final boolean optimizingNecessary;
+  private final FormatTableAnalysis tableAnalysis;
 
   public PendingInputResult(FormatPendingInput pendingInput, boolean optimizingNecessary) {
-    this(pendingInput, pendingInput, optimizingNecessary);
+    this(pendingInput, pendingInput, optimizingNecessary, null);
+  }
+
+  public PendingInputResult(
+      FormatPendingInput pendingInput,
+      boolean optimizingNecessary,
+      FormatTableAnalysis tableAnalysis) {
+    this(pendingInput, pendingInput, optimizingNecessary, tableAnalysis);
   }
 
   public PendingInputResult(
       FormatPendingInput pendingInput,
       FormatPendingInput optimizingPendingInput,
       boolean optimizingNecessary) {
+    this(pendingInput, optimizingPendingInput, optimizingNecessary, null);
+  }
+
+  public PendingInputResult(
+      FormatPendingInput pendingInput,
+      FormatPendingInput optimizingPendingInput,
+      boolean optimizingNecessary,
+      FormatTableAnalysis tableAnalysis) {
     this.pendingInput = pendingInput;
     this.optimizingPendingInput =
         optimizingPendingInput == null ? pendingInput : optimizingPendingInput;
     this.optimizingNecessary = optimizingNecessary;
+    this.tableAnalysis = tableAnalysis;
   }
 
   public FormatPendingInput pendingInput() {
@@ -51,5 +70,9 @@ public class PendingInputResult {
 
   public boolean optimizingNecessary() {
     return optimizingNecessary;
+  }
+
+  public Optional<FormatTableAnalysis> tableAnalysis() {
+    return Optional.ofNullable(tableAnalysis);
   }
 }

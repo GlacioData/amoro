@@ -18,10 +18,21 @@
 
 package org.apache.amoro.server.table;
 
+import static org.apache.amoro.server.table.TableSummaryMetrics.TABLE_SUMMARY_HEALTH_SCORE;
+import static org.apache.amoro.server.table.TableSummaryMetrics.TABLE_SUMMARY_TOTAL_FILES;
+import static org.apache.amoro.server.table.TableSummaryMetrics.TABLE_SUMMARY_TOTAL_FILES_SIZE;
+import static org.apache.amoro.server.table.TableSummaryMetrics.TABLE_SUMMARY_TOTAL_RECORDS;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import org.apache.amoro.AmoroTable;
@@ -31,16 +42,28 @@ import org.apache.amoro.TableRuntime;
 import org.apache.amoro.TableSnapshot;
 import org.apache.amoro.formats.paimon.PaimonHadoopCatalogTestHelper;
 import org.apache.amoro.formats.paimon.optimizing.PaimonPendingInput;
+import org.apache.amoro.metrics.Gauge;
+import org.apache.amoro.metrics.Metric;
+import org.apache.amoro.metrics.MetricDefine;
+import org.apache.amoro.metrics.MetricKey;
+import org.apache.amoro.optimizing.FormatTableAnalysis;
 import org.apache.amoro.optimizing.PendingInputResult;
 import org.apache.amoro.server.AMSServiceTestBase;
+import org.apache.amoro.server.manager.MetricManager;
 import org.apache.amoro.server.optimizing.OptimizingStatus;
 import org.apache.amoro.server.scheduler.inline.TableRuntimeRefreshExecutor;
+import org.apache.amoro.shade.guava32.com.google.common.collect.ImmutableMap;
+import org.apache.amoro.table.StateKey;
+import org.apache.amoro.table.health.TableAnalysisKey;
+import org.apache.amoro.table.health.TableHealthDetails;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 
+import java.util.Collections;
+import java.util.Map;
 import java.util.Optional;
 
 /**
@@ -58,6 +81,10 @@ public class TestTableRuntimeRefreshExecutorForPaimon extends AMSServiceTestBase
   private static final String CATALOG_NAME = "test_paimon_catalog";
   private static final String DB_NAME = "test_db";
   private static final String TABLE_NAME = "test_table";
+  private static final StateKey<PaimonPendingInput> PAIMON_PENDING_INPUT_KEY =
+      StateKey.stateKey("pending_input")
+          .jsonType(PaimonPendingInput.class)
+          .defaultValue(new PaimonPendingInput());
 
   @Rule public TemporaryFolder temp = new TemporaryFolder();
 
@@ -161,6 +188,9 @@ public class TestTableRuntimeRefreshExecutorForPaimon extends AMSServiceTestBase
   public void noNewSnapshotKeepsIdle() throws Exception {
     AmoroTable<?> mockAmoroTable = paimonAmoroTable(null);
     TableRuntimeRefreshExecutor executor = executorWith(mockAmoroTable);
+    // Normalize state left by a previous refresh of the reused runtime before asserting no change.
+    paimonRuntime.refresh(mockAmoroTable);
+    paimonRuntime.optimizingNotNecessary();
 
     executor.execute(paimonRuntime);
 
@@ -219,5 +249,479 @@ public class TestTableRuntimeRefreshExecutorForPaimon extends AMSServiceTestBase
     executor.execute(paimonRuntime);
 
     assertEquals(OptimizingStatus.PLANNING, paimonRuntime.getOptimizingStatus());
+  }
+
+  @Test
+  public void sameKeyWithSuccessfulHealthDoesNotScanAgain() {
+    TableAnalysisKey key = analysisKey(500L);
+    PaimonPendingInput input = pendingInput(4, 400L, 82);
+    FormatTableAnalysis analysis = analysis(key, input, Collections.emptyList());
+    AmoroTable<?> table = keyedPaimonTable(snapshotWithId(500L), key, input, false, analysis);
+    java.util.Map<String, String> adaptiveProperties = new java.util.HashMap<>();
+    adaptiveProperties.put("self-optimizing.refresh-table.adaptive.max-interval-ms", "120000");
+    when(table.properties()).thenReturn(adaptiveProperties);
+    TableRuntimeRefreshExecutor executor = executorWith(table);
+
+    executor.execute(paimonRuntime);
+    executor.execute(paimonRuntime);
+
+    verify(table, times(1)).evaluatePendingInput(any(), anyInt(), eq(true));
+    assertFalse(paimonRuntime.getLatestEvaluatedNeedOptimizing());
+    assertEquals(120_000L, paimonRuntime.getLatestRefreshInterval());
+    assertEquals(82, paimonRuntime.getRuntimeHealthSnapshot().orElseThrow().getHealthScore());
+    assertEquals(
+        82,
+        tableManager()
+            .getTableRuntimeMata(paimonRuntime.getTableIdentifier())
+            .getTableSummary()
+            .getHealthScore());
+  }
+
+  @Test
+  public void successfulHealthSnapshotAndGaugesSurviveLaterInvalidEvaluation() {
+    TableAnalysisKey successfulKey = analysisKey(520L);
+    PaimonPendingInput successfulInput = pendingInput(4, 400L, 82);
+    FormatTableAnalysis successfulAnalysis =
+        analysis(successfulKey, successfulInput, Collections.emptyList());
+    executorWith(
+            keyedPaimonTable(
+                snapshotWithId(520L), successfulKey, successfulInput, false, successfulAnalysis))
+        .execute(paimonRuntime);
+
+    RuntimeHealthSnapshot successfulSnapshot =
+        paimonRuntime.getRuntimeHealthSnapshot().orElseThrow();
+    assertEquals(82, successfulSnapshot.getHealthScore());
+    assertEquals(successfulKey.encoded(), successfulSnapshot.getHealthDetails().getEvaluationKey());
+    assertEquals(82L, metricValue(TABLE_SUMMARY_HEALTH_SCORE));
+    assertEquals(4L, metricValue(TABLE_SUMMARY_TOTAL_FILES));
+    assertEquals(400L, metricValue(TABLE_SUMMARY_TOTAL_FILES_SIZE));
+    assertEquals(40L, metricValue(TABLE_SUMMARY_TOTAL_RECORDS));
+
+    TableAnalysisKey invalidKey = analysisKey(521L);
+    PaimonPendingInput invalidInput = pendingInput(9, 900L, -1);
+    FormatTableAnalysis invalidAnalysis =
+        analysis(invalidKey, invalidInput, Collections.singletonList("INVALID_SCORING_CONFIG"));
+    executorWith(
+            keyedPaimonTable(snapshotWithId(521L), invalidKey, invalidInput, true, invalidAnalysis))
+        .execute(paimonRuntime);
+
+    assertEquals(
+        "An invalid health result may still carry valid optimization planning facts",
+        OptimizingStatus.PENDING,
+        paimonRuntime.getOptimizingStatus());
+    RuntimeHealthSnapshot retainedSnapshot = paimonRuntime.getRuntimeHealthSnapshot().orElseThrow();
+    assertEquals(82, retainedSnapshot.getHealthScore());
+    assertEquals(successfulKey.encoded(), retainedSnapshot.getHealthDetails().getEvaluationKey());
+    assertEquals(82L, metricValue(TABLE_SUMMARY_HEALTH_SCORE));
+    assertEquals(4L, metricValue(TABLE_SUMMARY_TOTAL_FILES));
+    assertEquals(400L, metricValue(TABLE_SUMMARY_TOTAL_FILES_SIZE));
+    assertEquals(40L, metricValue(TABLE_SUMMARY_TOTAL_RECORDS));
+  }
+
+  @Test
+  public void firstInvalidEvaluationPublishesUnavailableSnapshotWithReason() {
+    TableAnalysisKey key = analysisKey(530L);
+    PaimonPendingInput input = pendingInput(1, 10L, -1);
+    FormatTableAnalysis analysis =
+        analysis(key, input, Collections.singletonList("SNAPSHOT_SCAN_FAILED"));
+    AmoroTable<?> table = keyedPaimonTable(snapshotWithId(530L), key, input, false, analysis);
+    DefaultTableRuntime freshRuntime =
+        new DefaultTableRuntime(paimonRuntime.store(), () -> table, PAIMON_PENDING_INPUT_KEY);
+    freshRuntime.refresh(table);
+
+    freshRuntime.evaluatePendingInputAndTransition(table, MAX_PENDING_PARTITIONS, true);
+
+    RuntimeHealthSnapshot snapshot = freshRuntime.getRuntimeHealthSnapshot().orElseThrow();
+    assertEquals(-1, snapshot.getHealthScore());
+    assertEquals(
+        Collections.singletonList("SNAPSHOT_SCAN_FAILED"),
+        snapshot.getHealthDetails().getReasonCodes());
+  }
+
+  @Test
+  public void invalidatingAnalysisKeyDoesNotClearSuccessfulRuntimeHealth() {
+    TableAnalysisKey key = analysisKey(540L);
+    PaimonPendingInput input = pendingInput(2, 200L, 76);
+    FormatTableAnalysis analysis = analysis(key, input, Collections.emptyList());
+    executorWith(keyedPaimonTable(snapshotWithId(540L), key, input, false, analysis))
+        .execute(paimonRuntime);
+
+    paimonRuntime.invalidateCurrentAnalysisKey();
+
+    RuntimeHealthSnapshot snapshot = paimonRuntime.getRuntimeHealthSnapshot().orElseThrow();
+    assertEquals(76, snapshot.getHealthScore());
+    assertEquals(key.encoded(), snapshot.getHealthDetails().getEvaluationKey());
+  }
+
+  @Test
+  public void newRuntimeDoesNotRestorePersistedHealthAndMustEvaluateCurrentKey() {
+    TableAnalysisKey key = analysisKey(550L);
+    TableHealthDetails persistedDetails =
+        analysis(key, pendingInput(5, 500L, 88), Collections.emptyList()).healthDetails();
+    paimonRuntime
+        .store()
+        .begin()
+        .updateTableSummary(
+            summary -> {
+              summary.setHealthScore(88);
+              summary.setHealthDetails(persistedDetails);
+            })
+        .commit();
+    AmoroTable<?> table =
+        keyedPaimonTable(
+            snapshotWithId(550L),
+            key,
+            pendingInput(5, 500L, 88),
+            false,
+            analysis(key, pendingInput(5, 500L, 88), Collections.emptyList()));
+
+    DefaultTableRuntime restartedRuntime =
+        new DefaultTableRuntime(paimonRuntime.store(), () -> table, PAIMON_PENDING_INPUT_KEY);
+    restartedRuntime.refresh(table);
+
+    assertFalse(restartedRuntime.getRuntimeHealthSnapshot().isPresent());
+    assertTrue(restartedRuntime.shouldEvaluateCurrentAnalysis());
+  }
+
+  @Test
+  public void idleUnoptimizedSnapshotRetriesWithoutWaitingForHealthKeyChange() {
+    TableAnalysisKey key = analysisKey(505L);
+    PaimonPendingInput input = pendingInput(4, 400L, 82);
+    FormatTableAnalysis analysis = analysis(key, input, Collections.emptyList());
+    AmoroTable<?> table = keyedPaimonTable(snapshotWithId(505L), key, input, true, analysis);
+    TableRuntimeRefreshExecutor executor = executorWith(table);
+
+    executor.execute(paimonRuntime);
+    assertEquals(OptimizingStatus.PENDING, paimonRuntime.getOptimizingStatus());
+
+    // Model completeProcess(false): the failed process returns to IDLE without advancing the last
+    // optimized snapshot, while its same-key health summary remains persisted.
+    paimonRuntime.invalidateCurrentAnalysisKey();
+    paimonRuntime
+        .store()
+        .begin()
+        .updateStatusCode(ignored -> OptimizingStatus.IDLE.getCode())
+        .commit();
+
+    executor.execute(paimonRuntime);
+
+    verify(table, times(1)).evaluatePendingInput(any(), anyInt(), eq(true));
+    verify(table, times(1)).evaluatePendingInput(any(), anyInt());
+    assertEquals(OptimizingStatus.PENDING, paimonRuntime.getOptimizingStatus());
+  }
+
+  @Test
+  public void pendingSameKeyPreservesAdaptiveDemandWithoutRescan() {
+    TableAnalysisKey key = analysisKey(506L);
+    PaimonPendingInput input = pendingInput(4, 400L, 82);
+    FormatTableAnalysis analysis = analysis(key, input, Collections.emptyList());
+    AmoroTable<?> table = keyedPaimonTable(snapshotWithId(506L), key, input, true, analysis);
+    java.util.Map<String, String> adaptiveProperties = new java.util.HashMap<>();
+    adaptiveProperties.put("self-optimizing.refresh-table.adaptive.max-interval-ms", "120000");
+    when(table.properties()).thenReturn(adaptiveProperties);
+    TableRuntimeRefreshExecutor executor = executorWith(table);
+
+    executor.execute(paimonRuntime);
+    assertTrue(paimonRuntime.getLatestEvaluatedNeedOptimizing());
+
+    executor.execute(paimonRuntime);
+
+    verify(table, times(1)).evaluatePendingInput(any(), anyInt(), eq(true));
+    assertTrue(paimonRuntime.getLatestEvaluatedNeedOptimizing());
+    assertEquals(INTERVAL, paimonRuntime.getLatestRefreshInterval());
+  }
+
+  @Test
+  public void legacyFormatWithoutAnalysisKeyKeepsFalseOnSkippedEvaluation() {
+    AmoroTable<?> table = paimonAmoroTable(null, false);
+    when(table.format()).thenReturn(TableFormat.ICEBERG);
+    java.util.Map<String, String> adaptiveProperties = new java.util.HashMap<>();
+    adaptiveProperties.put("self-optimizing.refresh-table.adaptive.max-interval-ms", "120000");
+    when(table.properties()).thenReturn(adaptiveProperties);
+    paimonRuntime.refresh(table);
+    paimonRuntime.optimizingNotNecessary();
+    paimonRuntime.setLatestEvaluatedNeedOptimizing(true);
+    paimonRuntime.setLatestRefreshInterval(INTERVAL);
+
+    executorWith(table).execute(paimonRuntime);
+
+    verify(table, never()).evaluatePendingInput(any(), anyInt());
+    assertFalse(paimonRuntime.getLatestEvaluatedNeedOptimizing());
+    assertEquals(90_000L, paimonRuntime.getLatestRefreshInterval());
+  }
+
+  @Test
+  public void missingHealthSummaryForKeyForcesEvaluationWithoutSnapshotChange() {
+    TableAnalysisKey key =
+        new TableAnalysisKey(
+            String.valueOf(paimonRuntime.getTableIdentifier().getId()),
+            TableFormat.ICEBERG,
+            TableAnalysisKey.NO_SNAPSHOT,
+            TableAnalysisKey.NO_CHANGE_SNAPSHOT,
+            1L,
+            "fingerprint",
+            "iceberg-legacy-v1",
+            TableAnalysisKey.NO_BASELINE,
+            TableAnalysisKey.NO_BASELINE_TIME);
+    PaimonPendingInput input = pendingInput(0, 0L, 100);
+    FormatTableAnalysis analysis = analysis(key, input, Collections.emptyList());
+    AmoroTable<?> table = mock(AmoroTable.class);
+    when(table.format()).thenReturn(TableFormat.ICEBERG);
+    when(table.properties()).thenReturn(Collections.emptyMap());
+    when(table.currentSnapshot()).thenReturn(null);
+    when(table.refreshOptimizingState(any())).thenCallRealMethod();
+    when(table.currentAnalysisKey(any())).thenReturn(Optional.of(key));
+    when(table.evaluatePendingInput(any(), anyInt(), eq(true)))
+        .thenReturn(Optional.of(new PendingInputResult(input, false, analysis)));
+
+    executorWith(table).execute(paimonRuntime);
+
+    verify(table, times(1)).evaluatePendingInput(any(), anyInt(), eq(true));
+    verify(table, never()).evaluatePendingInput(any(), anyInt());
+    assertEquals(
+        100,
+        tableManager()
+            .getTableRuntimeMata(paimonRuntime.getTableIdentifier())
+            .getTableSummary()
+            .getHealthScore());
+  }
+
+  @Test
+  public void sameKeyRetriesOnlySnapshotScanFailure() {
+    TableAnalysisKey retryKey = analysisKey(510L);
+    PaimonPendingInput retryInput = pendingInput(1, 10L, -1);
+    FormatTableAnalysis retryAnalysis =
+        analysis(retryKey, retryInput, Collections.singletonList("SNAPSHOT_SCAN_FAILED"));
+    AmoroTable<?> retryTable =
+        keyedPaimonTable(snapshotWithId(510L), retryKey, retryInput, false, retryAnalysis);
+    TableRuntimeRefreshExecutor retryExecutor = executorWith(retryTable);
+
+    retryExecutor.execute(paimonRuntime);
+    retryExecutor.execute(paimonRuntime);
+
+    verify(retryTable, times(2)).evaluatePendingInput(any(), anyInt(), eq(true));
+
+    TableAnalysisKey deterministicKey = analysisKey(511L);
+    PaimonPendingInput deterministicInput = pendingInput(1, 10L, -1);
+    FormatTableAnalysis deterministicAnalysis =
+        analysis(
+            deterministicKey,
+            deterministicInput,
+            Collections.singletonList("INVALID_SCORING_CONFIG"));
+    AmoroTable<?> deterministicTable =
+        keyedPaimonTable(
+            snapshotWithId(511L),
+            deterministicKey,
+            deterministicInput,
+            false,
+            deterministicAnalysis);
+    TableRuntimeRefreshExecutor deterministicExecutor = executorWith(deterministicTable);
+
+    deterministicExecutor.execute(paimonRuntime);
+    deterministicExecutor.execute(paimonRuntime);
+
+    verify(deterministicTable, times(1)).evaluatePendingInput(any(), anyInt(), eq(true));
+  }
+
+  @Test
+  public void changedKeyWhilePendingOnlyRefreshesFullSummary() {
+    TableAnalysisKey firstKey = analysisKey(600L);
+    TableAnalysisKey secondKey = analysisKey(601L);
+    PaimonPendingInput firstInput = pendingInput(3, 300L, 70);
+    PaimonPendingInput secondInput = pendingInput(9, 900L, 40);
+    FormatTableAnalysis firstAnalysis = analysis(firstKey, firstInput, Collections.emptyList());
+    FormatTableAnalysis secondAnalysis = analysis(secondKey, secondInput, Collections.emptyList());
+    TableSnapshot firstSnapshot = snapshotWithId(600L);
+    TableSnapshot secondSnapshot = snapshotWithId(601L);
+
+    AmoroTable<?> table = mock(AmoroTable.class);
+    when(table.format()).thenReturn(TableFormat.PAIMON);
+    when(table.properties()).thenReturn(Collections.emptyMap());
+    when(table.currentSnapshot()).thenReturn(firstSnapshot, secondSnapshot);
+    when(table.refreshOptimizingState(any())).thenCallRealMethod();
+    when(table.currentAnalysisKey(any()))
+        .thenReturn(
+            Optional.of(firstKey),
+            Optional.of(firstKey),
+            Optional.of(secondKey),
+            Optional.of(secondKey));
+    when(table.evaluatePendingInput(any(), anyInt(), anyBoolean()))
+        .thenReturn(
+            Optional.of(new PendingInputResult(firstInput, true, firstAnalysis)),
+            Optional.of(new PendingInputResult(secondInput, true, secondAnalysis)));
+    TableRuntimeRefreshExecutor executor = executorWith(table);
+
+    executor.execute(paimonRuntime);
+    assertEquals(OptimizingStatus.PENDING, paimonRuntime.getOptimizingStatus());
+    executor.execute(paimonRuntime);
+
+    assertEquals(OptimizingStatus.PENDING, paimonRuntime.getOptimizingStatus());
+    assertEquals(3, paimonRuntime.getPendingInput().getTotalFileCount());
+    assertEquals(
+        9,
+        tableManager()
+            .getTableRuntimeMata(paimonRuntime.getTableIdentifier())
+            .getTableSummary()
+            .getTotalFileCount());
+    assertEquals(
+        40,
+        tableManager()
+            .getTableRuntimeMata(paimonRuntime.getTableIdentifier())
+            .getTableSummary()
+            .getHealthScore());
+    assertEquals(40, paimonRuntime.getRuntimeHealthSnapshot().orElseThrow().getHealthScore());
+    assertEquals(
+        secondKey.encoded(),
+        paimonRuntime
+            .getRuntimeHealthSnapshot()
+            .orElseThrow()
+            .getHealthDetails()
+            .getEvaluationKey());
+    assertFalse(paimonRuntime.takeTableAnalysis(firstKey).isPresent());
+  }
+
+  @Test
+  public void concurrentKeyChangeDropsStaleEvaluation() {
+    TableAnalysisKey evaluatedKey = analysisKey(700L);
+    TableAnalysisKey currentKey = analysisKey(701L);
+    PaimonPendingInput input = pendingInput(7, 700L, 55);
+    FormatTableAnalysis analysis = analysis(evaluatedKey, input, Collections.emptyList());
+    TableSnapshot snapshot = snapshotWithId(700L);
+    AmoroTable<?> table = mock(AmoroTable.class);
+    when(table.format()).thenReturn(TableFormat.PAIMON);
+    when(table.properties()).thenReturn(Collections.emptyMap());
+    when(table.currentSnapshot()).thenReturn(snapshot);
+    when(table.refreshOptimizingState(any())).thenCallRealMethod();
+    when(table.currentAnalysisKey(any()))
+        .thenReturn(Optional.of(evaluatedKey), Optional.of(currentKey));
+    when(table.evaluatePendingInput(any(), anyInt(), anyBoolean()))
+        .thenReturn(Optional.of(new PendingInputResult(input, false, analysis)));
+    TableHealthDetails summaryBefore =
+        tableManager()
+            .getTableRuntimeMata(paimonRuntime.getTableIdentifier())
+            .getTableSummary()
+            .getHealthDetails();
+
+    executorWith(table).execute(paimonRuntime);
+
+    assertEquals(Optional.of(currentKey), paimonRuntime.getCurrentAnalysisKey());
+    assertEquals(
+        summaryBefore,
+        tableManager()
+            .getTableRuntimeMata(paimonRuntime.getTableIdentifier())
+            .getTableSummary()
+            .getHealthDetails());
+  }
+
+  @Test
+  public void tableSummaryOnlyNeverPublishesPending() {
+    TableAnalysisKey key = analysisKey(800L);
+    PaimonPendingInput input = pendingInput(8, 800L, 66);
+    FormatTableAnalysis analysis = analysis(key, input, Collections.emptyList());
+    AmoroTable<?> table = keyedPaimonTable(snapshotWithId(800L), key, input, true, analysis);
+    java.util.Map<String, String> properties = new java.util.HashMap<>();
+    properties.put("self-optimizing.enabled", "false");
+    properties.put("table-summary.enabled", "true");
+    when(table.properties()).thenReturn(properties);
+
+    executorWith(table).execute(paimonRuntime);
+
+    assertEquals(OptimizingStatus.IDLE, paimonRuntime.getOptimizingStatus());
+    assertEquals(
+        0,
+        tableManager()
+            .getTableRuntimeMata(paimonRuntime.getTableIdentifier())
+            .getTableSummary()
+            .getPendingFileCount());
+    assertEquals(
+        66,
+        tableManager()
+            .getTableRuntimeMata(paimonRuntime.getTableIdentifier())
+            .getTableSummary()
+            .getHealthScore());
+  }
+
+  private AmoroTable<?> keyedPaimonTable(
+      TableSnapshot snapshot,
+      TableAnalysisKey key,
+      PaimonPendingInput input,
+      boolean optimizingNecessary,
+      FormatTableAnalysis analysis) {
+    AmoroTable<?> table = paimonAmoroTable(snapshot, optimizingNecessary);
+    when(table.currentAnalysisKey(any())).thenReturn(Optional.of(key));
+    Optional<PendingInputResult> result =
+        Optional.of(new PendingInputResult(input, optimizingNecessary, analysis));
+    when(table.evaluatePendingInput(any(), anyInt())).thenReturn(result);
+    when(table.evaluatePendingInput(any(), anyInt(), anyBoolean())).thenReturn(result);
+    return table;
+  }
+
+  private TableAnalysisKey analysisKey(long snapshotId) {
+    return new TableAnalysisKey(
+        String.valueOf(paimonRuntime.getTableIdentifier().getId()),
+        TableFormat.PAIMON,
+        snapshotId,
+        TableAnalysisKey.NO_CHANGE_SNAPSHOT,
+        1L,
+        "fingerprint",
+        "test-paimon-health-v1",
+        TableAnalysisKey.NO_BASELINE,
+        TableAnalysisKey.NO_BASELINE_TIME);
+  }
+
+  private PaimonPendingInput pendingInput(int fileCount, long fileSize, int healthScore) {
+    PaimonPendingInput input = new PaimonPendingInput();
+    input.setDataFileCount(fileCount);
+    input.setDataFileSize(fileSize);
+    input.setDataRecordCount(fileCount * 10L);
+    input.setHealthScore(healthScore);
+    return input;
+  }
+
+  @SuppressWarnings("unchecked")
+  private long metricValue(MetricDefine metricDefine) {
+    Map<MetricKey, Metric> metrics = MetricManager.getInstance().getGlobalRegistry().getMetrics();
+    MetricKey key =
+        new MetricKey(
+            metricDefine,
+            ImmutableMap.of(
+                "catalog",
+                paimonRuntime.getTableIdentifier().getCatalog(),
+                "database",
+                paimonRuntime.getTableIdentifier().getDatabase(),
+                "table",
+                paimonRuntime.getTableIdentifier().getTableName()));
+    return ((Gauge<Long>) metrics.get(key)).getValue();
+  }
+
+  private FormatTableAnalysis analysis(
+      TableAnalysisKey key, PaimonPendingInput input, java.util.List<String> reasonCodes) {
+    TableHealthDetails healthDetails =
+        new TableHealthDetails(
+            key.getFormulaVersion(),
+            key.getSnapshotId(),
+            null,
+            key.getSchemaId(),
+            key.getScoringConfigFingerprint(),
+            key.encoded(),
+            Collections.emptyList(),
+            Collections.emptyMap(),
+            reasonCodes);
+    return new FormatTableAnalysis() {
+      @Override
+      public TableAnalysisKey key() {
+        return key;
+      }
+
+      @Override
+      public PaimonPendingInput pendingInput() {
+        return input;
+      }
+
+      @Override
+      public TableHealthDetails healthDetails() {
+        return healthDetails;
+      }
+    };
   }
 }

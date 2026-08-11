@@ -23,6 +23,7 @@ import org.apache.amoro.optimizing.OptimizingType;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Optional;
 
 /** Read-only decision result for Paimon primary-key HASH table optimizing. */
 public class PaimonPrimaryKeyOptimizingEvaluation {
@@ -31,12 +32,14 @@ public class PaimonPrimaryKeyOptimizingEvaluation {
   private final OptimizingType optimizingType;
   private final boolean fullCompaction;
   private final long targetSnapshotId;
+  private final PaimonPrimaryKeySnapshotAnalysis analysis;
 
   private PaimonPrimaryKeyOptimizingEvaluation(
       List<PaimonBucketCompactionUnit> units,
       OptimizingType optimizingType,
       boolean fullCompaction,
-      long targetSnapshotId) {
+      long targetSnapshotId,
+      PaimonPrimaryKeySnapshotAnalysis analysis) {
     this.units =
         units == null
             ? Collections.emptyList()
@@ -44,11 +47,18 @@ public class PaimonPrimaryKeyOptimizingEvaluation {
     this.optimizingType = optimizingType;
     this.fullCompaction = fullCompaction;
     this.targetSnapshotId = targetSnapshotId;
+    this.analysis = analysis;
   }
 
   public static PaimonPrimaryKeyOptimizingEvaluation empty(long targetSnapshotId) {
     return new PaimonPrimaryKeyOptimizingEvaluation(
-        Collections.emptyList(), OptimizingType.MINOR, false, targetSnapshotId);
+        Collections.emptyList(), OptimizingType.MINOR, false, targetSnapshotId, null);
+  }
+
+  public static PaimonPrimaryKeyOptimizingEvaluation healthOnly(
+      long targetSnapshotId, PaimonPrimaryKeySnapshotAnalysis analysis) {
+    return new PaimonPrimaryKeyOptimizingEvaluation(
+        Collections.emptyList(), OptimizingType.MINOR, false, targetSnapshotId, analysis);
   }
 
   public static PaimonPrimaryKeyOptimizingEvaluation of(
@@ -57,7 +67,17 @@ public class PaimonPrimaryKeyOptimizingEvaluation {
       boolean fullCompaction,
       long targetSnapshotId) {
     return new PaimonPrimaryKeyOptimizingEvaluation(
-        units, optimizingType, fullCompaction, targetSnapshotId);
+        units, optimizingType, fullCompaction, targetSnapshotId, null);
+  }
+
+  public static PaimonPrimaryKeyOptimizingEvaluation of(
+      List<PaimonBucketCompactionUnit> units,
+      OptimizingType optimizingType,
+      boolean fullCompaction,
+      long targetSnapshotId,
+      PaimonPrimaryKeySnapshotAnalysis analysis) {
+    return new PaimonPrimaryKeyOptimizingEvaluation(
+        units, optimizingType, fullCompaction, targetSnapshotId, analysis);
   }
 
   public boolean necessary() {
@@ -78,5 +98,9 @@ public class PaimonPrimaryKeyOptimizingEvaluation {
 
   public long targetSnapshotId() {
     return targetSnapshotId;
+  }
+
+  public Optional<PaimonPrimaryKeySnapshotAnalysis> analysis() {
+    return Optional.ofNullable(analysis);
   }
 }

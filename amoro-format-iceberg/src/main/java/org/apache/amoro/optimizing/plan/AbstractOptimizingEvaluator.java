@@ -166,7 +166,9 @@ public abstract class AbstractOptimizingEvaluator {
     // to be inconsistent with the snapshot summary of iceberg
     if (TableFormat.ICEBERG == mixedTable.format()) {
       Snapshot snapshot = mixedTable.asUnkeyedTable().snapshot(currentSnapshot.snapshotId());
-      return new PendingInput(partitionPlanMap.values(), snapshot);
+      if (snapshot != null) {
+        return new PendingInput(partitionPlanMap.values(), snapshot);
+      }
     }
 
     return new PendingInput(partitionPlanMap.values());
@@ -335,6 +337,7 @@ public abstract class AbstractOptimizingEvaluator {
       return totalFileSize;
     }
 
+    @Override
     public long getTotalFileRecords() {
       return totalFileRecords;
     }

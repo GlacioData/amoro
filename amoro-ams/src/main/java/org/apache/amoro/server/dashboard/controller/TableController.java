@@ -54,7 +54,10 @@ import org.apache.amoro.server.dashboard.utils.CommonUtil;
 import org.apache.amoro.server.optimizing.OptimizingStatus;
 import org.apache.amoro.server.persistence.TableRuntimeMeta;
 import org.apache.amoro.server.process.TableProcessMeta;
+import org.apache.amoro.server.table.DefaultTableRuntime;
+import org.apache.amoro.server.table.RuntimeHealthSnapshot;
 import org.apache.amoro.server.table.TableManager;
+import org.apache.amoro.server.table.TableService;
 import org.apache.amoro.shade.guava32.com.google.common.base.Function;
 import org.apache.amoro.shade.guava32.com.google.common.base.Preconditions;
 import org.apache.amoro.shade.guava32.com.google.common.util.concurrent.ThreadFactoryBuilder;
@@ -72,8 +75,10 @@ import org.apache.amoro.table.descriptor.OptimizingTaskInfo;
 import org.apache.amoro.table.descriptor.PartitionBaseInfo;
 import org.apache.amoro.table.descriptor.PartitionFileBaseInfo;
 import org.apache.amoro.table.descriptor.ServerTableMeta;
+import org.apache.amoro.table.descriptor.TableHealthDetailsView;
 import org.apache.amoro.table.descriptor.TableSummary;
 import org.apache.amoro.table.descriptor.TagOrBranchInfo;
+import org.apache.amoro.table.health.TableHealthDetails;
 import org.apache.amoro.utils.CatalogUtil;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.tuple.Pair;
@@ -96,6 +101,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 /** The controller that handles table requests. */
@@ -107,6 +113,7 @@ public class TableController {
   private final TableManager tableManager;
   private final ServerTableDescriptor tableDescriptor;
   private final Configurations serviceConfig;
+  private final Supplier<TableService> tableServiceSupplier;
   private final ConcurrentHashMap<TableIdentifier, UpgradeRunningInfo> upgradeRunningInfo =
       new ConcurrentHashMap<>();
   private final ScheduledExecutorService tableUpgradeExecutor;
@@ -116,10 +123,30 @@ public class TableController {
       TableManager tableManager,
       ServerTableDescriptor tableDescriptor,
       Configurations serviceConfig) {
+    this(catalogManager, tableManager, tableDescriptor, serviceConfig, () -> null);
+  }
+
+  public TableController(
+      CatalogManager catalogManager,
+      TableManager tableManager,
+      ServerTableDescriptor tableDescriptor,
+      Configurations serviceConfig,
+      TableService tableService) {
+    this(catalogManager, tableManager, tableDescriptor, serviceConfig, () -> tableService);
+  }
+
+  public TableController(
+      CatalogManager catalogManager,
+      TableManager tableManager,
+      ServerTableDescriptor tableDescriptor,
+      Configurations serviceConfig,
+      Supplier<TableService> tableServiceSupplier) {
     this.catalogManager = catalogManager;
     this.tableManager = tableManager;
     this.tableDescriptor = tableDescriptor;
     this.serviceConfig = serviceConfig;
+    this.tableServiceSupplier =
+        Objects.requireNonNull(tableServiceSupplier, "Table service supplier must not be null");
     this.tableUpgradeExecutor =
         Executors.newScheduledThreadPool(
             0,
@@ -156,25 +183,62 @@ public class TableController {
             tableManager.getServerTableIdentifier(
                 TableIdentifier.of(catalog, database, tableName).buildTableIdentifier()));
     if (serverTableIdentifier.isPresent()) {
-      TableRuntimeMeta tableRuntimeMeta =
-          tableManager.getTableRuntimeMata(serverTableIdentifier.get());
+      ServerTableIdentifier identifier = serverTableIdentifier.get();
+      TableRuntimeMeta tableRuntimeMeta = tableManager.getTableRuntimeMata(identifier);
+      org.apache.amoro.table.TableSummary runtimeSummary = null;
       if (tableRuntimeMeta != null) {
         OptimizingStatus status = OptimizingStatus.ofCode(tableRuntimeMeta.getStatusCode());
         if (status != null) {
           tableSummary.setOptimizingStatus(status.name());
         }
-        org.apache.amoro.table.TableSummary summary = tableRuntimeMeta.getTableSummary();
-        if (summary != null) {
-          tableSummary.setHealthScore(summary.getHealthScore());
-          tableSummary.setSmallFileScore(summary.getSmallFileScore());
-          tableSummary.setEqualityDeleteScore(summary.getEqualityDeleteScore());
-          tableSummary.setPositionalDeleteScore(summary.getPositionalDeleteScore());
+        runtimeSummary = tableRuntimeMeta.getTableSummary();
+        if (runtimeSummary != null) {
+          tableSummary.setHealthScore(runtimeSummary.getHealthScore());
+          tableSummary.setSmallFileScore(runtimeSummary.getSmallFileScore());
+          tableSummary.setEqualityDeleteScore(runtimeSummary.getEqualityDeleteScore());
+          tableSummary.setPositionalDeleteScore(runtimeSummary.getPositionalDeleteScore());
         }
       }
+      projectHealthDetails(
+          tableSummary, runtimeSummary, identifier.getFormat(), currentRuntime(identifier));
     } else {
       tableSummary.setOptimizingStatus(OptimizingStatus.IDLE.name());
     }
     ctx.json(OkResponse.of(serverTableMeta));
+  }
+
+  private DefaultTableRuntime currentRuntime(ServerTableIdentifier identifier) {
+    TableService tableService = tableServiceSupplier.get();
+    if (tableService == null) {
+      return null;
+    }
+    org.apache.amoro.TableRuntime runtime = tableService.getRuntime(identifier.getId());
+    return runtime instanceof DefaultTableRuntime ? (DefaultTableRuntime) runtime : null;
+  }
+
+  private void projectHealthDetails(
+      TableSummary target,
+      org.apache.amoro.table.TableSummary source,
+      TableFormat format,
+      DefaultTableRuntime runtime) {
+    if (format == TableFormat.PAIMON) {
+      Optional<RuntimeHealthSnapshot> runtimeHealth =
+          runtime == null ? Optional.empty() : runtime.getRuntimeHealthSnapshot();
+      if (!runtimeHealth.isPresent()) {
+        target.setHealthScore(-1);
+        target.setHealthDetails(null);
+        return;
+      }
+      RuntimeHealthSnapshot snapshot = runtimeHealth.get();
+      target.setHealthScore(snapshot.getHealthScore());
+      target.setHealthDetails(TableHealthDetailsView.from(snapshot.getHealthDetails()));
+      return;
+    }
+
+    if (source != null) {
+      TableHealthDetails details = source.getHealthDetails();
+      target.setHealthDetails(TableHealthDetailsView.from(details));
+    }
   }
 
   /**

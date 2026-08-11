@@ -102,19 +102,35 @@ public class TableRuntimeRefreshExecutor extends PeriodicTableScheduler {
           lastOptimizedSnapshotId != defaultTableRuntime.getCurrentSnapshotId()
               || lastOptimizedChangeSnapshotId != defaultTableRuntime.getCurrentChangeSnapshotId();
 
+      boolean keyBasedEvaluation = defaultTableRuntime.getCurrentAnalysisKey().isPresent();
+      boolean healthNeedsEvaluation =
+          keyBasedEvaluation && defaultTableRuntime.shouldEvaluateCurrentAnalysis();
+      boolean retryUnoptimizedSnapshot =
+          optimizingConfig.isEnabled() && defaultTableRuntime.isIdle() && snapshotChanged;
+      boolean shouldEvaluate =
+          keyBasedEvaluation ? healthNeedsEvaluation || retryUnoptimizedSnapshot : snapshotChanged;
+
       boolean hasOptimizingDemand = false;
-      if (snapshotChanged) {
+      if (shouldEvaluate) {
         hasOptimizingDemand =
-            defaultTableRuntime.evaluatePendingInputAndTransition(table, maxPendingPartitions);
+            defaultTableRuntime.evaluatePendingInputAndTransition(
+                table, maxPendingPartitions, healthNeedsEvaluation);
       } else {
-        logger.debug("{} optimizing is not necessary", defaultTableRuntime.getTableIdentifier());
+        logger.debug(
+            "{} has no new table analysis input", defaultTableRuntime.getTableIdentifier());
       }
 
       // Update adaptive interval according to evaluated result.
       // Skip adaptive interval for table-summary-only mode to maintain fixed collection interval.
       if (!tableSummaryOnly
           && defaultTableRuntime.getOptimizingConfig().isRefreshTableAdaptiveEnabled(interval)) {
-        defaultTableRuntime.setLatestEvaluatedNeedOptimizing(hasOptimizingDemand);
+        // A keyed format can skip an unchanged analysis without producing a new demand signal.
+        // Preserve the previous result in that case so a pending table is not mistaken for
+        // healthy. Legacy formats without an analysis key retain the original false-on-skip
+        // behavior.
+        if (shouldEvaluate || !keyBasedEvaluation) {
+          defaultTableRuntime.setLatestEvaluatedNeedOptimizing(hasOptimizingDemand);
+        }
         long newInterval = getAdaptiveExecutingInterval(defaultTableRuntime);
         defaultTableRuntime.setLatestRefreshInterval(newInterval);
       }

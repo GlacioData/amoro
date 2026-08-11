@@ -22,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
@@ -77,6 +78,8 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Callable;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 @DisplayName("PaimonTableCommit")
 public class TestPaimonTableCommit {
@@ -229,14 +232,27 @@ public class TestPaimonTableCommit {
     List<PaimonCompactionTask> tasks = planAndExecute(catalog, id, 1L, 42L);
     assertTrue(tasks.size() >= 1);
     assertCompactMessageRowCountPreserved(tasks);
+    AtomicBoolean insideDoAs = new AtomicBoolean(false);
+    PaimonTable paimonTable = mock(PaimonTable.class);
+    when(paimonTable.doAs(any()))
+        .thenAnswer(
+            invocation -> {
+              insideDoAs.set(true);
+              Callable<?> callable = invocation.getArgument(0);
+              return callable.call();
+            });
 
     PaimonTableCommit committer =
         new PaimonTableCommit(
+            paimonTable,
             (AppendOnlyFileStoreTable) catalog.getTable(id),
             tasks,
             "user-1",
             commitIdentifier(tasks));
     committer.commit();
+
+    assertTrue(insideDoAs.get());
+    verify(paimonTable).doAs(any());
 
     long after = countDataFiles((AppendOnlyFileStoreTable) catalog.getTable(id));
     List<String> rowsAfter = readRowStrings(catalog.getTable(id));
@@ -549,7 +565,8 @@ public class TestPaimonTableCommit {
     AppendOnlyFileStoreTable t = (AppendOnlyFileStoreTable) catalog.getTable(id);
     long snapshotBefore = t.snapshotManager().latestSnapshot().id();
 
-    new PaimonTableCommit(t, Collections.emptyList(), "user", 1L).commit();
+    PaimonTableCommit committer = new PaimonTableCommit(t, Collections.emptyList(), "user", 1L);
+    committer.commit();
 
     AppendOnlyFileStoreTable after = (AppendOnlyFileStoreTable) catalog.getTable(id);
     assertEquals(snapshotBefore, after.snapshotManager().latestSnapshot().id());

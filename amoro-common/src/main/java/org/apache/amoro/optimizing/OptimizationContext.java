@@ -41,6 +41,11 @@ public interface OptimizationContext {
 
   long getLastMajorOptimizingTime();
 
+  /** Return the existing optimizing checkpoint used by scheduling. */
+  default long getLastOptimizedSnapshotId() {
+    return TableRuntimeOptimizingState.INVALID_SNAPSHOT_ID;
+  }
+
   /**
    * Record a non-maintained snapshot timestamp for optimizing lag metrics. Only meaningful for
    * Iceberg-based formats; other formats can ignore this.

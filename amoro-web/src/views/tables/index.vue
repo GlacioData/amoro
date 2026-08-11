@@ -56,9 +56,11 @@ export default defineComponent({
     const SIDEBAR_WIDTH_STORAGE_KEY = 'tables_sidebar_width'
     const SIDEBAR_MIN_WIDTH = 320
     const SIDEBAR_MAX_WIDTH = 800
+    const TABLE_DETAIL_REFRESH_INTERVAL_MS = 60_000
     const sidebarWidth = ref(320)
 
     let isResizing = false
+    let detailRefreshTimer: number | undefined
     let startX = 0
     let startWidth = sidebarWidth.value
 
@@ -125,10 +127,12 @@ export default defineComponent({
         createTime: '',
         tableFormat: '',
         hasPartition: false,
+        hasPrimaryKey: false,
         healthScore: -1,
         smallFileScore: 0,
         equalityDeleteScore: 0,
         positionalDeleteScore: 0,
+        healthDetails: null,
         comment: '',
       } as IBaseDetailInfo,
       detailLoaded: false,
@@ -156,10 +160,12 @@ export default defineComponent({
         createTime: '',
         tableFormat: '',
         hasPartition: false,
+        hasPrimaryKey: false,
         healthScore: -1,
         smallFileScore: 0,
         equalityDeleteScore: 0,
         positionalDeleteScore: 0,
+        healthDetails: null,
         comment: '',
       } as IBaseDetailInfo
       state.detailLoaded = false
@@ -174,6 +180,19 @@ export default defineComponent({
     const goBack = () => {
       state.isSecondaryNav = false
       router.back()
+    }
+
+    const refreshVisibleTableDetails = () => {
+      if (
+        document.visibilityState !== 'visible'
+        || state.isSecondaryNav
+        || !hasSelectedTable.value
+        || isHiveTable.value
+        || isHiveUpgrade.value
+      ) {
+        return
+      }
+      detailRef.value?.getTableDetails()
     }
 
     watch(
@@ -224,9 +243,16 @@ export default defineComponent({
           detailRef.value.getTableDetails()
         }
       })
+      detailRefreshTimer = window.setInterval(
+        refreshVisibleTableDetails,
+        TABLE_DETAIL_REFRESH_INTERVAL_MS,
+      )
     })
 
     onBeforeUnmount(() => {
+      if (detailRefreshTimer !== undefined) {
+        window.clearInterval(detailRefreshTimer)
+      }
       document.removeEventListener('mousemove', onSidebarResize)
       document.removeEventListener('mouseup', stopSidebarResize)
     })
@@ -407,10 +433,6 @@ export default defineComponent({
       color: #7CB305;
     }
 
-    .clickable-score {
-      cursor: pointer;
-      text-decoration: underline;
-    }
   }
 
   .table-edit {

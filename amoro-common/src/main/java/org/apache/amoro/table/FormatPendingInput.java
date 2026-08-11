@@ -35,4 +35,9 @@ public interface FormatPendingInput extends TableSummaryProvider {
   long getDataFileSize();
 
   int getDataFileCount();
+
+  /** Returns physical records reported by the current table files when available. */
+  default long getTotalFileRecords() {
+    return 0L;
+  }
 }

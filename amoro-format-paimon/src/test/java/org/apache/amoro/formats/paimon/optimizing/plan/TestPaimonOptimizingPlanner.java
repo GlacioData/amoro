@@ -29,10 +29,16 @@ import org.apache.amoro.formats.paimon.PaimonCatalogFactory;
 import org.apache.amoro.formats.paimon.PaimonTable;
 import org.apache.amoro.formats.paimon.optimizing.PaimonCompactionExecutorFactory;
 import org.apache.amoro.formats.paimon.optimizing.PaimonCompactionTask;
+import org.apache.amoro.formats.paimon.optimizing.health.PaimonAppendSnapshotAnalysis;
+import org.apache.amoro.formats.paimon.optimizing.health.PaimonHealthEvaluationContext;
+import org.apache.amoro.optimizing.FormatTableAnalysis;
 import org.apache.amoro.optimizing.OptimizingPlanResult;
 import org.apache.amoro.optimizing.OptimizingType;
 import org.apache.amoro.optimizing.TaskProperties;
+import org.apache.amoro.table.FormatPendingInput;
 import org.apache.amoro.table.TableIdentifier;
+import org.apache.amoro.table.health.TableAnalysisKey;
+import org.apache.amoro.table.health.TableHealthDetails;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.paimon.append.AppendCompactTask;
 import org.apache.paimon.catalog.Catalog;
@@ -59,7 +65,10 @@ import org.apache.paimon.utils.RowDataToObjectArrayConverter;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 
+import java.lang.reflect.Field;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -506,6 +515,232 @@ public class TestPaimonOptimizingPlanner {
   }
 
   @Test
+  @DisplayName("Matching APPEND analysis is consumed without a planner fallback scan")
+  void testMatchingAnalysisAvoidsFallbackScan(@TempDir Path warehouse) throws Exception {
+    Catalog catalog = fsCatalog(warehouse);
+    Map<String, String> options = new HashMap<>();
+    options.put("target-file-size", "1 kb");
+    options.put("compaction.min.file-num", "2");
+    Table table = createAppendOnlyTable(catalog, "t_reuse_analysis", options);
+    for (int i = 0; i < 3; i++) {
+      writeRecords(
+          table, Collections.singletonList(GenericRow.of(i, BinaryString.fromString("r-" + i))));
+    }
+    Identifier id = Identifier.create("db1", "t_reuse_analysis");
+    AppendOnlyFileStoreTable appendTable = (AppendOnlyFileStoreTable) catalog.getTable(id);
+    PaimonTable paimonTable = wrap(appendTable, "t_reuse_analysis");
+    PaimonHealthEvaluationContext context =
+        PaimonHealthEvaluationContext.capture(appendTable, paimonTable.id().toString(), null);
+    PaimonAppendSnapshotAnalysis analysis =
+        PaimonAppendFileScanner.analyze(appendTable, context, null);
+
+    PaimonOptimizingPlanner planner =
+        new PaimonOptimizingPlanner(
+            paimonTable,
+            1L,
+            1L,
+            4.0,
+            64L * 1024 * 1024,
+            defaultOptimizingConfig(),
+            0L,
+            0L,
+            0L,
+            null,
+            analysis);
+
+    assertTrue(planner.isNecessary());
+    assertEquals(0, planner.fallbackScanCount());
+    assertTrue(planner.tableAnalysis().isPresent());
+    assertTrue(planner.tableAnalysis().get() == analysis);
+    assertEquals(1, analysis.fullSnapshotScanCount());
+  }
+
+  @Test
+  @DisplayName("Mismatched APPEND analysis falls back to exactly one current snapshot scan")
+  void testMismatchedAnalysisFallsBackOnce(@TempDir Path warehouse) throws Exception {
+    Catalog catalog = fsCatalog(warehouse);
+    Map<String, String> options = new HashMap<>();
+    options.put("target-file-size", "1 kb");
+    options.put("compaction.min.file-num", "2");
+    Table table = createAppendOnlyTable(catalog, "t_mismatch_analysis", options);
+    for (int i = 0; i < 3; i++) {
+      writeRecords(
+          table, Collections.singletonList(GenericRow.of(i, BinaryString.fromString("r-" + i))));
+    }
+    Identifier id = Identifier.create("db1", "t_mismatch_analysis");
+    AppendOnlyFileStoreTable initialTable = (AppendOnlyFileStoreTable) catalog.getTable(id);
+    PaimonTable initialPaimonTable = wrap(initialTable, "t_mismatch_analysis");
+    PaimonHealthEvaluationContext initialContext =
+        PaimonHealthEvaluationContext.capture(
+            initialTable, initialPaimonTable.id().toString(), null);
+    PaimonAppendSnapshotAnalysis staleAnalysis =
+        PaimonAppendFileScanner.analyze(initialTable, initialContext, null);
+
+    writeRecords(
+        table, Collections.singletonList(GenericRow.of(9, BinaryString.fromString("new"))));
+    AppendOnlyFileStoreTable currentTable = (AppendOnlyFileStoreTable) catalog.getTable(id);
+    PaimonTable currentPaimonTable = wrap(currentTable, "t_mismatch_analysis");
+    long currentSnapshotId = currentTable.snapshotManager().latestSnapshot().id();
+    PaimonOptimizingPlanner planner =
+        new PaimonOptimizingPlanner(
+            currentPaimonTable,
+            1L,
+            2L,
+            4.0,
+            64L * 1024 * 1024,
+            defaultOptimizingConfig(),
+            0L,
+            0L,
+            0L,
+            null,
+            staleAnalysis);
+
+    assertTrue(planner.isNecessary());
+    assertEquals(1, planner.fallbackScanCount());
+    assertEquals(currentSnapshotId, planner.getTargetSnapshotId());
+    assertTrue(planner.tableAnalysis().isPresent());
+    assertEquals(currentSnapshotId, planner.tableAnalysis().get().key().getSnapshotId());
+  }
+
+  @ParameterizedTest(name = "mismatched {0} rejects APPEND analysis")
+  @EnumSource(KeyField.class)
+  @DisplayName("every TableAnalysisKey field participates in APPEND reuse eligibility")
+  void everyAnalysisKeyFieldMustMatch(KeyField keyField, @TempDir Path warehouse) throws Exception {
+    Catalog catalog = fsCatalog(warehouse);
+    Map<String, String> options = new HashMap<>();
+    options.put("target-file-size", "1 kb");
+    options.put("compaction.min.file-num", "2");
+    String tableName = "t_key_" + keyField.name().toLowerCase(java.util.Locale.ROOT);
+    Table table = createAppendOnlyTable(catalog, tableName, options);
+    for (int i = 0; i < 3; i++) {
+      writeRecords(
+          table, Collections.singletonList(GenericRow.of(i, BinaryString.fromString("r-" + i))));
+    }
+    Identifier id = Identifier.create("db1", tableName);
+    AppendOnlyFileStoreTable appendTable = (AppendOnlyFileStoreTable) catalog.getTable(id);
+    PaimonTable paimonTable = wrap(appendTable, tableName);
+    PaimonHealthEvaluationContext currentContext =
+        PaimonHealthEvaluationContext.capture(appendTable, paimonTable.id().toString(), null);
+    PaimonAppendSnapshotAnalysis supplied =
+        PaimonAppendFileScanner.analyze(appendTable, currentContext, null);
+    replaceAnalysisKey(supplied, keyField.change(currentContext.key()));
+
+    PaimonOptimizingPlanner planner =
+        new PaimonOptimizingPlanner(
+            paimonTable,
+            1L,
+            2L,
+            4.0,
+            64L * 1024 * 1024,
+            defaultOptimizingConfig(),
+            0L,
+            0L,
+            0L,
+            null,
+            supplied);
+
+    assertTrue(planner.isNecessary());
+    assertEquals(1, planner.fallbackScanCount());
+    assertEquals(currentContext.key(), planner.tableAnalysis().get().key());
+  }
+
+  @Test
+  @DisplayName("APPEND planner rejects a foreign analysis subtype even when its key matches")
+  void foreignAnalysisSubtypeFallsBackOnce(@TempDir Path warehouse) throws Exception {
+    Catalog catalog = fsCatalog(warehouse);
+    Map<String, String> options = new HashMap<>();
+    options.put("target-file-size", "1 kb");
+    options.put("compaction.min.file-num", "2");
+    Table table = createAppendOnlyTable(catalog, "t_foreign_analysis", options);
+    for (int i = 0; i < 3; i++) {
+      writeRecords(
+          table, Collections.singletonList(GenericRow.of(i, BinaryString.fromString("r-" + i))));
+    }
+    AppendOnlyFileStoreTable appendTable =
+        (AppendOnlyFileStoreTable) catalog.getTable(Identifier.create("db1", "t_foreign_analysis"));
+    PaimonTable paimonTable = wrap(appendTable, "t_foreign_analysis");
+    PaimonHealthEvaluationContext context =
+        PaimonHealthEvaluationContext.capture(appendTable, paimonTable.id().toString(), null);
+    PaimonAppendSnapshotAnalysis delegate =
+        PaimonAppendFileScanner.analyze(appendTable, context, null);
+    FormatTableAnalysis foreign =
+        new FormatTableAnalysis() {
+          @Override
+          public TableAnalysisKey key() {
+            return delegate.key();
+          }
+
+          @Override
+          public FormatPendingInput pendingInput() {
+            return delegate.pendingInput();
+          }
+
+          @Override
+          public TableHealthDetails healthDetails() {
+            return delegate.healthDetails();
+          }
+        };
+    PaimonOptimizingPlanner planner =
+        new PaimonOptimizingPlanner(
+            paimonTable,
+            1L,
+            2L,
+            4.0,
+            64L * 1024 * 1024,
+            defaultOptimizingConfig(),
+            0L,
+            0L,
+            0L,
+            null,
+            foreign);
+
+    assertTrue(planner.isNecessary());
+    assertEquals(1, planner.fallbackScanCount());
+    assertFalse(planner.tableAnalysis().get() == foreign);
+    assertEquals(context.key(), planner.tableAnalysis().get().key());
+  }
+
+  @Test
+  @DisplayName("APPEND planner rescans once when exact-key analysis has no planner facts")
+  void unavailablePlannerFactsFallBackOnce(@TempDir Path warehouse) throws Exception {
+    Catalog catalog = fsCatalog(warehouse);
+    Map<String, String> options = new HashMap<>();
+    options.put("target-file-size", "1 kb");
+    options.put("compaction.min.file-num", "2");
+    Table table = createAppendOnlyTable(catalog, "t_unavailable_facts", options);
+    for (int i = 0; i < 3; i++) {
+      writeRecords(
+          table, Collections.singletonList(GenericRow.of(i, BinaryString.fromString("r-" + i))));
+    }
+    AppendOnlyFileStoreTable appendTable =
+        (AppendOnlyFileStoreTable)
+            catalog.getTable(Identifier.create("db1", "t_unavailable_facts"));
+    PaimonTable paimonTable = wrap(appendTable, "t_unavailable_facts");
+    PaimonHealthEvaluationContext context =
+        PaimonHealthEvaluationContext.capture(appendTable, paimonTable.id().toString(), null);
+    PaimonAppendSnapshotAnalysis unavailable =
+        PaimonAppendSnapshotAnalysis.invalid(context, "TEST_UNAVAILABLE");
+    PaimonOptimizingPlanner planner =
+        new PaimonOptimizingPlanner(
+            paimonTable,
+            1L,
+            2L,
+            4.0,
+            64L * 1024 * 1024,
+            defaultOptimizingConfig(),
+            0L,
+            0L,
+            0L,
+            null,
+            unavailable);
+
+    assertTrue(planner.isNecessary());
+    assertEquals(1, planner.fallbackScanCount());
+    assertFalse(planner.tableAnalysis().get() == unavailable);
+    assertEquals(context.key(), planner.tableAnalysis().get().key());
+  }
+
+  @Test
   @DisplayName("Primary-key (HASH_FIXED) table is skipped without throwing")
   void testPrimaryKeyTableSkipped(@TempDir Path warehouse) throws Exception {
     Catalog catalog = fsCatalog(warehouse);
@@ -668,6 +903,43 @@ public class TestPaimonOptimizingPlanner {
       names.add(file.fileName());
     }
     return names;
+  }
+
+  private static void replaceAnalysisKey(
+      PaimonAppendSnapshotAnalysis analysis, TableAnalysisKey replacement) throws Exception {
+    Field field = PaimonAppendSnapshotAnalysis.class.getDeclaredField("key");
+    field.setAccessible(true);
+    field.set(analysis, replacement);
+  }
+
+  private enum KeyField {
+    TABLE_ID,
+    TABLE_FORMAT,
+    SNAPSHOT,
+    SCHEMA,
+    FINGERPRINT,
+    FORMULA,
+    BASELINE_ID,
+    BASELINE_TIME;
+
+    private TableAnalysisKey change(TableAnalysisKey key) {
+      return new TableAnalysisKey(
+          this == TABLE_ID ? key.getTableId() + "-other" : key.getTableId(),
+          this == TABLE_FORMAT ? org.apache.amoro.TableFormat.ICEBERG : key.getTableFormat(),
+          this == SNAPSHOT ? key.getSnapshotId() + 1L : key.getSnapshotId(),
+          key.getChangeSnapshotId(),
+          this == SCHEMA ? key.getSchemaId() + 1L : key.getSchemaId(),
+          this == FINGERPRINT
+              ? key.getScoringConfigFingerprint() + "-other"
+              : key.getScoringConfigFingerprint(),
+          this == FORMULA ? key.getFormulaVersion() + "-other" : key.getFormulaVersion(),
+          this == BASELINE_ID
+              ? key.getSuccessfulOptimizationBaselineId() + 1L
+              : key.getSuccessfulOptimizationBaselineId(),
+          this == BASELINE_TIME
+              ? key.getSuccessfulOptimizationBaselineTimeMillis() + 1L
+              : key.getSuccessfulOptimizationBaselineTimeMillis());
+    }
   }
 
   private static void compactAppendTasks(

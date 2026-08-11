@@ -22,6 +22,7 @@ import org.apache.amoro.optimizing.OptimizationContext;
 import org.apache.amoro.optimizing.PendingInputResult;
 import org.apache.amoro.optimizing.TableRuntimeOptimizingState;
 import org.apache.amoro.table.TableIdentifier;
+import org.apache.amoro.table.health.TableAnalysisKey;
 
 import java.util.Map;
 import java.util.Optional;
@@ -80,6 +81,28 @@ public interface AmoroTable<T> {
    */
   default Optional<PendingInputResult> evaluatePendingInput(
       OptimizationContext context, int maxPendingPartitions) {
+    return Optional.empty();
+  }
+
+  /**
+   * Evaluate pending input, optionally bypassing format-specific scheduling shortcuts so a missing
+   * or stale health summary can be rebuilt.
+   *
+   * <p>The default delegates to the legacy overload to preserve compatibility with format plugins
+   * that do not distinguish health evaluation from optimizing evaluation.
+   */
+  default Optional<PendingInputResult> evaluatePendingInput(
+      OptimizationContext context, int maxPendingPartitions, boolean forceHealthEvaluation) {
+    return evaluatePendingInput(context, maxPendingPartitions);
+  }
+
+  /**
+   * Return the current format-specific analysis key without scanning table files.
+   *
+   * <p>Formats that do not support key-based health evaluation keep the existing refresh gate by
+   * returning empty.
+   */
+  default Optional<TableAnalysisKey> currentAnalysisKey(OptimizationContext context) {
     return Optional.empty();
   }
 

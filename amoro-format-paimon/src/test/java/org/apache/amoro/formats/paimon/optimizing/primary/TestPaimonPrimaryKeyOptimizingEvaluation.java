@@ -42,6 +42,7 @@ class TestPaimonPrimaryKeyOptimizingEvaluation {
     assertFalse(evaluation.necessary());
     assertEquals(12L, evaluation.targetSnapshotId());
     assertTrue(evaluation.units().isEmpty());
+    assertFalse(evaluation.analysis().isPresent());
     assertFalse(evaluation.fullCompaction());
   }
 

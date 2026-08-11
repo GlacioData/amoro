@@ -19,6 +19,7 @@
 package org.apache.amoro.optimizing;
 
 import java.util.Map;
+import java.util.Optional;
 
 /**
  * Internal abstraction for table optimizing planning, used by ProcessFactory implementations. This
@@ -26,6 +27,11 @@ import java.util.Map;
  * internally.
  */
 public interface TableOptimizingPlanner {
+
+  /** Return the analysis used by this planner, if the format exposes reusable analysis facts. */
+  default Optional<FormatTableAnalysis> tableAnalysis() {
+    return Optional.empty();
+  }
 
   /** Evaluate whether optimizing is necessary for the current table state. */
   boolean isNecessary();

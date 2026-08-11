@@ -20,9 +20,6 @@ package org.apache.amoro.formats.paimon.optimizing;
 
 import org.apache.amoro.table.FormatPendingInput;
 
-import java.util.Collection;
-import java.util.Map;
-
 /** Paimon-specific pending input metrics collected during the refresh phase. */
 public class PaimonPendingInput implements FormatPendingInput {
 
@@ -41,7 +38,7 @@ public class PaimonPendingInput implements FormatPendingInput {
   private long deleteRecordCount;
 
   // ---- Health score ----
-  private int healthScore;
+  private int healthScore = -1;
 
   public PaimonPendingInput() {}
 
@@ -66,67 +63,6 @@ public class PaimonPendingInput implements FormatPendingInput {
     this.healthScore = healthScore;
   }
 
-  /**
-   * Compute a composite health score (0-100, 100 = fully healthy).
-   *
-   * <p>Formula: {@code smallFileScore * 0.60 + deleteScore * 0.20 + distributionScore * 0.20}
-   *
-   * <p>Edge cases: empty table (dataFileCount == 0 or partitionFiles empty) returns 100.
-   */
-  public static int computeHealthScore(
-      int dataFileCount,
-      long dataFileSize,
-      int smallFileCount,
-      long smallFileSize,
-      long dataRecordCount,
-      long deleteRecordCount,
-      Map<?, ? extends Collection<?>> partitionFiles) {
-    if (dataFileCount == 0 || partitionFiles.isEmpty()) {
-      return 100;
-    }
-
-    double smallFileCountScore = healthyPercentage(smallFileCount, dataFileCount);
-    double smallFileSizeScore =
-        dataFileSize <= 0 ? smallFileCountScore : healthyPercentage(smallFileSize, dataFileSize);
-    double smallFileScore = clampScore(smallFileCountScore * 0.5 + smallFileSizeScore * 0.5);
-
-    double deleteScore = healthyPercentage(deleteRecordCount, Math.max(dataRecordCount, 1));
-
-    // distributionScore (weight 20%): evenness of file distribution across partitions
-    int partitionCount = partitionFiles.size();
-    double avgFilesPerPartition = (double) dataFileCount / partitionCount;
-    double variance = 0.0;
-    for (Collection<?> files : partitionFiles.values()) {
-      double diff = files.size() - avgFilesPerPartition;
-      variance += diff * diff;
-    }
-    variance /= partitionCount;
-    double stdDev = Math.sqrt(variance);
-    double distributionScore =
-        clampScore(100.0 * (1.0 - Math.min(stdDev / Math.max(avgFilesPerPartition, 1.0), 1.0)));
-
-    return (int)
-        Math.round(
-            clampScore(smallFileScore * 0.60 + deleteScore * 0.20 + distributionScore * 0.20));
-  }
-
-  private static double healthyPercentage(long unhealthyValue, long totalValue) {
-    if (totalValue <= 0) {
-      return 100.0;
-    }
-    return clampScore(100.0 * (1.0 - (double) unhealthyValue / totalValue));
-  }
-
-  private static double clampScore(double score) {
-    if (Double.isNaN(score) || score < 0.0) {
-      return 0.0;
-    }
-    if (score > 100.0) {
-      return 100.0;
-    }
-    return score;
-  }
-
   public int getDataFileCount() {
     return dataFileCount;
   }
@@ -144,6 +80,11 @@ public class PaimonPendingInput implements FormatPendingInput {
   }
 
   public long getDataRecordCount() {
+    return dataRecordCount;
+  }
+
+  @Override
+  public long getTotalFileRecords() {
     return dataRecordCount;
   }
 

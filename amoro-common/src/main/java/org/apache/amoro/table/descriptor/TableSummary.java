@@ -30,6 +30,7 @@ public class TableSummary {
   private int smallFileScore = 0;
   private int equalityDeleteScore = 0;
   private int positionalDeleteScore = 0;
+  private TableHealthDetailsView healthDetails;
 
   public TableSummary() {}
 
@@ -110,5 +111,13 @@ public class TableSummary {
 
   public void setPositionalDeleteScore(int positionalDeleteScore) {
     this.positionalDeleteScore = positionalDeleteScore;
+  }
+
+  public TableHealthDetailsView getHealthDetails() {
+    return healthDetails;
+  }
+
+  public void setHealthDetails(TableHealthDetailsView healthDetails) {
+    this.healthDetails = healthDetails;
   }
 }

@@ -23,8 +23,12 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.anyList;
+import static org.mockito.Mockito.anySet;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
@@ -34,6 +38,8 @@ import static org.mockito.Mockito.when;
 
 import org.apache.amoro.config.OptimizingConfig;
 import org.apache.amoro.formats.paimon.PaimonCatalogFactory;
+import org.apache.amoro.formats.paimon.optimizing.health.PaimonHealthEvaluationContext;
+import org.apache.amoro.formats.paimon.optimizing.health.PaimonPrimaryKeyHealthEvaluator;
 import org.apache.amoro.optimizing.OptimizingType;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.paimon.CoreOptions;
@@ -45,6 +51,11 @@ import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.data.BinaryString;
 import org.apache.paimon.data.GenericRow;
 import org.apache.paimon.data.Timestamp;
+import org.apache.paimon.deletionvectors.BitmapDeletionVector;
+import org.apache.paimon.deletionvectors.DeletionVector;
+import org.apache.paimon.deletionvectors.DeletionVectorsIndexFile;
+import org.apache.paimon.index.IndexFileHandler;
+import org.apache.paimon.index.IndexFileMeta;
 import org.apache.paimon.io.DataFileMeta;
 import org.apache.paimon.manifest.FileKind;
 import org.apache.paimon.manifest.FileSource;
@@ -58,6 +69,7 @@ import org.apache.paimon.mergetree.compact.OffPeakHours;
 import org.apache.paimon.mergetree.compact.UniversalCompaction;
 import org.apache.paimon.options.CatalogOptions;
 import org.apache.paimon.schema.Schema;
+import org.apache.paimon.table.BucketMode;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.Table;
 import org.apache.paimon.table.sink.BatchTableCommit;
@@ -66,7 +78,9 @@ import org.apache.paimon.table.sink.BatchWriteBuilder;
 import org.apache.paimon.table.sink.CommitMessage;
 import org.apache.paimon.table.source.snapshot.SnapshotReader;
 import org.apache.paimon.types.DataTypes;
+import org.apache.paimon.utils.Pair;
 import org.apache.paimon.utils.SerializationUtils;
+import org.apache.paimon.utils.SnapshotManager;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -79,12 +93,367 @@ import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
 @DisplayName("Paimon primary-key optimizing evaluator")
 class TestPaimonPrimaryKeyOptimizingEvaluator {
+
+  @Test
+  @DisplayName("fixed Snapshot object drives exact DV health and HASH decision")
+  void fixedSnapshotObjectDrivesExactDvHealthAndHashDecision(@TempDir Path warehouse)
+      throws Exception {
+    Catalog catalog = fsCatalog(warehouse);
+    Map<String, String> options = strategyOptions();
+    options.put("deletion-vectors.enabled", "true");
+    List<ManifestEntry> entries = twoRuns(100L, 100L);
+    HealthFixture fixture =
+        healthFixture(catalog, "t_health_exact_dv", options, entries, false, BucketMode.HASH_FIXED);
+
+    KeyValueFileStore store = spy((KeyValueFileStore) fixture.table.store());
+    IndexFileHandler handler = mock(IndexFileHandler.class);
+    doReturn(handler).when(store).newIndexFileHandler();
+    doReturn(store).when(fixture.table).store();
+    DeletionVectorsIndexFile dvIndexFile = mock(DeletionVectorsIndexFile.class);
+    when(handler.dvIndex(any(BinaryRow.class), eq(0))).thenReturn(dvIndexFile);
+    when(handler.scan(eq(fixture.snapshot), eq("DELETION_VECTORS"), anySet()))
+        .thenReturn(Collections.<Pair<BinaryRow, Integer>, List<IndexFileMeta>>emptyMap());
+    BitmapDeletionVector deletionVector = new BitmapDeletionVector();
+    for (int position = 0; position < 1; position++) {
+      deletionVector.delete(position);
+    }
+    Map<String, DeletionVector> deletionVectors = new HashMap<>();
+    deletionVectors.put(entries.get(0).file().fileName(), deletionVector);
+    when(handler.readAllDeletionVectors(any(BinaryRow.class), eq(0), anyList()))
+        .thenReturn(deletionVectors);
+
+    PaimonPrimaryKeyOptimizingEvaluation evaluation =
+        evaluateWithHealth(fixture, defaultConfig(), 0L, 0L, now());
+
+    assertTrue(evaluation.necessary());
+    assertTrue(evaluation.analysis().isPresent());
+    PaimonPrimaryKeySnapshotAnalysis analysis = evaluation.analysis().get();
+    assertEquals(
+        1L,
+        analysis.pendingInput().getDeletionVectorRecordCount(),
+        analysis.healthDetails().getReasonCodes().toString());
+    assertTrue(analysis.pendingInput().getHealthScore() >= 0);
+    assertEquals(
+        java.util.Arrays.asList(
+            "SORTED_RUN", "MATERIALIZED_DELETE", "FILE_SIZE_AUXILIARY", "SNAPSHOT_ACTIVITY"),
+        componentCodes(analysis));
+    assertEquals("N/A", analysis.healthDetails().getMetrics().get("baselineSnapshotId"));
+    assertEquals("N/A", analysis.healthDetails().getMetrics().get("timeThresholdMillis"));
+    assertEquals("N/A", analysis.healthDetails().getMetrics().get("newSnapshotCount"));
+    assertEquals("N/A", analysis.healthDetails().getMetrics().get("snapshotPressure"));
+    assertEquals("0", analysis.healthDetails().getMetrics().get("tombstoneRecordCount"));
+    assertEquals(
+        Integer.toString(fixture.context.compactionTrigger()),
+        analysis.healthDetails().getMetrics().get("compactionTrigger"));
+    assertEquals(
+        Integer.toString(fixture.context.stopTrigger()),
+        analysis.healthDetails().getMetrics().get("stopTrigger"));
+    assertEquals(
+        Integer.toString(fixture.context.numLevels()),
+        analysis.healthDetails().getMetrics().get("numLevels"));
+    verify(fixture.reader).withSnapshot(fixture.snapshot);
+    verify(fixture.reader).readFileIterator();
+    verify(handler).scan(eq(fixture.snapshot), eq("DELETION_VECTORS"), anySet());
+  }
+
+  @Test
+  @DisplayName("invalid scoring config renders effective primary-key thresholds as N/A")
+  void invalidScoringConfigRendersEffectiveThresholdsAsUnavailable(@TempDir Path warehouse)
+      throws Exception {
+    Catalog catalog = fsCatalog(warehouse);
+    HealthFixture fixture =
+        healthFixture(
+            catalog,
+            "t_health_invalid_config_metrics",
+            strategyOptions(),
+            twoRuns(100L, 100L),
+            false,
+            BucketMode.HASH_FIXED);
+    doThrow(new IllegalArgumentException("invalid options")).when(fixture.table).coreOptions();
+    PaimonHealthEvaluationContext invalidContext =
+        PaimonHealthEvaluationContext.capture(fixture.table, fixture.id.toString(), null);
+
+    PaimonPrimaryKeySnapshotAnalysis analysis =
+        PaimonPrimaryKeySnapshotAnalysis.analyze(fixture.table, invalidContext);
+
+    assertEquals("N/A", analysis.healthDetails().getMetrics().get("targetFileSize"));
+    assertEquals("N/A", analysis.healthDetails().getMetrics().get("compactionFileSize"));
+    assertEquals("N/A", analysis.healthDetails().getMetrics().get("compactionTrigger"));
+    assertEquals("N/A", analysis.healthDetails().getMetrics().get("stopTrigger"));
+    assertEquals("N/A", analysis.healthDetails().getMetrics().get("numLevels"));
+    assertEquals("N/A", analysis.healthDetails().getMetrics().get("tombstoneRecordCount"));
+    assertEquals("N/A", analysis.healthDetails().getMetrics().get("deletionVectorRecordCount"));
+    assertEquals("N/A", analysis.healthDetails().getMetrics().get("newSnapshotCount"));
+    assertEquals("N/A", analysis.healthDetails().getMetrics().get("snapshotTimeDistanceMillis"));
+    assertEquals("N/A", analysis.healthDetails().getMetrics().get("snapshotPressure"));
+    assertEquals("N/A", analysis.healthDetails().getMetrics().get("timePressure"));
+    assertEquals("N/A", analysis.healthDetails().getMetrics().get("activityPressure"));
+  }
+
+  @Test
+  @DisplayName("missing tombstone metadata invalidates health but keeps HASH decision")
+  void missingTombstoneInvalidatesHealthButKeepsHashDecision(@TempDir Path warehouse)
+      throws Exception {
+    Catalog catalog = fsCatalog(warehouse);
+    List<ManifestEntry> entries =
+        java.util.Arrays.asList(
+            entry(BinaryRow.EMPTY_ROW, 0, fileWithDeleteCount("l0", 100L, 10L, 0, 1, null)),
+            entry(BinaryRow.EMPTY_ROW, 0, fileWithDeleteCount("l2", 100L, 10L, 2, 2, 0L)));
+    HealthFixture fixture =
+        healthFixture(
+            catalog,
+            "t_health_missing_delete",
+            strategyOptions(),
+            entries,
+            false,
+            BucketMode.HASH_FIXED);
+
+    PaimonPrimaryKeyOptimizingEvaluation evaluation =
+        evaluateWithHealth(fixture, defaultConfig(), 0L, 0L, now());
+
+    assertTrue(evaluation.necessary());
+    assertEquals(1, evaluation.units().size());
+    PaimonPrimaryKeySnapshotAnalysis analysis = evaluation.analysis().get();
+    assertEquals(-1, analysis.pendingInput().getHealthScore());
+    assertEquals(2, analysis.pendingInput().getDataFileCount());
+    assertEquals(200L, analysis.pendingInput().getDataFileSize());
+    assertEquals(2, analysis.pendingInput().getMaxSortedRunCount());
+    assertEquals("N/A", analysis.healthDetails().getMetrics().get("tombstoneRecordCount"));
+    assertEquals("N/A", analysis.healthDetails().getMetrics().get("deletionVectorRecordCount"));
+    assertTrue(
+        analysis
+            .healthDetails()
+            .getReasonCodes()
+            .contains(PaimonPrimaryKeyHealthEvaluator.DELETE_METADATA_INCOMPLETE));
+  }
+
+  @Test
+  @DisplayName("DV read failure invalidates health but keeps complete HASH Levels facts")
+  void dvReadFailureInvalidatesHealthButKeepsHashDecision(@TempDir Path warehouse)
+      throws Exception {
+    Catalog catalog = fsCatalog(warehouse);
+    Map<String, String> options = strategyOptions();
+    options.put("deletion-vectors.enabled", "true");
+    HealthFixture fixture =
+        healthFixture(
+            catalog,
+            "t_health_dv_failure",
+            options,
+            twoRuns(100L, 100L),
+            false,
+            BucketMode.HASH_FIXED);
+    KeyValueFileStore store = spy((KeyValueFileStore) fixture.table.store());
+    IndexFileHandler handler = mock(IndexFileHandler.class);
+    doReturn(handler).when(store).newIndexFileHandler();
+    doReturn(store).when(fixture.table).store();
+    when(handler.scan(eq(fixture.snapshot), eq("DELETION_VECTORS"), anySet()))
+        .thenThrow(new IllegalStateException("DV index unavailable"));
+
+    PaimonPrimaryKeyOptimizingEvaluation evaluation =
+        evaluateWithHealth(fixture, defaultConfig(), 0L, 0L, now());
+
+    assertTrue(evaluation.necessary());
+    assertEquals(2L, evaluation.units().get(0).getSortedRunCount());
+    PaimonPrimaryKeySnapshotAnalysis analysis = evaluation.analysis().get();
+    assertEquals(-1, analysis.pendingInput().getHealthScore());
+    assertEquals(2, analysis.pendingInput().getDataFileCount());
+    assertEquals(200L, analysis.pendingInput().getDataFileSize());
+    assertEquals("2", analysis.healthDetails().getMetrics().get("maxSortedRunCount"));
+    assertTrue(
+        analysis
+            .healthDetails()
+            .getReasonCodes()
+            .contains(PaimonPrimaryKeyHealthEvaluator.SNAPSHOT_SCAN_FAILED));
+  }
+
+  @Test
+  @DisplayName("KEY_DYNAMIC evaluates health without planner units")
+  void keyDynamicEvaluatesHealthWithoutPlannerUnits(@TempDir Path warehouse) throws Exception {
+    Catalog catalog = fsCatalog(warehouse);
+    HealthFixture fixture =
+        healthFixture(
+            catalog,
+            "t_health_key_dynamic",
+            strategyOptions(),
+            twoRuns(100L, 100L),
+            false,
+            BucketMode.KEY_DYNAMIC);
+
+    PaimonPrimaryKeyOptimizingEvaluation evaluation =
+        evaluateWithHealth(fixture, defaultConfig(), 0L, 0L, now());
+
+    assertFalse(evaluation.necessary());
+    assertTrue(evaluation.units().isEmpty());
+    assertTrue(evaluation.analysis().isPresent());
+    assertTrue(evaluation.analysis().get().pendingInput().getHealthScore() >= 0);
+    assertEquals(
+        "N/A", evaluation.analysis().get().healthDetails().getMetrics().get("snapshotPressure"));
+    assertEquals(
+        "N/A", evaluation.analysis().get().healthDetails().getMetrics().get("timePressure"));
+    assertEquals(
+        "0.0", evaluation.analysis().get().healthDetails().getMetrics().get("activityPressure"));
+    assertTrue(
+        evaluation
+            .analysis()
+            .get()
+            .healthDetails()
+            .getReasonCodes()
+            .contains(PaimonPrimaryKeyHealthEvaluator.KEY_DYNAMIC_OPTIMIZING_UNSUPPORTED));
+  }
+
+  @Test
+  @DisplayName("reused scanner partition rows are copied before grouping")
+  void reusedScannerPartitionRowsAreCopiedBeforeGrouping(@TempDir Path warehouse) throws Exception {
+    Catalog catalog = fsCatalog(warehouse);
+    HealthFixture fixture =
+        healthFixture(
+            catalog,
+            "t_health_reused_partition",
+            strategyOptions(),
+            Collections.emptyList(),
+            false,
+            BucketMode.HASH_FIXED);
+    BinaryRow reusedPartition = BinaryRow.singleColumn(0);
+    ManifestEntry first = entry(reusedPartition, 0, file("first", 100L, 10L, 0, 1, 1L));
+    ManifestEntry second = entry(reusedPartition, 0, file("second", 100L, 10L, 0, 2, 2L));
+    Iterator<ManifestEntry> iterator =
+        new Iterator<ManifestEntry>() {
+          private int index;
+
+          @Override
+          public boolean hasNext() {
+            return index < 2;
+          }
+
+          @Override
+          public ManifestEntry next() {
+            reusedPartition.setInt(0, ++index);
+            return index == 1 ? first : second;
+          }
+        };
+    when(fixture.reader.readFileIterator()).thenReturn(iterator);
+
+    PaimonPrimaryKeyOptimizingEvaluation evaluation =
+        evaluateWithHealth(fixture, defaultConfig(), 0L, 0L, now());
+
+    assertTrue(evaluation.analysis().isPresent());
+    assertEquals(2, evaluation.analysis().get().activePartitionCount());
+    assertEquals(2, evaluation.analysis().get().pendingInput().getEffectiveUnitCount());
+  }
+
+  @Test
+  @DisplayName("bucket facts use stable partition and bucket order instead of manifest order")
+  void bucketFactsHaveStableOrder(@TempDir Path warehouse) throws Exception {
+    Catalog catalog = fsCatalog(warehouse);
+    List<ManifestEntry> reverseBucketOrder = new ArrayList<>();
+    reverseBucketOrder.addAll(l0Runs(1, 2));
+    reverseBucketOrder.addAll(l0Runs(0, 2));
+    HealthFixture fixture =
+        healthFixture(
+            catalog,
+            "t_health_stable_bucket_order",
+            primaryKeyOptions(),
+            reverseBucketOrder,
+            false,
+            BucketMode.HASH_FIXED);
+
+    PaimonPrimaryKeySnapshotAnalysis analysis =
+        PaimonPrimaryKeySnapshotAnalysis.analyze(fixture.table, fixture.context);
+    List<Integer> orderedBuckets = new ArrayList<>();
+    analysis.bucketFacts().forEach(facts -> orderedBuckets.add(facts.bucket()));
+
+    assertEquals(java.util.Arrays.asList(0, 1), orderedBuckets);
+  }
+
+  @Test
+  @DisplayName("health facts are identical for different manifest file orders")
+  void healthFactsDoNotDependOnManifestFileOrder(@TempDir Path warehouse) throws Exception {
+    Catalog catalog = fsCatalog(warehouse);
+    List<ManifestEntry> forward =
+        java.util.Arrays.asList(
+            entry(BinaryRow.EMPTY_ROW, 0, file("later", 101L, 11L, 0, 2, 2L)),
+            entry(BinaryRow.EMPTY_ROW, 0, file("earlier", 99L, 9L, 0, 1, 1L)),
+            entry(BinaryRow.EMPTY_ROW, 0, file("level-one", 200L, 20L, 1, 3, 3L)));
+    List<ManifestEntry> reverse = new ArrayList<>(forward);
+    Collections.reverse(reverse);
+    HealthFixture forwardFixture =
+        healthFixture(
+            catalog,
+            "t_health_forward_file_order",
+            primaryKeyOptions(),
+            forward,
+            false,
+            BucketMode.HASH_FIXED);
+    HealthFixture reverseFixture =
+        healthFixture(
+            catalog,
+            "t_health_reverse_file_order",
+            primaryKeyOptions(),
+            reverse,
+            false,
+            BucketMode.HASH_FIXED);
+
+    PaimonPrimaryKeySnapshotAnalysis forwardAnalysis =
+        PaimonPrimaryKeySnapshotAnalysis.analyze(forwardFixture.table, forwardFixture.context);
+    PaimonPrimaryKeySnapshotAnalysis reverseAnalysis =
+        PaimonPrimaryKeySnapshotAnalysis.analyze(reverseFixture.table, reverseFixture.context);
+
+    assertEquals(
+        forwardAnalysis.pendingInput().getHealthScore(),
+        reverseAnalysis.pendingInput().getHealthScore());
+    assertEquals(
+        forwardAnalysis.healthDetails().getMetrics(), reverseAnalysis.healthDetails().getMetrics());
+    assertEquals(
+        fileNames(forwardAnalysis.bucketFacts().get(0)),
+        fileNames(reverseAnalysis.bucketFacts().get(0)));
+  }
+
+  @Test
+  @DisplayName("partition watermarks are immutable facts captured during analysis")
+  void partitionWatermarksAreCapturedBeforeAnalysisReturns(@TempDir Path warehouse)
+      throws Exception {
+    Catalog catalog = fsCatalog(warehouse);
+    Map<String, String> options = primaryKeyOptions();
+    options.put(PaimonPrimaryKeyOptions.PARTITION_IDLE_TIME, "0s");
+    BinaryRow partition = BinaryRow.singleColumn(BinaryString.fromString("p"));
+    HealthFixture fixture =
+        healthFixture(
+            catalog,
+            "t_health_watermark",
+            options,
+            Collections.singletonList(
+                entry(partition, 0, file("data", 100L, 10L, 0, 1, 1L, 1_000L))),
+            true,
+            BucketMode.HASH_FIXED);
+    when(fixture.reader.partitionEntries())
+        .thenReturn(
+            Collections.singletonList(new PartitionEntry(partition, 1L, 100L, 10L, 1_000L, 1)));
+
+    PaimonPrimaryKeyOptimizingEvaluation evaluation =
+        evaluateWithHealth(
+            fixture,
+            defaultConfig().setMinorLeastInterval(Integer.MAX_VALUE).setFullTriggerInterval(1),
+            10_000L,
+            0L,
+            10_000L);
+
+    assertTrue(evaluation.necessary());
+    assertEquals(OptimizingType.FULL, evaluation.optimizingType());
+    PaimonPrimaryKeySnapshotAnalysis analysis = evaluation.analysis().get();
+    when(fixture.reader.partitionEntries())
+        .thenThrow(new IllegalStateException("reader must not be retained"));
+    assertEquals(
+        1_000L,
+        analysis.partitionWatermark(SerializationUtils.serializeBinaryRow(partition)).longValue());
+    verify(fixture.reader).partitionEntries();
+  }
 
   @Test
   @DisplayName("enabled table without snapshot is not necessary")
@@ -145,10 +514,10 @@ class TestPaimonPrimaryKeyOptimizingEvaluator {
             entry(partition, 0, file("l2-1", 30L, 4L, 2, 3, 3L, 1_700_000_000_003L)),
             entry(partition, 0, file("l2-2", 40L, 5L, 2, 4, 4L, 1_700_000_000_004L)));
     SnapshotReader reader = mock(SnapshotReader.class);
-    when(reader.withSnapshot(101L)).thenReturn(reader);
+    when(reader.withSnapshot(snapshot)).thenReturn(reader);
     when(reader.readFileIterator()).thenReturn(entries.iterator());
     SnapshotReader newerReader = mock(SnapshotReader.class);
-    when(newerReader.withSnapshot(102L)).thenReturn(newerReader);
+    when(newerReader.withSnapshot(newerSnapshot)).thenReturn(newerReader);
     when(newerReader.readFileIterator())
         .thenReturn(
             Collections.singletonList(
@@ -174,7 +543,7 @@ class TestPaimonPrimaryKeyOptimizingEvaluator {
     assertEquals(0, unit.getBucket());
     verify(table).latestSnapshot();
     verify(table).newSnapshotReader();
-    verify(reader).withSnapshot(101L);
+    verify(reader).withSnapshot(snapshot);
     verify(reader).readFileIterator();
     verify(reader, never()).bucketEntries();
     verify(reader, never()).partitionEntries();
@@ -191,7 +560,7 @@ class TestPaimonPrimaryKeyOptimizingEvaluator {
     when(snapshot.id()).thenReturn(202L);
     doReturn(Optional.of(snapshot)).when(table).latestSnapshot();
     SnapshotReader reader = mock(SnapshotReader.class);
-    when(reader.withSnapshot(202L)).thenThrow(new IllegalStateException("expired snapshot"));
+    when(reader.withSnapshot(snapshot)).thenThrow(new IllegalStateException("expired snapshot"));
     doReturn(reader).when(table).newSnapshotReader();
 
     PaimonPrimaryKeyOptimizingEvaluation evaluation =
@@ -200,7 +569,7 @@ class TestPaimonPrimaryKeyOptimizingEvaluator {
 
     assertFalse(evaluation.necessary());
     assertEquals(202L, evaluation.targetSnapshotId());
-    verify(reader).withSnapshot(202L);
+    verify(reader).withSnapshot(snapshot);
     verify(reader, never()).readFileIterator();
   }
 
@@ -236,10 +605,10 @@ class TestPaimonPrimaryKeyOptimizingEvaluator {
           }
         };
     SnapshotReader reader = mock(SnapshotReader.class);
-    when(reader.withSnapshot(203L)).thenReturn(reader);
+    when(reader.withSnapshot(snapshot)).thenReturn(reader);
     when(reader.readFileIterator()).thenReturn(failingIterator);
     SnapshotReader newerReader = mock(SnapshotReader.class);
-    when(newerReader.withSnapshot(204L)).thenReturn(newerReader);
+    when(newerReader.withSnapshot(newerSnapshot)).thenReturn(newerReader);
     when(newerReader.readFileIterator())
         .thenReturn(
             Collections.singletonList(
@@ -255,7 +624,7 @@ class TestPaimonPrimaryKeyOptimizingEvaluator {
     assertEquals(203L, evaluation.targetSnapshotId());
     verify(table).latestSnapshot();
     verify(table).newSnapshotReader();
-    verify(reader).withSnapshot(203L);
+    verify(reader).withSnapshot(snapshot);
     verify(reader).readFileIterator();
     verifyNoInteractions(newerReader);
   }
@@ -292,7 +661,7 @@ class TestPaimonPrimaryKeyOptimizingEvaluator {
 
     BinaryRow partition = BinaryRow.singleColumn(BinaryString.fromString("p"));
     SnapshotReader reader = mock(SnapshotReader.class);
-    when(reader.withSnapshot(251L)).thenReturn(reader);
+    when(reader.withSnapshot(snapshot)).thenReturn(reader);
     when(reader.readFileIterator())
         .thenReturn(
             java.util.Arrays.asList(
@@ -329,7 +698,7 @@ class TestPaimonPrimaryKeyOptimizingEvaluator {
     BinaryRow watermarkPartition = BinaryRow.singleColumn(BinaryString.fromString("p"));
     assertNotSame(livePartition, watermarkPartition);
     SnapshotReader reader = mock(SnapshotReader.class);
-    when(reader.withSnapshot(252L)).thenReturn(reader);
+    when(reader.withSnapshot(snapshot)).thenReturn(reader);
     when(reader.readFileIterator())
         .thenReturn(
             Collections.singletonList(
@@ -543,7 +912,7 @@ class TestPaimonPrimaryKeyOptimizingEvaluator {
             entry(BinaryRow.EMPTY_ROW, 0, file("l0", 1L, 1L, 0, 1, 1L)),
             entry(BinaryRow.EMPTY_ROW, 0, file("l2", 1000L, 1L, 2, 2, 2L)));
     SnapshotReader reader = mock(SnapshotReader.class);
-    when(reader.withSnapshot(303L)).thenReturn(reader);
+    when(reader.withSnapshot(snapshot)).thenReturn(reader);
     when(reader.readFileIterator()).thenReturn(entries.iterator());
     doReturn(reader).when(table).newSnapshotReader();
 
@@ -914,6 +1283,58 @@ class TestPaimonPrimaryKeyOptimizingEvaluator {
     return System.currentTimeMillis();
   }
 
+  private static List<String> componentCodes(PaimonPrimaryKeySnapshotAnalysis analysis) {
+    List<String> codes = new ArrayList<>();
+    analysis.healthDetails().getComponents().forEach(component -> codes.add(component.getCode()));
+    return codes;
+  }
+
+  private static PaimonPrimaryKeyOptimizingEvaluation evaluateWithHealth(
+      HealthFixture fixture,
+      OptimizingConfig config,
+      long lastMinorOptimizingTime,
+      long lastFullOptimizingTime,
+      long planTime) {
+    return PaimonPrimaryKeyOptimizingEvaluator.evaluate(
+        fixture.table,
+        fixture.id.getObjectName(),
+        fixture.context,
+        config,
+        lastMinorOptimizingTime,
+        lastFullOptimizingTime,
+        null,
+        planTime);
+  }
+
+  private static HealthFixture healthFixture(
+      Catalog catalog,
+      String tableName,
+      Map<String, String> options,
+      List<ManifestEntry> entries,
+      boolean partitioned,
+      BucketMode bucketMode)
+      throws Exception {
+    Identifier id =
+        partitioned
+            ? createPartitionedPrimaryKeyTable(catalog, tableName, options)
+            : createPrimaryKeyTable(catalog, tableName, options);
+    FileStoreTable table = spy((FileStoreTable) catalog.getTable(id));
+    doReturn(bucketMode).when(table).bucketMode();
+    Snapshot snapshot = mock(Snapshot.class);
+    when(snapshot.id()).thenReturn(8_001L + Math.abs(tableName.hashCode()));
+    when(snapshot.timeMillis()).thenReturn(1_700_000_000_000L);
+    SnapshotManager snapshotManager = mock(SnapshotManager.class);
+    when(snapshotManager.latestSnapshot()).thenReturn(snapshot);
+    doReturn(snapshotManager).when(table).snapshotManager();
+    SnapshotReader reader = mock(SnapshotReader.class);
+    when(reader.withSnapshot(snapshot)).thenReturn(reader);
+    when(reader.readFileIterator()).thenReturn(entries.iterator());
+    doReturn(reader).when(table).newSnapshotReader();
+    PaimonHealthEvaluationContext context =
+        PaimonHealthEvaluationContext.capture(table, id.toString(), null);
+    return new HealthFixture(id, table, snapshot, reader, context);
+  }
+
   private static PaimonPrimaryKeyOptimizingEvaluation evaluate(
       Catalog catalog,
       Identifier id,
@@ -949,7 +1370,7 @@ class TestPaimonPrimaryKeyOptimizingEvaluator {
     when(snapshot.id()).thenReturn(snapshotId);
     doReturn(Optional.of(snapshot)).when(table).latestSnapshot();
     SnapshotReader reader = mock(SnapshotReader.class);
-    when(reader.withSnapshot(snapshotId)).thenReturn(reader);
+    when(reader.withSnapshot(snapshot)).thenReturn(reader);
     when(reader.readFileIterator()).thenReturn(entries.iterator());
     doReturn(reader).when(table).newSnapshotReader();
     return new SnapshotFixture(id, table, reader);
@@ -975,6 +1396,12 @@ class TestPaimonPrimaryKeyOptimizingEvaluator {
     return buckets;
   }
 
+  private static List<String> fileNames(PaimonPrimaryKeySnapshotAnalysis.BucketFacts facts) {
+    List<String> names = new ArrayList<>();
+    facts.files().forEach(file -> names.add(file.fileName()));
+    return names;
+  }
+
   private static class SnapshotFixture {
 
     private final Identifier id;
@@ -985,6 +1412,28 @@ class TestPaimonPrimaryKeyOptimizingEvaluator {
       this.id = id;
       this.table = table;
       this.reader = reader;
+    }
+  }
+
+  private static class HealthFixture {
+
+    private final Identifier id;
+    private final FileStoreTable table;
+    private final Snapshot snapshot;
+    private final SnapshotReader reader;
+    private final PaimonHealthEvaluationContext context;
+
+    private HealthFixture(
+        Identifier id,
+        FileStoreTable table,
+        Snapshot snapshot,
+        SnapshotReader reader,
+        PaimonHealthEvaluationContext context) {
+      this.id = id;
+      this.table = table;
+      this.snapshot = snapshot;
+      this.reader = reader;
+      this.context = context;
     }
   }
 
@@ -1002,7 +1451,7 @@ class TestPaimonPrimaryKeyOptimizingEvaluator {
     when(snapshot.id()).thenReturn(snapshotId);
     doReturn(Optional.of(snapshot)).when(table).latestSnapshot();
     SnapshotReader reader = mock(SnapshotReader.class);
-    when(reader.withSnapshot(snapshotId)).thenReturn(reader);
+    when(reader.withSnapshot(snapshot)).thenReturn(reader);
     when(reader.readFileIterator()).thenReturn(entries.iterator());
     doReturn(reader).when(table).newSnapshotReader();
 
@@ -1162,6 +1611,13 @@ class TestPaimonPrimaryKeyOptimizingEvaluator {
         null,
         null,
         null);
+  }
+
+  private static DataFileMeta fileWithDeleteCount(
+      String name, long size, long rows, int level, int key, Long deleteRowCount) {
+    DataFileMeta file = spy(file(name, size, rows, level, key, key));
+    doReturn(Optional.ofNullable(deleteRowCount)).when(file).deleteRowCount();
+    return file;
   }
 
   private static PaimonBucketCompactionUnit unit(
