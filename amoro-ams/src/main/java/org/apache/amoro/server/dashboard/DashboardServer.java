@@ -126,10 +126,11 @@ public class DashboardServer {
         new ServerTableDescriptor(catalogManager, tableManager, serviceConfig);
     this.processController = new ProcessController(tableManager);
     this.tableController =
-        new TableController(catalogManager, tableManager, tableDescriptor, serviceConfig);
+        new TableController(
+            catalogManager, tableManager, tableDescriptor, serviceConfig, ams::getTableService);
     this.terminalController = new TerminalController(terminalManager);
     this.versionController = new VersionController();
-    OverviewManager manager = new OverviewManager(serviceConfig);
+    OverviewManager manager = new OverviewManager(serviceConfig, ams::getTableService);
     this.overviewController = new OverviewController(manager);
     APITokenManager apiTokenManager = new APITokenManager();
     this.apiTokenController = new ApiTokenController(apiTokenManager);

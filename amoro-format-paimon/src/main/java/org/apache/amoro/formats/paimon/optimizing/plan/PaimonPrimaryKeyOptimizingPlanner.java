@@ -20,6 +20,7 @@ package org.apache.amoro.formats.paimon.optimizing.plan;
 
 import org.apache.amoro.config.OptimizingConfig;
 import org.apache.amoro.formats.paimon.PaimonTable;
+import org.apache.amoro.formats.paimon.optimizing.health.PaimonHealthEvaluationContext;
 import org.apache.amoro.formats.paimon.optimizing.primary.PaimonBucketCompactionUnit;
 import org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeyCompactionExecutorFactory;
 import org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeyCompactionInput;
@@ -27,6 +28,9 @@ import org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeyCompac
 import org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeyOptimizingEvaluation;
 import org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeyOptimizingEvaluator;
 import org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeyOptions;
+import org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeySnapshotAnalysis;
+import org.apache.amoro.optimizing.FormatTableAnalysis;
+import org.apache.amoro.optimizing.OptimizationContext;
 import org.apache.amoro.optimizing.OptimizingPlanResult;
 import org.apache.amoro.optimizing.OptimizingType;
 import org.apache.amoro.optimizing.TableOptimizingPlanner;
@@ -35,9 +39,9 @@ import org.apache.amoro.shade.guava32.com.google.common.collect.Maps;
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.options.Options;
 import org.apache.paimon.predicate.Predicate;
-import org.apache.paimon.table.AppendOnlyFileStoreTable;
 import org.apache.paimon.table.BucketMode;
 import org.apache.paimon.table.FileStoreTable;
+import org.apache.paimon.table.PrimaryKeyFileStoreTable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -45,6 +49,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 /** {@link TableOptimizingPlanner} for Paimon primary-key HASH_FIXED/HASH_DYNAMIC tables. */
 public class PaimonPrimaryKeyOptimizingPlanner implements TableOptimizingPlanner {
@@ -60,6 +65,8 @@ public class PaimonPrimaryKeyOptimizingPlanner implements TableOptimizingPlanner
   private final long lastMinorOptimizingTime;
   private final long lastFullOptimizingTime;
   private final Predicate partitionFilter;
+  private final OptimizationContext runtimeContext;
+  private final FormatTableAnalysis suppliedAnalysis;
 
   private Boolean necessary;
   private List<PaimonBucketCompactionUnit> cachedUnits;
@@ -67,13 +74,15 @@ public class PaimonPrimaryKeyOptimizingPlanner implements TableOptimizingPlanner
   private boolean fullCompaction;
   private long targetSnapshotId = -1L;
   private String commitUser;
+  private PaimonPrimaryKeySnapshotAnalysis usedAnalysis;
+  private int fallbackScanCount;
 
   public static boolean supports(PaimonTable paimonTable) {
     if (paimonTable == null) {
       return false;
     }
     Object raw = paimonTable.originalTable();
-    if (!(raw instanceof FileStoreTable) || raw instanceof AppendOnlyFileStoreTable) {
+    if (!(raw instanceof PrimaryKeyFileStoreTable)) {
       return false;
     }
     FileStoreTable table = (FileStoreTable) raw;
@@ -103,6 +112,8 @@ public class PaimonPrimaryKeyOptimizingPlanner implements TableOptimizingPlanner
         0L,
         0L,
         0L,
+        null,
+        null,
         null);
   }
 
@@ -117,6 +128,34 @@ public class PaimonPrimaryKeyOptimizingPlanner implements TableOptimizingPlanner
       long lastMajorOptimizingTime,
       long lastFullOptimizingTime,
       Predicate partitionFilter) {
+    this(
+        paimonTable,
+        tableId,
+        processId,
+        availableCore,
+        maxInputSizePerThread,
+        optimizingConfig,
+        lastMinorOptimizingTime,
+        lastMajorOptimizingTime,
+        lastFullOptimizingTime,
+        partitionFilter,
+        null,
+        null);
+  }
+
+  public PaimonPrimaryKeyOptimizingPlanner(
+      PaimonTable paimonTable,
+      long tableId,
+      long processId,
+      double availableCore,
+      long maxInputSizePerThread,
+      OptimizingConfig optimizingConfig,
+      long lastMinorOptimizingTime,
+      long lastMajorOptimizingTime,
+      long lastFullOptimizingTime,
+      Predicate partitionFilter,
+      OptimizationContext runtimeContext,
+      FormatTableAnalysis suppliedAnalysis) {
     this.paimonTable = paimonTable;
     this.tableId = tableId;
     this.processId = processId;
@@ -125,6 +164,8 @@ public class PaimonPrimaryKeyOptimizingPlanner implements TableOptimizingPlanner
     this.lastMinorOptimizingTime = lastMinorOptimizingTime;
     this.lastFullOptimizingTime = lastFullOptimizingTime;
     this.partitionFilter = partitionFilter;
+    this.runtimeContext = runtimeContext;
+    this.suppliedAnalysis = suppliedAnalysis;
   }
 
   private static OptimizingConfig defaultOptimizingConfig() {
@@ -150,15 +191,27 @@ public class PaimonPrimaryKeyOptimizingPlanner implements TableOptimizingPlanner
     if (table == null) {
       return cacheEmpty(false);
     }
+    PaimonOptimizingPlanner.RuntimeInputs runtimeInputs =
+        PaimonOptimizingPlanner.RuntimeInputs.capture(
+            runtimeContext, optimizingConfig, lastMinorOptimizingTime, 0L, lastFullOptimizingTime);
+    PaimonHealthEvaluationContext healthContext =
+        PaimonHealthEvaluationContext.capture(
+            table, paimonTable.id().toString(), runtimeInputs.healthContext());
     PaimonPrimaryKeyOptimizingEvaluation evaluation =
-        PaimonPrimaryKeyOptimizingEvaluator.evaluate(
-            table,
-            paimonTable.id().getTableName(),
-            optimizingConfig,
-            lastMinorOptimizingTime,
-            lastFullOptimizingTime,
-            partitionFilter,
-            planTime);
+        suppliedAnalysis instanceof PaimonPrimaryKeySnapshotAnalysis
+                && reusable(healthContext, (PaimonPrimaryKeySnapshotAnalysis) suppliedAnalysis)
+            ? PaimonPrimaryKeyOptimizingEvaluator.evaluate(
+                table,
+                paimonTable.id().getTableName(),
+                healthContext,
+                (PaimonPrimaryKeySnapshotAnalysis) suppliedAnalysis,
+                runtimeInputs.optimizingConfig(),
+                runtimeInputs.lastMinorOptimizingTime(),
+                runtimeInputs.lastFullOptimizingTime(),
+                partitionFilter,
+                planTime)
+            : fallbackEvaluation(table, healthContext, runtimeInputs);
+    usedAnalysis = evaluation.analysis().orElse(null);
     targetSnapshotId = evaluation.targetSnapshotId();
     if (!evaluation.necessary()) {
       return cacheEmpty(evaluation.fullCompaction());
@@ -193,6 +246,15 @@ public class PaimonPrimaryKeyOptimizingPlanner implements TableOptimizingPlanner
 
   public String getCommitUser() {
     return commitUser;
+  }
+
+  @Override
+  public Optional<FormatTableAnalysis> tableAnalysis() {
+    return Optional.ofNullable(usedAnalysis);
+  }
+
+  int fallbackScanCount() {
+    return fallbackScanCount;
   }
 
   @Override
@@ -256,15 +318,9 @@ public class PaimonPrimaryKeyOptimizingPlanner implements TableOptimizingPlanner
 
   private FileStoreTable unwrapPrimaryKeyHashTable() {
     Object raw = paimonTable.originalTable();
-    if (!(raw instanceof FileStoreTable)) {
+    if (!(raw instanceof PrimaryKeyFileStoreTable)) {
       LOG.info(
-          "Paimon table [{}] is not FileStoreTable; skip primary-key optimizing.",
-          paimonTable.id().getTableName());
-      return null;
-    }
-    if (raw instanceof AppendOnlyFileStoreTable) {
-      LOG.info(
-          "Paimon table [{}] is append-only; skip primary-key optimizing.",
+          "Paimon table [{}] is not PrimaryKeyFileStoreTable; skip primary-key optimizing.",
           paimonTable.id().getTableName());
       return null;
     }
@@ -284,6 +340,27 @@ public class PaimonPrimaryKeyOptimizingPlanner implements TableOptimizingPlanner
       return null;
     }
     return table;
+  }
+
+  private static boolean reusable(
+      PaimonHealthEvaluationContext context, PaimonPrimaryKeySnapshotAnalysis analysis) {
+    return analysis.validForPlanning() && context.key().equals(analysis.key());
+  }
+
+  private PaimonPrimaryKeyOptimizingEvaluation fallbackEvaluation(
+      FileStoreTable table,
+      PaimonHealthEvaluationContext healthContext,
+      PaimonOptimizingPlanner.RuntimeInputs runtimeInputs) {
+    fallbackScanCount++;
+    return PaimonPrimaryKeyOptimizingEvaluator.evaluate(
+        table,
+        paimonTable.id().getTableName(),
+        healthContext,
+        runtimeInputs.optimizingConfig(),
+        runtimeInputs.lastMinorOptimizingTime(),
+        runtimeInputs.lastFullOptimizingTime(),
+        partitionFilter,
+        planTime);
   }
 
   private boolean cache(

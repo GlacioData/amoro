@@ -26,12 +26,14 @@ import org.apache.amoro.optimizing.OptimizationContext;
 import org.apache.amoro.optimizing.PendingInputResult;
 import org.apache.amoro.optimizing.TableRuntimeOptimizingState;
 import org.apache.amoro.optimizing.evaluation.MetadataBasedEvaluationEvent;
+import org.apache.amoro.optimizing.health.IcebergLegacyHealthAdapter;
 import org.apache.amoro.optimizing.plan.AbstractOptimizingEvaluator;
 import org.apache.amoro.optimizing.plan.IcebergOptimizingEvaluatorFactory;
 import org.apache.amoro.shade.guava32.com.google.common.collect.Lists;
 import org.apache.amoro.table.BasicTableSnapshot;
 import org.apache.amoro.table.KeyedTableSnapshot;
 import org.apache.amoro.table.TableIdentifier;
+import org.apache.amoro.table.health.TableAnalysisKey;
 import org.apache.iceberg.Snapshot;
 
 import java.util.Map;
@@ -120,15 +122,24 @@ public class MixedTable implements AmoroTable<org.apache.amoro.table.MixedTable>
   @Override
   public java.util.Optional<PendingInputResult> evaluatePendingInput(
       OptimizationContext context, int maxPendingPartitions) {
-    if (context.getOptimizingConfig().isEnabled()
-        && context.isIdle()
-        && context.getOptimizingConfig().isMetadataBasedTriggerEnabled()
-        && !MetadataBasedEvaluationEvent.isEvaluatingNecessary(
-            context.getOptimizingConfig(), mixedTable, context.getLastPlanTime())) {
+    return evaluatePendingInput(context, maxPendingPartitions, false);
+  }
+
+  @Override
+  public java.util.Optional<PendingInputResult> evaluatePendingInput(
+      OptimizationContext context, int maxPendingPartitions, boolean forceHealthEvaluation) {
+    boolean optimizingEvaluationAllowed =
+        !context.getOptimizingConfig().isEnabled()
+            || !context.isIdle()
+            || !context.getOptimizingConfig().isMetadataBasedTriggerEnabled()
+            || MetadataBasedEvaluationEvent.isEvaluatingNecessary(
+                context.getOptimizingConfig(), mixedTable, context.getLastPlanTime());
+    if (!forceHealthEvaluation && !optimizingEvaluationAllowed) {
       return java.util.Optional.empty();
     }
 
-    org.apache.amoro.table.TableSnapshot snapshot = buildCurrentSnapshot();
+    MixedSnapshot currentSnapshot = currentEvaluationSnapshot();
+    org.apache.amoro.table.TableSnapshot snapshot = buildCurrentSnapshot(currentSnapshot);
     ServerTableIdentifier identifier = context.getTableIdentifier();
     AbstractOptimizingEvaluator evaluator =
         IcebergOptimizingEvaluatorFactory.create(
@@ -141,30 +152,67 @@ public class MixedTable implements AmoroTable<org.apache.amoro.table.MixedTable>
             context.getLastFullOptimizingTime(),
             context.getLastMajorOptimizingTime());
 
-    boolean necessary = evaluator.isNecessary();
+    boolean necessary = optimizingEvaluationAllowed && evaluator.isNecessary();
+    AbstractOptimizingEvaluator.PendingInput pendingInput = evaluator.getPendingInput();
+    TableAnalysisKey analysisKey = analysisKey(context, currentSnapshot, snapshot);
     return java.util.Optional.of(
         new PendingInputResult(
-            evaluator.getPendingInput(), evaluator.getOptimizingPendingInput(), necessary));
+            pendingInput,
+            evaluator.getOptimizingPendingInput(),
+            necessary,
+            IcebergLegacyHealthAdapter.adapt(analysisKey, pendingInput)));
   }
 
-  private org.apache.amoro.table.TableSnapshot buildCurrentSnapshot() {
+  @Override
+  public java.util.Optional<TableAnalysisKey> currentAnalysisKey(OptimizationContext context) {
+    MixedSnapshot currentSnapshot = currentEvaluationSnapshot();
+    org.apache.amoro.table.TableSnapshot snapshot = buildCurrentSnapshot(currentSnapshot);
+    return java.util.Optional.of(analysisKey(context, currentSnapshot, snapshot));
+  }
+
+  private TableAnalysisKey analysisKey(
+      OptimizationContext context,
+      MixedSnapshot currentSnapshot,
+      org.apache.amoro.table.TableSnapshot snapshot) {
+    return IcebergLegacyHealthAdapter.createKey(
+        id(),
+        format(),
+        snapshot,
+        currentSnapshot != null ? currentSnapshot.schemaId() : mixedTable.schema().schemaId(),
+        context.getOptimizingConfig());
+  }
+
+  private MixedSnapshot currentEvaluationSnapshot() {
+    Snapshot changeSnapshot;
+    Snapshot baseSnapshot;
+    if (mixedTable.isKeyedTable()) {
+      baseSnapshot = mixedTable.asKeyedTable().baseTable().currentSnapshot();
+      changeSnapshot = mixedTable.asKeyedTable().changeTable().currentSnapshot();
+    } else {
+      baseSnapshot = mixedTable.asUnkeyedTable().currentSnapshot();
+      changeSnapshot = null;
+    }
+    if (baseSnapshot == null && changeSnapshot == null) {
+      return null;
+    }
+    return new MixedSnapshot(changeSnapshot, baseSnapshot);
+  }
+
+  private org.apache.amoro.table.TableSnapshot buildCurrentSnapshot(MixedSnapshot snapshot) {
     if (mixedTable.isUnkeyedTable()) {
-      org.apache.iceberg.Snapshot snap = mixedTable.asUnkeyedTable().currentSnapshot();
       long snapshotId =
-          snap != null ? snap.snapshotId() : TableRuntimeOptimizingState.INVALID_SNAPSHOT_ID;
+          snapshot != null
+              ? snapshot.getBaseSnapshotId()
+              : TableRuntimeOptimizingState.INVALID_SNAPSHOT_ID;
       return new BasicTableSnapshot(snapshotId);
     } else {
-      org.apache.iceberg.Snapshot baseSnap =
-          mixedTable.asKeyedTable().baseTable().currentSnapshot();
-      org.apache.iceberg.Snapshot changeSnap =
-          mixedTable.asKeyedTable().changeTable().currentSnapshot();
       long baseId =
-          baseSnap != null
-              ? baseSnap.snapshotId()
+          snapshot != null
+              ? snapshot.getBaseSnapshotId()
               : TableRuntimeOptimizingState.INVALID_SNAPSHOT_ID;
       long changeId =
-          changeSnap != null
-              ? changeSnap.snapshotId()
+          snapshot != null
+              ? snapshot.getChangeSnapshotId()
               : TableRuntimeOptimizingState.INVALID_SNAPSHOT_ID;
       return new KeyedTableSnapshot(baseId, changeId);
     }

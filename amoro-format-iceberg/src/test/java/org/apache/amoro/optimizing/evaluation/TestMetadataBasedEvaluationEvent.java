@@ -18,6 +18,7 @@
 
 package org.apache.amoro.optimizing.evaluation;
 
+import org.apache.amoro.AmoroTable;
 import org.apache.amoro.BasicTableTestHelper;
 import org.apache.amoro.ServerTableIdentifier;
 import org.apache.amoro.TableFormat;
@@ -31,6 +32,8 @@ import org.apache.amoro.iceberg.Constants;
 import org.apache.amoro.io.IcebergDataTestHelpers;
 import org.apache.amoro.io.MixedDataTestHelpers;
 import org.apache.amoro.io.writer.RecordWithAction;
+import org.apache.amoro.optimizing.OptimizationContext;
+import org.apache.amoro.optimizing.PendingInputResult;
 import org.apache.amoro.optimizing.plan.CommonPartitionEvaluator;
 import org.apache.amoro.optimizing.plan.MixedIcebergPartitionPlan;
 import org.apache.amoro.optimizing.plan.PartitionEvaluator;
@@ -74,6 +77,7 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.stream.Collectors;
 
 @RunWith(Parameterized.class)
@@ -244,6 +248,50 @@ public class TestMetadataBasedEvaluationEvent extends TableTestBase {
     Assert.assertTrue(config.isMetadataBasedTriggerEnabled());
     Assert.assertFalse(MetadataBasedEvaluationEvent.isReachFallbackInterval(config, 0L));
     Assert.assertFalse(MetadataBasedEvaluationEvent.isEvaluatingNecessary(config, table, 0L));
+  }
+
+  @Test
+  public void test_healthEvaluationBypassesMetadataShortcutForEmptyTable() {
+    OptimizingConfig config =
+        getDefaultOptimizingConfig().setEvaluationFallbackInterval(Long.MAX_VALUE);
+    AmoroTable<?> table =
+        getUnifiedCatalog()
+            .loadTable(TableTestHelper.TEST_DB_NAME, TableTestHelper.TEST_TABLE_NAME);
+    OptimizationContext context = optimizationContext(config);
+
+    Assert.assertFalse(table.evaluatePendingInput(context, 1).isPresent());
+
+    Optional<PendingInputResult> result = table.evaluatePendingInput(context, 1, true);
+    Assert.assertTrue(result.isPresent());
+    Assert.assertTrue(result.get().tableAnalysis().isPresent());
+    Assert.assertEquals(100, result.get().pendingInput().getHealthScore());
+    Assert.assertEquals(
+        table.currentAnalysisKey(context).get(), result.get().tableAnalysis().get().key());
+  }
+
+  @Test
+  public void test_healthEvaluationPreservesMetadataOptimizingDecision() throws IOException {
+    initData();
+    OptimizingConfig config =
+        getDefaultOptimizingConfig()
+            .setTargetSize(1024L * 1024L * 1024L)
+            .setMinTargetSizeRatio(0D)
+            .setEvaluationMseTolerance(0L)
+            .setFullTriggerInterval(0)
+            .setFullRewriteAllFiles(true)
+            .setEvaluationFallbackInterval(Long.MAX_VALUE);
+    AmoroTable<?> table =
+        getUnifiedCatalog()
+            .loadTable(TableTestHelper.TEST_DB_NAME, TableTestHelper.TEST_TABLE_NAME);
+    OptimizationContext context = optimizationContext(config);
+
+    Assert.assertFalse(
+        MetadataBasedEvaluationEvent.isEvaluatingNecessary(config, getMixedTable(), 0L));
+    Assert.assertFalse(table.evaluatePendingInput(context, 10).isPresent());
+    PendingInputResult forcedHealthResult = table.evaluatePendingInput(context, 10, true).get();
+
+    Assert.assertFalse(forcedHealthResult.optimizingNecessary());
+    Assert.assertTrue(forcedHealthResult.tableAnalysis().isPresent());
   }
 
   @Test
@@ -545,5 +593,44 @@ public class TestMetadataBasedEvaluationEvent extends TableTestBase {
             TableProperties.SELF_OPTIMIZING_EVALUATION_FALLBACK_INTERVAL_DEFAULT)
         .setEvaluationMseTolerance(
             TableProperties.SELF_OPTIMIZING_EVALUATION_FILE_SIZE_MSE_TOLERANCE_DEFAULT);
+  }
+
+  private OptimizationContext optimizationContext(OptimizingConfig config) {
+    return new OptimizationContext() {
+      @Override
+      public ServerTableIdentifier getTableIdentifier() {
+        return ServerTableIdentifier.of(TableTestHelper.TEST_TABLE_ID, getTestFormat());
+      }
+
+      @Override
+      public OptimizingConfig getOptimizingConfig() {
+        return config;
+      }
+
+      @Override
+      public boolean isIdle() {
+        return true;
+      }
+
+      @Override
+      public long getLastPlanTime() {
+        return 0L;
+      }
+
+      @Override
+      public long getLastMinorOptimizingTime() {
+        return 0L;
+      }
+
+      @Override
+      public long getLastFullOptimizingTime() {
+        return 0L;
+      }
+
+      @Override
+      public long getLastMajorOptimizingTime() {
+        return 0L;
+      }
+    };
   }
 }

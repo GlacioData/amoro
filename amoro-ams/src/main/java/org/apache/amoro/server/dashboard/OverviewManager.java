@@ -19,6 +19,8 @@
 package org.apache.amoro.server.dashboard;
 
 import org.apache.amoro.ServerTableIdentifier;
+import org.apache.amoro.TableFormat;
+import org.apache.amoro.TableRuntime;
 import org.apache.amoro.config.Configurations;
 import org.apache.amoro.server.AmoroManagementConf;
 import org.apache.amoro.server.dashboard.model.OverviewDataSizeItem;
@@ -32,6 +34,9 @@ import org.apache.amoro.server.persistence.mapper.OptimizerMapper;
 import org.apache.amoro.server.persistence.mapper.TableMetaMapper;
 import org.apache.amoro.server.persistence.mapper.TableRuntimeMapper;
 import org.apache.amoro.server.resource.OptimizerInstance;
+import org.apache.amoro.server.table.DefaultTableRuntime;
+import org.apache.amoro.server.table.RuntimeHealthSnapshot;
+import org.apache.amoro.server.table.TableService;
 import org.apache.amoro.shade.guava32.com.google.common.annotations.VisibleForTesting;
 import org.apache.amoro.shade.guava32.com.google.common.collect.ImmutableList;
 import org.apache.amoro.shade.guava32.com.google.common.collect.Maps;
@@ -55,6 +60,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 public class OverviewManager extends PersistentBase {
@@ -79,16 +85,32 @@ public class OverviewManager extends PersistentBase {
   private final AtomicLong totalMemory = new AtomicLong();
 
   private final int maxRecordCount;
+  private final Supplier<TableService> tableServiceSupplier;
 
   public OverviewManager(Configurations serverConfigs) {
+    this(serverConfigs, () -> null);
+  }
+
+  public OverviewManager(
+      Configurations serverConfigs, Supplier<TableService> tableServiceSupplier) {
     this(
         serverConfigs.getInteger(AmoroManagementConf.OVERVIEW_CACHE_MAX_SIZE),
-        serverConfigs.get(AmoroManagementConf.OVERVIEW_CACHE_REFRESH_INTERVAL));
+        serverConfigs.get(AmoroManagementConf.OVERVIEW_CACHE_REFRESH_INTERVAL),
+        tableServiceSupplier);
   }
 
   @VisibleForTesting
   public OverviewManager(int maxRecordCount, Duration refreshInterval) {
+    this(maxRecordCount, refreshInterval, () -> null);
+  }
+
+  @VisibleForTesting
+  OverviewManager(
+      int maxRecordCount, Duration refreshInterval, Supplier<TableService> tableServiceSupplier) {
     this.maxRecordCount = maxRecordCount;
+    this.tableServiceSupplier =
+        java.util.Objects.requireNonNull(
+            tableServiceSupplier, "Table service supplier must not be null");
     ScheduledExecutorService overviewUpdaterScheduler =
         Executors.newSingleThreadScheduledExecutor(
             new ThreadFactoryBuilder()
@@ -202,7 +224,8 @@ public class OverviewManager extends PersistentBase {
     this.optimizingStatusCountMap.putAll(optimizingStatusMap);
   }
 
-  private Optional<OverviewTopTableItem> toTopTableItem(
+  @VisibleForTesting
+  Optional<OverviewTopTableItem> toTopTableItem(
       ServerTableIdentifier identifier, TableRuntimeMeta meta) {
     if (meta == null) {
       return Optional.empty();
@@ -214,9 +237,26 @@ public class OverviewManager extends PersistentBase {
       tableItem.setFileCount(tableSummary.getTotalFileCount());
       tableItem.setHealthScore(tableSummary.getHealthScore());
     }
+    if (identifier.getFormat() == TableFormat.PAIMON) {
+      tableItem.setHealthScore(runtimeHealthScore(identifier.getId()).orElse(-1));
+    }
     tableItem.setAverageFileSize(
         tableItem.getFileCount() == 0 ? 0 : tableItem.getTableSize() / tableItem.getFileCount());
     return Optional.of(tableItem);
+  }
+
+  private Optional<Integer> runtimeHealthScore(long tableId) {
+    TableService tableService = tableServiceSupplier.get();
+    if (tableService == null) {
+      return Optional.empty();
+    }
+    TableRuntime runtime = tableService.getRuntime(tableId);
+    if (!(runtime instanceof DefaultTableRuntime)) {
+      return Optional.empty();
+    }
+    return ((DefaultTableRuntime) runtime)
+        .getRuntimeHealthSnapshot()
+        .map(RuntimeHealthSnapshot::getHealthScore);
   }
 
   private String statusToMetricString(OptimizingStatus status) {

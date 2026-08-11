@@ -18,11 +18,16 @@
 
 package org.apache.amoro.formats.paimon.optimizing.plan;
 
+import org.apache.amoro.ServerTableIdentifier;
 import org.apache.amoro.config.OptimizingConfig;
 import org.apache.amoro.formats.paimon.PaimonTable;
 import org.apache.amoro.formats.paimon.optimizing.PaimonCompactionExecutorFactory;
 import org.apache.amoro.formats.paimon.optimizing.PaimonCompactionInput;
 import org.apache.amoro.formats.paimon.optimizing.PaimonCompactionTask;
+import org.apache.amoro.formats.paimon.optimizing.health.PaimonAppendSnapshotAnalysis;
+import org.apache.amoro.formats.paimon.optimizing.health.PaimonHealthEvaluationContext;
+import org.apache.amoro.optimizing.FormatTableAnalysis;
+import org.apache.amoro.optimizing.OptimizationContext;
 import org.apache.amoro.optimizing.OptimizingPlanResult;
 import org.apache.amoro.optimizing.OptimizingType;
 import org.apache.amoro.optimizing.TableOptimizingPlanner;
@@ -44,6 +49,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.function.ToLongFunction;
 
 /**
@@ -91,6 +97,8 @@ public class PaimonOptimizingPlanner implements TableOptimizingPlanner {
   private final long lastMajorOptimizingTime;
   private final long lastFullOptimizingTime;
   private final Predicate partitionFilter;
+  private final OptimizationContext runtimeContext;
+  private final FormatTableAnalysis suppliedAnalysis;
 
   // Memoised state built the first time isNecessary() / plan() runs.
   private Boolean necessary;
@@ -98,6 +106,8 @@ public class PaimonOptimizingPlanner implements TableOptimizingPlanner {
   private String commitUser;
   private long targetSnapshotId = -1L;
   private OptimizingType optimizingType = OptimizingType.MINOR;
+  private PaimonAppendSnapshotAnalysis usedAnalysis;
+  private int fallbackScanCount;
 
   public PaimonOptimizingPlanner(
       PaimonTable paimonTable,
@@ -115,6 +125,7 @@ public class PaimonOptimizingPlanner implements TableOptimizingPlanner {
         0L,
         0L,
         0L,
+        null,
         null);
   }
 
@@ -135,7 +146,8 @@ public class PaimonOptimizingPlanner implements TableOptimizingPlanner {
         0L,
         0L,
         0L,
-        partitionFilter);
+        partitionFilter,
+        null);
   }
 
   public PaimonOptimizingPlanner(
@@ -149,6 +161,61 @@ public class PaimonOptimizingPlanner implements TableOptimizingPlanner {
       long lastMajorOptimizingTime,
       long lastFullOptimizingTime,
       Predicate partitionFilter) {
+    this(
+        paimonTable,
+        tableId,
+        processId,
+        availableCore,
+        maxInputSizePerThread,
+        optimizingConfig,
+        lastMinorOptimizingTime,
+        lastMajorOptimizingTime,
+        lastFullOptimizingTime,
+        partitionFilter,
+        null,
+        null);
+  }
+
+  public PaimonOptimizingPlanner(
+      PaimonTable paimonTable,
+      long tableId,
+      long processId,
+      double availableCore,
+      long maxInputSizePerThread,
+      OptimizingConfig optimizingConfig,
+      long lastMinorOptimizingTime,
+      long lastMajorOptimizingTime,
+      long lastFullOptimizingTime,
+      Predicate partitionFilter,
+      FormatTableAnalysis suppliedAnalysis) {
+    this(
+        paimonTable,
+        tableId,
+        processId,
+        availableCore,
+        maxInputSizePerThread,
+        optimizingConfig,
+        lastMinorOptimizingTime,
+        lastMajorOptimizingTime,
+        lastFullOptimizingTime,
+        partitionFilter,
+        null,
+        suppliedAnalysis);
+  }
+
+  public PaimonOptimizingPlanner(
+      PaimonTable paimonTable,
+      long tableId,
+      long processId,
+      double availableCore,
+      long maxInputSizePerThread,
+      OptimizingConfig optimizingConfig,
+      long lastMinorOptimizingTime,
+      long lastMajorOptimizingTime,
+      long lastFullOptimizingTime,
+      Predicate partitionFilter,
+      OptimizationContext runtimeContext,
+      FormatTableAnalysis suppliedAnalysis) {
     this.paimonTable = paimonTable;
     this.tableId = tableId;
     this.processId = processId;
@@ -160,6 +227,8 @@ public class PaimonOptimizingPlanner implements TableOptimizingPlanner {
     this.lastMajorOptimizingTime = lastMajorOptimizingTime;
     this.lastFullOptimizingTime = lastFullOptimizingTime;
     this.partitionFilter = partitionFilter;
+    this.runtimeContext = runtimeContext;
+    this.suppliedAnalysis = suppliedAnalysis;
   }
 
   private static OptimizingConfig defaultOptimizingConfig() {
@@ -189,20 +258,43 @@ public class PaimonOptimizingPlanner implements TableOptimizingPlanner {
         return false;
       }
 
-      PaimonPlanContext context =
-          PaimonPlanContext.forOptions(
-              CoreOptions.fromMap(table.options()),
+      RuntimeInputs runtimeInputs =
+          RuntimeInputs.capture(
+              runtimeContext,
               optimizingConfig,
               lastMinorOptimizingTime,
               lastMajorOptimizingTime,
-              lastFullOptimizingTime,
+              lastFullOptimizingTime);
+      PaimonHealthEvaluationContext healthContext =
+          PaimonHealthEvaluationContext.capture(
+              table, paimonTable.id().toString(), runtimeInputs.healthContext());
+      PaimonPlanContext context =
+          PaimonPlanContext.forOptions(
+              CoreOptions.fromMap(table.options()),
+              runtimeInputs.optimizingConfig(),
+              runtimeInputs.lastMinorOptimizingTime(),
+              runtimeInputs.lastMajorOptimizingTime(),
+              runtimeInputs.lastFullOptimizingTime(),
               availableCore,
               maxInputSizePerThread,
               planTime);
-      PaimonAppendFileScanner.ScanResult scanResult =
-          new PaimonAppendFileScanner(table, context, partitionFilter).scan();
-      targetSnapshotId = scanResult.snapshotId();
-      Map<BinaryRow, List<PaimonFileCandidate>> filesByPartition = scanResult.files();
+      PaimonAppendFileScanner scanner;
+      Map<BinaryRow, List<PaimonFileCandidate>> filesByPartition;
+      if (suppliedAnalysis instanceof PaimonAppendSnapshotAnalysis
+          && matchesCurrentContext(
+              healthContext, (PaimonAppendSnapshotAnalysis) suppliedAnalysis)) {
+        usedAnalysis = (PaimonAppendSnapshotAnalysis) suppliedAnalysis;
+        targetSnapshotId = usedAnalysis.key().getSnapshotId();
+        scanner = new PaimonAppendFileScanner(table, healthContext, context, partitionFilter);
+        filesByPartition = scanner.candidatesFromAnalysis(usedAnalysis);
+      } else {
+        fallbackScanCount++;
+        scanner = new PaimonAppendFileScanner(table, healthContext, context, partitionFilter);
+        PaimonAppendFileScanner.ScanResult scanResult = scanner.scan();
+        usedAnalysis = scanResult.analysis();
+        targetSnapshotId = scanResult.snapshotId();
+        filesByPartition = scanResult.files();
+      }
       List<PlannedAppendTask> tasks = new ArrayList<>();
       PaimonPartitionEvaluator evaluator = new PaimonPartitionEvaluator(context);
       PaimonAppendTaskPacker packer = new PaimonAppendTaskPacker(context);
@@ -270,7 +362,7 @@ public class PaimonOptimizingPlanner implements TableOptimizingPlanner {
       // NOTE (§3.4 split contract): this does NOT re-split, merge, or otherwise mutate the
       // Amoro-built AppendCompactTask — we only decide how many tasks get released this tick.
       List<PlannedAppendTask> eligible =
-          applyQuotaInternal(
+          applyQuota(
               cachedTasks,
               availableCore,
               maxInputSizePerThread,
@@ -353,6 +445,15 @@ public class PaimonOptimizingPlanner implements TableOptimizingPlanner {
     return commitUser;
   }
 
+  @Override
+  public Optional<FormatTableAnalysis> tableAnalysis() {
+    return Optional.ofNullable(usedAnalysis);
+  }
+
+  int fallbackScanCount() {
+    return fallbackScanCount;
+  }
+
   /**
    * Apply the plan-tick quota to a list of {@link AppendCompactTask}s built by the Amoro Paimon
    * planner.
@@ -370,16 +471,7 @@ public class PaimonOptimizingPlanner implements TableOptimizingPlanner {
    * <p>Visible for testing so unit tests can inject a synthetic {@code sizeFn} without standing up
    * a real Paimon file system.
    */
-  static List<AppendCompactTask> applyQuota(
-      List<AppendCompactTask> tasks,
-      double availableCore,
-      long maxInputSizePerThread,
-      ToLongFunction<AppendCompactTask> sizeFn,
-      String tableNameForLog) {
-    return applyQuotaInternal(tasks, availableCore, maxInputSizePerThread, sizeFn, tableNameForLog);
-  }
-
-  private static <T> List<T> applyQuotaInternal(
+  static <T> List<T> applyQuota(
       List<T> tasks,
       double availableCore,
       long maxInputSizePerThread,
@@ -514,6 +606,139 @@ public class PaimonOptimizingPlanner implements TableOptimizingPlanner {
       return null;
     }
     return table;
+  }
+
+  private static boolean matchesCurrentContext(
+      PaimonHealthEvaluationContext context, PaimonAppendSnapshotAnalysis analysis) {
+    if (!analysis.plannerFactsAvailable() || !context.key().equals(analysis.key())) {
+      return false;
+    }
+    return context.snapshotId() < 0 || analysis.snapshot() != null;
+  }
+
+  /** Immutable runtime values captured immediately before the planner binds a table Snapshot. */
+  static final class RuntimeInputs implements OptimizationContext {
+    private final boolean runtimeAvailable;
+    private final ServerTableIdentifier tableIdentifier;
+    private final OptimizingConfig optimizingConfig;
+    private final boolean idle;
+    private final long lastPlanTime;
+    private final long lastMinorOptimizingTime;
+    private final long lastFullOptimizingTime;
+    private final long lastMajorOptimizingTime;
+    private final long lastOptimizedSnapshotId;
+
+    private RuntimeInputs(
+        boolean runtimeAvailable,
+        ServerTableIdentifier tableIdentifier,
+        OptimizingConfig optimizingConfig,
+        boolean idle,
+        long lastPlanTime,
+        long lastMinorOptimizingTime,
+        long lastFullOptimizingTime,
+        long lastMajorOptimizingTime,
+        long lastOptimizedSnapshotId) {
+      this.runtimeAvailable = runtimeAvailable;
+      this.tableIdentifier = tableIdentifier;
+      this.optimizingConfig = optimizingConfig;
+      this.idle = idle;
+      this.lastPlanTime = lastPlanTime;
+      this.lastMinorOptimizingTime = lastMinorOptimizingTime;
+      this.lastFullOptimizingTime = lastFullOptimizingTime;
+      this.lastMajorOptimizingTime = lastMajorOptimizingTime;
+      this.lastOptimizedSnapshotId = lastOptimizedSnapshotId;
+    }
+
+    static RuntimeInputs capture(
+        OptimizationContext context,
+        OptimizingConfig fallbackConfig,
+        long fallbackLastMinor,
+        long fallbackLastMajor,
+        long fallbackLastFull) {
+      if (context == null) {
+        return new RuntimeInputs(
+            false,
+            null,
+            fallbackConfig,
+            false,
+            0L,
+            fallbackLastMinor,
+            fallbackLastFull,
+            fallbackLastMajor,
+            -1L);
+      }
+      OptimizingConfig currentConfig = context.getOptimizingConfig();
+      return new RuntimeInputs(
+          true,
+          context.getTableIdentifier(),
+          currentConfig == null ? fallbackConfig : currentConfig,
+          context.isIdle(),
+          context.getLastPlanTime(),
+          context.getLastMinorOptimizingTime(),
+          context.getLastFullOptimizingTime(),
+          context.getLastMajorOptimizingTime(),
+          context.getLastOptimizedSnapshotId());
+    }
+
+    OptimizationContext healthContext() {
+      return runtimeAvailable ? this : null;
+    }
+
+    long lastMinorOptimizingTime() {
+      return lastMinorOptimizingTime;
+    }
+
+    long lastMajorOptimizingTime() {
+      return lastMajorOptimizingTime;
+    }
+
+    long lastFullOptimizingTime() {
+      return lastFullOptimizingTime;
+    }
+
+    @Override
+    public ServerTableIdentifier getTableIdentifier() {
+      return tableIdentifier;
+    }
+
+    @Override
+    public OptimizingConfig getOptimizingConfig() {
+      return optimizingConfig;
+    }
+
+    OptimizingConfig optimizingConfig() {
+      return optimizingConfig;
+    }
+
+    @Override
+    public boolean isIdle() {
+      return idle;
+    }
+
+    @Override
+    public long getLastPlanTime() {
+      return lastPlanTime;
+    }
+
+    @Override
+    public long getLastMinorOptimizingTime() {
+      return lastMinorOptimizingTime;
+    }
+
+    @Override
+    public long getLastFullOptimizingTime() {
+      return lastFullOptimizingTime;
+    }
+
+    @Override
+    public long getLastMajorOptimizingTime() {
+      return lastMajorOptimizingTime;
+    }
+
+    @Override
+    public long getLastOptimizedSnapshotId() {
+      return lastOptimizedSnapshotId;
+    }
   }
 
   private OptimizingPlanResult<PaimonCompactionTask> emptyResult() {

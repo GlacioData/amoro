@@ -61,6 +61,27 @@ export interface IKeyAndValue {
   key: string
   value: string
 }
+
+export interface TableHealthComponent {
+  code: string
+  score: number
+  weight: number | null
+  combination: string | null
+  metrics: Record<string, string>
+}
+
+export interface TableHealthDetails {
+  formulaVersion: string
+  snapshotId: string | null
+  changeSnapshotId: string | null
+  schemaId: string | null
+  scoringConfigFingerprint: string
+  evaluationKey: string
+  components: TableHealthComponent[]
+  metrics: Record<string, string>
+  reasonCodes: string[]
+}
+
 export interface IBaseDetailInfo {
   optimizingStatus: string
   records: string
@@ -72,10 +93,12 @@ export interface IBaseDetailInfo {
   averageFile: string
   tableFormat: string
   hasPartition: boolean
+  hasPrimaryKey: boolean
   healthScore: number
   smallFileScore: number
   equalityDeleteScore: number
   positionalDeleteScore: number
+  healthDetails: TableHealthDetails | null
   comment: string
 }
 

@@ -36,6 +36,7 @@ import org.apache.amoro.formats.paimon.optimizing.plan.PaimonOptimizingPlanner;
 import org.apache.amoro.formats.paimon.optimizing.plan.PaimonPrimaryKeyOptimizingPlanner;
 import org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeyCompactionTask;
 import org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeyTableCommit;
+import org.apache.amoro.optimizing.FormatTableAnalysis;
 import org.apache.amoro.optimizing.OptimizationContext;
 import org.apache.amoro.optimizing.TableOptimizingCommitter;
 import org.apache.amoro.optimizing.TableOptimizingPlanner;
@@ -122,6 +123,17 @@ public class PaimonProcessFactory implements ProcessFactory {
       AmoroTable<?> table,
       double availableCore,
       long maxInputSizePerThread) {
+    return createPlanner(
+        tableRuntime, table, availableCore, maxInputSizePerThread, Optional.empty());
+  }
+
+  @Override
+  public TableOptimizingPlanner createPlanner(
+      TableRuntime tableRuntime,
+      AmoroTable<?> table,
+      double availableCore,
+      long maxInputSizePerThread,
+      Optional<FormatTableAnalysis> tableAnalysis) {
     if (!(table instanceof PaimonTable)) {
       throw new IllegalStateException(
           "PaimonProcessFactory.createPlanner requires PaimonTable, got "
@@ -135,12 +147,15 @@ public class PaimonProcessFactory implements ProcessFactory {
     long lastMinor = 0L;
     long lastMajor = 0L;
     long lastFull = 0L;
+    OptimizationContext runtimeContext = null;
     if (tableRuntime instanceof OptimizationContext) {
-      OptimizationContext context = (OptimizationContext) tableRuntime;
-      lastMinor = context.getLastMinorOptimizingTime();
-      lastMajor = context.getLastMajorOptimizingTime();
-      lastFull = context.getLastFullOptimizingTime();
+      runtimeContext = (OptimizationContext) tableRuntime;
+      lastMinor = runtimeContext.getLastMinorOptimizingTime();
+      lastMajor = runtimeContext.getLastMajorOptimizingTime();
+      lastFull = runtimeContext.getLastFullOptimizingTime();
     }
+    FormatTableAnalysis suppliedAnalysis =
+        tableAnalysis == null ? null : tableAnalysis.orElse(null);
     if (PaimonPrimaryKeyOptimizingPlanner.supports(paimonTable)) {
       return new PaimonPrimaryKeyOptimizingPlanner(
           paimonTable,
@@ -152,7 +167,9 @@ public class PaimonProcessFactory implements ProcessFactory {
           lastMinor,
           lastMajor,
           lastFull,
-          null);
+          null,
+          runtimeContext,
+          suppliedAnalysis);
     }
     return new PaimonOptimizingPlanner(
         paimonTable,
@@ -164,7 +181,9 @@ public class PaimonProcessFactory implements ProcessFactory {
         lastMinor,
         lastMajor,
         lastFull,
-        null);
+        null,
+        runtimeContext,
+        suppliedAnalysis);
   }
 
   @Override

@@ -23,6 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
@@ -73,6 +74,8 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Callable;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 @DisplayName("PaimonPrimaryKeyTableCommit")
 class TestPaimonPrimaryKeyTableCommit {
@@ -88,8 +91,19 @@ class TestPaimonPrimaryKeyTableCommit {
     assertFalse(tasks.isEmpty());
     FileStoreTable table = (FileStoreTable) catalog.getTable(id);
     long snapshotBefore = table.snapshotManager().latestSnapshot().id();
+    AtomicBoolean insideDoAs = new AtomicBoolean(false);
+    PaimonTable paimonTable = mock(PaimonTable.class);
+    when(paimonTable.doAs(any()))
+        .thenAnswer(
+            invocation -> {
+              insideDoAs.set(true);
+              Callable<?> callable = invocation.getArgument(0);
+              return callable.call();
+            });
 
-    new PaimonPrimaryKeyTableCommit(table, tasks).commit();
+    PaimonPrimaryKeyTableCommit committer =
+        new PaimonPrimaryKeyTableCommit(paimonTable, table, tasks);
+    committer.commit();
 
     FileStoreTable afterCommit = (FileStoreTable) catalog.getTable(id);
     Snapshot snapshot = afterCommit.snapshotManager().latestSnapshot();
@@ -97,6 +111,8 @@ class TestPaimonPrimaryKeyTableCommit {
     assertEquals(Snapshot.CommitKind.COMPACT, snapshot.commitKind());
     assertEquals(7L, snapshot.commitIdentifier());
     assertEquals(rowsBefore, readRows(afterCommit));
+    assertTrue(insideDoAs.get());
+    verify(paimonTable).doAs(any());
   }
 
   @Test
@@ -113,8 +129,9 @@ class TestPaimonPrimaryKeyTableCommit {
     long snapshotAfterFirstCommit =
         ((FileStoreTable) catalog.getTable(id)).snapshotManager().latestSnapshot().id();
 
-    new PaimonPrimaryKeyTableCommit((FileStoreTable) catalog.getTable(id), tasks)
-        .commit(CommitMode.RECOVERY_REPLAY);
+    PaimonPrimaryKeyTableCommit replay =
+        new PaimonPrimaryKeyTableCommit((FileStoreTable) catalog.getTable(id), tasks);
+    replay.commit(CommitMode.RECOVERY_REPLAY);
 
     assertEquals(
         snapshotAfterFirstCommit,
@@ -319,9 +336,12 @@ class TestPaimonPrimaryKeyTableCommit {
     long snapshotBeforeCommit =
         ((FileStoreTable) catalog.getTable(id)).snapshotManager().latestSnapshot().id();
 
-    new PaimonPrimaryKeyTableCommit((FileStoreTable) catalog.getTable(id), tasks).commit();
-    new PaimonPrimaryKeyTableCommit((FileStoreTable) catalog.getTable(id), tasks)
-        .commit(CommitMode.RECOVERY_REPLAY);
+    PaimonPrimaryKeyTableCommit normal =
+        new PaimonPrimaryKeyTableCommit((FileStoreTable) catalog.getTable(id), tasks);
+    normal.commit();
+    PaimonPrimaryKeyTableCommit replay =
+        new PaimonPrimaryKeyTableCommit((FileStoreTable) catalog.getTable(id), tasks);
+    replay.commit(CommitMode.RECOVERY_REPLAY);
 
     FileStoreTable afterCommit = (FileStoreTable) catalog.getTable(id);
     assertEquals(snapshotBeforeCommit, afterCommit.snapshotManager().latestSnapshot().id());
@@ -447,7 +467,9 @@ class TestPaimonPrimaryKeyTableCommit {
     FileStoreTable table = (FileStoreTable) catalog.getTable(id);
     long snapshotBefore = table.snapshotManager().latestSnapshot().id();
 
-    new PaimonPrimaryKeyTableCommit(table, Collections.emptyList()).commit();
+    PaimonPrimaryKeyTableCommit committer =
+        new PaimonPrimaryKeyTableCommit(table, Collections.emptyList());
+    committer.commit();
 
     assertEquals(
         snapshotBefore,

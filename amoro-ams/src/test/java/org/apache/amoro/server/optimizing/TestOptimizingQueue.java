@@ -45,10 +45,12 @@ import org.apache.amoro.io.MixedDataTestHelpers;
 import org.apache.amoro.metrics.Gauge;
 import org.apache.amoro.metrics.MetricKey;
 import org.apache.amoro.metrics.MetricRegistry;
+import org.apache.amoro.optimizing.FormatTableAnalysis;
 import org.apache.amoro.optimizing.RewriteFilesOutput;
 import org.apache.amoro.optimizing.TableOptimizing;
 import org.apache.amoro.optimizing.TableOptimizingCommitter;
 import org.apache.amoro.optimizing.TableOptimizingCommitter.CommitMode;
+import org.apache.amoro.optimizing.TableOptimizingPlanner;
 import org.apache.amoro.process.ProcessFactory;
 import org.apache.amoro.process.ProcessStatus;
 import org.apache.amoro.resource.ResourceGroup;
@@ -67,6 +69,7 @@ import org.apache.amoro.shade.guava32.com.google.common.collect.Lists;
 import org.apache.amoro.table.MixedTable;
 import org.apache.amoro.table.TableProperties;
 import org.apache.amoro.table.UnkeyedTable;
+import org.apache.amoro.table.health.TableAnalysisKey;
 import org.apache.amoro.utils.SerializationUtil;
 import org.apache.iceberg.AppendFiles;
 import org.apache.iceberg.DataFile;
@@ -87,13 +90,19 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.Queue;
 import java.util.Set;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.Lock;
 import java.util.stream.Collectors;
 
@@ -987,6 +996,29 @@ public class TestOptimizingQueue extends AMSTableTestBase {
     originalQueue.dispose();
   }
 
+  private OptimizingQueue recoveryQueue(
+      DefaultTableRuntime paimonRuntime, RecordingCommitter recordingCommitter) {
+    ProcessFactory factory = Mockito.mock(ProcessFactory.class);
+    Mockito.when(factory.supportedFormats()).thenReturn(Collections.singleton(TableFormat.PAIMON));
+    Mockito.when(
+            factory.createCommitter(
+                Mockito.any(),
+                Mockito.anyLong(),
+                Mockito.anyLong(),
+                Mockito.anyCollection(),
+                Mockito.anyMap(),
+                Mockito.anyMap()))
+        .thenReturn(recordingCommitter);
+    return new OptimizingQueue(
+        CATALOG_MANAGER,
+        new ResourceGroup.Builder("paimon-evidence-test", "local").build(),
+        quotaProvider,
+        planExecutor,
+        Collections.singletonList(paimonRuntime),
+        1,
+        new ProcessFactoryRouter(Collections.singletonList(factory)));
+  }
+
   @Test
   public void testCompleteProcessWithExplicitProcessWorksWhenRuntimeProcessIsDetached()
       throws Exception {
@@ -1309,6 +1341,7 @@ public class TestOptimizingQueue extends AMSTableTestBase {
   private static class RecordingCommitter implements TableOptimizingCommitter {
     private CommitMode commitMode;
     private int legacyCommitCount;
+    private int commitCount;
 
     @Override
     public void commit() {
@@ -1318,6 +1351,7 @@ public class TestOptimizingQueue extends AMSTableTestBase {
     @Override
     public void commit(CommitMode mode) {
       commitMode = mode;
+      commitCount++;
     }
   }
 
@@ -1498,6 +1532,265 @@ public class TestOptimizingQueue extends AMSTableTestBase {
                       released.add(tr);
                     }));
     return released;
+  }
+
+  @Test
+  public void testPlanTakesCurrentAnalysisAfterRefreshAndPassesItToFactory() throws Exception {
+    AnalysisHandoffFixture fixture = analysisHandoffFixture(TableFormat.PAIMON);
+    try {
+      TableAnalysisKey key = analysisKey(TableFormat.PAIMON, 11L);
+      FormatTableAnalysis analysis = analysis(key);
+      Mockito.when(fixture.runtime.getCurrentAnalysisKey()).thenReturn(Optional.of(key));
+      Mockito.when(fixture.runtime.takeTableAnalysis(key)).thenReturn(Optional.of(analysis));
+
+      Assert.assertNull(invokePlanInternal(fixture.queue, fixture.runtime));
+
+      org.mockito.InOrder order =
+          Mockito.inOrder(
+              fixture.runtime, fixture.catalogManager, fixture.factory, fixture.planner);
+      order.verify(fixture.runtime).beginPlanning();
+      order.verify(fixture.catalogManager).loadTable(fixture.identifier.getIdentifier());
+      order.verify(fixture.runtime).refresh(fixture.table);
+      order.verify(fixture.runtime).getCurrentAnalysisKey();
+      order.verify(fixture.runtime).takeTableAnalysis(key);
+      order
+          .verify(fixture.factory)
+          .createPlanner(
+              Mockito.eq(fixture.runtime),
+              Mockito.eq(fixture.table),
+              Mockito.anyDouble(),
+              Mockito.anyLong(),
+              Mockito.eq(Optional.of(analysis)));
+      order.verify(fixture.planner).isNecessary();
+      Mockito.verify(fixture.factory, Mockito.never())
+          .createPlanner(Mockito.any(), Mockito.any(), Mockito.anyDouble(), Mockito.anyLong());
+    } finally {
+      fixture.queue.dispose();
+    }
+  }
+
+  @Test
+  public void testPlanWritesFallbackAnalysisOnlyThroughCurrentKeyGuard() throws Exception {
+    AnalysisHandoffFixture fixture = analysisHandoffFixture(TableFormat.PAIMON);
+    try {
+      TableAnalysisKey currentKey = analysisKey(TableFormat.PAIMON, 12L);
+      FormatTableAnalysis staleFallback = analysis(analysisKey(TableFormat.PAIMON, 11L));
+      Mockito.when(fixture.runtime.getCurrentAnalysisKey()).thenReturn(Optional.of(currentKey));
+      Mockito.when(fixture.runtime.takeTableAnalysis(currentKey)).thenReturn(Optional.empty());
+      Mockito.when(fixture.planner.tableAnalysis()).thenReturn(Optional.of(staleFallback));
+      Mockito.when(fixture.runtime.updateTableSummaryIfCurrent(fixture.table, staleFallback))
+          .thenReturn(false);
+
+      Assert.assertNull(invokePlanInternal(fixture.queue, fixture.runtime));
+
+      Mockito.verify(fixture.factory)
+          .createPlanner(
+              Mockito.eq(fixture.runtime),
+              Mockito.eq(fixture.table),
+              Mockito.anyDouble(),
+              Mockito.anyLong(),
+              Mockito.eq(Optional.empty()));
+      org.mockito.InOrder order = Mockito.inOrder(fixture.planner, fixture.runtime);
+      order.verify(fixture.planner).isNecessary();
+      order.verify(fixture.planner).tableAnalysis();
+      order.verify(fixture.runtime).updateTableSummaryIfCurrent(fixture.table, staleFallback);
+      Mockito.verify(fixture.runtime).completeEmptyProcess();
+    } finally {
+      fixture.queue.dispose();
+    }
+  }
+
+  @Test
+  public void testPlanUsesLegacyFactoryPathWhenFormatHasNoAnalysisKey() throws Exception {
+    AnalysisHandoffFixture fixture = analysisHandoffFixture(TableFormat.ICEBERG);
+    try {
+      FormatTableAnalysis legacyAnalysis = analysis(analysisKey(TableFormat.ICEBERG, 21L));
+      Mockito.when(fixture.runtime.getCurrentAnalysisKey()).thenReturn(Optional.empty());
+      Mockito.when(fixture.planner.tableAnalysis()).thenReturn(Optional.of(legacyAnalysis));
+
+      Assert.assertNull(invokePlanInternal(fixture.queue, fixture.runtime));
+
+      Mockito.verify(fixture.factory)
+          .createPlanner(
+              Mockito.eq(fixture.runtime),
+              Mockito.eq(fixture.table),
+              Mockito.anyDouble(),
+              Mockito.anyLong());
+      Mockito.verify(fixture.factory, Mockito.never())
+          .createPlanner(
+              Mockito.any(), Mockito.any(), Mockito.anyDouble(), Mockito.anyLong(), Mockito.any());
+      Mockito.verify(fixture.runtime, Mockito.never()).takeTableAnalysis(Mockito.any());
+      Mockito.verify(fixture.runtime).updateTableSummaryIfCurrent(fixture.table, legacyAnalysis);
+    } finally {
+      fixture.queue.dispose();
+    }
+  }
+
+  @Test
+  public void testConcurrentPlansConsumeAnalysisSlotOnlyOnce() throws Exception {
+    AnalysisHandoffFixture fixture = analysisHandoffFixture(TableFormat.PAIMON);
+    ExecutorService executor = Executors.newFixedThreadPool(2);
+    CountDownLatch release = new CountDownLatch(1);
+    try {
+      TableAnalysisKey key = analysisKey(TableFormat.PAIMON, 31L);
+      FormatTableAnalysis analysis = analysis(key);
+      AtomicReference<FormatTableAnalysis> slot = new AtomicReference<>(analysis);
+      Queue<Optional<FormatTableAnalysis>> handedOff = new ConcurrentLinkedQueue<>();
+      CountDownLatch bothReady = new CountDownLatch(2);
+
+      Mockito.when(fixture.runtime.getCurrentAnalysisKey()).thenReturn(Optional.of(key));
+      Mockito.when(fixture.runtime.takeTableAnalysis(key))
+          .thenAnswer(
+              ignored -> {
+                bothReady.countDown();
+                Assert.assertTrue(release.await(5, TimeUnit.SECONDS));
+                return Optional.ofNullable(slot.getAndSet(null));
+              });
+      Mockito.when(
+              fixture.factory.createPlanner(
+                  Mockito.any(),
+                  Mockito.any(),
+                  Mockito.anyDouble(),
+                  Mockito.anyLong(),
+                  Mockito.any()))
+          .thenAnswer(
+              invocation -> {
+                @SuppressWarnings("unchecked")
+                Optional<FormatTableAnalysis> value = invocation.getArgument(4);
+                handedOff.add(value);
+                return fixture.planner;
+              });
+
+      Future<Object> first =
+          executor.submit(() -> invokePlanInternal(fixture.queue, fixture.runtime));
+      Future<Object> second =
+          executor.submit(() -> invokePlanInternal(fixture.queue, fixture.runtime));
+      Assert.assertTrue(bothReady.await(5, TimeUnit.SECONDS));
+      release.countDown();
+      Assert.assertNull(first.get(5, TimeUnit.SECONDS));
+      Assert.assertNull(second.get(5, TimeUnit.SECONDS));
+
+      Assert.assertEquals(2, handedOff.size());
+      Assert.assertEquals(1, handedOff.stream().filter(Optional::isPresent).count());
+      Assert.assertEquals(1, handedOff.stream().filter(value -> !value.isPresent()).count());
+      Assert.assertSame(
+          analysis, handedOff.stream().filter(Optional::isPresent).findFirst().get().get());
+      Mockito.verify(fixture.runtime, Mockito.times(2)).takeTableAnalysis(key);
+    } finally {
+      release.countDown();
+      executor.shutdownNow();
+      fixture.queue.dispose();
+    }
+  }
+
+  private AnalysisHandoffFixture analysisHandoffFixture(TableFormat format) {
+    ServerTableIdentifier identifier =
+        ServerTableIdentifier.of(
+            org.apache.amoro.table.TableIdentifier.of(
+                "analysis_catalog", "analysis_database", "analysis_table"),
+            format);
+    identifier.setId(12345L);
+    CatalogManager catalogManager = Mockito.mock(CatalogManager.class);
+    @SuppressWarnings("unchecked")
+    AmoroTable<Object> table = Mockito.mock(AmoroTable.class);
+    Mockito.doReturn(table).when(catalogManager).loadTable(identifier.getIdentifier());
+
+    DefaultTableRuntime runtime = Mockito.mock(DefaultTableRuntime.class);
+    Mockito.when(runtime.getTableIdentifier()).thenReturn(identifier);
+    Mockito.when(runtime.getFormat()).thenReturn(format);
+    Mockito.when(runtime.refresh(table)).thenReturn(runtime);
+
+    TableOptimizingPlanner planner = Mockito.mock(TableOptimizingPlanner.class);
+    Mockito.when(planner.isNecessary()).thenReturn(false);
+
+    ProcessFactory factory = Mockito.mock(ProcessFactory.class);
+    Mockito.when(factory.supportedFormats()).thenReturn(Collections.singleton(format));
+    Mockito.when(
+            factory.createPlanner(
+                Mockito.any(), Mockito.any(), Mockito.anyDouble(), Mockito.anyLong()))
+        .thenReturn(planner);
+    Mockito.when(
+            factory.createPlanner(
+                Mockito.any(),
+                Mockito.any(),
+                Mockito.anyDouble(),
+                Mockito.anyLong(),
+                Mockito.any()))
+        .thenReturn(planner);
+    ProcessFactoryRouter processFactoryRouter =
+        new ProcessFactoryRouter(Collections.singletonList(factory));
+    OptimizingQueue queue =
+        new OptimizingQueue(
+            catalogManager,
+            testResourceGroup(),
+            resourceGroup -> 1,
+            Runnable::run,
+            Collections.emptyList(),
+            1,
+            processFactoryRouter);
+    return new AnalysisHandoffFixture(
+        identifier, catalogManager, table, runtime, planner, factory, queue);
+  }
+
+  private static TableAnalysisKey analysisKey(TableFormat format, long snapshotId) {
+    return new TableAnalysisKey(
+        "analysis_catalog.analysis_database.analysis_table",
+        format,
+        snapshotId,
+        TableAnalysisKey.NO_CHANGE_SNAPSHOT,
+        1L,
+        "config",
+        "formula",
+        TableAnalysisKey.NO_BASELINE,
+        TableAnalysisKey.NO_BASELINE_TIME);
+  }
+
+  private static FormatTableAnalysis analysis(TableAnalysisKey key) {
+    FormatTableAnalysis analysis = Mockito.mock(FormatTableAnalysis.class);
+    Mockito.when(analysis.key()).thenReturn(key);
+    return analysis;
+  }
+
+  private static Object invokePlanInternal(OptimizingQueue queue, DefaultTableRuntime tableRuntime)
+      throws Exception {
+    Method method =
+        OptimizingQueue.class.getDeclaredMethod("planInternal", DefaultTableRuntime.class);
+    method.setAccessible(true);
+    try {
+      return method.invoke(queue, tableRuntime);
+    } catch (java.lang.reflect.InvocationTargetException exception) {
+      if (exception.getCause() instanceof Exception) {
+        throw (Exception) exception.getCause();
+      }
+      throw exception;
+    }
+  }
+
+  private static final class AnalysisHandoffFixture {
+    private final ServerTableIdentifier identifier;
+    private final CatalogManager catalogManager;
+    private final AmoroTable<?> table;
+    private final DefaultTableRuntime runtime;
+    private final TableOptimizingPlanner planner;
+    private final ProcessFactory factory;
+    private final OptimizingQueue queue;
+
+    private AnalysisHandoffFixture(
+        ServerTableIdentifier identifier,
+        CatalogManager catalogManager,
+        AmoroTable<?> table,
+        DefaultTableRuntime runtime,
+        TableOptimizingPlanner planner,
+        ProcessFactory factory,
+        OptimizingQueue queue) {
+      this.identifier = identifier;
+      this.catalogManager = catalogManager;
+      this.table = table;
+      this.runtime = runtime;
+      this.planner = planner;
+      this.factory = factory;
+      this.queue = queue;
+    }
   }
 
   private OptimizingTaskResult buildOptimizingTaskFailed(OptimizingTaskId taskId, int threadId) {

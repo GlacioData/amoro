@@ -29,6 +29,7 @@ import org.apache.amoro.optimizing.OptimizationContext;
 import org.apache.amoro.optimizing.PendingInputResult;
 import org.apache.amoro.optimizing.TableRuntimeOptimizingState;
 import org.apache.amoro.optimizing.evaluation.MetadataBasedEvaluationEvent;
+import org.apache.amoro.optimizing.health.IcebergLegacyHealthAdapter;
 import org.apache.amoro.optimizing.plan.AbstractOptimizingEvaluator;
 import org.apache.amoro.optimizing.plan.IcebergOptimizingEvaluatorFactory;
 import org.apache.amoro.shade.guava32.com.google.common.collect.Lists;
@@ -37,6 +38,7 @@ import org.apache.amoro.table.BasicUnkeyedTable;
 import org.apache.amoro.table.TableIdentifier;
 import org.apache.amoro.table.TableMetaStore;
 import org.apache.amoro.table.UnkeyedTable;
+import org.apache.amoro.table.health.TableAnalysisKey;
 import org.apache.amoro.utils.MixedFormatCatalogUtil;
 import org.apache.iceberg.Snapshot;
 import org.apache.iceberg.SnapshotSummary;
@@ -124,11 +126,19 @@ public class IcebergTable implements AmoroTable<UnkeyedTable> {
   @Override
   public Optional<PendingInputResult> evaluatePendingInput(
       OptimizationContext context, int maxPendingPartitions) {
-    if (context.getOptimizingConfig().isEnabled()
-        && context.isIdle()
-        && context.getOptimizingConfig().isMetadataBasedTriggerEnabled()
-        && !MetadataBasedEvaluationEvent.isEvaluatingNecessary(
-            context.getOptimizingConfig(), table, context.getLastPlanTime())) {
+    return evaluatePendingInput(context, maxPendingPartitions, false);
+  }
+
+  @Override
+  public Optional<PendingInputResult> evaluatePendingInput(
+      OptimizationContext context, int maxPendingPartitions, boolean forceHealthEvaluation) {
+    boolean optimizingEvaluationAllowed =
+        !context.getOptimizingConfig().isEnabled()
+            || !context.isIdle()
+            || !context.getOptimizingConfig().isMetadataBasedTriggerEnabled()
+            || MetadataBasedEvaluationEvent.isEvaluatingNecessary(
+                context.getOptimizingConfig(), table, context.getLastPlanTime());
+    if (!forceHealthEvaluation && !optimizingEvaluationAllowed) {
       return Optional.empty();
     }
 
@@ -146,10 +156,33 @@ public class IcebergTable implements AmoroTable<UnkeyedTable> {
             context.getLastFullOptimizingTime(),
             context.getLastMajorOptimizingTime());
 
-    boolean necessary = evaluator.isNecessary();
+    boolean necessary = optimizingEvaluationAllowed && evaluator.isNecessary();
+    AbstractOptimizingEvaluator.PendingInput pendingInput = evaluator.getPendingInput();
+    TableAnalysisKey analysisKey = analysisKey(context, current, snapshotId);
     return Optional.of(
         new PendingInputResult(
-            evaluator.getPendingInput(), evaluator.getOptimizingPendingInput(), necessary));
+            pendingInput,
+            evaluator.getOptimizingPendingInput(),
+            necessary,
+            IcebergLegacyHealthAdapter.adapt(analysisKey, pendingInput)));
+  }
+
+  @Override
+  public Optional<TableAnalysisKey> currentAnalysisKey(OptimizationContext context) {
+    Snapshot current = table.currentSnapshot();
+    long snapshotId =
+        current != null ? current.snapshotId() : TableRuntimeOptimizingState.INVALID_SNAPSHOT_ID;
+    return Optional.of(analysisKey(context, current, snapshotId));
+  }
+
+  private TableAnalysisKey analysisKey(
+      OptimizationContext context, Snapshot current, long snapshotId) {
+    return IcebergLegacyHealthAdapter.createKey(
+        identifier,
+        format(),
+        new BasicTableSnapshot(snapshotId),
+        current != null ? current.schemaId() : table.schema().schemaId(),
+        context.getOptimizingConfig());
   }
 
   @Override

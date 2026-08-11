@@ -23,32 +23,33 @@ import org.apache.amoro.TableFormat;
 import org.apache.amoro.TableSnapshot;
 import org.apache.amoro.config.OptimizingConfig;
 import org.apache.amoro.formats.paimon.optimizing.PaimonPendingInput;
+import org.apache.amoro.formats.paimon.optimizing.health.PaimonAppendSnapshotAnalysis;
+import org.apache.amoro.formats.paimon.optimizing.health.PaimonHealthEvaluationContext;
+import org.apache.amoro.formats.paimon.optimizing.plan.PaimonAppendFileScanner;
+import org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeyOptimizingEvaluation;
 import org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeyOptimizingEvaluator;
+import org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeyPendingInput;
+import org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeySnapshotAnalysis;
+import org.apache.amoro.optimizing.FormatTableAnalysis;
 import org.apache.amoro.optimizing.OptimizationContext;
 import org.apache.amoro.optimizing.PendingInputResult;
 import org.apache.amoro.shade.guava32.com.google.common.collect.ImmutableMap;
 import org.apache.amoro.table.TableIdentifier;
 import org.apache.amoro.table.TableMetaStore;
+import org.apache.amoro.table.health.TableAnalysisKey;
+import org.apache.amoro.table.health.TableHealthDetails;
 import org.apache.amoro.utils.CatalogUtil;
-import org.apache.paimon.CoreOptions;
 import org.apache.paimon.Snapshot;
-import org.apache.paimon.data.BinaryRow;
-import org.apache.paimon.io.DataFileMeta;
-import org.apache.paimon.manifest.FileKind;
-import org.apache.paimon.manifest.ManifestEntry;
-import org.apache.paimon.operation.FileStoreScan;
 import org.apache.paimon.table.AppendOnlyFileStoreTable;
 import org.apache.paimon.table.BucketMode;
 import org.apache.paimon.table.DataTable;
 import org.apache.paimon.table.FileStoreTable;
+import org.apache.paimon.table.PrimaryKeyFileStoreTable;
 import org.apache.paimon.table.Table;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.io.Serializable;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.Callable;
@@ -56,7 +57,11 @@ import java.util.concurrent.Callable;
 public class PaimonTable implements AmoroTable<Table>, Serializable {
 
   private static final long serialVersionUID = 1L;
-  private static final Logger LOG = LoggerFactory.getLogger(PaimonTable.class);
+  private static final String UNSUPPORTED_TABLE_SHAPE = "UNSUPPORTED_TABLE_SHAPE";
+  private static final String UNSUPPORTED_BUCKET_MODE = "UNSUPPORTED_BUCKET_MODE";
+  private static final String PK_CLUSTERING_OVERRIDE_UNSUPPORTED =
+      "PK_CLUSTERING_OVERRIDE_UNSUPPORTED";
+  private static final int NOT_EQUIVALENT = -1;
 
   private final TableIdentifier tableIdentifier;
 
@@ -121,18 +126,54 @@ public class PaimonTable implements AmoroTable<Table>, Serializable {
   }
 
   @Override
+  public long snapshotCount() {
+    return doAs(
+        () ->
+            table instanceof DataTable
+                ? ((DataTable) table).snapshotManager().snapshotCount()
+                : 0L);
+  }
+
+  @Override
   public Optional<PendingInputResult> evaluatePendingInput(
       OptimizationContext context, int maxPendingPartitions) {
     return doAs(
         () -> {
-          boolean appendBucketUnaware = isAppendBucketUnawareTable();
-          PaimonPendingInput pendingInput =
-              appendBucketUnaware ? collectPaimonPendingInput() : new PaimonPendingInput();
-          boolean selfOptimizingEnabled = isSelfOptimizingEnabled(context);
-          boolean optimizingNecessary =
-              selfOptimizingEnabled
-                  && (appendBucketUnaware || isPrimaryKeyHashOptimizingNecessary(context));
-          return Optional.of(new PendingInputResult(pendingInput, optimizingNecessary));
+          if (!(table instanceof FileStoreTable)) {
+            return Optional.empty();
+          }
+          FileStoreTable fileStoreTable = (FileStoreTable) table;
+          PaimonHealthEvaluationContext healthContext =
+              PaimonHealthEvaluationContext.capture(fileStoreTable, id().toString(), context);
+          if (fileStoreTable instanceof PrimaryKeyFileStoreTable) {
+            if (healthContext.pkClusteringOverride()) {
+              return Optional.of(
+                  unsupportedResult(healthContext, PK_CLUSTERING_OVERRIDE_UNSUPPORTED));
+            }
+            if (!isSupportedPrimaryKeyMode(healthContext.bucketMode())) {
+              return Optional.of(unsupportedResult(healthContext, UNSUPPORTED_BUCKET_MODE));
+            }
+            return Optional.of(evaluatePrimaryKey(fileStoreTable, healthContext, context));
+          }
+          if (fileStoreTable instanceof AppendOnlyFileStoreTable) {
+            return Optional.of(
+                evaluateAppend((AppendOnlyFileStoreTable) fileStoreTable, healthContext, context));
+          }
+          return Optional.of(unsupportedResult(healthContext, UNSUPPORTED_TABLE_SHAPE));
+        });
+  }
+
+  @Override
+  public Optional<TableAnalysisKey> currentAnalysisKey(OptimizationContext context) {
+    return doAs(
+        () -> {
+          if (!(table instanceof FileStoreTable)) {
+            return Optional.empty();
+          }
+          return Optional.of(
+              PaimonHealthEvaluationContext.capture(
+                      (FileStoreTable) table, id().toString(), context)
+                  .key());
         });
   }
 
@@ -161,91 +202,120 @@ public class PaimonTable implements AmoroTable<Table>, Serializable {
     return config == null || config.isEnabled();
   }
 
-  private boolean isAppendBucketUnawareTable() {
-    if (!(table instanceof AppendOnlyFileStoreTable)) {
-      return false;
-    }
-    AppendOnlyFileStoreTable appendOnlyTable = (AppendOnlyFileStoreTable) table;
-    return appendOnlyTable.bucketMode() == BucketMode.BUCKET_UNAWARE;
+  private PendingInputResult evaluateAppend(
+      AppendOnlyFileStoreTable appendTable,
+      PaimonHealthEvaluationContext healthContext,
+      OptimizationContext context) {
+    PaimonAppendSnapshotAnalysis analysis =
+        PaimonAppendFileScanner.analyze(appendTable, healthContext, null);
+    boolean optimizingNecessary =
+        isSelfOptimizingEnabled(context) && appendTable.bucketMode() == BucketMode.BUCKET_UNAWARE;
+    return new PendingInputResult(
+        analysis.pendingInput(), analysis.pendingInput(), optimizingNecessary, analysis);
   }
 
-  private boolean isPrimaryKeyHashOptimizingNecessary(OptimizationContext context) {
-    if (!(table instanceof FileStoreTable) || table instanceof AppendOnlyFileStoreTable) {
-      return false;
-    }
-    FileStoreTable fileStoreTable = (FileStoreTable) table;
-    return PaimonPrimaryKeyOptimizingEvaluator.evaluate(
+  private PendingInputResult evaluatePrimaryKey(
+      FileStoreTable fileStoreTable,
+      PaimonHealthEvaluationContext healthContext,
+      OptimizationContext context) {
+    PaimonPrimaryKeyOptimizingEvaluation evaluation =
+        PaimonPrimaryKeyOptimizingEvaluator.evaluate(
             fileStoreTable,
-            tableIdentifier.getTableName(),
+            id().toString(),
+            healthContext,
             context == null ? null : context.getOptimizingConfig(),
             context == null ? 0L : context.getLastMinorOptimizingTime(),
             context == null ? 0L : context.getLastFullOptimizingTime(),
             null,
-            System.currentTimeMillis())
-        .necessary();
+            System.currentTimeMillis());
+    PaimonPrimaryKeySnapshotAnalysis analysis =
+        evaluation
+            .analysis()
+            .orElseThrow(
+                () ->
+                    new IllegalStateException(
+                        "Supported Paimon primary-key evaluation did not return analysis."));
+    boolean hashMode =
+        healthContext.bucketMode() == BucketMode.HASH_FIXED
+            || healthContext.bucketMode() == BucketMode.HASH_DYNAMIC;
+    boolean optimizingNecessary =
+        isSelfOptimizingEnabled(context)
+            && hashMode
+            && analysis.validForPlanning()
+            && evaluation.necessary();
+    return new PendingInputResult(
+        analysis.pendingInput(),
+        legacyPendingInput(analysis.pendingInput()),
+        optimizingNecessary,
+        analysis);
   }
 
-  private PaimonPendingInput collectPaimonPendingInput() {
-    if (!(table instanceof FileStoreTable)) {
-      LOG.warn(
-          "Expected FileStoreTable but got {}, returning empty pending input",
-          table.getClass().getName());
-      return new PaimonPendingInput();
-    }
-    FileStoreTable fileStoreTable = (FileStoreTable) table;
-    FileStoreScan scan = fileStoreTable.store().newScan();
-    List<ManifestEntry> entries = scan.plan().files(FileKind.ADD);
-
-    long targetFileSize = CoreOptions.fromMap(fileStoreTable.options()).targetFileSize(false);
-    Map<BinaryRow, List<DataFileMeta>> partitionFiles = new HashMap<>();
-
-    int dataFileCount = 0;
-    long dataFileSize = 0;
-    long dataRecordCount = 0;
-    int smallFileCount = 0;
-    long smallFileSize = 0;
-    int fileWithDeleteCount = 0;
-    long deleteRecordCount = 0;
-
-    for (ManifestEntry entry : entries) {
-      DataFileMeta file = entry.file();
-      dataFileCount++;
-      dataFileSize += file.fileSize();
-      dataRecordCount += file.rowCount();
-
-      if (file.fileSize() < targetFileSize) {
-        smallFileCount++;
-        smallFileSize += file.fileSize();
-      }
-
-      if (file.deleteRowCount().isPresent() && file.deleteRowCount().get() > 0) {
-        fileWithDeleteCount++;
-        deleteRecordCount += file.deleteRowCount().get();
-      }
-
-      partitionFiles.computeIfAbsent(entry.partition(), k -> new ArrayList<>()).add(file);
-    }
-
-    int partitionCount = partitionFiles.size();
-    int healthScore =
-        PaimonPendingInput.computeHealthScore(
-            dataFileCount,
-            dataFileSize,
-            smallFileCount,
-            smallFileSize,
-            dataRecordCount,
-            deleteRecordCount,
-            partitionFiles);
-
+  private static PaimonPendingInput legacyPendingInput(PaimonPrimaryKeyPendingInput source) {
     return new PaimonPendingInput(
-        dataFileCount,
-        dataFileSize,
-        dataRecordCount,
-        smallFileCount,
-        smallFileSize,
-        partitionCount,
-        fileWithDeleteCount,
-        deleteRecordCount,
-        healthScore);
+        source.getDataFileCount(),
+        source.getDataFileSize(),
+        source.getDataRecordCount(),
+        source.getSmallFileCount(),
+        source.getSmallFileSize(),
+        NOT_EQUIVALENT,
+        NOT_EQUIVALENT,
+        NOT_EQUIVALENT,
+        source.getHealthScore());
+  }
+
+  private static boolean isSupportedPrimaryKeyMode(BucketMode mode) {
+    return mode == BucketMode.HASH_FIXED
+        || mode == BucketMode.HASH_DYNAMIC
+        || mode == BucketMode.KEY_DYNAMIC;
+  }
+
+  private static PendingInputResult unsupportedResult(
+      PaimonHealthEvaluationContext healthContext, String reasonCode) {
+    PaimonPendingInput pendingInput = new PaimonPendingInput();
+    FormatTableAnalysis analysis =
+        new UnsupportedPaimonAnalysis(healthContext, pendingInput, reasonCode);
+    return new PendingInputResult(pendingInput, pendingInput, false, analysis);
+  }
+
+  private static final class UnsupportedPaimonAnalysis implements FormatTableAnalysis {
+
+    private final TableAnalysisKey key;
+    private final PaimonPendingInput pendingInput;
+    private final TableHealthDetails healthDetails;
+
+    private UnsupportedPaimonAnalysis(
+        PaimonHealthEvaluationContext context, PaimonPendingInput pendingInput, String reasonCode) {
+      this.key = context.key();
+      this.pendingInput = pendingInput;
+      Map<String, String> metrics = new LinkedHashMap<>();
+      metrics.put("tableShape", context.tableShape().name());
+      metrics.put("bucketMode", context.bucketMode().name());
+      this.healthDetails =
+          new TableHealthDetails(
+              context.formulaVersion(),
+              context.snapshotId() < 0 ? null : context.snapshotId(),
+              null,
+              context.schemaId() < 0 ? null : context.schemaId(),
+              context.scoringConfigFingerprint(),
+              context.key().encoded(),
+              Collections.emptyList(),
+              metrics,
+              Collections.singletonList(reasonCode));
+    }
+
+    @Override
+    public TableAnalysisKey key() {
+      return key;
+    }
+
+    @Override
+    public PaimonPendingInput pendingInput() {
+      return pendingInput;
+    }
+
+    @Override
+    public TableHealthDetails healthDetails() {
+      return healthDetails;
+    }
   }
 }

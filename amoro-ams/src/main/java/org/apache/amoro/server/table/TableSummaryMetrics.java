@@ -89,7 +89,7 @@ public class TableSummaryMetrics extends AbstractTableMetrics {
   // table summary files records metrics
   public static final MetricDefine TABLE_SUMMARY_TOTAL_RECORDS =
       defineGauge("table_summary_total_records")
-          .withDescription("Total records in the table")
+          .withDescription("Physical records reported by current table files")
           .withTags("catalog", "database", "table")
           .build();
 
@@ -125,7 +125,10 @@ public class TableSummaryMetrics extends AbstractTableMetrics {
           .withTags("catalog", "database", "table")
           .build();
 
-  private AbstractOptimizingEvaluator.PendingInput tableSummary =
+  private volatile FormatPendingInput commonSummary =
+      new AbstractOptimizingEvaluator.PendingInput();
+
+  private volatile AbstractOptimizingEvaluator.PendingInput icebergSummary =
       new AbstractOptimizingEvaluator.PendingInput();
 
   private long snapshots = 0L;
@@ -141,65 +144,65 @@ public class TableSummaryMetrics extends AbstractTableMetrics {
       registerMetric(
           registry,
           TABLE_SUMMARY_TOTAL_FILES,
-          (Gauge<Long>) () -> (long) tableSummary.getTotalFileCount());
+          (Gauge<Long>) () -> (long) commonSummary.getTotalFileCount());
       registerMetric(
           registry,
           TABLE_SUMMARY_DATA_FILES,
-          (Gauge<Long>) () -> (long) tableSummary.getDataFileCount());
+          (Gauge<Long>) () -> (long) icebergSummary.getDataFileCount());
       registerMetric(
           registry,
           TABLE_SUMMARY_POSITION_DELETE_FILES,
-          (Gauge<Long>) () -> (long) tableSummary.getPositionalDeleteFileCount());
+          (Gauge<Long>) () -> (long) icebergSummary.getPositionalDeleteFileCount());
       registerMetric(
           registry,
           TABLE_SUMMARY_EQUALITY_DELETE_FILES,
-          (Gauge<Long>) () -> (long) tableSummary.getEqualityDeleteFileCount());
+          (Gauge<Long>) () -> (long) icebergSummary.getEqualityDeleteFileCount());
       registerMetric(
           registry,
           TABLE_SUMMARY_DANGLING_DELETE_FILES,
-          (Gauge<Long>) () -> (long) tableSummary.getDanglingDeleteFileCount());
+          (Gauge<Long>) () -> (long) icebergSummary.getDanglingDeleteFileCount());
 
       // register files size metrics
       registerMetric(
           registry,
           TABLE_SUMMARY_TOTAL_FILES_SIZE,
-          (Gauge<Long>) () -> tableSummary.getTotalFileSize());
+          (Gauge<Long>) () -> commonSummary.getTotalFileSize());
       registerMetric(
           registry,
           TABLE_SUMMARY_DATA_FILES_SIZE,
-          (Gauge<Long>) () -> tableSummary.getDataFileSize());
+          (Gauge<Long>) () -> icebergSummary.getDataFileSize());
       registerMetric(
           registry,
           TABLE_SUMMARY_POSITION_DELETE_FILES_SIZE,
-          (Gauge<Long>) () -> tableSummary.getPositionalDeleteBytes());
+          (Gauge<Long>) () -> icebergSummary.getPositionalDeleteBytes());
       registerMetric(
           registry,
           TABLE_SUMMARY_EQUALITY_DELETE_FILES_SIZE,
-          (Gauge<Long>) () -> tableSummary.getEqualityDeleteBytes());
+          (Gauge<Long>) () -> icebergSummary.getEqualityDeleteBytes());
 
       // register files records metrics
       registerMetric(
           registry,
           TABLE_SUMMARY_TOTAL_RECORDS,
-          (Gauge<Long>) () -> tableSummary.getTotalFileRecords());
+          (Gauge<Long>) () -> commonSummary.getTotalFileRecords());
       registerMetric(
           registry,
           TABLE_SUMMARY_DATA_FILES_RECORDS,
-          (Gauge<Long>) () -> tableSummary.getDataFileRecords());
+          (Gauge<Long>) () -> icebergSummary.getDataFileRecords());
       registerMetric(
           registry,
           TABLE_SUMMARY_POSITION_DELETE_FILES_RECORDS,
-          (Gauge<Long>) () -> tableSummary.getPositionalDeleteFileRecords());
+          (Gauge<Long>) () -> icebergSummary.getPositionalDeleteFileRecords());
       registerMetric(
           registry,
           TABLE_SUMMARY_EQUALITY_DELETE_FILES_RECORDS,
-          (Gauge<Long>) () -> tableSummary.getEqualityDeleteFileRecords());
+          (Gauge<Long>) () -> icebergSummary.getEqualityDeleteFileRecords());
 
       // register health score metric
       registerMetric(
           registry,
           TABLE_SUMMARY_HEALTH_SCORE,
-          (Gauge<Long>) () -> (long) tableSummary.getHealthScore());
+          (Gauge<Long>) () -> (long) commonSummary.getHealthScore());
 
       // register snapshots number metric
       registerMetric(registry, TABLE_SUMMARY_SNAPSHOTS, (Gauge<Long>) () -> snapshots);
@@ -212,8 +215,9 @@ public class TableSummaryMetrics extends AbstractTableMetrics {
     if (tableSummary == null) {
       return;
     }
+    this.commonSummary = tableSummary;
     if (tableSummary instanceof AbstractOptimizingEvaluator.PendingInput) {
-      this.tableSummary = (AbstractOptimizingEvaluator.PendingInput) tableSummary;
+      this.icebergSummary = (AbstractOptimizingEvaluator.PendingInput) tableSummary;
     }
   }
 

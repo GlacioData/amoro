@@ -29,6 +29,7 @@ import org.apache.amoro.exception.OptimizingClosedException;
 import org.apache.amoro.exception.PersistenceException;
 import org.apache.amoro.exception.TaskNotFoundException;
 import org.apache.amoro.optimizing.BaseOptimizingInput;
+import org.apache.amoro.optimizing.FormatTableAnalysis;
 import org.apache.amoro.optimizing.MetricsSummary;
 import org.apache.amoro.optimizing.OptimizingPlanResult;
 import org.apache.amoro.optimizing.OptimizingType;
@@ -37,6 +38,7 @@ import org.apache.amoro.optimizing.TableOptimizingCommitter.CommitMode;
 import org.apache.amoro.optimizing.TableOptimizingPlanner;
 import org.apache.amoro.optimizing.TaskMetricsSummary;
 import org.apache.amoro.optimizing.TaskProperties;
+import org.apache.amoro.process.ProcessFactory;
 import org.apache.amoro.process.ProcessStatus;
 import org.apache.amoro.process.StagedTaskDescriptor;
 import org.apache.amoro.resource.ResourceGroup;
@@ -64,6 +66,7 @@ import org.apache.amoro.shade.guava32.com.google.common.base.Preconditions;
 import org.apache.amoro.shade.guava32.com.google.common.collect.Lists;
 import org.apache.amoro.shade.guava32.com.google.common.collect.Maps;
 import org.apache.amoro.table.TableIdentifier;
+import org.apache.amoro.table.health.TableAnalysisKey;
 import org.apache.amoro.utils.CompatiblePropertyUtil;
 import org.apache.amoro.utils.ExceptionUtil;
 import org.slf4j.Logger;
@@ -76,6 +79,7 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Queue;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
@@ -603,11 +607,29 @@ public class OptimizingQueue extends PersistentBase {
         return null;
       }
 
-      TableOptimizingPlanner planner =
-          router
-              .forFormat(tableRuntime.getFormat())
-              .createPlanner(tableRuntime, table, getAvailableCore(), maxInputSizePerThread());
-      if (planner.isNecessary()) {
+      ProcessFactory processFactory = router.forFormat(tableRuntime.getFormat());
+      Optional<TableAnalysisKey> currentAnalysisKey = tableRuntime.getCurrentAnalysisKey();
+      TableOptimizingPlanner planner;
+      if (currentAnalysisKey.isPresent()) {
+        Optional<FormatTableAnalysis> tableAnalysis =
+            tableRuntime.takeTableAnalysis(currentAnalysisKey.get());
+        planner =
+            processFactory.createPlanner(
+                tableRuntime, table, getAvailableCore(), maxInputSizePerThread(), tableAnalysis);
+      } else {
+        // Keep the legacy overload as the no-key path. Existing Iceberg/Mixed factories do not
+        // opt in to keyed one-shot analysis and third-party factories can continue implementing
+        // only the original ProcessFactory contract.
+        planner =
+            processFactory.createPlanner(
+                tableRuntime, table, getAvailableCore(), maxInputSizePerThread());
+      }
+
+      boolean necessary = planner.isNecessary();
+      planner
+          .tableAnalysis()
+          .ifPresent(analysis -> tableRuntime.updateTableSummaryIfCurrent(table, analysis));
+      if (necessary) {
         OptimizingPlanResult planResult = planner.plan();
         if (planResult.getTasks() == null || planResult.getTasks().isEmpty()) {
           LOG.info(

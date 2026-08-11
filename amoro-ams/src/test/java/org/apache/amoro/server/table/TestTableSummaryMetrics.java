@@ -45,11 +45,14 @@ import org.apache.amoro.metrics.Gauge;
 import org.apache.amoro.metrics.Metric;
 import org.apache.amoro.metrics.MetricDefine;
 import org.apache.amoro.metrics.MetricKey;
+import org.apache.amoro.metrics.MetricRegistry;
+import org.apache.amoro.optimizing.plan.AbstractOptimizingEvaluator;
 import org.apache.amoro.server.manager.MetricManager;
 import org.apache.amoro.server.optimizing.OptimizingTestHelpers;
 import org.apache.amoro.server.scheduler.inline.TableRuntimeRefreshExecutor;
 import org.apache.amoro.shade.guava32.com.google.common.collect.ImmutableMap;
 import org.apache.amoro.shade.guava32.com.google.common.collect.Lists;
+import org.apache.amoro.table.FormatPendingInput;
 import org.apache.amoro.table.MixedTable;
 import org.apache.amoro.table.UnkeyedTable;
 import org.apache.iceberg.AppendFiles;
@@ -62,6 +65,7 @@ import org.junit.Test;
 import org.junit.jupiter.api.Assertions;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
+import org.mockito.Mockito;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -211,6 +215,115 @@ public class TestTableSummaryMetrics extends AMSTableTestBase {
 
     Assertions.assertTrue(snapshots.getValue() > 0);
     Assertions.assertTrue(healthScore.getValue() > 0);
+  }
+
+  @Test
+  public void testFormatAgnosticSummaryMetrics() {
+    MetricRegistry registry = new MetricRegistry();
+    ServerTableIdentifier identifier =
+        ServerTableIdentifier.of("paimon_catalog", "db", "table", TableFormat.PAIMON);
+    TableSummaryMetrics summaryMetrics = new TableSummaryMetrics(identifier);
+    summaryMetrics.register(registry);
+
+    FormatPendingInput summary = Mockito.mock(FormatPendingInput.class);
+    Mockito.when(summary.getTotalFileCount()).thenReturn(7);
+    Mockito.when(summary.getTotalFileSize()).thenReturn(700L);
+    Mockito.when(summary.getTotalFileRecords()).thenReturn(70L);
+    Mockito.when(summary.getHealthScore()).thenReturn(73);
+    summaryMetrics.refresh(summary);
+
+    Assertions.assertEquals(
+        7L, getMetric(registry.getMetrics(), identifier, TABLE_SUMMARY_TOTAL_FILES).getValue());
+    Assertions.assertEquals(
+        700L,
+        getMetric(registry.getMetrics(), identifier, TABLE_SUMMARY_TOTAL_FILES_SIZE).getValue());
+    Assertions.assertEquals(
+        70L, getMetric(registry.getMetrics(), identifier, TABLE_SUMMARY_TOTAL_RECORDS).getValue());
+    Assertions.assertEquals(
+        73L, getMetric(registry.getMetrics(), identifier, TABLE_SUMMARY_HEALTH_SCORE).getValue());
+
+    FormatPendingInput unknownHealthSummary = Mockito.mock(FormatPendingInput.class);
+    Mockito.when(unknownHealthSummary.getTotalFileCount()).thenReturn(8);
+    Mockito.when(unknownHealthSummary.getTotalFileSize()).thenReturn(800L);
+    Mockito.when(unknownHealthSummary.getHealthScore()).thenReturn(-1);
+    summaryMetrics.refresh(unknownHealthSummary);
+    Assertions.assertEquals(
+        -1L, getMetric(registry.getMetrics(), identifier, TABLE_SUMMARY_HEALTH_SCORE).getValue());
+
+    summaryMetrics.refresh(null);
+    Assertions.assertEquals(
+        8L, getMetric(registry.getMetrics(), identifier, TABLE_SUMMARY_TOTAL_FILES).getValue());
+    Assertions.assertEquals(
+        -1L, getMetric(registry.getMetrics(), identifier, TABLE_SUMMARY_HEALTH_SCORE).getValue());
+  }
+
+  @Test
+  public void testFormatAgnosticRefreshDoesNotOverwriteIcebergMetrics() {
+    MetricRegistry registry = new MetricRegistry();
+    ServerTableIdentifier identifier =
+        ServerTableIdentifier.of("iceberg_catalog", "db", "table", TableFormat.ICEBERG);
+    TableSummaryMetrics summaryMetrics = new TableSummaryMetrics(identifier);
+    summaryMetrics.register(registry);
+
+    AbstractOptimizingEvaluator.PendingInput icebergSummary =
+        Mockito.mock(AbstractOptimizingEvaluator.PendingInput.class);
+    Mockito.when(icebergSummary.getTotalFileCount()).thenReturn(10);
+    Mockito.when(icebergSummary.getTotalFileSize()).thenReturn(1_000L);
+    Mockito.when(icebergSummary.getHealthScore()).thenReturn(90);
+    Mockito.when(icebergSummary.getDataFileCount()).thenReturn(6);
+    Mockito.when(icebergSummary.getDataFileSize()).thenReturn(600L);
+    Mockito.when(icebergSummary.getDataFileRecords()).thenReturn(60L);
+    Mockito.when(icebergSummary.getPositionalDeleteFileCount()).thenReturn(2);
+    Mockito.when(icebergSummary.getPositionalDeleteBytes()).thenReturn(200L);
+    Mockito.when(icebergSummary.getPositionalDeleteFileRecords()).thenReturn(20L);
+    Mockito.when(icebergSummary.getEqualityDeleteFileCount()).thenReturn(1);
+    Mockito.when(icebergSummary.getEqualityDeleteBytes()).thenReturn(100L);
+    Mockito.when(icebergSummary.getEqualityDeleteFileRecords()).thenReturn(10L);
+    Mockito.when(icebergSummary.getDanglingDeleteFileCount()).thenReturn(1);
+    Mockito.when(icebergSummary.getTotalFileRecords()).thenReturn(90L);
+    summaryMetrics.refresh(icebergSummary);
+
+    FormatPendingInput genericSummary = Mockito.mock(FormatPendingInput.class);
+    Mockito.when(genericSummary.getTotalFileCount()).thenReturn(4);
+    Mockito.when(genericSummary.getTotalFileSize()).thenReturn(400L);
+    Mockito.when(genericSummary.getTotalFileRecords()).thenReturn(40L);
+    Mockito.when(genericSummary.getHealthScore()).thenReturn(44);
+    Mockito.when(genericSummary.getDataFileCount()).thenReturn(4);
+    Mockito.when(genericSummary.getDataFileSize()).thenReturn(400L);
+    summaryMetrics.refresh(genericSummary);
+
+    Map<MetricKey, Metric> metrics = registry.getMetrics();
+    Assertions.assertEquals(
+        4L, getMetric(metrics, identifier, TABLE_SUMMARY_TOTAL_FILES).getValue());
+    Assertions.assertEquals(
+        400L, getMetric(metrics, identifier, TABLE_SUMMARY_TOTAL_FILES_SIZE).getValue());
+    Assertions.assertEquals(
+        44L, getMetric(metrics, identifier, TABLE_SUMMARY_HEALTH_SCORE).getValue());
+    Assertions.assertEquals(
+        40L, getMetric(metrics, identifier, TABLE_SUMMARY_TOTAL_RECORDS).getValue());
+
+    Assertions.assertEquals(
+        6L, getMetric(metrics, identifier, TABLE_SUMMARY_DATA_FILES).getValue());
+    Assertions.assertEquals(
+        600L, getMetric(metrics, identifier, TABLE_SUMMARY_DATA_FILES_SIZE).getValue());
+    Assertions.assertEquals(
+        60L, getMetric(metrics, identifier, TABLE_SUMMARY_DATA_FILES_RECORDS).getValue());
+    Assertions.assertEquals(
+        2L, getMetric(metrics, identifier, TABLE_SUMMARY_POSITION_DELETE_FILES).getValue());
+    Assertions.assertEquals(
+        200L, getMetric(metrics, identifier, TABLE_SUMMARY_POSITION_DELETE_FILES_SIZE).getValue());
+    Assertions.assertEquals(
+        20L,
+        getMetric(metrics, identifier, TABLE_SUMMARY_POSITION_DELETE_FILES_RECORDS).getValue());
+    Assertions.assertEquals(
+        1L, getMetric(metrics, identifier, TABLE_SUMMARY_EQUALITY_DELETE_FILES).getValue());
+    Assertions.assertEquals(
+        100L, getMetric(metrics, identifier, TABLE_SUMMARY_EQUALITY_DELETE_FILES_SIZE).getValue());
+    Assertions.assertEquals(
+        10L,
+        getMetric(metrics, identifier, TABLE_SUMMARY_EQUALITY_DELETE_FILES_RECORDS).getValue());
+    Assertions.assertEquals(
+        1L, getMetric(metrics, identifier, TABLE_SUMMARY_DANGLING_DELETE_FILES).getValue());
   }
 
   private Gauge<Long> getMetric(

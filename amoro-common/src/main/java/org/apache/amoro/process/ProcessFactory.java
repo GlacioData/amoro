@@ -23,6 +23,7 @@ import org.apache.amoro.ActivePlugin;
 import org.apache.amoro.AmoroTable;
 import org.apache.amoro.TableFormat;
 import org.apache.amoro.TableRuntime;
+import org.apache.amoro.optimizing.FormatTableAnalysis;
 import org.apache.amoro.optimizing.TableOptimizingCommitter;
 import org.apache.amoro.optimizing.TableOptimizingPlanner;
 import org.apache.amoro.shade.guava32.com.google.common.collect.Lists;
@@ -77,6 +78,20 @@ public interface ProcessFactory extends ActivePlugin {
       double availableCore,
       long maxInputSizePerThread) {
     throw new UnsupportedOperationException("Optimizing planner is not supported by " + name());
+  }
+
+  /**
+   * Create a planner and optionally provide reusable analysis facts for the same table state.
+   *
+   * <p>The default implementation preserves compatibility by delegating to the legacy overload.
+   */
+  default TableOptimizingPlanner createPlanner(
+      TableRuntime tableRuntime,
+      AmoroTable<?> table,
+      double availableCore,
+      long maxInputSizePerThread,
+      Optional<FormatTableAnalysis> tableAnalysis) {
+    return createPlanner(tableRuntime, table, availableCore, maxInputSizePerThread);
   }
 
   /**

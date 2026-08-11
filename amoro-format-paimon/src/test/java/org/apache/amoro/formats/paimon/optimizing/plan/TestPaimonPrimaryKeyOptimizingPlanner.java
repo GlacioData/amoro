@@ -28,13 +28,19 @@ import static org.mockito.Mockito.when;
 import org.apache.amoro.config.OptimizingConfig;
 import org.apache.amoro.formats.paimon.PaimonCatalogFactory;
 import org.apache.amoro.formats.paimon.PaimonTable;
+import org.apache.amoro.formats.paimon.optimizing.health.PaimonHealthEvaluationContext;
 import org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeyCompactionExecutorFactory;
 import org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeyCompactionTask;
+import org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeyOptimizingEvaluation;
+import org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeyOptimizingEvaluator;
 import org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeyOptions;
+import org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeySnapshotAnalysis;
+import org.apache.amoro.optimizing.OptimizationContext;
 import org.apache.amoro.optimizing.OptimizingPlanResult;
 import org.apache.amoro.optimizing.OptimizingType;
 import org.apache.amoro.optimizing.TaskProperties;
 import org.apache.amoro.table.TableIdentifier;
+import org.apache.amoro.table.health.TableAnalysisKey;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.paimon.Snapshot;
 import org.apache.paimon.catalog.Catalog;
@@ -46,6 +52,7 @@ import org.apache.paimon.predicate.Predicate;
 import org.apache.paimon.schema.Schema;
 import org.apache.paimon.table.BucketMode;
 import org.apache.paimon.table.FileStoreTable;
+import org.apache.paimon.table.PrimaryKeyFileStoreTable;
 import org.apache.paimon.table.Table;
 import org.apache.paimon.table.sink.BatchTableCommit;
 import org.apache.paimon.table.sink.BatchTableWrite;
@@ -55,7 +62,10 @@ import org.apache.paimon.types.DataTypes;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 
+import java.lang.reflect.Field;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.Collections;
@@ -68,6 +78,216 @@ import java.util.Set;
 
 @DisplayName("PaimonPrimaryKeyOptimizingPlanner")
 class TestPaimonPrimaryKeyOptimizingPlanner {
+
+  @Test
+  @DisplayName("matching HASH analysis is consumed without fallback snapshot scan")
+  void matchingHashAnalysisAvoidsFallbackScan(@TempDir Path warehouse) throws Exception {
+    Catalog catalog = fsCatalog(warehouse);
+    Map<String, String> options = primaryKeyOptions();
+    options.put("bucket", "1");
+    options.put("write-only", "true");
+    options.put("num-sorted-run.compaction-trigger", "2");
+    Identifier id = createPrimaryKeyTable(catalog, "t_hash_analysis_reuse", options);
+    writeCommits(catalog.getTable(id), 2);
+    FileStoreTable fileStoreTable = (FileStoreTable) catalog.getTable(id);
+    PaimonTable paimonTable = wrap(fileStoreTable, id.getObjectName());
+    OptimizingConfig config = defaultConfig();
+    OptimizationContext runtimeContext = runtimeContext(config, 0L, 0L, 11L);
+    PaimonHealthEvaluationContext healthContext =
+        PaimonHealthEvaluationContext.capture(
+            fileStoreTable, paimonTable.id().toString(), runtimeContext);
+    PaimonPrimaryKeyOptimizingEvaluation evaluation =
+        PaimonPrimaryKeyOptimizingEvaluator.evaluate(
+            fileStoreTable,
+            paimonTable.id().getTableName(),
+            healthContext,
+            config,
+            0L,
+            0L,
+            null,
+            System.currentTimeMillis());
+    PaimonPrimaryKeySnapshotAnalysis analysis = evaluation.analysis().get();
+
+    PaimonPrimaryKeyOptimizingPlanner planner =
+        new PaimonPrimaryKeyOptimizingPlanner(
+            paimonTable,
+            100L,
+            7L,
+            4.0,
+            64L * 1024 * 1024,
+            config,
+            0L,
+            0L,
+            0L,
+            null,
+            runtimeContext,
+            analysis);
+
+    assertTrue(planner.isNecessary());
+    assertEquals(0, planner.fallbackScanCount());
+    assertTrue(planner.tableAnalysis().isPresent());
+    assertTrue(planner.tableAnalysis().get() == analysis);
+  }
+
+  @Test
+  @DisplayName("HASH planner recaptures a newer snapshot and falls back exactly once")
+  void newerSnapshotBetweenCreationAndConsumptionFallsBackOnce(@TempDir Path warehouse)
+      throws Exception {
+    Catalog catalog = fsCatalog(warehouse);
+    Map<String, String> options = primaryKeyOptions();
+    options.put("bucket", "1");
+    options.put("write-only", "true");
+    options.put("num-sorted-run.compaction-trigger", "2");
+    Identifier id = createPrimaryKeyTable(catalog, "t_hash_analysis_stale", options);
+    Table table = catalog.getTable(id);
+    writeCommits(table, 2);
+    FileStoreTable fileStoreTable = (FileStoreTable) catalog.getTable(id);
+    PaimonTable paimonTable = wrap(fileStoreTable, id.getObjectName());
+    OptimizingConfig config = defaultConfig();
+    OptimizationContext runtimeContext = runtimeContext(config, 0L, 0L, 11L);
+    PaimonHealthEvaluationContext initialContext =
+        PaimonHealthEvaluationContext.capture(
+            fileStoreTable, paimonTable.id().toString(), runtimeContext);
+    PaimonPrimaryKeySnapshotAnalysis staleAnalysis =
+        PaimonPrimaryKeyOptimizingEvaluator.evaluate(
+                fileStoreTable,
+                paimonTable.id().getTableName(),
+                initialContext,
+                config,
+                0L,
+                0L,
+                null,
+                System.currentTimeMillis())
+            .analysis()
+            .get();
+    PaimonPrimaryKeyOptimizingPlanner planner =
+        new PaimonPrimaryKeyOptimizingPlanner(
+            paimonTable,
+            100L,
+            7L,
+            4.0,
+            64L * 1024 * 1024,
+            config,
+            0L,
+            0L,
+            0L,
+            null,
+            runtimeContext,
+            staleAnalysis);
+
+    writeCommits(table, 1);
+    long currentSnapshotId = fileStoreTable.snapshotManager().latestSnapshot().id();
+
+    assertTrue(planner.isNecessary());
+    assertEquals(1, planner.fallbackScanCount());
+    assertTrue(planner.tableAnalysis().isPresent());
+    assertFalse(planner.tableAnalysis().get() == staleAnalysis);
+    assertEquals(currentSnapshotId, planner.tableAnalysis().get().key().getSnapshotId());
+  }
+
+  @Test
+  @DisplayName("HASH planner without restart-supplied facts scans once and exposes current key")
+  void missingRestartAnalysisFallsBackOnce(@TempDir Path warehouse) throws Exception {
+    Catalog catalog = fsCatalog(warehouse);
+    Map<String, String> options = primaryKeyOptions();
+    options.put("bucket", "1");
+    options.put("write-only", "true");
+    options.put("num-sorted-run.compaction-trigger", "2");
+    Identifier id = createPrimaryKeyTable(catalog, "t_hash_analysis_missing", options);
+    writeCommits(catalog.getTable(id), 2);
+    FileStoreTable fileStoreTable = (FileStoreTable) catalog.getTable(id);
+    PaimonTable paimonTable = wrap(fileStoreTable, id.getObjectName());
+    OptimizingConfig config = defaultConfig();
+    OptimizationContext runtimeContext = runtimeContext(config, 0L, 0L, 15L);
+    PaimonPrimaryKeyOptimizingPlanner planner =
+        new PaimonPrimaryKeyOptimizingPlanner(
+            paimonTable,
+            100L,
+            7L,
+            4.0,
+            64L * 1024 * 1024,
+            config,
+            0L,
+            0L,
+            0L,
+            null,
+            runtimeContext,
+            null);
+
+    assertTrue(planner.isNecessary());
+    assertEquals(1, planner.fallbackScanCount());
+    assertEquals(
+        PaimonHealthEvaluationContext.capture(
+                fileStoreTable, paimonTable.id().toString(), runtimeContext)
+            .key(),
+        planner.tableAnalysis().get().key());
+  }
+
+  @ParameterizedTest(name = "mismatched {0} rejects HASH analysis")
+  @EnumSource(KeyField.class)
+  @DisplayName("every TableAnalysisKey field participates in HASH reuse eligibility")
+  void everyHashAnalysisKeyFieldMustMatch(KeyField keyField, @TempDir Path warehouse)
+      throws Exception {
+    Catalog catalog = fsCatalog(warehouse);
+    Map<String, String> options = primaryKeyOptions();
+    options.put("bucket", "1");
+    options.put("write-only", "true");
+    options.put("num-sorted-run.compaction-trigger", "2");
+    String tableName = "t_hash_key_" + keyField.name().toLowerCase(java.util.Locale.ROOT);
+    Identifier id = createPrimaryKeyTable(catalog, tableName, options);
+    writeCommits(catalog.getTable(id), 2);
+    FileStoreTable fileStoreTable = (FileStoreTable) catalog.getTable(id);
+    PaimonTable paimonTable = wrap(fileStoreTable, tableName);
+    PaimonHealthEvaluationContext currentContext =
+        PaimonHealthEvaluationContext.capture(fileStoreTable, paimonTable.id().toString(), null);
+    PaimonPrimaryKeySnapshotAnalysis supplied =
+        PaimonPrimaryKeyOptimizingEvaluator.evaluate(
+                fileStoreTable,
+                paimonTable.id().getTableName(),
+                currentContext,
+                defaultConfig(),
+                0L,
+                0L,
+                null,
+                System.currentTimeMillis())
+            .analysis()
+            .get();
+    replaceAnalysisKey(supplied, keyField.change(currentContext.key()));
+    PaimonPrimaryKeyOptimizingPlanner planner =
+        new PaimonPrimaryKeyOptimizingPlanner(
+            paimonTable,
+            100L,
+            7L,
+            4.0,
+            64L * 1024 * 1024,
+            defaultConfig(),
+            0L,
+            0L,
+            0L,
+            null,
+            null,
+            supplied);
+
+    assertTrue(planner.isNecessary());
+    assertEquals(1, planner.fallbackScanCount());
+    assertEquals(currentContext.key(), planner.tableAnalysis().get().key());
+  }
+
+  @Test
+  @DisplayName("real KEY_DYNAMIC primary-key table is never routed to HASH planner")
+  void realKeyDynamicPrimaryKeyTableIsUnsupported(@TempDir Path warehouse) throws Exception {
+    Catalog catalog = fsCatalog(warehouse);
+    Map<String, String> options = primaryKeyOptions();
+    options.put("bucket", "-1");
+    Identifier id =
+        createCrossPartitionPrimaryKeyTable(catalog, "t_key_dynamic_not_planned", options);
+    Table raw = catalog.getTable(id);
+    PaimonTable paimonTable = wrap(raw, id.getObjectName());
+
+    assertTrue(raw instanceof PrimaryKeyFileStoreTable);
+    assertEquals(BucketMode.KEY_DYNAMIC, ((FileStoreTable) raw).bucketMode());
+    assertFalse(PaimonPrimaryKeyOptimizingPlanner.supports(paimonTable));
+  }
 
   @Test
   @DisplayName("HASH_FIXED MINOR uses effective minor threshold")
@@ -654,6 +874,22 @@ class TestPaimonPrimaryKeyOptimizingPlanner {
     return id;
   }
 
+  private static Identifier createCrossPartitionPrimaryKeyTable(
+      Catalog catalog, String tableName, Map<String, String> options) throws Exception {
+    catalog.createDatabase("db1", true);
+    Schema.Builder builder =
+        Schema.newBuilder()
+            .column("id", DataTypes.INT())
+            .column("pt", DataTypes.STRING())
+            .column("name", DataTypes.STRING())
+            .partitionKeys("pt")
+            .primaryKey("id");
+    options.forEach(builder::option);
+    Identifier id = Identifier.create("db1", tableName);
+    catalog.createTable(id, builder.build(), true);
+    return id;
+  }
+
   private static void writeCommits(Table table, int count) throws Exception {
     writeCommits(table, count, null);
   }
@@ -739,6 +975,53 @@ class TestPaimonPrimaryKeyOptimizingPlanner {
         .setFullTriggerInterval(-1)
         .setFullRewriteAllFiles(false)
         .setMaxTaskSize(64L * 1024 * 1024);
+  }
+
+  private static OptimizationContext runtimeContext(
+      OptimizingConfig config, long lastMinor, long lastFull, long lastOptimizedSnapshotId) {
+    OptimizationContext context = mock(OptimizationContext.class);
+    when(context.getOptimizingConfig()).thenReturn(config);
+    when(context.getLastMinorOptimizingTime()).thenReturn(lastMinor);
+    when(context.getLastFullOptimizingTime()).thenReturn(lastFull);
+    when(context.getLastOptimizedSnapshotId()).thenReturn(lastOptimizedSnapshotId);
+    return context;
+  }
+
+  private static void replaceAnalysisKey(
+      PaimonPrimaryKeySnapshotAnalysis analysis, TableAnalysisKey replacement) throws Exception {
+    Field field = PaimonPrimaryKeySnapshotAnalysis.class.getDeclaredField("key");
+    field.setAccessible(true);
+    field.set(analysis, replacement);
+  }
+
+  private enum KeyField {
+    TABLE_ID,
+    TABLE_FORMAT,
+    SNAPSHOT,
+    SCHEMA,
+    FINGERPRINT,
+    FORMULA,
+    BASELINE_ID,
+    BASELINE_TIME;
+
+    private TableAnalysisKey change(TableAnalysisKey key) {
+      return new TableAnalysisKey(
+          this == TABLE_ID ? key.getTableId() + "-other" : key.getTableId(),
+          this == TABLE_FORMAT ? org.apache.amoro.TableFormat.ICEBERG : key.getTableFormat(),
+          this == SNAPSHOT ? key.getSnapshotId() + 1L : key.getSnapshotId(),
+          key.getChangeSnapshotId(),
+          this == SCHEMA ? key.getSchemaId() + 1L : key.getSchemaId(),
+          this == FINGERPRINT
+              ? key.getScoringConfigFingerprint() + "-other"
+              : key.getScoringConfigFingerprint(),
+          this == FORMULA ? key.getFormulaVersion() + "-other" : key.getFormulaVersion(),
+          this == BASELINE_ID
+              ? key.getSuccessfulOptimizationBaselineId() + 1L
+              : key.getSuccessfulOptimizationBaselineId(),
+          this == BASELINE_TIME
+              ? key.getSuccessfulOptimizationBaselineTimeMillis() + 1L
+              : key.getSuccessfulOptimizationBaselineTimeMillis());
+    }
   }
 
   private static void assertTaskMetadata(

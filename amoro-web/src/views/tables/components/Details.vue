@@ -17,7 +17,7 @@ limitations under the License.
 / -->
 
 <script setup lang="ts">
-import { computed, onMounted, reactive, shallowReactive, watch } from 'vue'
+import { computed, reactive, shallowReactive, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter } from 'vue-router'
 import type { ColumnProps } from 'ant-design-vue/es/table'
@@ -27,7 +27,7 @@ import { dateFormat } from '@/utils'
 
 const emit = defineEmits<{
   (e: 'setBaseDetailInfo', data: IBaseDetailInfo): void
-  (e: 'tableNotFound', info: { catalog: string; db: string; table: string }): void
+  (e: 'tableNotFound', info: { catalog: string, db: string, table: string }): void
 }>()
 const { t } = useI18n()
 const route = useRoute()
@@ -67,12 +67,22 @@ const state = reactive({
   detailLoading: false,
   baseDetailInfo: {
     optimizingStatus: '',
+    records: '',
     tableType: '',
     tableName: '',
     createTime: '',
+    size: '',
+    file: '',
+    averageFile: '',
     tableFormat: '',
     hasPartition: false, // Whether there is a partition, if there is no partition, the file list will be displayed
-    comment: ''
+    hasPrimaryKey: false,
+    healthScore: -1,
+    smallFileScore: -1,
+    equalityDeleteScore: -1,
+    positionalDeleteScore: -1,
+    healthDetails: null,
+    comment: '',
   } as IBaseDetailInfo,
   pkList: [] as DetailColumnItem[],
   partitionColumnList: [] as PartitionColumnItem[],
@@ -83,6 +93,9 @@ const state = reactive({
 })
 
 async function getTableDetails() {
+  if (state.detailLoading) {
+    return
+  }
   const requestParams = { ...params.value }
   const { catalog, db, table } = requestParams
   if (!catalog || !db || !table) {
@@ -94,16 +107,19 @@ async function getTableDetails() {
       ...requestParams,
     })
     const { pkList = [], tableType, partitionColumnList = [], properties, changeMetrics, schema, createTime, tableIdentifier, baseMetrics, tableSummary, comment } = result
+    const primaryKeys = pkList || []
     state.baseDetailInfo = {
       ...tableSummary,
       tableType,
       tableName: `${tableIdentifier?.catalog || ''}.${tableIdentifier?.database || ''}.${tableIdentifier?.tableName || ''}`,
       createTime: createTime ? dateFormat(createTime) : '',
       hasPartition: !!(partitionColumnList?.length),
-      comment: comment || ''
+      hasPrimaryKey: primaryKeys.length > 0,
+      healthDetails: tableSummary?.healthDetails ?? null,
+      comment: comment || '',
     }
 
-    state.pkList = pkList || []
+    state.pkList = primaryKeys
     state.partitionColumnList = partitionColumnList || []
     state.schema = schema || []
 
