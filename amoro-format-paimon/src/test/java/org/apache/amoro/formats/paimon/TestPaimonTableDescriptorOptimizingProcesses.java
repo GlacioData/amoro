@@ -24,7 +24,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -44,8 +43,10 @@ import org.apache.paimon.manifest.ManifestList;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.utils.SnapshotManager;
 import org.junit.jupiter.api.Test;
+import org.mockito.invocation.InvocationOnMock;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -54,7 +55,7 @@ import java.util.Optional;
 import java.util.stream.Collectors;
 
 /**
- * Pins down the bounded snapshot pagination contract of {@link
+ * Pins down the progressive snapshot pagination contract of {@link
  * PaimonTableDescriptor#getOptimizingProcessesInfo}.
  *
  * <p>Before JSTP-2356 the method did the inverse: it paginated COMPACT snapshots first (via {@code
@@ -65,15 +66,16 @@ import java.util.stream.Collectors;
  * (latestSnapshotId - earliestSnapshotId) / 2L * 0.6} that ignored the filter entirely and NPE'd on
  * a freshly-created empty table because {@code latestSnapshotId()} returns {@code null} there.
  *
- * <p>The current implementation keeps the endpoint stateless and scans only one bounded snapshot-id
- * window through Paimon's {@code snapshotsWithinRange} API. Sparse COMPACT windows may return short
- * pages, and totals are upper-bound estimates used to keep next-page navigation available. These
- * tests lock:
+ * <p>The current implementation keeps the endpoint stateless and scans progressively through
+ * Paimon's {@code snapshotsWithinRange} API until it fills the filtered page or reaches the
+ * earliest snapshot. Totals are exact when history is exhausted and otherwise include one next-page
+ * sentinel. These tests lock:
  *
  * <ul>
  *   <li>NPE short-circuit on an empty table (no iteration, no scans).
- *   <li>Optimizer queries use bounded {@code snapshotsWithinRange}, not full {@code snapshots()}.
- *   <li>{@code lastSnapshot} acts as a stateless cursor for the next bounded window.
+ *   <li>Optimizer queries use progressive {@code snapshotsWithinRange}, not full {@code
+ *       snapshots()}.
+ *   <li>{@code lastSnapshot} acts as a stateless cursor for the next older page.
  *   <li>Status filters that cannot match landed compact snapshots return empty immediately.
  *   <li>Non-COMPACT snapshots are excluded by {@code commitKind}.
  * </ul>
@@ -217,7 +219,7 @@ class TestPaimonTableDescriptorOptimizingProcesses {
   }
 
   @Test
-  void optimizerPaginationUsesBoundedSnapshotRange() throws Exception {
+  void optimizerPaginationUsesProgressiveSnapshotRange() throws Exception {
     ManifestList manifestList = mock(ManifestList.class);
     ManifestFile manifestFile = mock(ManifestFile.class);
 
@@ -242,14 +244,10 @@ class TestPaimonTableDescriptorOptimizingProcesses {
     Pair<List<OptimizingProcessInfo>, Integer> result =
         descriptor.getOptimizingProcessesInfo(amoroTable, null, null, 5, 0, null);
 
-    assertEquals(1, result.getLeft().size(), "bounded sparse window may return a short page");
-    assertEquals(
-        2,
-        result.getRight(),
-        "total is an upper-bound estimate: current matches plus one next-page sentinel");
+    assertEquals(1, result.getLeft().size(), "the exhausted history has one compact snapshot");
+    assertEquals(1, result.getRight(), "the exhausted history reports the exact matching total");
     assertEquals("20", result.getLeft().get(0).getProcessId());
     verify(manager, never()).snapshots();
-    verify(manager, times(1)).snapshotsWithinRange(any(), any());
   }
 
   @Test
@@ -280,22 +278,141 @@ class TestPaimonTableDescriptorOptimizingProcesses {
 
     assertEquals(Collections.singletonList("15"), processIds(result.getLeft()));
     assertEquals(
-        7,
-        result.getRight(),
-        "cursor page total estimate should preserve a next-page sentinel beyond the caller offset");
+        6, result.getRight(), "the exhausted cursor page reports offset plus returned rows");
     verify(manager, never()).snapshots();
-    verify(manager, times(1)).snapshotsWithinRange(any(), any());
   }
 
   private static List<String> processIds(List<OptimizingProcessInfo> processes) {
     return processes.stream().map(OptimizingProcessInfo::getProcessId).collect(Collectors.toList());
   }
 
+  private static SnapshotManager mockRangeSnapshotManager(List<Snapshot> snapshots) {
+    SnapshotManager manager = mock(SnapshotManager.class);
+    long earliest =
+        snapshots.stream().mapToLong(Snapshot::id).min().orElseThrow(AssertionError::new);
+    long latest = snapshots.stream().mapToLong(Snapshot::id).max().orElseThrow(AssertionError::new);
+    when(manager.earliestSnapshotId()).thenReturn(earliest);
+    when(manager.latestSnapshotId()).thenReturn(latest);
+    when(manager.snapshotsWithinRange(any(), any()))
+        .thenAnswer(
+            (InvocationOnMock invocation) -> {
+              Optional<Long> optionalMax = invocation.getArgument(0);
+              Optional<Long> optionalMin = invocation.getArgument(1);
+              long max = optionalMax.orElse(latest);
+              long min = optionalMin.orElse(earliest);
+              return snapshots.stream()
+                  .filter(snapshot -> snapshot.id() >= min && snapshot.id() <= max)
+                  .sorted((left, right) -> Long.compare(left.id(), right.id()))
+                  .collect(Collectors.toList())
+                  .iterator();
+            });
+    return manager;
+  }
+
+  @Test
+  void sparseCompactHistoryRemainsReachable() throws Exception {
+    ManifestList manifestList = mock(ManifestList.class);
+    ManifestFile manifestFile = mock(ManifestFile.class);
+    List<Snapshot> snapshots = new ArrayList<>();
+    Snapshot compact = mockSnapshot(1L, Snapshot.CommitKind.COMPACT);
+    snapshots.add(compact);
+    armSnapshotEmpty(manifestList, compact);
+    for (long id = 2L; id <= 30L; id++) {
+      snapshots.add(mockSnapshot(id, Snapshot.CommitKind.APPEND));
+    }
+
+    SnapshotManager manager = mockRangeSnapshotManager(snapshots);
+    AmoroTable<?> amoroTable = wireAmoroTable(manager, manifestList, manifestFile);
+
+    Pair<List<OptimizingProcessInfo>, Integer> result =
+        new PaimonTableDescriptor().getOptimizingProcessesInfo(amoroTable, null, null, 5, 0, null);
+
+    assertEquals(
+        Collections.singletonList("1"),
+        processIds(result.getLeft()),
+        "a compact snapshot older than the first raw-id window must remain reachable");
+    assertEquals(1, result.getRight(), "the exhausted history has one matching process");
+  }
+
+  @Test
+  void compactWithoutAddedFilesUsesCommitTimeAsStartTime() throws Exception {
+    ManifestList manifestList = mock(ManifestList.class);
+    ManifestFile manifestFile = mock(ManifestFile.class);
+    Snapshot compact = mockSnapshot(7L, Snapshot.CommitKind.COMPACT);
+    armSnapshotEmpty(manifestList, compact);
+    SnapshotManager manager = mockRangeSnapshotManager(Collections.singletonList(compact));
+    AmoroTable<?> amoroTable = wireAmoroTable(manager, manifestList, manifestFile);
+
+    OptimizingProcessInfo process =
+        new PaimonTableDescriptor()
+            .getOptimizingProcessesInfo(amoroTable, null, null, 5, 0, null)
+            .getLeft()
+            .get(0);
+
+    assertEquals(compact.timeMillis(), process.getStartTime());
+    assertEquals(0L, process.getDuration());
+  }
+
+  @Test
+  void cursorPagesRemainContiguousWithoutDuplicates() throws Exception {
+    ManifestList manifestList = mock(ManifestList.class);
+    ManifestFile manifestFile = mock(ManifestFile.class);
+    List<Snapshot> snapshots = new ArrayList<>();
+    for (long id = 1L; id <= 8L; id++) {
+      Snapshot compact = mockSnapshot(id, Snapshot.CommitKind.COMPACT);
+      snapshots.add(compact);
+      armSnapshotEmpty(manifestList, compact);
+    }
+
+    AmoroTable<?> amoroTable =
+        wireAmoroTable(mockRangeSnapshotManager(snapshots), manifestList, manifestFile);
+    PaimonTableDescriptor descriptor = new PaimonTableDescriptor();
+
+    Pair<List<OptimizingProcessInfo>, Integer> first =
+        descriptor.getOptimizingProcessesInfo(amoroTable, null, null, 3, 0, null);
+    Pair<List<OptimizingProcessInfo>, Integer> second =
+        descriptor.getOptimizingProcessesInfo(amoroTable, null, null, 3, 3, "6");
+    Pair<List<OptimizingProcessInfo>, Integer> third =
+        descriptor.getOptimizingProcessesInfo(amoroTable, null, null, 3, 6, "3");
+
+    assertEquals(Arrays.asList("8", "7", "6"), processIds(first.getLeft()));
+    assertEquals(Arrays.asList("5", "4", "3"), processIds(second.getLeft()));
+    assertEquals(Arrays.asList("2", "1"), processIds(third.getLeft()));
+    assertEquals(4, first.getRight(), "first page exposes one next-page sentinel");
+    assertEquals(7, second.getRight(), "middle page exposes one next-page sentinel");
+    assertEquals(8, third.getRight(), "last page reports the exact exhausted total");
+  }
+
+  @Test
+  void sparseTypeFilterIsAppliedBeforePagination() throws Exception {
+    ManifestList manifestList = mock(ManifestList.class);
+    ManifestFile manifestFile = mock(ManifestFile.class);
+    List<Snapshot> snapshots = new ArrayList<>();
+    for (long id = 1L; id <= 10L; id++) {
+      Snapshot compact = mockSnapshot(id, Snapshot.CommitKind.COMPACT);
+      snapshots.add(compact);
+      int level = id == 1L || id == 5L || id == 10L ? 4 : 1;
+      armSnapshotWithLevel(manifestList, manifestFile, compact, level, "m" + id);
+    }
+
+    AmoroTable<?> amoroTable =
+        wirePrimaryKeyAmoroTable(mockRangeSnapshotManager(snapshots), manifestList, manifestFile);
+    PaimonTableDescriptor descriptor = new PaimonTableDescriptor();
+
+    Pair<List<OptimizingProcessInfo>, Integer> first =
+        descriptor.getOptimizingProcessesInfo(amoroTable, "FULL", null, 2, 0, null);
+    Pair<List<OptimizingProcessInfo>, Integer> second =
+        descriptor.getOptimizingProcessesInfo(amoroTable, "FULL", null, 2, 2, "5");
+
+    assertEquals(Arrays.asList("10", "5"), processIds(first.getLeft()));
+    assertEquals(Collections.singletonList("1"), processIds(second.getLeft()));
+    assertEquals(3, first.getRight(), "sparse FULL results fill the page before pagination");
+    assertEquals(3, second.getRight(), "the final filtered page reports the exact total");
+  }
+
   @Test
   void filterAppliedBeforePagination_typeFull() throws Exception {
-    // The bounded path only inspects the newest page-size window. All five snapshots in that
-    // window are FULL, and older snapshots exist, so the total is an upper-bound estimate with a
-    // one-row next-page sentinel instead of the global FULL count.
+    // All five snapshots are FULL and the supplied history is exhausted, so total is exact.
     List<Snapshot> all = new ArrayList<>();
     ManifestList manifestList = mock(ManifestList.class);
     ManifestFile manifestFile = mock(ManifestFile.class);
@@ -317,14 +434,14 @@ class TestPaimonTableDescriptorOptimizingProcesses {
         descriptor.getOptimizingProcessesInfo(amoroTable, "FULL", null, 5, 0, null);
 
     assertEquals(5, result.getLeft().size(), "page size must be 5 (limit)");
-    assertEquals(6, result.getRight(), "total is estimated with one next-page sentinel");
+    assertEquals(5, result.getRight(), "exhausted filtered history reports the exact total");
     result.getLeft().forEach(p -> assertEquals("FULL", p.getOptimizingType()));
     verify(manager, never()).snapshots();
   }
 
   @Test
   void filterAppliedBeforePagination_statusMatches() throws Exception {
-    // All landed COMPACT snapshots are translated as SUCCESS. SUCCESS uses the bounded window;
+    // All landed COMPACT snapshots are translated as SUCCESS. SUCCESS scans progressively;
     // non-SUCCESS can return empty immediately without touching snapshot history.
     List<Snapshot> all = new ArrayList<>();
     ManifestList manifestList = mock(ManifestList.class);
@@ -346,7 +463,7 @@ class TestPaimonTableDescriptorOptimizingProcesses {
     Pair<List<OptimizingProcessInfo>, Integer> matched =
         descriptor.getOptimizingProcessesInfo(amoroTable, null, ProcessStatus.SUCCESS, 5, 0, null);
     assertEquals(5, matched.getLeft().size(), "limit=5 over 20 matches must yield page of 5");
-    assertEquals(6, matched.getRight(), "SUCCESS total is an upper-bound estimate");
+    assertEquals(5, matched.getRight(), "exhausted SUCCESS history reports the exact total");
 
     Pair<List<OptimizingProcessInfo>, Integer> miss =
         descriptor.getOptimizingProcessesInfo(amoroTable, null, ProcessStatus.RUNNING, 5, 0, null);
@@ -369,9 +486,7 @@ class TestPaimonTableDescriptorOptimizingProcesses {
       armSnapshotWithLevel(manifestList, manifestFile, s, 4, "m" + id);
     }
 
-    SnapshotManager manager = mock(SnapshotManager.class);
-    when(manager.latestSnapshotId()).thenReturn(10L);
-    when(manager.earliestSnapshotId()).thenReturn(1L);
+    SnapshotManager manager = mockRangeSnapshotManager(all);
 
     AmoroTable<?> amoroTable = wirePrimaryKeyAmoroTable(manager, manifestList, manifestFile);
     PaimonTableDescriptor descriptor = new PaimonTableDescriptor();
@@ -380,9 +495,8 @@ class TestPaimonTableDescriptorOptimizingProcesses {
         descriptor.getOptimizingProcessesInfo(amoroTable, "FULL", null, 10, 10, null);
 
     assertTrue(result.getLeft().isEmpty(), "offset past end must yield empty page");
-    assertEquals(10, result.getRight(), "out-of-range offset is echoed as the estimated total");
+    assertEquals(10, result.getRight(), "the exhausted history reports the exact total");
     verify(manager, never()).snapshots();
-    verify(manager, never()).snapshotsWithinRange(any(), any());
   }
 
   @Test
@@ -418,7 +532,7 @@ class TestPaimonTableDescriptorOptimizingProcesses {
         descriptor.getOptimizingProcessesInfo(amoroTable, null, null, 100, 0, null);
 
     assertEquals(5, result.getLeft().size(), "only the 5 COMPACT snapshots must surface");
-    assertEquals(5, result.getRight(), "bounded window reaches earliest, so no sentinel is needed");
+    assertEquals(5, result.getRight(), "the scan reaches earliest, so no sentinel is needed");
     verify(manager, never()).snapshots();
   }
 }

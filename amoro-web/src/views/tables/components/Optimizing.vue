@@ -64,10 +64,7 @@ const optimizingColumns: IColumns[] = [
   { title: t('output'), dataIndex: 'outputFiles' },
 ]
 
-const columns: IColumns[] = shallowReactive([
-  ...baseColumns,
-  ...(props.processCategory === 'OPTIMIZING' ? optimizingColumns : [{ title: t('finishTime'), dataIndex: 'finishTime', width: 172 }]),
-])
+const columns: IColumns[] = shallowReactive([...baseColumns, ...optimizingColumns])
 
 const breadcrumbColumns = shallowReactive([
   { title: t('taskId'), dataIndex: 'taskId', width: 82 },
@@ -130,7 +127,8 @@ async function refreshOptimizingProcesses() {
     // Update lastSnapshot with the last item's processId from current page
     if (list && list.length > 0) {
       lastSnapshot.value = list[list.length - 1].processId?.toString() || null
-    } else {
+    }
+    else {
       lastSnapshot.value = null
     }
 
@@ -264,7 +262,8 @@ function toggleBreadcrumb(rowProcessId: number, status: string) {
   hasBreadcrumb.value = !hasBreadcrumb.value
   if (hasBreadcrumb.value) {
     breadcrumbPagination.current = 1
-  } else {
+  }
+  else {
     // Reset cursor-based pagination when returning to main view
     lastSnapshot.value = null
     pagination.current = 1
@@ -285,11 +284,11 @@ onMounted(() => {
       <a-space class="filter-form">
         <a-select
           v-model:value="actionType" allow-clear :placeholder="t('type')" :options="actionTypeList"
-          style="min-width: 150px;" @change="refresh"
+          style="min-width: 150px;" @change="handleFilterChange"
         />
         <a-select
           v-model:value="statusType" allow-clear :placeholder="t('status')" :options="statusTypeList"
-          style="min-width: 150px;" @change="refresh"
+          style="min-width: 150px;" @change="handleFilterChange"
         />
       </a-space>
       <a-table
@@ -372,7 +371,8 @@ onMounted(() => {
           </a-breadcrumb>
         </a-col>
         <a-col :span="6">
-          <a-button v-if="writable"
+          <a-button
+            v-if="writable"
             v-model:disabled="cancelDisabled" type="primary" class="g-mb-16" style="float: right"
             @click="cancel"
           >

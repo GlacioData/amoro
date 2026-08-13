@@ -30,13 +30,14 @@ import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Optional;
+import java.util.function.Function;
 import java.util.function.Predicate;
 
 public class SnapShotsScanUtils {
 
   private static final Logger LOG = LoggerFactory.getLogger(SnapShotsScanUtils.class);
 
-  private static final int DEFAULT_BOUNDED_SCAN_MULTIPLIER = 1;
+  private static final int MAX_PROGRESSIVE_SCAN_SIZE = 1024;
 
   /**
    * Get snapshots with cursor-based pagination to avoid full scan. Uses smart scanning to only scan
@@ -89,16 +90,20 @@ public class SnapShotsScanUtils {
   }
 
   /**
-   * Returns a bounded newest-first page without scanning the whole snapshot history.
+   * Returns a newest-first page after mapping and filtering snapshots.
    *
-   * <p>The returned total is intentionally an upper-bound estimate. Exact filtered totals require
-   * scanning every snapshot, which this helper is designed to avoid. When older snapshots exist
-   * outside the scanned window, the total includes one sentinel row beyond the current page so the
-   * UI can keep next-page navigation available.
+   * <p>The scan advances towards older snapshots until it either finds one extra result beyond the
+   * requested page or reaches the earliest snapshot. This makes sparse mapped results reachable
+   * without loading the full history into memory. A mapper returns {@link Optional#empty()} to
+   * exclude a snapshot.
+   *
+   * <p>The returned total is a navigation value rather than a global exact count. It is exact after
+   * the history is exhausted; otherwise it contains one sentinel result beyond the current page so
+   * the caller can expose the next page.
    */
-  public static Pair<List<Snapshot>, Integer> getSnapshotsWithBoundedPagination(
+  public static <T> Pair<List<T>, Integer> getMappedSnapshotsWithPagination(
       SnapshotManager snapshotManager,
-      Predicate<Snapshot> filter,
+      Function<Snapshot, Optional<T>> mapper,
       int limit,
       int offset,
       Long lastSnapshotId) {
@@ -112,40 +117,63 @@ public class SnapShotsScanUtils {
       return Pair.of(Collections.emptyList(), 0);
     }
 
-    long requestedStart =
-        lastSnapshotId == null ? latestSnapshotId - Math.max(offset, 0) : lastSnapshotId - 1;
-    if (requestedStart < earliestSnapshotId) {
-      return Pair.of(Collections.emptyList(), Math.max(offset, 0));
+    int normalizedOffset = Math.max(offset, 0);
+    if (lastSnapshotId != null && lastSnapshotId <= earliestSnapshotId) {
+      return Pair.of(Collections.emptyList(), normalizedOffset);
     }
-    long currentStart = Math.min(latestSnapshotId, requestedStart);
 
-    int scanLimit = Math.max(limit, limit * DEFAULT_BOUNDED_SCAN_MULTIPLIER);
-    long minSnapshotId = Math.max(earliestSnapshotId, currentStart - scanLimit + 1L);
-    Iterator<Snapshot> rangeSnapshots =
-        snapshotManager.snapshotsWithinRange(Optional.of(currentStart), Optional.of(minSnapshotId));
+    long currentMaxSnapshotId =
+        lastSnapshotId == null ? latestSnapshotId : Math.min(latestSnapshotId, lastSnapshotId - 1L);
+    int remainingOffset = lastSnapshotId == null ? normalizedOffset : 0;
+    int scanSize = Math.max(1, Math.min(limit, MAX_PROGRESSIVE_SCAN_SIZE));
+    int matchedCount = 0;
+    List<T> mappedResults = new ArrayList<>(Math.min(limit, MAX_PROGRESSIVE_SCAN_SIZE));
 
-    List<Snapshot> matched = new ArrayList<>();
-    while (rangeSnapshots.hasNext()) {
-      Snapshot snapshot = rangeSnapshots.next();
-      if (filter.test(snapshot)) {
-        matched.add(snapshot);
+    while (currentMaxSnapshotId >= earliestSnapshotId && mappedResults.size() <= limit) {
+      long minSnapshotId = Math.max(earliestSnapshotId, currentMaxSnapshotId - scanSize + 1L);
+      Iterator<Snapshot> rangeSnapshots =
+          snapshotManager.snapshotsWithinRange(
+              Optional.of(currentMaxSnapshotId), Optional.of(minSnapshotId));
+      List<Snapshot> snapshots = new ArrayList<>();
+      while (rangeSnapshots.hasNext()) {
+        snapshots.add(rangeSnapshots.next());
       }
-    }
-    matched.sort((s1, s2) -> Long.compare(s2.id(), s1.id()));
+      snapshots.sort((left, right) -> Long.compare(right.id(), left.id()));
 
-    List<Snapshot> page =
-        matched.size() <= limit ? matched : new ArrayList<>(matched.subList(0, limit));
-    boolean mayHaveOlderSnapshots = minSnapshotId > earliestSnapshotId;
-    int estimatedTotal = Math.max(offset, 0) + page.size() + (mayHaveOlderSnapshots ? 1 : 0);
+      for (Snapshot snapshot : snapshots) {
+        Optional<T> mapped = mapper.apply(snapshot);
+        if (!mapped.isPresent()) {
+          continue;
+        }
+        matchedCount++;
+        if (remainingOffset > 0) {
+          remainingOffset--;
+        } else if (mappedResults.size() <= limit) {
+          mappedResults.add(mapped.get());
+          if (mappedResults.size() > limit) {
+            break;
+          }
+        }
+      }
+
+      currentMaxSnapshotId = minSnapshotId - 1L;
+      scanSize = Math.min(MAX_PROGRESSIVE_SCAN_SIZE, scanSize * 2);
+    }
+
+    boolean hasMore = mappedResults.size() > limit;
+    List<T> page = hasMore ? new ArrayList<>(mappedResults.subList(0, limit)) : mappedResults;
+    int total =
+        hasMore
+            ? normalizedOffset + page.size() + 1
+            : lastSnapshotId == null ? matchedCount : normalizedOffset + page.size();
 
     LOG.debug(
-        "Bounded snapshot pagination scanned [{}, {}], matched {}, returned {}, estimatedTotal {}",
-        minSnapshotId,
-        currentStart,
-        matched.size(),
+        "Mapped snapshot pagination matched {}, returned {}, hasMore {}, total {}",
+        matchedCount,
         page.size(),
-        estimatedTotal);
-    return Pair.of(page, estimatedTotal);
+        hasMore,
+        total);
+    return Pair.of(page, total);
   }
 
   /**

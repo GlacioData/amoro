@@ -490,15 +490,7 @@ public class PaimonTableDescriptor implements FormatTableDescriptor {
     return partitionFileBases;
   }
 
-  /**
-   * Returns a bounded paged view of the table's COMPACT-commit processes.
-   *
-   * <p>This is intentionally stateless: it reads one bounded snapshot-id window through Paimon's
-   * {@link SnapshotManager#snapshotsWithinRange(Optional, Optional)} path, identifies COMPACT
-   * snapshots from {@link Snapshot#commitKind()}, and then materialises only those compact
-   * snapshots into process rows. The returned total is an upper-bound estimate, not a global exact
-   * count; exact filtered totals would require scanning the full snapshot history.
-   */
+  /** Returns a paged view of the table's COMPACT-commit processes. */
   @Override
   public Pair<List<OptimizingProcessInfo>, Integer> getOptimizingProcessesInfo(
       AmoroTable<?> amoroTable,
@@ -548,52 +540,47 @@ public class PaimonTableDescriptor implements FormatTableDescriptor {
         (lastSnapshot != null && !lastSnapshot.trim().isEmpty())
             ? Long.valueOf(lastSnapshot)
             : null;
-    Pair<List<Snapshot>, Integer> compactSnapshots =
-        SnapShotsScanUtils.getSnapshotsWithBoundedPagination(
+    Pair<List<OptimizingProcessInfo>, Integer> page =
+        SnapShotsScanUtils.getMappedSnapshotsWithPagination(
             snapshotManager,
-            s -> s.commitKind() == Snapshot.CommitKind.COMPACT,
+            snapshot -> {
+              if (snapshot.commitKind() != Snapshot.CommitKind.COMPACT) {
+                return Optional.empty();
+              }
+              OptimizingProcessInfo process =
+                  toOptimizingProcessInfo(
+                      snapshot,
+                      tableIdentifier,
+                      manifestFile,
+                      manifestList,
+                      isPrimaryTable,
+                      maxLevel);
+              return StringUtils.isBlank(type) || type.equalsIgnoreCase(process.getOptimizingType())
+                  ? Optional.of(process)
+                  : Optional.empty();
+            },
             limit,
             offset,
             lastSnapshotId);
 
-    List<OptimizingProcessInfo> processes =
-        compactSnapshots.getLeft().stream()
-            .map(
-                s ->
-                    toOptimizingProcessInfo(
-                        s, tableIdentifier, manifestFile, manifestList, isPrimaryTable, maxLevel))
-            .collect(Collectors.toList());
-
-    List<OptimizingProcessInfo> page =
-        processes.stream()
-            .filter(p -> StringUtils.isBlank(type) || type.equalsIgnoreCase(p.getOptimizingType()))
-            .filter(p -> status == null || status == p.getStatus())
-            .collect(Collectors.toList());
-
-    int total =
-        page.isEmpty()
-            ? compactSnapshots.getRight()
-            : Math.max(compactSnapshots.getRight(), Math.max(offset, 0) + page.size());
-
     if (LOG.isDebugEnabled()) {
       LOG.debug(
-          "getOptimizingProcessesInfo for {}: bounded compact candidates {}, estimated total {}, type={}, status={}, offset={}, limit={}, returned {}",
+          "getOptimizingProcessesInfo for {}: total={}, type={}, status={}, offset={}, limit={}, returned={}",
           tableIdentifier,
-          compactSnapshots.getLeft().size(),
-          total,
+          page.getRight(),
           type,
           status,
           offset,
           limit,
-          page.size());
+          page.getLeft().size());
     }
 
-    return Pair.of(page, total);
+    return page;
   }
 
   /**
    * Builds a single {@link OptimizingProcessInfo} from a COMPACT snapshot by walking its delta
-   * manifests. Extracted so bounded pagination can reuse the same per-snapshot materialisation
+   * manifests. Extracted so progressive pagination can reuse the same per-snapshot materialisation
    * logic after selecting compact candidates.
    */
   private OptimizingProcessInfo toOptimizingProcessInfo(
@@ -649,8 +636,9 @@ public class PaimonTableDescriptor implements FormatTableDescriptor {
     }
     optimizingProcessInfo.setSuccessTasks(buckets.size());
     optimizingProcessInfo.setTotalTasks(buckets.size());
-    optimizingProcessInfo.setStartTime(minCreateTime);
-    optimizingProcessInfo.setDuration(s.timeMillis() - minCreateTime);
+    long startTime = minCreateTime == Long.MAX_VALUE ? s.timeMillis() : minCreateTime;
+    optimizingProcessInfo.setStartTime(startTime);
+    optimizingProcessInfo.setDuration(s.timeMillis() - startTime);
     optimizingProcessInfo.setInputFiles(inputBuilder.build());
     optimizingProcessInfo.setOutputFiles(outputBuilder.build());
     summary.put(
