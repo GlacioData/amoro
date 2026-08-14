@@ -180,4 +180,4 @@ Made with [contrib.rocks](https://contrib.rocks).
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=apache/amoro&type=Date)](https://star-history.com/#apache/amoro&Date)
+[![Star History Chart](https://star-history.dera.page/svg?repos=apache/amoro&type=Date)](https://star-history.dera.page/#apache/amoro&Date)
