@@ -20,6 +20,7 @@ package org.apache.amoro.formats.paimon.optimizing.health;
 
 import org.apache.amoro.TableFormat;
 import org.apache.amoro.config.OptimizingConfig;
+import org.apache.amoro.formats.paimon.optimizing.PaimonOptimizingEligibility;
 import org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeyOptions;
 import org.apache.amoro.optimizing.OptimizationContext;
 import org.apache.amoro.table.health.TableAnalysisKey;
@@ -110,6 +111,14 @@ public final class PaimonHealthEvaluationContext {
    */
   public static PaimonHealthEvaluationContext capture(
       FileStoreTable table, String tableId, @Nullable OptimizationContext context) {
+    return capture(table, tableId, context, null);
+  }
+
+  public static PaimonHealthEvaluationContext capture(
+      FileStoreTable table,
+      String tableId,
+      @Nullable OptimizationContext context,
+      @Nullable Map<String, String> eligibilityTableOptions) {
     Objects.requireNonNull(table, "Paimon table must not be null");
     Objects.requireNonNull(tableId, "Table id must not be null");
 
@@ -143,6 +152,8 @@ public final class PaimonHealthEvaluationContext {
         effectiveOptions = EffectiveOptions.invalid();
       }
     }
+    Map<String, String> eligibilityOptions =
+        eligibilityTableOptions == null ? rawOptions : safeOptions(eligibilityTableOptions);
 
     Snapshot snapshot = table.snapshotManager().latestSnapshot();
     long snapshotId = snapshot == null ? TableAnalysisKey.NO_SNAPSHOT : snapshot.id();
@@ -174,6 +185,7 @@ public final class PaimonHealthEvaluationContext {
             formulaVersion,
             effectiveOptions,
             rawOptions,
+            eligibilityOptions,
             optimizingConfig,
             configurationError);
     return new PaimonHealthEvaluationContext(
@@ -207,6 +219,7 @@ public final class PaimonHealthEvaluationContext {
       String formulaVersion,
       EffectiveOptions options,
       Map<String, String> rawOptions,
+      Map<String, String> eligibilityOptions,
       @Nullable OptimizingConfig optimizingConfig,
       @Nullable String configurationError) {
     FingerprintBuilder builder =
@@ -216,7 +229,11 @@ public final class PaimonHealthEvaluationContext {
             .add("bucketMode", bucketMode.name())
             .add("schemaId", schemaId)
             .add("formulaVersion", formulaVersion)
-            .add("activityFormulaVersion", PaimonActivityHealth.FORMULA_VERSION);
+            .add("activityFormulaVersion", PaimonActivityHealth.FORMULA_VERSION)
+            .add("writeOnly", eligibilityOptions.get(CoreOptions.WRITE_ONLY.key()))
+            .add(
+                "selfOptimizingEnabled",
+                eligibilityOptions.get(PaimonOptimizingEligibility.SELF_OPTIMIZING_ENABLED));
     if (configurationError != null) {
       addInvalidOptions(builder, shape, bucketMode, rawOptions);
       return builder
@@ -277,7 +294,6 @@ public final class PaimonHealthEvaluationContext {
           .add("needLookup", options.needLookup)
           .add("lookupCompact", options.lookupCompact)
           .add("lookupCompactMaxInterval", options.lookupCompactMaxInterval)
-          .add("primaryKeyOptimizingEnabled", options.primaryKeyOptimizingEnabled)
           .add("primaryKeyPartitionIdleTimeMillis", options.primaryKeyPartitionIdleTimeMillis)
           .add("primaryKeyMajorMaxBucketRatio", options.primaryKeyMajorMaxBucketRatio);
       addHashPlanningOptions(builder, optimizingConfig);
@@ -338,7 +354,6 @@ public final class PaimonHealthEvaluationContext {
       addRaw(builder, rawOptions, CoreOptions.COMPACTION_SIZE_RATIO.key());
       addRaw(builder, rawOptions, CoreOptions.LOOKUP_COMPACT.key());
       addRaw(builder, rawOptions, CoreOptions.LOOKUP_COMPACT_MAX_INTERVAL.key());
-      addRaw(builder, rawOptions, PaimonPrimaryKeyOptions.ENABLED);
       addRaw(builder, rawOptions, PaimonPrimaryKeyOptions.PARTITION_IDLE_TIME);
       addRaw(builder, rawOptions, PaimonPrimaryKeyOptions.MAJOR_MAX_BUCKET_RATIO);
     }
@@ -475,7 +490,6 @@ public final class PaimonHealthEvaluationContext {
     private final int lookupCompactMaxInterval;
     private final boolean deletionVectorsEnabled;
     private final boolean pkClusteringOverride;
-    private final boolean primaryKeyOptimizingEnabled;
     private final long primaryKeyPartitionIdleTimeMillis;
     private final String primaryKeyMajorMaxBucketRatio;
 
@@ -502,7 +516,6 @@ public final class PaimonHealthEvaluationContext {
         int lookupCompactMaxInterval,
         boolean deletionVectorsEnabled,
         boolean pkClusteringOverride,
-        boolean primaryKeyOptimizingEnabled,
         long primaryKeyPartitionIdleTimeMillis,
         String primaryKeyMajorMaxBucketRatio) {
       this.targetFileSize = targetFileSize;
@@ -527,7 +540,6 @@ public final class PaimonHealthEvaluationContext {
       this.lookupCompactMaxInterval = lookupCompactMaxInterval;
       this.deletionVectorsEnabled = deletionVectorsEnabled;
       this.pkClusteringOverride = pkClusteringOverride;
-      this.primaryKeyOptimizingEnabled = primaryKeyOptimizingEnabled;
       this.primaryKeyPartitionIdleTimeMillis = primaryKeyPartitionIdleTimeMillis;
       this.primaryKeyMajorMaxBucketRatio = primaryKeyMajorMaxBucketRatio;
     }
@@ -570,7 +582,6 @@ public final class PaimonHealthEvaluationContext {
             "<not-applicable>",
             0,
             coreOptions.deletionVectorsEnabled(),
-            false,
             false,
             0L,
             "<not-applicable>");
@@ -616,7 +627,6 @@ public final class PaimonHealthEvaluationContext {
           lookupCompactMaxInterval,
           coreOptions.deletionVectorsEnabled(),
           coreOptions.pkClusteringOverride(),
-          primaryKeyOptions != null && primaryKeyOptions.enabled(),
           partitionIdleTimeMillis,
           primaryKeyOptions == null
               ? "<not-applicable>"
@@ -645,7 +655,6 @@ public final class PaimonHealthEvaluationContext {
           false,
           "<invalid>",
           -1,
-          false,
           false,
           false,
           -1L,

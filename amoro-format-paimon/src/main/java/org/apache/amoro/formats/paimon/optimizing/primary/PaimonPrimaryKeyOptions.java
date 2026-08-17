@@ -36,44 +36,28 @@ public class PaimonPrimaryKeyOptions {
   private static final BigDecimal DEFAULT_MAJOR_MAX_BUCKET_RATIO = new BigDecimal("0.33");
   private static final BigDecimal MIN_MAJOR_MAX_BUCKET_RATIO = new BigDecimal("0.33");
 
-  public static final String ENABLED = "paimon-optimizer.primary-key.enabled";
   public static final String PARTITION_IDLE_TIME =
       "paimon-optimizer.primary-key.partition-idle-time";
-  public static final String MAJOR_FILE_COUNT_THRESHOLD =
-      "paimon-optimizer.primary-key.major.file-count-threshold";
   public static final String MAJOR_MAX_BUCKET_RATIO =
       "paimon-optimizer.primary-key.major.max-bucket-ratio";
 
-  private final boolean enabled;
   private final Duration partitionIdleTime;
   private final BigDecimal majorMaxBucketRatio;
 
-  private PaimonPrimaryKeyOptions(
-      boolean enabled, Duration partitionIdleTime, BigDecimal majorMaxBucketRatio) {
-    this.enabled = enabled;
+  private PaimonPrimaryKeyOptions(Duration partitionIdleTime, BigDecimal majorMaxBucketRatio) {
     this.partitionIdleTime = partitionIdleTime;
     this.majorMaxBucketRatio = majorMaxBucketRatio;
   }
 
   public static PaimonPrimaryKeyOptions from(Map<String, String> properties) {
     Map<String, String> props = properties == null ? Collections.emptyMap() : properties;
-    boolean enabled = enabled(properties);
     Duration partitionIdleTime =
         props.containsKey(PARTITION_IDLE_TIME)
             ? parseDuration(props.get(PARTITION_IDLE_TIME))
             : null;
-    if (props.containsKey(MAJOR_FILE_COUNT_THRESHOLD)) {
-      LOG.warn(
-          "Paimon primary-key option [{}] is deprecated and ignored.", MAJOR_FILE_COUNT_THRESHOLD);
-    }
     BigDecimal majorMaxBucketRatio = parseMajorMaxBucketRatio(props);
 
-    return new PaimonPrimaryKeyOptions(enabled, partitionIdleTime, majorMaxBucketRatio);
-  }
-
-  public static boolean enabled(Map<String, String> properties) {
-    Map<String, String> props = properties == null ? Collections.emptyMap() : properties;
-    return Boolean.parseBoolean(props.getOrDefault(ENABLED, "false"));
+    return new PaimonPrimaryKeyOptions(partitionIdleTime, majorMaxBucketRatio);
   }
 
   private static Duration parseDuration(String value) {
@@ -122,10 +106,6 @@ public class PaimonPrimaryKeyOptions {
       return MIN_MAJOR_MAX_BUCKET_RATIO;
     }
     return truncated;
-  }
-
-  public boolean enabled() {
-    return enabled;
   }
 
   public Optional<Duration> partitionIdleTime() {

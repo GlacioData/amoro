@@ -26,6 +26,12 @@ import java.net.InetAddress;
 
 public class AmoroManagementConfValidator {
   public static void validateConfig(Configurations configurations) {
+    String env = configurations.getString(AmoroManagementConf.ENV);
+    if (!AmoroManagementConf.ENV_VALUES.contains(env)) {
+      throw new IllegalArgumentException(
+          String.format("Illegal env: %s, env must be one of prod, pre, or dev", env));
+    }
+
     // SERVER_EXPOSE_HOST config
     if ("".equals(configurations.getString(AmoroManagementConf.SERVER_EXPOSE_HOST))) {
       throw new IllegalArgumentException(

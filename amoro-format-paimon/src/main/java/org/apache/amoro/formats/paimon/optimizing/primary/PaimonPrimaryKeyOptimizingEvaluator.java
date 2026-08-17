@@ -119,9 +119,6 @@ public class PaimonPrimaryKeyOptimizingEvaluator {
           e);
       return PaimonPrimaryKeyOptimizingEvaluation.empty(-1L);
     }
-    if (!primaryKeyOptions.enabled()) {
-      return PaimonPrimaryKeyOptimizingEvaluation.empty(-1L);
-    }
     if (coreOptions.pkClusteringOverride()) {
       LOG.warn(
           "Paimon primary-key table [{}] enables pk-clustering-override; skip primary-key "
@@ -275,7 +272,7 @@ public class PaimonPrimaryKeyOptimizingEvaluator {
           e);
       return PaimonPrimaryKeyOptimizingEvaluation.healthOnly(targetSnapshotId, analysis);
     }
-    if (!primaryKeyOptions.enabled() || coreOptions.pkClusteringOverride()) {
+    if (coreOptions.pkClusteringOverride()) {
       return PaimonPrimaryKeyOptimizingEvaluation.healthOnly(targetSnapshotId, analysis);
     }
 

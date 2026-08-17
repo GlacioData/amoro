@@ -28,6 +28,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import org.apache.amoro.config.OptimizingConfig;
+import org.apache.amoro.formats.paimon.optimizing.PaimonOptimizingEligibility;
 import org.apache.amoro.optimizing.OptimizationContext;
 import org.apache.amoro.table.health.TableAnalysisKey;
 import org.apache.paimon.CoreOptions;
@@ -40,7 +41,6 @@ import org.apache.paimon.table.PrimaryKeyFileStoreTable;
 import org.apache.paimon.utils.SnapshotManager;
 import org.junit.jupiter.api.Test;
 
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -306,6 +306,49 @@ public class TestPaimonActivityHealth {
   }
 
   @Test
+  public void invalidConfigurationFingerprintStillTracksEligibility() {
+    PrimaryKeyFileStoreTable eligibleTable = invalidPrimaryKeyTable("1000 b", "true", "true");
+    PrimaryKeyFileStoreTable writeOnlyDisabledTable =
+        invalidPrimaryKeyTable("1000 b", "false", "true");
+    PrimaryKeyFileStoreTable selfOptimizingMissingTable =
+        invalidPrimaryKeyTable("1000 b", "true", null);
+    PrimaryKeyFileStoreTable selfOptimizingDisabledTable =
+        invalidPrimaryKeyTable("1000 b", "true", "false");
+
+    PaimonHealthEvaluationContext eligible =
+        PaimonHealthEvaluationContext.capture(
+            eligibleTable,
+            "catalog.db.invalid_eligibility",
+            optimizationContext(-1L, new OptimizingConfig().setEnabled(true)));
+    PaimonHealthEvaluationContext writeOnlyDisabled =
+        PaimonHealthEvaluationContext.capture(
+            writeOnlyDisabledTable,
+            "catalog.db.invalid_eligibility",
+            optimizationContext(-1L, new OptimizingConfig().setEnabled(true)));
+    PaimonHealthEvaluationContext selfOptimizingMissing =
+        PaimonHealthEvaluationContext.capture(
+            selfOptimizingMissingTable,
+            "catalog.db.invalid_eligibility",
+            optimizationContext(-1L, new OptimizingConfig().setEnabled(true)));
+    PaimonHealthEvaluationContext selfOptimizingDisabled =
+        PaimonHealthEvaluationContext.capture(
+            selfOptimizingDisabledTable,
+            "catalog.db.invalid_eligibility",
+            optimizationContext(-1L, new OptimizingConfig().setEnabled(true)));
+
+    assertTrue(eligible.configurationError().isPresent());
+    assertNotEquals(
+        eligible.scoringConfigFingerprint(), writeOnlyDisabled.scoringConfigFingerprint());
+    assertNotEquals(
+        eligible.scoringConfigFingerprint(), selfOptimizingMissing.scoringConfigFingerprint());
+    assertNotEquals(
+        eligible.scoringConfigFingerprint(), selfOptimizingDisabled.scoringConfigFingerprint());
+    assertNotEquals(
+        selfOptimizingMissing.scoringConfigFingerprint(),
+        selfOptimizingDisabled.scoringConfigFingerprint());
+  }
+
+  @Test
   public void unknownFileStoreShapeIsStableAndNeverMisclassifiedAsPrimaryKey() {
     FileStoreTable table = mock(FileStoreTable.class);
     SnapshotManager snapshotManager = mock(SnapshotManager.class);
@@ -482,12 +525,24 @@ public class TestPaimonActivityHealth {
   }
 
   private static PrimaryKeyFileStoreTable invalidPrimaryKeyTable(String targetFileSize) {
+    return invalidPrimaryKeyTable(targetFileSize, null, null);
+  }
+
+  private static PrimaryKeyFileStoreTable invalidPrimaryKeyTable(
+      String targetFileSize, String writeOnly, String selfOptimizingEnabled) {
     PrimaryKeyFileStoreTable table = mock(PrimaryKeyFileStoreTable.class);
     SnapshotManager snapshotManager = mock(SnapshotManager.class);
     Snapshot snapshot = snapshot(2L, 200L);
     TableSchema tableSchema = schema(4L);
-    when(tableSchema.options())
-        .thenReturn(Collections.singletonMap(CoreOptions.TARGET_FILE_SIZE.key(), targetFileSize));
+    Map<String, String> options = new HashMap<>();
+    options.put(CoreOptions.TARGET_FILE_SIZE.key(), targetFileSize);
+    if (writeOnly != null) {
+      options.put(CoreOptions.WRITE_ONLY.key(), writeOnly);
+    }
+    if (selfOptimizingEnabled != null) {
+      options.put(PaimonOptimizingEligibility.SELF_OPTIMIZING_ENABLED, selfOptimizingEnabled);
+    }
+    when(tableSchema.options()).thenReturn(options);
     when(table.bucketMode()).thenReturn(BucketMode.HASH_FIXED);
     when(table.schema()).thenReturn(tableSchema);
     when(table.snapshotManager()).thenReturn(snapshotManager);
@@ -498,7 +553,7 @@ public class TestPaimonActivityHealth {
 
   private static Map<String, String> primaryKeyOptions() {
     Map<String, String> options = new HashMap<>();
-    options.put("paimon-optimizer.primary-key.enabled", "true");
+    options.put(CoreOptions.WRITE_ONLY.key(), "true");
     return options;
   }
 }

@@ -1059,7 +1059,7 @@ public class TestOptimizingQueue extends AMSTableTestBase {
   }
 
   @Test
-  public void testRecoveredPaimonProcessPropagatesRecoveryReplayMode() throws Exception {
+  public void testRecoveredIneligiblePaimonProcessPropagatesRecoveryReplayMode() throws Exception {
     DefaultTableRuntime runtime = initTableWithFiles();
     OptimizingQueue originalQueue = buildOptimizingGroupService(runtime);
     TaskRuntime<?> task = originalQueue.pollTask(optimizerThread, MAX_POLLING_TIME);
@@ -1074,6 +1074,12 @@ public class TestOptimizingQueue extends AMSTableTestBase {
 
     DefaultTableRuntime paimonRuntime = Mockito.spy(runtime);
     Mockito.doReturn(TableFormat.PAIMON).when(paimonRuntime).getFormat();
+    paimonRuntime
+        .store()
+        .begin()
+        .updateTableConfig(config -> config.put("write-only", "false"))
+        .commit();
+    Assert.assertEquals("false", paimonRuntime.getTableConfig().get("write-only"));
     RecordingCommitter recordingCommitter = new RecordingCommitter();
     ProcessFactory factory = Mockito.mock(ProcessFactory.class);
     Mockito.when(factory.supportedFormats()).thenReturn(Collections.singleton(TableFormat.PAIMON));
@@ -1679,6 +1685,27 @@ public class TestOptimizingQueue extends AMSTableTestBase {
       order.verify(fixture.planner).isNecessary();
       Mockito.verify(fixture.factory, Mockito.never())
           .createPlanner(Mockito.any(), Mockito.any(), Mockito.anyDouble(), Mockito.anyLong());
+    } finally {
+      fixture.queue.dispose();
+    }
+  }
+
+  @Test
+  public void testIneligiblePaimonPendingPlanCompletesWithoutProcessTaskOrOwner() throws Exception {
+    AnalysisHandoffFixture fixture = analysisHandoffFixture(TableFormat.PAIMON);
+    try {
+      TableAnalysisKey ineligibleKey = analysisKey(TableFormat.PAIMON, 13L);
+      Mockito.when(fixture.runtime.getCurrentAnalysisKey()).thenReturn(Optional.of(ineligibleKey));
+      Mockito.when(fixture.runtime.takeTableAnalysis(ineligibleKey)).thenReturn(Optional.empty());
+      Mockito.when(fixture.planner.isNecessary()).thenReturn(false);
+
+      Assert.assertNull(invokePlanInternal(fixture.queue, fixture.runtime));
+
+      Mockito.verify(fixture.runtime).beginPlanning();
+      Mockito.verify(fixture.runtime).completeEmptyProcess();
+      Mockito.verify(fixture.planner, Mockito.never()).plan();
+      Mockito.verify(fixture.runtime, Mockito.never()).tryAcquireProcessOwner(Mockito.anyLong());
+      Assert.assertTrue(fixture.queue.collectTasks(task -> true).isEmpty());
     } finally {
       fixture.queue.dispose();
     }

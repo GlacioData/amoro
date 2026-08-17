@@ -23,12 +23,17 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 import org.apache.amoro.config.OptimizingConfig;
 import org.apache.amoro.formats.paimon.PaimonCatalogFactory;
 import org.apache.amoro.formats.paimon.PaimonTable;
 import org.apache.amoro.formats.paimon.optimizing.PaimonCompactionExecutorFactory;
 import org.apache.amoro.formats.paimon.optimizing.PaimonCompactionTask;
+import org.apache.amoro.formats.paimon.optimizing.PaimonOptimizingEligibility;
 import org.apache.amoro.formats.paimon.optimizing.health.PaimonAppendSnapshotAnalysis;
 import org.apache.amoro.formats.paimon.optimizing.health.PaimonHealthEvaluationContext;
 import org.apache.amoro.optimizing.FormatTableAnalysis;
@@ -40,6 +45,7 @@ import org.apache.amoro.table.TableIdentifier;
 import org.apache.amoro.table.health.TableAnalysisKey;
 import org.apache.amoro.table.health.TableHealthDetails;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.paimon.CoreOptions;
 import org.apache.paimon.append.AppendCompactTask;
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.Identifier;
@@ -84,10 +90,57 @@ import java.util.function.ToLongFunction;
 @DisplayName("PaimonOptimizingPlanner")
 public class TestPaimonOptimizingPlanner {
 
+  @Test
+  @DisplayName("missing write-only skips append planning before snapshot access")
+  void missingWriteOnlySkipsBeforeSnapshotAccess() {
+    assertIneligibleBeforeSnapshotAccess(
+        Collections.emptyMap(), new OptimizingConfig().setEnabled(true));
+  }
+
+  @Test
+  @DisplayName("missing self-optimizing skips append planning before snapshot access")
+  void missingSelfOptimizingSkipsBeforeSnapshotAccess() {
+    assertIneligibleBeforeSnapshotAccess(
+        Collections.singletonMap(CoreOptions.WRITE_ONLY.key(), "true"),
+        new OptimizingConfig().setEnabled(true));
+  }
+
+  @Test
+  @DisplayName("disabled runtime self-optimizing skips append planning before snapshot access")
+  void disabledSelfOptimizingSkipsBeforeSnapshotAccess() {
+    assertIneligibleBeforeSnapshotAccess(
+        eligibleOptions(), new OptimizingConfig().setEnabled(false));
+  }
+
   private static Catalog fsCatalog(Path warehouse) {
     Map<String, String> props = new HashMap<>();
     props.put(CatalogOptions.WAREHOUSE.key(), warehouse.toUri().toString());
     return PaimonCatalogFactory.paimonCatalog(props, new Configuration());
+  }
+
+  private static void assertIneligibleBeforeSnapshotAccess(
+      Map<String, String> options, OptimizingConfig config) {
+    AppendOnlyFileStoreTable table = mock(AppendOnlyFileStoreTable.class);
+    when(table.options()).thenReturn(options);
+    when(table.bucketMode()).thenReturn(org.apache.paimon.table.BucketMode.BUCKET_UNAWARE);
+    PaimonOptimizingPlanner planner =
+        new PaimonOptimizingPlanner(
+            wrap(table, "t_ineligible"),
+            100L,
+            7L,
+            4.0,
+            64L * 1024 * 1024,
+            config,
+            0L,
+            0L,
+            0L,
+            null);
+
+    assertFalse(planner.isNecessary());
+    assertTrue(planner.plan().getTasks().isEmpty());
+    verify(table, never()).schema();
+    verify(table, never()).snapshotManager();
+    verify(table, never()).store();
   }
 
   private static void writeRecords(Table table, List<GenericRow> rowsInOneCommit) throws Exception {
@@ -114,7 +167,9 @@ public class TestPaimonOptimizingPlanner {
         Schema.newBuilder()
             .column("id", DataTypes.INT())
             .column("name", DataTypes.STRING())
-            .option("bucket", "-1");
+            .option("bucket", "-1")
+            .option(CoreOptions.WRITE_ONLY.key(), "true")
+            .option(PaimonOptimizingEligibility.SELF_OPTIMIZING_ENABLED, "true");
     for (Map.Entry<String, String> e : extraOptions.entrySet()) {
       builder.option(e.getKey(), e.getValue());
     }
@@ -132,13 +187,22 @@ public class TestPaimonOptimizingPlanner {
             .column("name", DataTypes.STRING())
             .column("dt", DataTypes.STRING())
             .partitionKeys("dt")
-            .option("bucket", "-1");
+            .option("bucket", "-1")
+            .option(CoreOptions.WRITE_ONLY.key(), "true")
+            .option(PaimonOptimizingEligibility.SELF_OPTIMIZING_ENABLED, "true");
     for (Map.Entry<String, String> e : extraOptions.entrySet()) {
       builder.option(e.getKey(), e.getValue());
     }
     Identifier id = Identifier.create("db1", tableName);
     catalog.createTable(id, builder.build(), true);
     return catalog.getTable(id);
+  }
+
+  private static Map<String, String> eligibleOptions() {
+    Map<String, String> options = new HashMap<>();
+    options.put(CoreOptions.WRITE_ONLY.key(), "true");
+    options.put(PaimonOptimizingEligibility.SELF_OPTIMIZING_ENABLED, "true");
+    return options;
   }
 
   @Test

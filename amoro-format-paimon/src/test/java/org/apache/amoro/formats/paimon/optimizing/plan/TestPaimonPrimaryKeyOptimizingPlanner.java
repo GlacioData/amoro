@@ -23,11 +23,14 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import org.apache.amoro.config.OptimizingConfig;
 import org.apache.amoro.formats.paimon.PaimonCatalogFactory;
 import org.apache.amoro.formats.paimon.PaimonTable;
+import org.apache.amoro.formats.paimon.optimizing.PaimonOptimizingEligibility;
 import org.apache.amoro.formats.paimon.optimizing.health.PaimonHealthEvaluationContext;
 import org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeyCompactionExecutorFactory;
 import org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeyCompactionTask;
@@ -42,6 +45,7 @@ import org.apache.amoro.optimizing.TaskProperties;
 import org.apache.amoro.table.TableIdentifier;
 import org.apache.amoro.table.health.TableAnalysisKey;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.paimon.CoreOptions;
 import org.apache.paimon.Snapshot;
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.Identifier;
@@ -287,6 +291,26 @@ class TestPaimonPrimaryKeyOptimizingPlanner {
     assertTrue(raw instanceof PrimaryKeyFileStoreTable);
     assertEquals(BucketMode.KEY_DYNAMIC, ((FileStoreTable) raw).bucketMode());
     assertFalse(PaimonPrimaryKeyOptimizingPlanner.supports(paimonTable));
+  }
+
+  @Test
+  @DisplayName("missing write-only keeps primary-key routing but skips before snapshot access")
+  void missingWriteOnlySkipsBeforeSnapshotAccess() {
+    assertIneligibleBeforeSnapshotAccess(Collections.emptyMap(), defaultConfig());
+  }
+
+  @Test
+  @DisplayName("missing self-optimizing keeps primary-key routing but skips before snapshot access")
+  void missingSelfOptimizingSkipsBeforeSnapshotAccess() {
+    assertIneligibleBeforeSnapshotAccess(
+        Collections.singletonMap(CoreOptions.WRITE_ONLY.key(), "true"), defaultConfig());
+  }
+
+  @Test
+  @DisplayName(
+      "disabled runtime self-optimizing keeps primary-key routing but skips before snapshot access")
+  void disabledSelfOptimizingSkipsBeforeSnapshotAccess() {
+    assertIneligibleBeforeSnapshotAccess(primaryKeyOptions(), defaultConfig().setEnabled(false));
   }
 
   @Test
@@ -744,33 +768,6 @@ class TestPaimonPrimaryKeyOptimizingPlanner {
   }
 
   @Test
-  @DisplayName("deprecated private major threshold is ignored")
-  void deprecatedPrivateMajorThresholdIsIgnored(@TempDir Path warehouse) throws Exception {
-    Catalog catalog = fsCatalog(warehouse);
-    Map<String, String> options = primaryKeyOptions();
-    options.put("bucket", "1");
-    options.put("num-sorted-run.compaction-trigger", "99");
-    Identifier id = createPrimaryKeyTable(catalog, "t_bad_major_threshold", options);
-    writeCommits(catalog.getTable(id), 3);
-
-    OptimizingPlanResult<PaimonPrimaryKeyCompactionTask> result =
-        planner(
-                catalog,
-                id,
-                defaultConfig(),
-                runtimeOptions(
-                    "num-sorted-run.compaction-trigger",
-                    "3",
-                    PaimonPrimaryKeyOptions.MAJOR_FILE_COUNT_THRESHOLD,
-                    "2"))
-            .plan();
-
-    assertEquals(OptimizingType.MINOR, result.getOptimizingType());
-    assertFalse(result.getTasks().isEmpty());
-    assertFalse(result.getTasks().get(0).getInput().isFullCompaction());
-  }
-
-  @Test
   @DisplayName("HASH table without primary key is rejected before planning")
   void nonPrimaryKeyHashTableIsRejectedBeforePlanning() {
     FileStoreTable table = mock(FileStoreTable.class);
@@ -951,8 +948,28 @@ class TestPaimonPrimaryKeyOptimizingPlanner {
 
   private static Map<String, String> primaryKeyOptions() {
     Map<String, String> options = new HashMap<>();
-    options.put(PaimonPrimaryKeyOptions.ENABLED, "true");
+    options.put(CoreOptions.WRITE_ONLY.key(), "true");
+    options.put(PaimonOptimizingEligibility.SELF_OPTIMIZING_ENABLED, "true");
     return options;
+  }
+
+  private static void assertIneligibleBeforeSnapshotAccess(
+      Map<String, String> options, OptimizingConfig config) {
+    PrimaryKeyFileStoreTable table = mock(PrimaryKeyFileStoreTable.class);
+    when(table.options()).thenReturn(options);
+    when(table.primaryKeys()).thenReturn(Collections.singletonList("id"));
+    when(table.bucketMode()).thenReturn(BucketMode.HASH_FIXED);
+    PaimonTable paimonTable = wrap(table, "t_ineligible");
+    PaimonPrimaryKeyOptimizingPlanner planner =
+        new PaimonPrimaryKeyOptimizingPlanner(
+            paimonTable, 100L, 7L, 4.0, 64L * 1024 * 1024, config, 0L, 0L, 0L, null);
+
+    assertTrue(PaimonPrimaryKeyOptimizingPlanner.supports(paimonTable));
+    assertFalse(planner.isNecessary());
+    assertTrue(planner.plan().getTasks().isEmpty());
+    verify(table, never()).snapshotManager();
+    verify(table, never()).latestSnapshot();
+    verify(table, never()).store();
   }
 
   private static Map<String, String> runtimeOptions(String... keyValues) {

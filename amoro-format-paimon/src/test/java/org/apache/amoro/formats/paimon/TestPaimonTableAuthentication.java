@@ -26,6 +26,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import org.apache.amoro.formats.paimon.optimizing.PaimonOptimizingEligibility;
 import org.apache.amoro.table.TableIdentifier;
 import org.apache.amoro.table.TableMetaStore;
 import org.apache.amoro.utils.SerializationUtil;
@@ -185,6 +186,8 @@ public class TestPaimonTableAuthentication {
             .column("id", DataTypes.INT())
             .column("name", DataTypes.STRING())
             .option("bucket", "-1")
+            .option("write-only", "true")
+            .option(PaimonOptimizingEligibility.SELF_OPTIMIZING_ENABLED, "true")
             .build();
     Identifier id = Identifier.create("db1", "t_auth");
     catalog.createTable(id, schema, true);

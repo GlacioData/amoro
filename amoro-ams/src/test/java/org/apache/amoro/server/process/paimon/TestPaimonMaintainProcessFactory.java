@@ -24,6 +24,7 @@ import org.apache.amoro.ServerTableIdentifier;
 import org.apache.amoro.TableFormat;
 import org.apache.amoro.TableSnapshot;
 import org.apache.amoro.config.ConfigurationException;
+import org.apache.amoro.formats.paimon.optimizing.PaimonOptimizingEligibility;
 import org.apache.amoro.process.HttpRemoteSparkStandAloneSubmit;
 import org.apache.amoro.process.LocalExecutionEngine;
 import org.apache.amoro.process.ProcessStatus;
@@ -32,6 +33,7 @@ import org.apache.amoro.process.TableProcess;
 import org.apache.amoro.process.TableProcessStore;
 import org.apache.amoro.server.table.DefaultTableRuntime;
 import org.apache.amoro.server.table.cleanup.TableRuntimeCleanupState;
+import org.apache.paimon.CoreOptions;
 import org.apache.paimon.FileStore;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.utils.SnapshotManager;
@@ -41,6 +43,7 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
@@ -155,6 +158,52 @@ public class TestPaimonMaintainProcessFactory {
   }
 
   @Test
+  public void testMaintenanceActionsRequireEligibilityBeforeTableAccess() {
+    PaimonMaintainProcessFactory factory = new PaimonMaintainProcessFactory();
+    Map<String, String> properties = new HashMap<>();
+    properties.put("sync-table-meta.enabled", "false");
+    properties.put("expire-snapshots.enabled", "true");
+    properties.put("clean-orphans.enabled", "true");
+    factory.open(properties);
+
+    HttpRemoteSparkStandAloneSubmit engine = new HttpRemoteSparkStandAloneSubmit();
+    engine.open(Collections.singletonMap("execute.user", "amoro"));
+    factory.availableExecuteEngines(Collections.singletonList(engine));
+
+    Map<String, String> selfOptimizingDisabled = new HashMap<>();
+    selfOptimizingDisabled.put(CoreOptions.WRITE_ONLY.key(), "true");
+    selfOptimizingDisabled.put(PaimonOptimizingEligibility.SELF_OPTIMIZING_ENABLED, "false");
+    Map<String, String> onlyWriteOnly =
+        Collections.singletonMap(CoreOptions.WRITE_ONLY.key(), "true");
+    Map<String, String> onlySelfOptimizing =
+        Collections.singletonMap(PaimonOptimizingEligibility.SELF_OPTIMIZING_ENABLED, "true");
+    for (Map<String, String> tableConfig :
+        Arrays.<Map<String, String>>asList(
+            Collections.emptyMap(), onlyWriteOnly, onlySelfOptimizing, selfOptimizingDisabled)) {
+      for (org.apache.amoro.Action action :
+          new org.apache.amoro.Action[] {
+            PaimonActions.EXPIRE_SNAPSHOTS, PaimonActions.CLEAN_ORPHANS
+          }) {
+        DefaultTableRuntime runtime = Mockito.mock(DefaultTableRuntime.class);
+        Mockito.when(runtime.getTableConfig()).thenReturn(tableConfig);
+        Mockito.when(runtime.getTableIdentifier())
+            .thenReturn(ServerTableIdentifier.of("catalog", "db", "tbl", TableFormat.PAIMON));
+        Mockito.when(runtime.getState(DefaultTableRuntime.CLEANUP_STATE_KEY))
+            .thenReturn(new TableRuntimeCleanupState());
+        if (PaimonActions.EXPIRE_SNAPSHOTS.equals(action)) {
+          mockSnapshotCount(runtime, 11);
+        } else {
+          mockCurrentSnapshot(runtime, System.currentTimeMillis());
+        }
+
+        Assert.assertFalse(factory.trigger(runtime, action).isPresent());
+        Mockito.verify(runtime, Mockito.never()).loadTable();
+        Mockito.verify(runtime, Mockito.never()).getState(Mockito.any());
+      }
+    }
+  }
+
+  @Test
   public void testTriggerExpireSnapshotsUseHttpSparkEngine() {
     PaimonMaintainProcessFactory factory = new PaimonMaintainProcessFactory();
     Map<String, String> properties = new HashMap<>();
@@ -172,7 +221,7 @@ public class TestPaimonMaintainProcessFactory {
     Mockito.when(runtime.getFormat()).thenReturn(TableFormat.PAIMON);
     Mockito.when(runtime.getTableIdentifier())
         .thenReturn(ServerTableIdentifier.of("catalog", "db", "tbl", TableFormat.PAIMON));
-    Mockito.when(runtime.getTableConfig()).thenReturn(Collections.emptyMap());
+    Mockito.when(runtime.getTableConfig()).thenReturn(eligibleTableConfig());
     Mockito.when(runtime.getState(DefaultTableRuntime.CLEANUP_STATE_KEY))
         .thenReturn(new TableRuntimeCleanupState());
     mockSnapshotCount(runtime, 11);
@@ -209,6 +258,7 @@ public class TestPaimonMaintainProcessFactory {
     Mockito.when(runtime.getFormat()).thenReturn(TableFormat.PAIMON);
     Mockito.when(runtime.getTableIdentifier())
         .thenReturn(ServerTableIdentifier.of("catalog", "db", "tbl", TableFormat.PAIMON));
+    Mockito.when(runtime.getTableConfig()).thenReturn(eligibleTableConfig());
     Mockito.when(runtime.getState(DefaultTableRuntime.CLEANUP_STATE_KEY))
         .thenReturn(new TableRuntimeCleanupState());
     mockCurrentSnapshot(runtime, System.currentTimeMillis() - Duration.ofDays(5).toMillis());
@@ -245,6 +295,7 @@ public class TestPaimonMaintainProcessFactory {
     Mockito.when(runtime.getFormat()).thenReturn(TableFormat.PAIMON);
     Mockito.when(runtime.getTableIdentifier())
         .thenReturn(ServerTableIdentifier.of("catalog", "db", "tbl", TableFormat.PAIMON));
+    Mockito.when(runtime.getTableConfig()).thenReturn(eligibleTableConfig());
     Mockito.when(runtime.getState(DefaultTableRuntime.CLEANUP_STATE_KEY))
         .thenReturn(
             new TableRuntimeCleanupState()
@@ -266,6 +317,7 @@ public class TestPaimonMaintainProcessFactory {
 
     DefaultTableRuntime runtime = Mockito.mock(DefaultTableRuntime.class);
     Mockito.when(runtime.getFormat()).thenReturn(TableFormat.PAIMON);
+    Mockito.when(runtime.getTableConfig()).thenReturn(eligibleTableConfig());
 
     Optional<TableProcess> process = factory.trigger(runtime, PaimonActions.EXPIRE_SNAPSHOTS);
 
@@ -338,6 +390,7 @@ public class TestPaimonMaintainProcessFactory {
     Mockito.when(runtime.getFormat()).thenReturn(TableFormat.PAIMON);
     Mockito.when(runtime.getTableIdentifier())
         .thenReturn(ServerTableIdentifier.of("catalog", "db", "tbl", TableFormat.PAIMON));
+    Mockito.when(runtime.getTableConfig()).thenReturn(eligibleTableConfig());
     Mockito.when(runtime.getState(DefaultTableRuntime.CLEANUP_STATE_KEY))
         .thenReturn(new TableRuntimeCleanupState());
     mockCurrentSnapshot(runtime, System.currentTimeMillis());
@@ -362,6 +415,7 @@ public class TestPaimonMaintainProcessFactory {
 
     DefaultTableRuntime runtime = Mockito.mock(DefaultTableRuntime.class);
     Mockito.when(runtime.getFormat()).thenReturn(TableFormat.PAIMON);
+    Mockito.when(runtime.getTableConfig()).thenReturn(eligibleTableConfig());
 
     Optional<TableProcess> process = factory.trigger(runtime, PaimonActions.CLEAN_ORPHANS);
 
@@ -483,6 +537,13 @@ public class TestPaimonMaintainProcessFactory {
       throw new RuntimeException(e);
     }
     Mockito.doReturn(amoroTable).when(runtime).loadTable();
+  }
+
+  private Map<String, String> eligibleTableConfig() {
+    Map<String, String> properties = new HashMap<>();
+    properties.put(CoreOptions.WRITE_ONLY.key(), "true");
+    properties.put(PaimonOptimizingEligibility.SELF_OPTIMIZING_ENABLED, "true");
+    return properties;
   }
 
   private void mockCurrentSnapshot(DefaultTableRuntime runtime, long snapshotCommitTime) {

@@ -25,6 +25,7 @@ import org.apache.amoro.TableRuntime;
 import org.apache.amoro.config.ConfigOption;
 import org.apache.amoro.config.ConfigOptions;
 import org.apache.amoro.config.Configurations;
+import org.apache.amoro.formats.paimon.optimizing.PaimonOptimizingEligibility;
 import org.apache.amoro.process.ExecuteEngine;
 import org.apache.amoro.process.HttpRemoteSparkStandAloneSubmit;
 import org.apache.amoro.process.LocalExecutionEngine;
@@ -143,6 +144,10 @@ public class PaimonMaintainProcessFactory implements ProcessFactory {
 
     if (PaimonActions.SYNC_TABLE_META.equals(action)) {
       return Optional.of(new PaimonTableMetaSyncProcess(tableRuntime));
+    }
+
+    if (!PaimonOptimizingEligibility.isEligible(tableRuntime.getTableConfig())) {
+      return Optional.empty();
     }
 
     if (PaimonActions.EXPIRE_SNAPSHOTS.equals(action)) {

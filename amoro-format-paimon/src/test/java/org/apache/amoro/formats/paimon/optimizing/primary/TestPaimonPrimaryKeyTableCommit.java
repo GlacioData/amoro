@@ -37,6 +37,7 @@ import org.apache.amoro.config.OptimizingConfig;
 import org.apache.amoro.exception.OptimizingCommitException;
 import org.apache.amoro.formats.paimon.PaimonCatalogFactory;
 import org.apache.amoro.formats.paimon.PaimonTable;
+import org.apache.amoro.formats.paimon.optimizing.PaimonOptimizingEligibility;
 import org.apache.amoro.formats.paimon.optimizing.plan.PaimonPrimaryKeyOptimizingPlanner;
 import org.apache.amoro.optimizing.OptimizingPlanResult;
 import org.apache.amoro.optimizing.OptimizingType;
@@ -44,6 +45,7 @@ import org.apache.amoro.optimizing.TableOptimizingCommitter.CommitMode;
 import org.apache.amoro.table.TableIdentifier;
 import org.apache.amoro.utils.SerializationUtil;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.paimon.CoreOptions;
 import org.apache.paimon.Snapshot;
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.Identifier;
@@ -561,7 +563,8 @@ class TestPaimonPrimaryKeyTableCommit {
 
   private static Map<String, String> primaryKeyOptions() {
     Map<String, String> options = new HashMap<>();
-    options.put(PaimonPrimaryKeyOptions.ENABLED, "true");
+    options.put(CoreOptions.WRITE_ONLY.key(), "true");
+    options.put(PaimonOptimizingEligibility.SELF_OPTIMIZING_ENABLED, "true");
     options.put("bucket", "1");
     return options;
   }

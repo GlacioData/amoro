@@ -38,6 +38,7 @@ import org.apache.amoro.formats.paimon.PaimonTable;
 import org.apache.amoro.formats.paimon.optimizing.PaimonCompactionExecutor;
 import org.apache.amoro.formats.paimon.optimizing.PaimonCompactionOutput;
 import org.apache.amoro.formats.paimon.optimizing.PaimonCompactionTask;
+import org.apache.amoro.formats.paimon.optimizing.PaimonOptimizingEligibility;
 import org.apache.amoro.formats.paimon.optimizing.plan.PaimonOptimizingPlanner;
 import org.apache.amoro.optimizing.OptimizingPlanResult;
 import org.apache.amoro.optimizing.TableOptimizingCommitter.CommitMode;
@@ -100,6 +101,8 @@ public class TestPaimonTableCommit {
             .option("bucket", "-1")
             .option("target-file-size", "1 kb")
             .option("compaction.min.file-num", "2")
+            .option("write-only", "true")
+            .option(PaimonOptimizingEligibility.SELF_OPTIMIZING_ENABLED, "true")
             .build();
     Identifier id = Identifier.create("db1", tableName);
     catalog.createTable(id, schema, true);

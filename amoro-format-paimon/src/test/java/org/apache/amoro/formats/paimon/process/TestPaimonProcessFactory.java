@@ -35,6 +35,7 @@ import org.apache.amoro.formats.paimon.PaimonCatalogFactory;
 import org.apache.amoro.formats.paimon.PaimonTable;
 import org.apache.amoro.formats.paimon.optimizing.PaimonCompactionInput;
 import org.apache.amoro.formats.paimon.optimizing.PaimonCompactionTask;
+import org.apache.amoro.formats.paimon.optimizing.PaimonOptimizingEligibility;
 import org.apache.amoro.formats.paimon.optimizing.commit.PaimonTableCommit;
 import org.apache.amoro.formats.paimon.optimizing.health.PaimonHealthEvaluationContext;
 import org.apache.amoro.formats.paimon.optimizing.plan.PaimonOptimizingPlanner;
@@ -42,7 +43,6 @@ import org.apache.amoro.formats.paimon.optimizing.plan.PaimonPrimaryKeyOptimizin
 import org.apache.amoro.formats.paimon.optimizing.primary.PaimonBucketCompactionUnit;
 import org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeyCompactionInput;
 import org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeyCompactionTask;
-import org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeyOptions;
 import org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeyTableCommit;
 import org.apache.amoro.optimizing.FormatTableAnalysis;
 import org.apache.amoro.optimizing.OptimizationContext;
@@ -54,6 +54,7 @@ import org.apache.amoro.process.ProcessFactory;
 import org.apache.amoro.process.StagedTaskDescriptor;
 import org.apache.amoro.table.TableIdentifier;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.paimon.CoreOptions;
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.data.BinaryString;
@@ -113,6 +114,8 @@ public class TestPaimonProcessFactory {
             .column("id", DataTypes.INT())
             .column("name", DataTypes.STRING())
             .option("bucket", "-1")
+            .option(CoreOptions.WRITE_ONLY.key(), "true")
+            .option(PaimonOptimizingEligibility.SELF_OPTIMIZING_ENABLED, "true")
             .options(options)
             .build();
     Identifier id = Identifier.create("db1", tableName);
@@ -138,7 +141,8 @@ public class TestPaimonProcessFactory {
             .column("name", DataTypes.STRING())
             .primaryKey("id")
             .option("bucket", "1")
-            .option(PaimonPrimaryKeyOptions.ENABLED, "true")
+            .option(CoreOptions.WRITE_ONLY.key(), "true")
+            .option(PaimonOptimizingEligibility.SELF_OPTIMIZING_ENABLED, "true")
             .options(options)
             .build();
     Identifier id = Identifier.create("db1", tableName);
@@ -161,7 +165,8 @@ public class TestPaimonProcessFactory {
             .partitionKeys("pt")
             .primaryKey("id")
             .option("bucket", "-1")
-            .option(PaimonPrimaryKeyOptions.ENABLED, "true")
+            .option(CoreOptions.WRITE_ONLY.key(), "true")
+            .option(PaimonOptimizingEligibility.SELF_OPTIMIZING_ENABLED, "true")
             .build();
     Identifier id = Identifier.create("db1", tableName);
     catalog.createTable(id, schema, true);
@@ -224,6 +229,24 @@ public class TestPaimonProcessFactory {
     TableOptimizingPlanner planner = factory.createPlanner(null, table, 1.0, 1024L);
     assertNotNull(planner);
     assertTrue(planner instanceof PaimonOptimizingPlanner);
+  }
+
+  @Test
+  @DisplayName("createPlanner keeps ineligible append table on append planner with no tasks")
+  void testCreatePlannerKeepsIneligibleAppendRouting(@TempDir Path warehouse) throws Exception {
+    PaimonProcessFactory factory = new PaimonProcessFactory();
+    factory.open(enabledProps());
+    PaimonTable table =
+        buildAppendTable(
+            warehouse,
+            "t_append_ineligible",
+            Collections.singletonMap(CoreOptions.WRITE_ONLY.key(), "false"));
+
+    TableOptimizingPlanner planner = factory.createPlanner(null, table, 1.0, 1024L);
+
+    assertTrue(planner instanceof PaimonOptimizingPlanner);
+    assertFalse(planner.isNecessary());
+    assertTrue(planner.plan().getTasks().isEmpty());
   }
 
   @Test
@@ -340,20 +363,23 @@ public class TestPaimonProcessFactory {
   }
 
   @Test
-  @DisplayName("createPlanner routes invalid enabled primary-key options to primary-key planner")
-  void testCreatePlannerRoutesInvalidEnabledPrimaryKeyOptions(@TempDir Path warehouse)
-      throws Exception {
+  @DisplayName(
+      "createPlanner keeps ineligible primary-key table on primary-key planner with no tasks")
+  void testCreatePlannerKeepsIneligiblePrimaryKeyRouting(@TempDir Path warehouse) throws Exception {
     PaimonProcessFactory factory = new PaimonProcessFactory();
     factory.open(enabledProps());
-    Map<String, String> options = new HashMap<>();
-    options.put(PaimonPrimaryKeyOptions.MAJOR_FILE_COUNT_THRESHOLD, "1");
-    PaimonTable table = buildPrimaryKeyTable(warehouse, "t_pk_invalid_options", options);
+    PaimonTable table =
+        buildPrimaryKeyTable(
+            warehouse,
+            "t_pk_ineligible",
+            Collections.singletonMap(CoreOptions.WRITE_ONLY.key(), "false"));
 
     TableOptimizingPlanner planner = factory.createPlanner(null, table, 1.0, 1024L);
 
     assertNotNull(planner);
     assertTrue(planner instanceof PaimonPrimaryKeyOptimizingPlanner);
     assertFalse(planner.isNecessary());
+    assertTrue(planner.plan().getTasks().isEmpty());
   }
 
   @Test
