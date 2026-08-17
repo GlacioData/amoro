@@ -24,6 +24,7 @@ import org.apache.amoro.formats.paimon.PaimonTable;
 import org.apache.amoro.formats.paimon.optimizing.PaimonCompactionExecutorFactory;
 import org.apache.amoro.formats.paimon.optimizing.PaimonCompactionInput;
 import org.apache.amoro.formats.paimon.optimizing.PaimonCompactionTask;
+import org.apache.amoro.formats.paimon.optimizing.PaimonOptimizingEligibility;
 import org.apache.amoro.formats.paimon.optimizing.health.PaimonAppendSnapshotAnalysis;
 import org.apache.amoro.formats.paimon.optimizing.health.PaimonHealthEvaluationContext;
 import org.apache.amoro.optimizing.FormatTableAnalysis;
@@ -265,9 +266,18 @@ public class PaimonOptimizingPlanner implements TableOptimizingPlanner {
               lastMinorOptimizingTime,
               lastMajorOptimizingTime,
               lastFullOptimizingTime);
+      OptimizingConfig effectiveConfig = runtimeInputs.optimizingConfig();
+      Map<String, String> tableProperties = paimonTable.properties();
+      if (!PaimonOptimizingEligibility.isEligible(tableProperties)
+          || (effectiveConfig != null && !effectiveConfig.isEnabled())) {
+        necessary = false;
+        cachedTasks = Collections.emptyList();
+        logPlanFinish("isNecessary", startTime, "necessary=false,reason=ineligible");
+        return false;
+      }
       PaimonHealthEvaluationContext healthContext =
           PaimonHealthEvaluationContext.capture(
-              table, paimonTable.id().toString(), runtimeInputs.healthContext());
+              table, paimonTable.id().toString(), runtimeInputs.healthContext(), tableProperties);
       PaimonPlanContext context =
           PaimonPlanContext.forOptions(
               CoreOptions.fromMap(table.options()),

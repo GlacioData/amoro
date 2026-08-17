@@ -64,20 +64,47 @@ When this flag is off, `PaimonProcessFactory.supportedFormats()` returns an empt
 set, so the AMS optimizer queue cannot route any Paimon table into this factory —
 it is a clean kill-switch for grey-scale rollout.
 
+### Table eligibility
+
+The plugin switch only enables Paimon routing. A Paimon table is eligible for
+self-optimizing only when both effective table properties are set as follows:
+
+```text
+write-only=true
+self-optimizing.enabled=true
+```
+
+This unified eligibility rule applies to both AppendOnly and primary-key compaction,
+and to optimization maintenance actions including snapshot expiration and orphan-file
+cleanup. Metadata synchronization is independent of this rule. In addition to the
+unified rule, the table must still match the shape supported by its planner: AppendOnly
+requires `bucket=-1` and no primary key; primary-key tables require `HASH_FIXED` or
+`HASH_DYNAMIC` and must not enable `pk-clustering-override`.
+
 ### Watching progress
 
-Once enabled, every registered Paimon AppendOnly table is refreshed periodically
-by the same `TableRuntimeRefreshExecutor` that drives Iceberg. Each optimizing
-cycle transitions the table runtime state through:
+Once the plugin and table eligibility are both enabled, each supported Paimon table is
+refreshed periodically by the same `TableRuntimeRefreshExecutor` that drives Iceberg.
+Each optimizing cycle transitions the table runtime state through:
 
 ```
 IDLE → PLANNING → OPTIMIZING → COMMITTING → IDLE
 ```
 
 You can observe this progression on the Dashboard `Optimizing` tab, or by querying
-`GET /api/ams/v1/optimize/tables` via the REST API. Every task shows up with
-`OptimizingType.MINOR` and the `task-executor-factory-impl` property set to
-`PaimonCompactionExecutorFactory`.
+`GET /api/ams/v1/optimize/tables` via the REST API.
+
+Planner 与任务执行器的分派取决于表形态，不能将所有 Paimon 优化任务统一识别为
+`OptimizingType.MINOR` 或 `PaimonCompactionExecutorFactory`：
+
+| 表路径 | Planner | 规划结果 `OptimizingType` | `task-executor-factory-impl` |
+| --- | --- | --- | --- |
+| AppendOnly、`bucket=-1` | `PaimonOptimizingPlanner` | 根据分区评估结果生成 `MINOR`、`MAJOR` 或 `FULL`；同一轮存在多种候选时，Plan 使用其中最高的类型 | `org.apache.amoro.formats.paimon.optimizing.PaimonCompactionExecutorFactory` |
+| 主键表、`HASH_FIXED`/`HASH_DYNAMIC` | `PaimonPrimaryKeyOptimizingPlanner` | 根据下文的主键表单次决策生成 `MINOR`、`MAJOR` 或 `FULL` | `org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeyCompactionExecutorFactory` |
+
+`task-executor-factory-impl` 实际保存对应 Factory 的完整类名。核对运行状态或排查
+Optimizer 分派问题时，应先按表形态确认 Planner，再同时检查 Plan 的
+`OptimizingType` 和任务携带的 Factory；主键任务不应被分派给 AppendOnly Executor。
 
 The `summary()` of each finished task carries four keys (all byte-level counts):
 
@@ -89,7 +116,7 @@ compacted-files, compacted-bytes, produced-files, produced-bytes
 
 | Symptom | Likely cause / fix |
 | --- | --- |
-| Table stays `IDLE` even though many small files exist | Check `paimon-optimizer.enabled=true` is in AMS config; check the table is `AppendOnly + bucket=-1`; primary-key tables are skipped by design. |
+| Table stays `IDLE` even though many small files exist | Check `paimon-optimizer.enabled=true` in AMS config, then check the effective table properties are `write-only=true` and `self-optimizing.enabled=true`. Finally verify the table shape is supported: `AppendOnly + bucket=-1`, or a primary-key table using `HASH_FIXED`/`HASH_DYNAMIC` without `pk-clustering-override`. |
 | `NoClassDefFoundError: org.apache.paimon.append.AppendCompactCoordinator` in the Optimizer log | `paimon-bundle` jar is missing from the Optimizer distribution `lib/` directory. Rebuild the distribution or drop the jar in manually. |
 | `OptimizingCommitException: Paimon commit failed … RuntimeException` | An external writer committed concurrently between plan and commit; AMS will mark this process failed and re-plan automatically on the next tick. No action needed unless it repeats indefinitely. |
 | `IllegalStateException: missing required fields (table / taskBytes)` in Optimizer | The task input was truncated or the Planner shipped an empty `PaimonCompactionInput`; usually an upgrade-skew issue. Check that AMS and Optimizer are on the same Amoro version. |
@@ -109,7 +136,7 @@ compacted-files, compacted-bytes, produced-files, produced-bytes
 
 Paimon 主键表优化仅覆盖同时满足以下条件的表：
 
-* 表属性 `paimon-optimizer.primary-key.enabled=true`；
+* 有效表属性同时为 `write-only=true` 与 `self-optimizing.enabled=true`；
 * 存在主键；
 * bucket 模式为 `HASH_FIXED` 或 `HASH_DYNAMIC`；
 * 未开启 `pk-clustering-override`。
@@ -185,11 +212,14 @@ serialized partition bytes unsigned ASC
 bucket ASC
 ```
 
-已废弃的 `paimon-optimizer.primary-key.major.file-count-threshold` 只记录 WARN 并忽略，
-即使其值无法解析也不会改变规划结果。
+主键表 MAJOR 判定不使用额外文件数阈值，也不会读取或兼容已移除的旧阈值配置。
 
 ### 升级说明
 
 该修正不提供旧 Paimon 主键 PROCESS payload 的无损接管。升级前应先 drain 或终止旧版本正在运行的
 Paimon 主键表优化 PROCESS，再统一升级 AMS 与 Optimizer。重启后每轮直接基于当时捕获的新 snapshot
 重新规划，不持久化 bucket cursor、候选文件列表或跨轮公平状态。
+
+升级后应从表属性和 Catalog 默认属性中清理已移除的主键专用启用开关与 MAJOR 文件数阈值。
+这些旧属性不再读取、不再输出兼容 WARN，也不能替代统一的 `write-only=true` 与
+`self-optimizing.enabled=true` 准入条件。

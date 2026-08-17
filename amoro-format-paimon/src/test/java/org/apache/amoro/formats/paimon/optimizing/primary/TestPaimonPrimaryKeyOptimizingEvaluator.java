@@ -470,8 +470,8 @@ class TestPaimonPrimaryKeyOptimizingEvaluator {
   }
 
   @Test
-  @DisplayName("disabled primary-key evaluator returns before snapshot access")
-  void disabledPrimaryKeyEvaluatorReturnsBeforeSnapshotAccess(@TempDir Path warehouse)
+  @DisplayName("deprecated primary-key enabled option no longer gates evaluation")
+  void deprecatedPrimaryKeyEnabledOptionNoLongerGatesEvaluation(@TempDir Path warehouse)
       throws Exception {
     Catalog catalog = fsCatalog(warehouse);
     Identifier id = createPrimaryKeyTable(catalog, "t_disabled", Collections.emptyMap());
@@ -483,7 +483,7 @@ class TestPaimonPrimaryKeyOptimizingEvaluator {
 
     assertFalse(evaluation.necessary());
     assertEquals(-1L, evaluation.targetSnapshotId());
-    verify(table, never()).latestSnapshot();
+    verify(table).latestSnapshot();
     verify(table, never()).newSnapshotReader();
   }
 
@@ -1072,7 +1072,6 @@ class TestPaimonPrimaryKeyOptimizingEvaluator {
     options.put("write-only", "true");
     options.put("num-sorted-run.compaction-trigger", "2");
     options.put("num-sorted-run.stop-trigger", "2");
-    options.put(PaimonPrimaryKeyOptions.MAJOR_FILE_COUNT_THRESHOLD, "not-a-number");
     Identifier id = createPrimaryKeyTable(catalog, "t_major", options);
     writeCommits(catalog.getTable(id), 3);
 
@@ -1628,7 +1627,7 @@ class TestPaimonPrimaryKeyOptimizingEvaluator {
 
   private static Map<String, String> primaryKeyOptions() {
     Map<String, String> options = new HashMap<>();
-    options.put(PaimonPrimaryKeyOptions.ENABLED, "true");
+    options.put(CoreOptions.WRITE_ONLY.key(), "true");
     return options;
   }
 

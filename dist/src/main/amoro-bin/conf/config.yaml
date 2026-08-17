@@ -16,6 +16,7 @@
 #
 
 ams:
+  env: dev
   admin-username: admin
   admin-password: admin
   server-bind-host: "0.0.0.0"

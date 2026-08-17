@@ -40,7 +40,10 @@ import org.apache.amoro.ServerTableIdentifier;
 import org.apache.amoro.TableFormat;
 import org.apache.amoro.TableRuntime;
 import org.apache.amoro.TableSnapshot;
+import org.apache.amoro.config.OptimizingConfig;
+import org.apache.amoro.config.TableConfiguration;
 import org.apache.amoro.formats.paimon.PaimonHadoopCatalogTestHelper;
+import org.apache.amoro.formats.paimon.optimizing.PaimonOptimizingEligibility;
 import org.apache.amoro.formats.paimon.optimizing.PaimonPendingInput;
 import org.apache.amoro.metrics.Gauge;
 import org.apache.amoro.metrics.Metric;
@@ -48,8 +51,10 @@ import org.apache.amoro.metrics.MetricDefine;
 import org.apache.amoro.metrics.MetricKey;
 import org.apache.amoro.optimizing.FormatTableAnalysis;
 import org.apache.amoro.optimizing.PendingInputResult;
+import org.apache.amoro.process.ProcessStatus;
 import org.apache.amoro.server.AMSServiceTestBase;
 import org.apache.amoro.server.manager.MetricManager;
+import org.apache.amoro.server.optimizing.OptimizingProcess;
 import org.apache.amoro.server.optimizing.OptimizingStatus;
 import org.apache.amoro.server.scheduler.inline.TableRuntimeRefreshExecutor;
 import org.apache.amoro.shade.guava32.com.google.common.collect.ImmutableMap;
@@ -221,6 +226,100 @@ public class TestTableRuntimeRefreshExecutorForPaimon extends AMSServiceTestBase
     executor.execute(paimonRuntime);
 
     assertEquals(OptimizingStatus.IDLE, paimonRuntime.getOptimizingStatus());
+  }
+
+  @Test
+  public void sameSnapshotEligibilityChangesAreEvaluatedInBothDirections() {
+    long snapshotId = 210L;
+    TableAnalysisKey eligibleKey =
+        analysisKey(snapshotId, 1L, "writeOnly=true,selfOptimizing=true");
+    TableAnalysisKey ineligibleKey =
+        analysisKey(snapshotId, 2L, "writeOnly=true,selfOptimizing=null");
+    TableAnalysisKey restoredEligibleKey =
+        analysisKey(snapshotId, 3L, "writeOnly=true,selfOptimizing=true");
+    PaimonPendingInput input = pendingInput(4, 400L, 82);
+    AmoroTable<?> eligibleTable =
+        keyedPaimonTable(
+            snapshotWithId(snapshotId),
+            eligibleKey,
+            input,
+            true,
+            analysis(eligibleKey, input, Collections.emptyList()));
+    AmoroTable<?> ineligibleTable =
+        keyedPaimonTable(
+            snapshotWithId(snapshotId),
+            ineligibleKey,
+            input,
+            false,
+            analysis(ineligibleKey, input, Collections.emptyList()));
+    AmoroTable<?> restoredEligibleTable =
+        keyedPaimonTable(
+            snapshotWithId(snapshotId),
+            restoredEligibleKey,
+            input,
+            true,
+            analysis(restoredEligibleKey, input, Collections.emptyList()));
+    java.util.Map<String, String> eligibleProperties = new java.util.HashMap<>();
+    eligibleProperties.put("write-only", "true");
+    eligibleProperties.put(PaimonOptimizingEligibility.SELF_OPTIMIZING_ENABLED, "true");
+    when(eligibleTable.properties()).thenReturn(eligibleProperties);
+    when(restoredEligibleTable.properties()).thenReturn(eligibleProperties);
+    when(ineligibleTable.properties()).thenReturn(Collections.singletonMap("write-only", "true"));
+    when(ineligibleTable.evaluatePendingInput(any(), anyInt())).thenReturn(Optional.empty());
+    when(ineligibleTable.evaluatePendingInput(any(), anyInt(), anyBoolean()))
+        .thenReturn(Optional.empty());
+
+    executorWith(eligibleTable).execute(paimonRuntime);
+    assertEquals(OptimizingStatus.PENDING, paimonRuntime.getOptimizingStatus());
+
+    executorWith(ineligibleTable).execute(paimonRuntime);
+    verify(ineligibleTable, times(1)).evaluatePendingInput(any(), anyInt(), eq(true));
+    assertEquals(Optional.of(ineligibleKey), paimonRuntime.getCurrentAnalysisKey());
+
+    // Model the existing empty-plan closure for the PENDING table that lost eligibility.
+    paimonRuntime.completeEmptyProcess();
+    assertEquals(OptimizingStatus.IDLE, paimonRuntime.getOptimizingStatus());
+
+    executorWith(restoredEligibleTable).execute(paimonRuntime);
+    verify(eligibleTable, times(1)).evaluatePendingInput(any(), anyInt(), eq(true));
+    verify(restoredEligibleTable, times(1)).evaluatePendingInput(any(), anyInt(), eq(true));
+    assertEquals(Optional.of(restoredEligibleKey), paimonRuntime.getCurrentAnalysisKey());
+    assertEquals(OptimizingStatus.PENDING, paimonRuntime.getOptimizingStatus());
+  }
+
+  @Test
+  public void disablingSelfOptimizingStillClosesRunningProcess() {
+    DefaultTableRuntime runtime = mock(DefaultTableRuntime.class);
+    OptimizingProcess process = mock(OptimizingProcess.class);
+    TableConfiguration originalConfig =
+        new TableConfiguration().setOptimizingConfig(new OptimizingConfig().setEnabled(true));
+    TableConfiguration disabledConfig =
+        new TableConfiguration().setOptimizingConfig(new OptimizingConfig().setEnabled(false));
+    when(runtime.getTableConfiguration()).thenReturn(disabledConfig);
+    when(runtime.getOptimizingProcess()).thenReturn(process);
+    when(process.getStatus()).thenReturn(ProcessStatus.RUNNING);
+
+    executorWith(paimonAmoroTable(null)).handleConfigChanged(runtime, originalConfig);
+
+    verify(process).close(false);
+  }
+
+  @Test
+  public void removingSelfOptimizingPropertyDoesNotCloseRunningProcess() {
+    DefaultTableRuntime runtime = mock(DefaultTableRuntime.class);
+    OptimizingProcess process = mock(OptimizingProcess.class);
+    TableConfiguration originalConfig =
+        new TableConfiguration().setOptimizingConfig(new OptimizingConfig().setEnabled(true));
+    TableConfiguration missingPropertyConfig =
+        TableConfigurations.parseTableConfig(Collections.singletonMap("write-only", "true"));
+    assertTrue(missingPropertyConfig.getOptimizingConfig().isEnabled());
+    when(runtime.getTableConfiguration()).thenReturn(missingPropertyConfig);
+    when(runtime.getOptimizingProcess()).thenReturn(process);
+    when(process.getStatus()).thenReturn(ProcessStatus.RUNNING);
+
+    executorWith(paimonAmoroTable(null)).handleConfigChanged(runtime, originalConfig);
+
+    verify(process, never()).close(anyBoolean());
   }
 
   @Test
@@ -657,13 +756,21 @@ public class TestTableRuntimeRefreshExecutorForPaimon extends AMSServiceTestBase
   }
 
   private TableAnalysisKey analysisKey(long snapshotId) {
+    return analysisKey(snapshotId, "fingerprint");
+  }
+
+  private TableAnalysisKey analysisKey(long snapshotId, String fingerprint) {
+    return analysisKey(snapshotId, 1L, fingerprint);
+  }
+
+  private TableAnalysisKey analysisKey(long snapshotId, long schemaId, String fingerprint) {
     return new TableAnalysisKey(
         String.valueOf(paimonRuntime.getTableIdentifier().getId()),
         TableFormat.PAIMON,
         snapshotId,
         TableAnalysisKey.NO_CHANGE_SNAPSHOT,
-        1L,
-        "fingerprint",
+        schemaId,
+        fingerprint,
         "test-paimon-health-v1",
         TableAnalysisKey.NO_BASELINE,
         TableAnalysisKey.NO_BASELINE_TIME);

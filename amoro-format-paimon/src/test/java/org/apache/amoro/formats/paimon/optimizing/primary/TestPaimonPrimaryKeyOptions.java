@@ -21,7 +21,6 @@ package org.apache.amoro.formats.paimon.optimizing.primary;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.junit.jupiter.api.Test;
 
@@ -33,10 +32,9 @@ import java.util.Map;
 class TestPaimonPrimaryKeyOptions {
 
   @Test
-  void defaultsKeepPrimaryKeyOptimizingDisabled() {
+  void defaultsKeepSupportedPrimaryKeyOptions() {
     PaimonPrimaryKeyOptions options = PaimonPrimaryKeyOptions.from(new HashMap<>());
 
-    assertFalse(options.enabled());
     assertFalse(options.partitionIdleTime().isPresent());
     assertEquals(new BigDecimal("0.33"), options.majorMaxBucketRatio());
   }
@@ -44,13 +42,11 @@ class TestPaimonPrimaryKeyOptions {
   @Test
   void parsesPrimaryKeySpecificOptions() {
     Map<String, String> props = new HashMap<>();
-    props.put(PaimonPrimaryKeyOptions.ENABLED, "true");
     props.put(PaimonPrimaryKeyOptions.PARTITION_IDLE_TIME, "PT30M");
     props.put(PaimonPrimaryKeyOptions.MAJOR_MAX_BUCKET_RATIO, "0.302");
 
     PaimonPrimaryKeyOptions options = PaimonPrimaryKeyOptions.from(props);
 
-    assertTrue(options.enabled());
     assertEquals(
         Duration.ofMinutes(30), options.partitionIdleTime().orElseThrow(AssertionError::new));
     assertEquals(new BigDecimal("0.33"), options.majorMaxBucketRatio());
@@ -94,16 +90,6 @@ class TestPaimonPrimaryKeyOptions {
   }
 
   @Test
-  void ignoresDeprecatedMajorFileCountThresholdEvenWhenInvalid() {
-    Map<String, String> props = new HashMap<>();
-    props.put(PaimonPrimaryKeyOptions.MAJOR_FILE_COUNT_THRESHOLD, "not-a-number");
-
-    PaimonPrimaryKeyOptions options = PaimonPrimaryKeyOptions.from(props);
-
-    assertEquals(new BigDecimal("0.33"), options.majorMaxBucketRatio());
-  }
-
-  @Test
   void parsesPaimonStylePartitionIdleTime() {
     Map<String, String> props = new HashMap<>();
     props.put(PaimonPrimaryKeyOptions.PARTITION_IDLE_TIME, "10s");
@@ -121,6 +107,7 @@ class TestPaimonPrimaryKeyOptions {
 
     PaimonPrimaryKeyOptions options = PaimonPrimaryKeyOptions.from(props);
 
-    assertFalse(options.enabled());
+    assertFalse(options.partitionIdleTime().isPresent());
+    assertEquals(new BigDecimal("0.33"), options.majorMaxBucketRatio());
   }
 }

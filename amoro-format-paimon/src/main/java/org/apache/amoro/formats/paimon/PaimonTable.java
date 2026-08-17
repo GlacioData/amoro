@@ -22,6 +22,7 @@ import org.apache.amoro.AmoroTable;
 import org.apache.amoro.TableFormat;
 import org.apache.amoro.TableSnapshot;
 import org.apache.amoro.config.OptimizingConfig;
+import org.apache.amoro.formats.paimon.optimizing.PaimonOptimizingEligibility;
 import org.apache.amoro.formats.paimon.optimizing.PaimonPendingInput;
 import org.apache.amoro.formats.paimon.optimizing.health.PaimonAppendSnapshotAnalysis;
 import org.apache.amoro.formats.paimon.optimizing.health.PaimonHealthEvaluationContext;
@@ -39,6 +40,7 @@ import org.apache.amoro.table.TableMetaStore;
 import org.apache.amoro.table.health.TableAnalysisKey;
 import org.apache.amoro.table.health.TableHealthDetails;
 import org.apache.amoro.utils.CatalogUtil;
+import org.apache.paimon.CoreOptions;
 import org.apache.paimon.Snapshot;
 import org.apache.paimon.table.AppendOnlyFileStoreTable;
 import org.apache.paimon.table.BucketMode;
@@ -104,7 +106,13 @@ public class PaimonTable implements AmoroTable<Table>, Serializable {
 
   @Override
   public Map<String, String> properties() {
-    return CatalogUtil.mergeCatalogPropertiesToTable(table.options(), catalogProperties);
+    Map<String, String> tableOptions = table.options();
+    Map<String, String> properties =
+        CatalogUtil.mergeCatalogPropertiesToTable(tableOptions, catalogProperties);
+    retainRawTableOption(properties, tableOptions, CoreOptions.WRITE_ONLY.key());
+    retainRawTableOption(
+        properties, tableOptions, PaimonOptimizingEligibility.SELF_OPTIMIZING_ENABLED);
+    return properties;
   }
 
   @Override
@@ -143,8 +151,13 @@ public class PaimonTable implements AmoroTable<Table>, Serializable {
             return Optional.empty();
           }
           FileStoreTable fileStoreTable = (FileStoreTable) table;
+          Map<String, String> tableProperties = properties();
+          if (!PaimonOptimizingEligibility.isEligible(tableProperties)) {
+            return Optional.empty();
+          }
           PaimonHealthEvaluationContext healthContext =
-              PaimonHealthEvaluationContext.capture(fileStoreTable, id().toString(), context);
+              PaimonHealthEvaluationContext.capture(
+                  fileStoreTable, id().toString(), context, tableProperties);
           if (fileStoreTable instanceof PrimaryKeyFileStoreTable) {
             if (healthContext.pkClusteringOverride()) {
               return Optional.of(
@@ -153,11 +166,16 @@ public class PaimonTable implements AmoroTable<Table>, Serializable {
             if (!isSupportedPrimaryKeyMode(healthContext.bucketMode())) {
               return Optional.of(unsupportedResult(healthContext, UNSUPPORTED_BUCKET_MODE));
             }
-            return Optional.of(evaluatePrimaryKey(fileStoreTable, healthContext, context));
+            return Optional.of(
+                evaluatePrimaryKey(fileStoreTable, healthContext, context, tableProperties));
           }
           if (fileStoreTable instanceof AppendOnlyFileStoreTable) {
             return Optional.of(
-                evaluateAppend((AppendOnlyFileStoreTable) fileStoreTable, healthContext, context));
+                evaluateAppend(
+                    (AppendOnlyFileStoreTable) fileStoreTable,
+                    healthContext,
+                    context,
+                    tableProperties));
           }
           return Optional.of(unsupportedResult(healthContext, UNSUPPORTED_TABLE_SHAPE));
         });
@@ -172,7 +190,7 @@ public class PaimonTable implements AmoroTable<Table>, Serializable {
           }
           return Optional.of(
               PaimonHealthEvaluationContext.capture(
-                      (FileStoreTable) table, id().toString(), context)
+                      (FileStoreTable) table, id().toString(), context, properties())
                   .key());
         });
   }
@@ -194,22 +212,31 @@ public class PaimonTable implements AmoroTable<Table>, Serializable {
     }
   }
 
-  private boolean isSelfOptimizingEnabled(OptimizationContext context) {
-    if (context == null) {
-      return true;
+  private boolean isOptimizingEligible(
+      Map<String, String> tableProperties, OptimizationContext context) {
+    OptimizingConfig config = context == null ? null : context.getOptimizingConfig();
+    return PaimonOptimizingEligibility.isEligible(tableProperties)
+        && (config == null || config.isEnabled());
+  }
+
+  private static void retainRawTableOption(
+      Map<String, String> mergedOptions, Map<String, String> tableOptions, String key) {
+    mergedOptions.remove(key);
+    if (tableOptions.containsKey(key)) {
+      mergedOptions.put(key, tableOptions.get(key));
     }
-    OptimizingConfig config = context.getOptimizingConfig();
-    return config == null || config.isEnabled();
   }
 
   private PendingInputResult evaluateAppend(
       AppendOnlyFileStoreTable appendTable,
       PaimonHealthEvaluationContext healthContext,
-      OptimizationContext context) {
+      OptimizationContext context,
+      Map<String, String> tableProperties) {
     PaimonAppendSnapshotAnalysis analysis =
         PaimonAppendFileScanner.analyze(appendTable, healthContext, null);
     boolean optimizingNecessary =
-        isSelfOptimizingEnabled(context) && appendTable.bucketMode() == BucketMode.BUCKET_UNAWARE;
+        isOptimizingEligible(tableProperties, context)
+            && appendTable.bucketMode() == BucketMode.BUCKET_UNAWARE;
     return new PendingInputResult(
         analysis.pendingInput(), analysis.pendingInput(), optimizingNecessary, analysis);
   }
@@ -217,7 +244,8 @@ public class PaimonTable implements AmoroTable<Table>, Serializable {
   private PendingInputResult evaluatePrimaryKey(
       FileStoreTable fileStoreTable,
       PaimonHealthEvaluationContext healthContext,
-      OptimizationContext context) {
+      OptimizationContext context,
+      Map<String, String> tableProperties) {
     PaimonPrimaryKeyOptimizingEvaluation evaluation =
         PaimonPrimaryKeyOptimizingEvaluator.evaluate(
             fileStoreTable,
@@ -239,7 +267,7 @@ public class PaimonTable implements AmoroTable<Table>, Serializable {
         healthContext.bucketMode() == BucketMode.HASH_FIXED
             || healthContext.bucketMode() == BucketMode.HASH_DYNAMIC;
     boolean optimizingNecessary =
-        isSelfOptimizingEnabled(context)
+        isOptimizingEligible(tableProperties, context)
             && hashMode
             && analysis.validForPlanning()
             && evaluation.necessary();

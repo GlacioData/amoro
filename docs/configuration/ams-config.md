@@ -55,6 +55,7 @@ table td:last-child, table th:last-child { width: 40%; word-break: break-all; }
 | database.type | derby | Database type. |
 | database.url | jdbc:derby:/tmp/amoro/derby;create=true | Database connection address |
 | database.username | root | The username for connecting to the database. |
+| env | dev | The deployment environment of AMS: prod, pre, or dev. |
 | ha.bucket-assign.interval | 1 min | Interval for bucket assignment service to detect node changes and redistribute bucket IDs. |
 | ha.bucket-id.total-count | 100 | Total count of bucket IDs for assignment. Bucket IDs range from 1 to this value. |
 | ha.bucket-table-sync.interval | 1 min | Interval for syncing tables assigned to bucket IDs in master-slave mode. Each node periodically loads tables from database based on its assigned bucket IDs. |

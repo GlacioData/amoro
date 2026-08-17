@@ -20,6 +20,7 @@ package org.apache.amoro.server.process;
 
 import org.apache.amoro.Action;
 import org.apache.amoro.AmoroTable;
+import org.apache.amoro.PaimonActions;
 import org.apache.amoro.ServerTableIdentifier;
 import org.apache.amoro.TableFormat;
 import org.apache.amoro.TableRuntime;
@@ -28,6 +29,7 @@ import org.apache.amoro.metrics.MetricRegistry;
 import org.apache.amoro.process.ActionCoordinator;
 import org.apache.amoro.process.EngineType;
 import org.apache.amoro.process.ExecuteEngine;
+import org.apache.amoro.process.ProcessEvent;
 import org.apache.amoro.process.ProcessStatus;
 import org.apache.amoro.process.TableProcess;
 import org.apache.amoro.process.TableProcessStore;
@@ -37,6 +39,7 @@ import org.apache.amoro.server.persistence.mapper.TableProcessMapper;
 import org.apache.amoro.table.StateKey;
 import org.junit.Assert;
 import org.junit.Test;
+import org.mockito.Mockito;
 
 import java.lang.reflect.Field;
 import java.util.Arrays;
@@ -45,12 +48,15 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import java.util.function.Function;
 
@@ -81,6 +87,90 @@ public class TestProcessServiceRetryScheduling extends AMSManagerTestBase {
       Assert.assertTrue(
           "失败重试应异步调度，不能因为等待重试而阻塞第 11 个 process 的提交",
           executeEngine.awaitSubmissions(RETRY_ASSERT_TIMEOUT_SECONDS, TimeUnit.SECONDS));
+    } finally {
+      shutdownExecutor(processService, "processExecutionPool");
+      shutdownExecutor(processService, "retrySchedulingPool");
+      processService.dispose();
+    }
+  }
+
+  @Test(timeout = 20_000)
+  public void testIneligiblePaimonMaintenanceProcessRetriesThroughFinishedCallback()
+      throws Exception {
+    TableRuntime runtime = new TestingTableRuntime(10_100L);
+    Assert.assertTrue(runtime.getTableConfig().isEmpty());
+    RetryOnceExecuteEngine executeEngine = new RetryOnceExecuteEngine();
+    AtomicReference<ProcessStatus> status = new AtomicReference<>(ProcessStatus.PENDING);
+    AtomicReference<String> externalIdentifier = new AtomicReference<>("");
+    AtomicInteger retryNumber = new AtomicInteger(0);
+    List<ProcessEvent> transitions = new CopyOnWriteArrayList<>();
+    List<ProcessStatus> statusTransitions = new CopyOnWriteArrayList<>();
+    DefaultTableProcessStore store =
+        retryStore(
+            runtime,
+            executeEngine,
+            status,
+            externalIdentifier,
+            retryNumber,
+            transitions,
+            statusTransitions);
+    ProcessService processService =
+        new ProcessService(null) {
+          @Override
+          protected DefaultTableProcessStore persistTableProcess(TableProcess process) {
+            return store;
+          }
+        };
+    ScheduledExecutorService immediateRetryScheduler = Mockito.mock(ScheduledExecutorService.class);
+    ScheduledFuture<?> scheduledFuture = Mockito.mock(ScheduledFuture.class);
+    Mockito.when(
+            immediateRetryScheduler.schedule(
+                Mockito.any(Runnable.class), Mockito.anyLong(), Mockito.eq(TimeUnit.SECONDS)))
+        .thenAnswer(
+            invocation -> {
+              invocation.<Runnable>getArgument(0).run();
+              return scheduledFuture;
+            });
+    replaceRetryScheduler(processService, immediateRetryScheduler);
+    processService.installExecuteEngine(executeEngine);
+    processService.installActionCoordinator(
+        new RecoveringCoordinator(PaimonActions.EXPIRE_SNAPSHOTS, executeEngine));
+
+    try {
+      TableProcess process =
+          new TestingTableProcess(runtime, executeEngine, PaimonActions.EXPIRE_SNAPSHOTS);
+      processService.register(runtime, process);
+
+      Assert.assertTrue(
+          "Paimon 维护 Process 应在失败后通过既有回调完成第二次提交",
+          executeEngine.awaitSubmissions(RETRY_ASSERT_TIMEOUT_SECONDS, TimeUnit.SECONDS));
+      awaitCondition(
+          () ->
+              status.get() == ProcessStatus.SUCCESS
+                  && processService.getActiveTableProcess().isEmpty(),
+          RETRY_ASSERT_TIMEOUT_SECONDS * 1000L,
+          50L);
+
+      Assert.assertEquals(1, retryNumber.get());
+      Assert.assertEquals(2, executeEngine.getSubmissionCount());
+      Assert.assertEquals(
+          Arrays.asList(
+              ProcessEvent.SUBMIT_REQUESTED,
+              ProcessEvent.COMPLETE_FAILED,
+              ProcessEvent.RETRY_REQUESTED,
+              ProcessEvent.SUBMIT_REQUESTED,
+              ProcessEvent.COMPLETE_SUCCESS),
+          transitions);
+      Assert.assertEquals(
+          Arrays.asList(
+              ProcessStatus.SUBMITTED,
+              ProcessStatus.FAILED,
+              ProcessStatus.PENDING,
+              ProcessStatus.SUBMITTED,
+              ProcessStatus.SUCCESS),
+          statusTransitions);
+      Mockito.verify(immediateRetryScheduler)
+          .schedule(Mockito.any(Runnable.class), Mockito.eq(30L), Mockito.eq(TimeUnit.SECONDS));
     } finally {
       shutdownExecutor(processService, "processExecutionPool");
       shutdownExecutor(processService, "retrySchedulingPool");
@@ -240,6 +330,64 @@ public class TestProcessServiceRetryScheduling extends AMSManagerTestBase {
     }
   }
 
+  private void replaceRetryScheduler(
+      ProcessService processService, ScheduledExecutorService retryScheduler) throws Exception {
+    Field field = ProcessService.class.getDeclaredField("retrySchedulingPool");
+    field.setAccessible(true);
+    ScheduledExecutorService original = (ScheduledExecutorService) field.get(processService);
+    original.shutdownNow();
+    field.set(processService, retryScheduler);
+  }
+
+  private DefaultTableProcessStore retryStore(
+      TableRuntime runtime,
+      ExecuteEngine executeEngine,
+      AtomicReference<ProcessStatus> status,
+      AtomicReference<String> externalIdentifier,
+      AtomicInteger retryNumber,
+      List<ProcessEvent> transitions,
+      List<ProcessStatus> statusTransitions) {
+    DefaultTableProcessStore store = Mockito.mock(DefaultTableProcessStore.class);
+    Mockito.when(store.getProcessId()).thenReturn(10_100L);
+    Mockito.when(store.getTableId()).thenReturn(runtime.getTableIdentifier().getId());
+    Mockito.when(store.getAction()).thenReturn(PaimonActions.EXPIRE_SNAPSHOTS);
+    Mockito.when(store.getExecutionEngine()).thenReturn(executeEngine.name());
+    Mockito.when(store.getProcessParameters()).thenReturn(Collections.emptyMap());
+    Mockito.when(store.getSummary()).thenReturn(Collections.emptyMap());
+    Mockito.when(store.getStatus()).thenAnswer(invocation -> status.get());
+    Mockito.when(store.getExternalProcessIdentifier())
+        .thenAnswer(invocation -> externalIdentifier.get());
+    Mockito.when(store.getRetryNumber()).thenAnswer(invocation -> retryNumber.get());
+    Mockito.when(
+            store.tryTransitState(
+                Mockito.any(ProcessStatus.class),
+                Mockito.any(ProcessEvent.class),
+                Mockito.anyString(),
+                Mockito.anyString(),
+                Mockito.anyMap(),
+                Mockito.anyMap()))
+        .thenAnswer(
+            invocation -> {
+              ProcessStatus targetStatus = invocation.getArgument(0);
+              ProcessEvent event = invocation.getArgument(1);
+              String targetIdentifier = invocation.getArgument(2);
+              transitions.add(event);
+              statusTransitions.add(targetStatus);
+              if (event == ProcessEvent.RETRY_REQUESTED) {
+                if (status.get() != ProcessStatus.FAILED) {
+                  return false;
+                }
+                retryNumber.incrementAndGet();
+                externalIdentifier.set("");
+              } else if (event == ProcessEvent.SUBMIT_REQUESTED) {
+                externalIdentifier.set(targetIdentifier);
+              }
+              status.set(targetStatus);
+              return true;
+            });
+    return store;
+  }
+
   private TableProcessMeta getProcessMeta(long processId) {
     return new TableProcessMetaReader().getProcessMeta(processId);
   }
@@ -332,6 +480,53 @@ public class TestProcessServiceRetryScheduling extends AMSManagerTestBase {
     @Override
     public String name() {
       return "recover-running";
+    }
+  }
+
+  private static class RetryOnceExecuteEngine implements ExecuteEngine {
+    private final CountDownLatch submissionLatch = new CountDownLatch(2);
+    private final AtomicInteger submissions = new AtomicInteger(0);
+
+    @Override
+    public EngineType engineType() {
+      return EngineType.of(name());
+    }
+
+    @Override
+    public ProcessStatus getStatus(String processIdentifier) {
+      return processIdentifier.endsWith("-1") ? ProcessStatus.FAILED : ProcessStatus.SUCCESS;
+    }
+
+    @Override
+    public String submitTableProcess(TableProcess tableProcess) {
+      int attempt = submissions.incrementAndGet();
+      submissionLatch.countDown();
+      return "paimon-retry-" + attempt;
+    }
+
+    @Override
+    public ProcessStatus tryCancelTableProcess(
+        TableProcess tableProcess, String processIdentifier) {
+      return ProcessStatus.CANCELED;
+    }
+
+    @Override
+    public void open(Map<String, String> properties) {}
+
+    @Override
+    public void close() {}
+
+    @Override
+    public String name() {
+      return "retry-once";
+    }
+
+    private boolean awaitSubmissions(long timeout, TimeUnit unit) throws InterruptedException {
+      return submissionLatch.await(timeout, unit);
+    }
+
+    private int getSubmissionCount() {
+      return submissions.get();
     }
   }
 

@@ -24,10 +24,36 @@ import org.junit.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.stream.Stream;
 
 public class TestAmoroManagementConfValidator {
+
+  @ParameterizedTest
+  @ValueSource(strings = {"prod", "pre", "dev"})
+  public void testValidateEnv(String env) {
+    Configurations configurations = new Configurations();
+    configurations.setString(AmoroManagementConf.SERVER_EXPOSE_HOST, "127.0.0.1");
+
+    Assert.assertEquals("dev", configurations.getString(AmoroManagementConf.ENV));
+    AmoroManagementConfValidator.validateConfig(configurations);
+
+    configurations.setString(AmoroManagementConf.ENV, env);
+    AmoroManagementConfValidator.validateConfig(configurations);
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"", " ", "PROD", "prod ", " dev", "test"})
+  public void testRejectInvalidEnv(String env) {
+    Configurations configurations = new Configurations();
+    configurations.setString(AmoroManagementConf.SERVER_EXPOSE_HOST, "127.0.0.1");
+    configurations.setString(AmoroManagementConf.ENV, env);
+
+    Assert.assertThrows(
+        IllegalArgumentException.class,
+        () -> AmoroManagementConfValidator.validateConfig(configurations));
+  }
 
   @Test
   public void testBlankServerExposeHost() {

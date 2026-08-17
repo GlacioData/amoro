@@ -20,6 +20,7 @@ package org.apache.amoro.formats.paimon;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -29,6 +30,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import org.apache.amoro.config.OptimizingConfig;
+import org.apache.amoro.formats.paimon.optimizing.PaimonOptimizingEligibility;
 import org.apache.amoro.formats.paimon.optimizing.PaimonPendingInput;
 import org.apache.amoro.formats.paimon.optimizing.health.PaimonAppendHealthEvaluator;
 import org.apache.amoro.formats.paimon.optimizing.health.PaimonAppendSnapshotAnalysis;
@@ -74,6 +76,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 @DisplayName("Paimon pending input eligibility")
 class TestPaimonTablePendingInputEligibility {
@@ -114,7 +117,7 @@ class TestPaimonTablePendingInputEligibility {
   @DisplayName("append-only BUCKET_UNAWARE table can request optimizing")
   void appendOnlyBucketUnawareTableIsOptimizingNecessary(@TempDir Path warehouse) throws Exception {
     Catalog catalog = fsCatalog(warehouse);
-    Table table = createAppendOnlyTable(catalog, "t_append", new HashMap<>());
+    Table table = createAppendOnlyTable(catalog, "t_append", eligibleRuntimeOptions());
     PaimonTable paimonTable = wrap(table, "t_append");
 
     PendingInputResult result =
@@ -134,6 +137,49 @@ class TestPaimonTablePendingInputEligibility {
   }
 
   @Test
+  @DisplayName("append-only BUCKET_UNAWARE table requires both explicit properties")
+  void appendOnlyBucketUnawareTableRequiresWriteOnly(@TempDir Path warehouse) throws Exception {
+    Catalog catalog = fsCatalog(warehouse);
+    Table table = createAppendOnlyTable(catalog, "t_append_without_write_only", new HashMap<>());
+
+    Optional<PendingInputResult> result =
+        wrap(table, "t_append_without_write_only")
+            .evaluatePendingInput(optimizationContext(true), 10);
+
+    assertFalse(result.isPresent());
+  }
+
+  @Test
+  @DisplayName("append-only missing self-optimizing property exits before metadata access")
+  void appendOnlyMissingSelfOptimizingSkipsBeforeSnapshotAccess() {
+    AppendOnlyFileStoreTable table = mock(AppendOnlyFileStoreTable.class);
+    when(table.options()).thenReturn(runtimeOptions(CoreOptions.WRITE_ONLY.key(), "true"));
+
+    assertFalse(
+        wrap(table, "t_append_without_self_optimizing")
+            .evaluatePendingInput(optimizationContext(true), 10)
+            .isPresent());
+    verify(table, never()).schema();
+    verify(table, never()).snapshotManager();
+    verify(table, never()).store();
+  }
+
+  @Test
+  @DisplayName("primary-key missing self-optimizing property exits before metadata access")
+  void primaryKeyMissingSelfOptimizingSkipsBeforeSnapshotAccess() {
+    PrimaryKeyFileStoreTable table = mock(PrimaryKeyFileStoreTable.class);
+    when(table.options()).thenReturn(runtimeOptions(CoreOptions.WRITE_ONLY.key(), "true"));
+
+    assertFalse(
+        wrap(table, "t_pk_without_self_optimizing")
+            .evaluatePendingInput(optimizationContext(true), 10)
+            .isPresent());
+    verify(table, never()).schema();
+    verify(table, never()).snapshotManager();
+    verify(table, never()).store();
+  }
+
+  @Test
   @DisplayName("append-only eligibility keeps legacy semantics when health scan fails")
   void appendOnlyScanFailureStillRequestsPlannerFallback() {
     AppendOnlyFileStoreTable table = mock(AppendOnlyFileStoreTable.class);
@@ -141,11 +187,12 @@ class TestPaimonTablePendingInputEligibility {
     TableSchema schema = mock(TableSchema.class);
     Snapshot snapshot = mock(Snapshot.class);
     SnapshotManager snapshotManager = mock(SnapshotManager.class);
-    Map<String, String> options = runtimeOptions("bucket", "-1");
+    Map<String, String> options = eligibleRuntimeOptions("bucket", "-1");
     when(table.bucketMode()).thenReturn(BucketMode.BUCKET_UNAWARE);
     when(table.schema()).thenReturn(schema);
     when(schema.id()).thenReturn(10L);
     when(schema.options()).thenReturn(options);
+    when(table.options()).thenReturn(options);
     when(table.coreOptions()).thenReturn(CoreOptions.fromMap(options));
     when(table.snapshotManager()).thenReturn(snapshotManager);
     when(snapshotManager.latestSnapshot()).thenReturn(snapshot);
@@ -174,20 +221,17 @@ class TestPaimonTablePendingInputEligibility {
   }
 
   @Test
-  @DisplayName("primary-key HASH_FIXED table is not bound to optimizing queue by default")
+  @DisplayName("primary-key HASH_FIXED table without explicit properties is not evaluated")
   void primaryKeyHashFixedTableIsNotOptimizingNecessaryByDefault(@TempDir Path warehouse)
       throws Exception {
     Catalog catalog = fsCatalog(warehouse);
     Identifier id = createPrimaryKeyTable(catalog, "t_pk_default", new HashMap<>());
     PaimonTable paimonTable = wrap(catalog.getTable(id), "t_pk");
 
-    PendingInputResult result =
-        paimonTable
-            .evaluatePendingInput(optimizationContext(true), 10)
-            .orElseThrow(AssertionError::new);
+    Optional<PendingInputResult> result =
+        paimonTable.evaluatePendingInput(optimizationContext(true), 10);
 
-    assertFalse(result.optimizingNecessary());
-    assertPrimaryPendingInputBridge(result);
+    assertFalse(result.isPresent());
   }
 
   @Test
@@ -195,8 +239,7 @@ class TestPaimonTablePendingInputEligibility {
   void primaryKeyHashFixedTableDoesNotRequestOptimizingBeforeTrigger(@TempDir Path warehouse)
       throws Exception {
     Catalog catalog = fsCatalog(warehouse);
-    Map<String, String> options = new HashMap<>();
-    options.put(PaimonPrimaryKeyOptions.ENABLED, "true");
+    Map<String, String> options = eligibleRuntimeOptions();
     options.put("bucket", "1");
     options.put("num-sorted-run.compaction-trigger", "99");
     Identifier id = createPrimaryKeyTable(catalog, "t_pk_enabled", options);
@@ -219,8 +262,7 @@ class TestPaimonTablePendingInputEligibility {
   void primaryKeyHashFixedTableRequestsOptimizingAfterMinorTrigger(@TempDir Path warehouse)
       throws Exception {
     Catalog catalog = fsCatalog(warehouse);
-    Map<String, String> options = new HashMap<>();
-    options.put(PaimonPrimaryKeyOptions.ENABLED, "true");
+    Map<String, String> options = eligibleRuntimeOptions();
     options.put("bucket", "1");
     options.put("num-sorted-run.compaction-trigger", "99");
     Identifier id = createPrimaryKeyTable(catalog, "t_pk_minor", options);
@@ -244,9 +286,8 @@ class TestPaimonTablePendingInputEligibility {
   void primaryKeyHashDynamicTableRequestsOptimizingAfterMinorTrigger(@TempDir Path warehouse)
       throws Exception {
     Catalog catalog = fsCatalog(warehouse);
-    Map<String, String> options = new HashMap<>();
+    Map<String, String> options = eligibleRuntimeOptions();
     options.put("bucket", "-1");
-    options.put(PaimonPrimaryKeyOptions.ENABLED, "true");
     options.put("num-sorted-run.compaction-trigger", "99");
     Identifier id = createPrimaryKeyTable(catalog, "t_pk_dynamic_enabled", options);
     writeCommits(catalog.getTable(id), 2, 0);
@@ -269,8 +310,7 @@ class TestPaimonTablePendingInputEligibility {
   void primaryKeyHashTableRespectsMinorIntervalInPreCheck(@TempDir Path warehouse)
       throws Exception {
     Catalog catalog = fsCatalog(warehouse);
-    Map<String, String> options = new HashMap<>();
-    options.put(PaimonPrimaryKeyOptions.ENABLED, "true");
+    Map<String, String> options = eligibleRuntimeOptions();
     options.put("bucket", "1");
     options.put("num-sorted-run.compaction-trigger", "99");
     Identifier id = createPrimaryKeyTable(catalog, "t_pk_minor_interval", options);
@@ -302,8 +342,7 @@ class TestPaimonTablePendingInputEligibility {
   @DisplayName("primary-key HASH table rejects non-empty self-optimizing filter in pre-check")
   void primaryKeyHashTableRejectsFilterInPreCheck(@TempDir Path warehouse) throws Exception {
     Catalog catalog = fsCatalog(warehouse);
-    Map<String, String> options = new HashMap<>();
-    options.put(PaimonPrimaryKeyOptions.ENABLED, "true");
+    Map<String, String> options = eligibleRuntimeOptions();
     options.put("bucket", "1");
     options.put("num-sorted-run.compaction-trigger", "99");
     Identifier id = createPrimaryKeyTable(catalog, "t_pk_filter", options);
@@ -327,8 +366,7 @@ class TestPaimonTablePendingInputEligibility {
   @DisplayName("primary-key HASH table can request FULL optimizing after idle interval")
   void primaryKeyHashTableRequestsFullAfterIdleInterval(@TempDir Path warehouse) throws Exception {
     Catalog catalog = fsCatalog(warehouse);
-    Map<String, String> options = new HashMap<>();
-    options.put(PaimonPrimaryKeyOptions.ENABLED, "true");
+    Map<String, String> options = eligibleRuntimeOptions();
     options.put(PaimonPrimaryKeyOptions.PARTITION_IDLE_TIME, "0s");
     Identifier id = createPrimaryKeyTable(catalog, "t_pk_full", options);
     writeCommits(catalog.getTable(id), 1);
@@ -355,8 +393,7 @@ class TestPaimonTablePendingInputEligibility {
   @DisplayName("primary-key HASH table respects full interval in pre-check")
   void primaryKeyHashTableRespectsFullIntervalInPreCheck(@TempDir Path warehouse) throws Exception {
     Catalog catalog = fsCatalog(warehouse);
-    Map<String, String> options = new HashMap<>();
-    options.put(PaimonPrimaryKeyOptions.ENABLED, "true");
+    Map<String, String> options = eligibleRuntimeOptions();
     options.put(PaimonPrimaryKeyOptions.PARTITION_IDLE_TIME, "0s");
     Identifier id = createPrimaryKeyTable(catalog, "t_pk_full_interval", options);
     writeCommits(catalog.getTable(id), 1);
@@ -384,8 +421,7 @@ class TestPaimonTablePendingInputEligibility {
   @DisplayName("HASH table without primary key is not bound to optimizing queue")
   void nonPrimaryKeyHashTableIsNotOptimizingNecessaryWhenEnabled() {
     FileStoreTable table = mock(FileStoreTable.class);
-    Map<String, String> options = new HashMap<>();
-    options.put(PaimonPrimaryKeyOptions.ENABLED, "true");
+    Map<String, String> options = eligibleRuntimeOptions();
     when(table.options()).thenReturn(options);
     when(table.primaryKeys()).thenReturn(Collections.emptyList());
     when(table.bucketMode()).thenReturn(BucketMode.HASH_FIXED);
@@ -417,7 +453,7 @@ class TestPaimonTablePendingInputEligibility {
   void fixedBucketAppendOnlyTableIsNotOptimizingNecessary(@TempDir Path warehouse)
       throws Exception {
     Catalog catalog = fsCatalog(warehouse);
-    Map<String, String> options = new HashMap<>();
+    Map<String, String> options = eligibleRuntimeOptions();
     options.put("bucket", "2");
     options.put("bucket-key", "id");
     Table table = createAppendOnlyTable(catalog, "t_fixed_bucket", options);
@@ -436,7 +472,7 @@ class TestPaimonTablePendingInputEligibility {
   @DisplayName("self-optimizing disabled table does not request optimizing")
   void disabledSelfOptimizingIsNotOptimizingNecessary(@TempDir Path warehouse) throws Exception {
     Catalog catalog = fsCatalog(warehouse);
-    Table table = createAppendOnlyTable(catalog, "t_disabled", new HashMap<>());
+    Table table = createAppendOnlyTable(catalog, "t_disabled", eligibleRuntimeOptions());
     PaimonTable paimonTable = wrap(table, "t_disabled");
 
     PendingInputResult result =
@@ -488,8 +524,10 @@ class TestPaimonTablePendingInputEligibility {
     when(table.bucketMode()).thenReturn(BucketMode.POSTPONE_MODE);
     when(table.schema()).thenReturn(schema);
     when(schema.id()).thenReturn(8L);
-    when(schema.options()).thenReturn(runtimeOptions("bucket", "-2"));
-    when(table.coreOptions()).thenReturn(CoreOptions.fromMap(runtimeOptions("bucket", "-2")));
+    Map<String, String> options = eligibleRuntimeOptions("bucket", "-2");
+    when(table.options()).thenReturn(options);
+    when(schema.options()).thenReturn(options);
+    when(table.coreOptions()).thenReturn(CoreOptions.fromMap(options));
     when(table.snapshotManager()).thenReturn(snapshotManager);
 
     PendingInputResult result =
@@ -509,7 +547,7 @@ class TestPaimonTablePendingInputEligibility {
     TableSchema schema = mock(TableSchema.class);
     SnapshotManager snapshotManager = mock(SnapshotManager.class);
     Map<String, String> options =
-        runtimeOptions(
+        eligibleRuntimeOptions(
             "bucket",
             "1",
             CoreOptions.PK_CLUSTERING_OVERRIDE.key(),
@@ -517,6 +555,7 @@ class TestPaimonTablePendingInputEligibility {
             CoreOptions.CLUSTERING_COLUMNS.key(),
             "name");
     when(table.bucketMode()).thenReturn(BucketMode.HASH_FIXED);
+    when(table.options()).thenReturn(options);
     when(table.schema()).thenReturn(schema);
     when(schema.id()).thenReturn(9L);
     when(schema.options()).thenReturn(options);
@@ -537,7 +576,7 @@ class TestPaimonTablePendingInputEligibility {
   @DisplayName("analysis key uses the complete Amoro table identifier")
   void analysisKeyUsesCompleteTableIdentifier(@TempDir Path warehouse) throws Exception {
     Catalog catalog = fsCatalog(warehouse);
-    Table table = createAppendOnlyTable(catalog, "t_key", new HashMap<>());
+    Table table = createAppendOnlyTable(catalog, "t_key", eligibleRuntimeOptions());
     PaimonTable paimonTable = wrap(table, "t_key");
 
     TableAnalysisKey key =
@@ -552,12 +591,95 @@ class TestPaimonTablePendingInputEligibility {
   }
 
   @Test
+  @DisplayName("analysis key tracks missing false and true eligibility values")
+  void analysisKeyTracksOptimizingEligibility(@TempDir Path warehouse) throws Exception {
+    Catalog catalog = fsCatalog(warehouse);
+    Table table = createAppendOnlyTable(catalog, "t_eligibility_key", new HashMap<>());
+    PaimonTable eligible = wrap(table.copy(eligibleRuntimeOptions()), "t_eligibility_key");
+    PaimonTable writeOnlyDisabled =
+        wrap(
+            table.copy(eligibleRuntimeOptions(CoreOptions.WRITE_ONLY.key(), "false")),
+            "t_eligibility_key");
+    PaimonTable selfOptimizingMissing =
+        wrap(table.copy(runtimeOptions(CoreOptions.WRITE_ONLY.key(), "true")), "t_eligibility_key");
+    PaimonTable selfOptimizingDisabled =
+        wrap(
+            table.copy(
+                eligibleRuntimeOptions(
+                    PaimonOptimizingEligibility.SELF_OPTIMIZING_ENABLED, "false")),
+            "t_eligibility_key");
+
+    TableAnalysisKey eligibleKey =
+        eligible.currentAnalysisKey(optimizationContext(true)).orElseThrow(AssertionError::new);
+    TableAnalysisKey writeOnlyDisabledKey =
+        writeOnlyDisabled
+            .currentAnalysisKey(optimizationContext(true))
+            .orElseThrow(AssertionError::new);
+    TableAnalysisKey selfOptimizingMissingKey =
+        selfOptimizingMissing
+            .currentAnalysisKey(optimizationContext(true))
+            .orElseThrow(AssertionError::new);
+    TableAnalysisKey selfOptimizingDisabledKey =
+        selfOptimizingDisabled
+            .currentAnalysisKey(optimizationContext(true))
+            .orElseThrow(AssertionError::new);
+
+    assertNotEquals(eligibleKey, writeOnlyDisabledKey);
+    assertNotEquals(eligibleKey, selfOptimizingMissingKey);
+    assertNotEquals(eligibleKey, selfOptimizingDisabledKey);
+    assertNotEquals(selfOptimizingMissingKey, selfOptimizingDisabledKey);
+  }
+
+  @Test
+  @DisplayName("catalog table defaults cannot provide optimizing eligibility")
+  void catalogTableDefaultsDoNotParticipateInEligibilityAndAnalysisKey(@TempDir Path warehouse)
+      throws Exception {
+    Catalog catalog = fsCatalog(warehouse);
+    Table table = createAppendOnlyTable(catalog, "t_catalog_default", new HashMap<>());
+    TableIdentifier id = TableIdentifier.of("test_catalog", "db1", "t_catalog_default");
+    Map<String, String> catalogDefaults =
+        runtimeOptions(
+            "table." + CoreOptions.WRITE_ONLY.key(),
+            "true",
+            "table." + PaimonOptimizingEligibility.SELF_OPTIMIZING_ENABLED,
+            "true",
+            "table.catalog-only-option",
+            "catalog-value");
+    PaimonTable withoutDefault = new PaimonTable(id, table);
+    PaimonTable withDefault = new PaimonTable(id, table, catalogDefaults);
+    PaimonTable withRawEligibility =
+        new PaimonTable(id, table.copy(eligibleRuntimeOptions()), catalogDefaults);
+
+    Optional<PendingInputResult> catalogDefaultResult =
+        withDefault.evaluatePendingInput(optimizationContext(true), 10);
+    PendingInputResult rawEligibilityResult =
+        withRawEligibility
+            .evaluatePendingInput(optimizationContext(true), 10)
+            .orElseThrow(AssertionError::new);
+    TableAnalysisKey withoutDefaultKey =
+        withoutDefault
+            .currentAnalysisKey(optimizationContext(true))
+            .orElseThrow(AssertionError::new);
+    TableAnalysisKey withDefaultKey =
+        withDefault.currentAnalysisKey(optimizationContext(true)).orElseThrow(AssertionError::new);
+
+    assertFalse(catalogDefaultResult.isPresent());
+    assertTrue(rawEligibilityResult.optimizingNecessary());
+    assertFalse(withDefault.properties().containsKey(CoreOptions.WRITE_ONLY.key()));
+    assertFalse(
+        withDefault.properties().containsKey(PaimonOptimizingEligibility.SELF_OPTIMIZING_ENABLED));
+    assertEquals("catalog-value", withDefault.properties().get("catalog-only-option"));
+    assertEquals(withoutDefaultKey, withDefaultKey);
+  }
+
+  @Test
   @DisplayName("unknown FileStoreTable shape returns an explicit unsupported analysis")
   void unknownFileStoreShapeReturnsUnsupportedAnalysis() {
     FileStoreTable table = mock(FileStoreTable.class);
     TableSchema schema = mock(TableSchema.class);
     SnapshotManager snapshotManager = mock(SnapshotManager.class);
     when(table.bucketMode()).thenReturn(BucketMode.HASH_FIXED);
+    when(table.options()).thenReturn(eligibleRuntimeOptions());
     when(table.schema()).thenReturn(schema);
     when(schema.id()).thenReturn(7L);
     when(table.snapshotManager()).thenReturn(snapshotManager);
@@ -583,7 +705,7 @@ class TestPaimonTablePendingInputEligibility {
   void primaryKeyOptimizingPendingInputKeepsLegacyJsonShape(@TempDir Path warehouse)
       throws Exception {
     Catalog catalog = fsCatalog(warehouse);
-    Identifier id = createPrimaryKeyTable(catalog, "t_pk_json", new HashMap<>());
+    Identifier id = createPrimaryKeyTable(catalog, "t_pk_json", eligibleRuntimeOptions());
     writeCommits(catalog.getTable(id), 1);
     PendingInputResult result =
         wrap(catalog.getTable(id), "t_pk_json")
@@ -652,6 +774,8 @@ class TestPaimonTablePendingInputEligibility {
             .partitionKeys("pt")
             .primaryKey("id")
             .option("bucket", "-1")
+            .option(CoreOptions.WRITE_ONLY.key(), "true")
+            .option(PaimonOptimizingEligibility.SELF_OPTIMIZING_ENABLED, "true")
             .build();
     Identifier id = Identifier.create("db1", tableName);
     catalog.createTable(id, schema, true);
@@ -667,6 +791,17 @@ class TestPaimonTablePendingInputEligibility {
     for (int i = 0; i < keyValues.length; i += 2) {
       options.put(keyValues[i], keyValues[i + 1]);
     }
+    return options;
+  }
+
+  private static Map<String, String> eligibleRuntimeOptions(String... keyValues) {
+    Map<String, String> options =
+        runtimeOptions(
+            CoreOptions.WRITE_ONLY.key(),
+            "true",
+            PaimonOptimizingEligibility.SELF_OPTIMIZING_ENABLED,
+            "true");
+    options.putAll(runtimeOptions(keyValues));
     return options;
   }
 

@@ -20,6 +20,7 @@ package org.apache.amoro.formats.paimon.optimizing.plan;
 
 import org.apache.amoro.config.OptimizingConfig;
 import org.apache.amoro.formats.paimon.PaimonTable;
+import org.apache.amoro.formats.paimon.optimizing.PaimonOptimizingEligibility;
 import org.apache.amoro.formats.paimon.optimizing.health.PaimonHealthEvaluationContext;
 import org.apache.amoro.formats.paimon.optimizing.primary.PaimonBucketCompactionUnit;
 import org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeyCompactionExecutorFactory;
@@ -27,7 +28,6 @@ import org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeyCompac
 import org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeyCompactionTask;
 import org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeyOptimizingEvaluation;
 import org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeyOptimizingEvaluator;
-import org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeyOptions;
 import org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeySnapshotAnalysis;
 import org.apache.amoro.optimizing.FormatTableAnalysis;
 import org.apache.amoro.optimizing.OptimizationContext;
@@ -93,7 +93,7 @@ public class PaimonPrimaryKeyOptimizingPlanner implements TableOptimizingPlanner
         && table.bucketMode() != BucketMode.HASH_DYNAMIC) {
       return false;
     }
-    return PaimonPrimaryKeyOptions.enabled(table.options());
+    return true;
   }
 
   public PaimonPrimaryKeyOptimizingPlanner(
@@ -194,9 +194,15 @@ public class PaimonPrimaryKeyOptimizingPlanner implements TableOptimizingPlanner
     PaimonOptimizingPlanner.RuntimeInputs runtimeInputs =
         PaimonOptimizingPlanner.RuntimeInputs.capture(
             runtimeContext, optimizingConfig, lastMinorOptimizingTime, 0L, lastFullOptimizingTime);
+    OptimizingConfig effectiveConfig = runtimeInputs.optimizingConfig();
+    Map<String, String> tableProperties = paimonTable.properties();
+    if (!PaimonOptimizingEligibility.isEligible(tableProperties)
+        || (effectiveConfig != null && !effectiveConfig.isEnabled())) {
+      return cacheEmpty(false);
+    }
     PaimonHealthEvaluationContext healthContext =
         PaimonHealthEvaluationContext.capture(
-            table, paimonTable.id().toString(), runtimeInputs.healthContext());
+            table, paimonTable.id().toString(), runtimeInputs.healthContext(), tableProperties);
     PaimonPrimaryKeyOptimizingEvaluation evaluation =
         suppliedAnalysis instanceof PaimonPrimaryKeySnapshotAnalysis
                 && reusable(healthContext, (PaimonPrimaryKeySnapshotAnalysis) suppliedAnalysis)

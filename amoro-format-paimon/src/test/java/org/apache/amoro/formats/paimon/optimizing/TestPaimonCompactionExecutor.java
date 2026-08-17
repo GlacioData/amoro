@@ -288,7 +288,9 @@ public class TestPaimonCompactionExecutor {
             .column("name", DataTypes.STRING())
             .option("bucket", "-1")
             .option("target-file-size", "1 kb")
-            .option("compaction.min.file-num", "2");
+            .option("compaction.min.file-num", "2")
+            .option("write-only", "true")
+            .option(PaimonOptimizingEligibility.SELF_OPTIMIZING_ENABLED, "true");
     tableOptions.forEach(builder::option);
     catalog.createTable(id, builder.build(), true);
     Table table = catalog.getTable(id);

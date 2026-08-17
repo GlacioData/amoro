@@ -30,6 +30,12 @@ import java.util.Map;
 
 public class AmoroManagementConf {
 
+  public static final ConfigOption<String> ENV =
+      ConfigOptions.key("env")
+          .stringType()
+          .defaultValue("dev")
+          .withDescription("The deployment environment of AMS: prod, pre, or dev.");
+
   public static final ConfigOption<String> SERVER_BIND_HOST =
       ConfigOptions.key("server-bind-host")
           .stringType()
@@ -630,6 +636,8 @@ public class AmoroManagementConf {
   public static final String DB_TYPE_DERBY = "derby";
   public static final String DB_TYPE_MYSQL = "mysql";
   public static final String DB_TYPE_POSTGRES = "postgres";
+
+  static final List<String> ENV_VALUES = Arrays.asList("prod", "pre", "dev");
 
   // HA config
   public static final String HA_TYPE_ZK = "zk";
