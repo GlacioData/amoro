@@ -117,6 +117,10 @@ public abstract class StagedTaskDescriptor<I, O, S> {
     return true;
   }
 
+  public void setProperties(Map<String, String> properties) {
+    this.properties = properties;
+  }
+
   public S getSummary() {
     return summary;
   }

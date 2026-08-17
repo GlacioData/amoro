@@ -25,12 +25,15 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.apache.amoro.formats.paimon.PaimonCatalogFactory;
 import org.apache.amoro.formats.paimon.PaimonTable;
+import org.apache.amoro.formats.paimon.PaimonTableDescriptor;
 import org.apache.amoro.formats.paimon.optimizing.commit.PaimonTableCommit;
 import org.apache.amoro.formats.paimon.optimizing.plan.PaimonOptimizingPlanner;
 import org.apache.amoro.optimizing.OptimizingExecutor;
 import org.apache.amoro.optimizing.OptimizingPlanResult;
 import org.apache.amoro.table.TableIdentifier;
+import org.apache.amoro.table.descriptor.OptimizingProcessInfo;
 import org.apache.amoro.utils.SerializationUtil;
+import org.apache.commons.lang3.tuple.Pair;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.paimon.Snapshot;
 import org.apache.paimon.catalog.Catalog;
@@ -164,7 +167,7 @@ public class TestPaimonCompactionExecutor {
   }
 
   @Test
-  @DisplayName("End-to-end: Planner → Executor → Commit reduces file count and preserves rows")
+  @DisplayName("End-to-end: committed compaction remains visible after sparse append history")
   void testEndToEndCompaction(@TempDir Path warehouse) throws Exception {
     // 1) FileSystem Paimon catalog + tiny append-only table with 5 small commits.
     Map<String, String> props = new HashMap<>();
@@ -209,9 +212,28 @@ public class TestPaimonCompactionExecutor {
         ((AppendOnlyFileStoreTable) catalog.getTable(id)).snapshotManager().latestSnapshot();
     assertEquals(snapshotBeforeExecute + 1, latestSnapshot.id());
     assertEquals(Snapshot.CommitKind.COMPACT, latestSnapshot.commitKind());
+    long compactSnapshotId = latestSnapshot.id();
 
     long filesAfter = countDataFiles((AppendOnlyFileStoreTable) catalog.getTable(id));
     assertTrue(filesAfter < filesBefore, "After compaction file count must drop");
+
+    // Push the COMPACT snapshot outside a single 25-snapshot raw window. The dashboard query must
+    // keep scanning backwards and return it instead of showing an unreachable empty first page.
+    Table appendTable = catalog.getTable(id);
+    for (int i = 0; i < 26; i++) {
+      writeOne(appendTable, 100 + i, "history-" + i);
+    }
+    PaimonTable paimonTable =
+        new PaimonTable(
+            TableIdentifier.of("test_catalog", id.getDatabaseName(), id.getObjectName()),
+            catalog.getTable(id));
+    Pair<List<OptimizingProcessInfo>, Integer> history =
+        new PaimonTableDescriptor()
+            .getOptimizingProcessesInfo(paimonTable, null, null, 25, 0, null);
+
+    assertEquals(1, history.getRight(), "real snapshot history contains one compaction");
+    assertEquals(1, history.getLeft().size());
+    assertEquals(Long.toString(compactSnapshotId), history.getLeft().get(0).getProcessId());
   }
 
   @Test

@@ -182,7 +182,7 @@ const defaultPropertiesMap = {
   hadoop: ['warehouse'],
   filesystem: ['warehouse'],
   custom: ['catalog-impl'],
-  glue: ['warehouse', 'lock-impl', 'lock.table'],
+  glue: ['warehouse'],
   rest: ['uri'],
   PAIMON: ['warehouse'],
 }
