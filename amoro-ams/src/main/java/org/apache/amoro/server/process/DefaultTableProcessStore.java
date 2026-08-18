@@ -406,6 +406,17 @@ public class DefaultTableProcessStore extends PersistentBase implements TablePro
    * @param message fail or info message
    * @param summary summary map
    */
+  private void updateTableProcessStatus(ProcessStatus status, String message) {
+    updateTableProcessStatus(status, message, null);
+  }
+
+  /**
+   * Update status with message and summary, and persist them in one transaction.
+   *
+   * @param status new status
+   * @param message fail or info message
+   * @param summary terminal summary, or null when the transition does not update summary
+   */
   private void updateTableProcessStatus(
       ProcessStatus status, String message, Map<String, String> summary) {
     switch (status) {
@@ -415,6 +426,12 @@ public class DefaultTableProcessStore extends PersistentBase implements TablePro
         begin().updateTableProcessStatus(status).commit();
         break;
       case SUCCESS:
+        begin()
+            .updateTableProcessStatus(status)
+            .updateFinishTime(System.currentTimeMillis())
+            .updateSummary(summary)
+            .commit();
+        break;
       case CANCELED:
       case CLOSED:
       case KILLED:

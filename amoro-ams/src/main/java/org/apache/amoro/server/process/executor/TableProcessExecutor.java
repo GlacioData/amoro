@@ -32,6 +32,8 @@ import org.slf4j.LoggerFactory;
 
 import java.io.PrintWriter;
 import java.io.StringWriter;
+import java.util.HashMap;
+import java.util.Map;
 
 /**
  * Runnable executor that submits and tracks a {@link TableProcess} on a given {@link
@@ -41,6 +43,7 @@ public class TableProcessExecutor extends PersistentBase implements Runnable {
   private static final Logger LOG = LoggerFactory.getLogger(TableProcessExecutor.class);
 
   private static final long DEFAULT_POLL_INTERVAL_MS = 5000L;
+  private static final String TRACK_URI_SUMMARY_KEY = "trackUri";
   public ExecuteEngine executeEngine;
   protected TableProcess tableProcess;
   private final TableProcessStore store;
@@ -77,6 +80,7 @@ public class TableProcessExecutor extends PersistentBase implements Runnable {
     boolean submittedInCurrentRun = false;
     ProcessStatus status;
     String message = "";
+    String latestTrackUri = "";
     ProcessStatusInfo statusInfo = ProcessStatusInfo.of(ProcessStatus.UNKNOWN);
 
     if (isTableProcessCanceling(store.getStatus())) {
@@ -115,6 +119,7 @@ public class TableProcessExecutor extends PersistentBase implements Runnable {
 
       statusInfo = executeEngine.getStatusInfo(externalProcessIdentifier);
       status = statusInfo.getStatus();
+      latestTrackUri = latestTrackUri(latestTrackUri, statusInfo);
 
       while (isTableProcessExecuting(status)) {
         if (isTableProcessCanceling(store.getStatus())) {
@@ -131,6 +136,7 @@ public class TableProcessExecutor extends PersistentBase implements Runnable {
         }
         statusInfo = executeEngine.getStatusInfo(externalProcessIdentifier);
         status = statusInfo.getStatus();
+        latestTrackUri = latestTrackUri(latestTrackUri, statusInfo);
         persistRunningStatusIfNecessary(status, externalProcessIdentifier);
       }
       message = statusInfo.getMessage();
@@ -173,21 +179,23 @@ public class TableProcessExecutor extends PersistentBase implements Runnable {
           tableProcess.getProcessParameters(),
           tableProcess.getSummary());
     } else if (status == ProcessStatus.FAILED) {
+      Map<String, String> terminalSummary = buildTerminalSummary(latestTrackUri);
       store.tryTransitState(
           status,
           ProcessEvent.COMPLETE_FAILED,
           store.getExternalProcessIdentifier(),
           Strings.isNullOrEmpty(message) ? "Unknown failure." : message,
           tableProcess.getProcessParameters(),
-          tableProcess.getSummary());
+          terminalSummary);
     } else if (status == ProcessStatus.SUCCESS) {
+      Map<String, String> terminalSummary = buildTerminalSummary(latestTrackUri);
       store.tryTransitState(
           status,
           ProcessEvent.COMPLETE_SUCCESS,
           store.getExternalProcessIdentifier(),
           "Complete Success",
           tableProcess.getProcessParameters(),
-          tableProcess.getSummary());
+          terminalSummary);
     } else {
       LOG.warn("Un expected terminal status: {} for process: {}.", status, store.getProcessId());
     }
@@ -199,6 +207,33 @@ public class TableProcessExecutor extends PersistentBase implements Runnable {
     }
 
     runFinishedCallback();
+  }
+
+  private String latestTrackUri(String currentTrackUri, ProcessStatusInfo statusInfo) {
+    return Strings.isNullOrEmpty(statusInfo.getTrackUri())
+        ? currentTrackUri
+        : statusInfo.getTrackUri();
+  }
+
+  private Map<String, String> buildTerminalSummary(String latestTrackUri) {
+    Map<String, String> persistedSummary = store.getSummary();
+    Map<String, String> terminalSummary = new HashMap<>();
+    if (persistedSummary != null) {
+      terminalSummary.putAll(persistedSummary);
+    }
+    Map<String, String> processSummary = tableProcess.getSummary();
+    if (processSummary != null) {
+      terminalSummary.putAll(processSummary);
+    }
+
+    if (!Strings.isNullOrEmpty(latestTrackUri)) {
+      terminalSummary.put(TRACK_URI_SUMMARY_KEY, latestTrackUri);
+    } else if (Strings.isNullOrEmpty(terminalSummary.get(TRACK_URI_SUMMARY_KEY))
+        && persistedSummary != null
+        && !Strings.isNullOrEmpty(persistedSummary.get(TRACK_URI_SUMMARY_KEY))) {
+      terminalSummary.put(TRACK_URI_SUMMARY_KEY, persistedSummary.get(TRACK_URI_SUMMARY_KEY));
+    }
+    return terminalSummary;
   }
 
   /**

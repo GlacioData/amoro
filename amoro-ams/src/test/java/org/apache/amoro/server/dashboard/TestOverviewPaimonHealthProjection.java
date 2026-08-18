@@ -54,7 +54,7 @@ class TestOverviewPaimonHealthProjection {
             .toTopTableItem(
                 ServerTableIdentifier.of(17L, "catalog", "database", "table", TableFormat.PAIMON),
                 runtimeMeta(91, 7, 700L))
-            .orElseThrow();
+            .get();
 
     assertEquals(72, item.getHealthScore());
     assertEquals(7, item.getFileCount());
@@ -74,7 +74,7 @@ class TestOverviewPaimonHealthProjection {
             .toTopTableItem(
                 ServerTableIdentifier.of(17L, "catalog", "database", "table", TableFormat.PAIMON),
                 runtimeMeta(91, 7, 700L))
-            .orElseThrow();
+            .get();
 
     assertEquals(-1, item.getHealthScore());
   }
@@ -90,7 +90,7 @@ class TestOverviewPaimonHealthProjection {
                 ServerTableIdentifier.of(
                     18L, "catalog", "database", "iceberg_table", TableFormat.ICEBERG),
                 runtimeMeta(91, 7, 700L))
-            .orElseThrow();
+            .get();
 
     assertEquals(91, item.getHealthScore());
   }

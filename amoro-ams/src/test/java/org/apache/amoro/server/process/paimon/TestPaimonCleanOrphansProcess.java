@@ -64,7 +64,7 @@ public class TestPaimonCleanOrphansProcess {
     Assert.assertEquals("AMORO", params.get("sourceTag"));
     Assert.assertEquals("354", params.get("sparkVersion"));
     Assert.assertEquals(
-        "{\"sparkVersion\":\"354\",\"paimon.version\":\"1.3\"}", params.get("conf"));
+        "{\"sparkVersion\":\"354\",\"spark.custom.paimon.version\":\"1.3\"}", params.get("conf"));
   }
 
   @Test
