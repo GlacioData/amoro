@@ -121,6 +121,19 @@ function handleFilterChange() {
   refreshProcesses()
 }
 
+function isHttpTrackUri(value: unknown) {
+  if (typeof value !== 'string' || !value)
+    return false
+
+  try {
+    const uri = new URL(value)
+    return uri.protocol === 'http:' || uri.protocol === 'https:'
+  }
+  catch {
+    return false
+  }
+}
+
 onMounted(() => {
   initFilters()
   refreshProcesses()
@@ -185,7 +198,15 @@ onMounted(() => {
             <div class="kv-list">
               <div v-for="(value, key) in record.summary" :key="key" class="kv-row">
                 <span class="kv-key">{{ key }}</span>
-                <span class="kv-value">{{ value }}</span>
+                <span class="kv-value">
+                  <a
+                    v-if="key === 'trackUri' && isHttpTrackUri(value)" :href="value"
+                    target="_blank" rel="noopener noreferrer"
+                  >{{ value }}</a>
+                  <template v-else>
+                    {{ value }}
+                  </template>
+                </span>
               </div>
             </div>
           </template>

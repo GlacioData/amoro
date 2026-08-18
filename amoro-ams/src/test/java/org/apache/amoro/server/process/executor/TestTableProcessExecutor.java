@@ -38,6 +38,7 @@ import org.junit.Test;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -252,6 +253,94 @@ public class TestTableProcessExecutor {
         store.getTransitions());
   }
 
+  @Test
+  public void testSuccessPersistsTrackUriInSummary() {
+    String trackUri = "http://spark.example.com/proxy/application_success/";
+    InMemoryTableProcessStore store = new InMemoryTableProcessStore();
+    SequencedExecuteEngine engine =
+        new SequencedExecuteEngine(
+            ProcessStatusInfo.of(ProcessStatus.SUCCESS, "", trackUri), Collections.emptyList());
+
+    new TableProcessExecutor(new TestingTableProcess(), store, engine).run();
+
+    Assert.assertEquals(ProcessStatus.SUCCESS, store.getStatus());
+    Assert.assertEquals(trackUri, store.getSummary().get("trackUri"));
+  }
+
+  @Test
+  public void testFailurePersistsTrackUriInSummary() {
+    String trackUri = "https://spark.example.com/proxy/application_failed/";
+    InMemoryTableProcessStore store = new InMemoryTableProcessStore();
+    SequencedExecuteEngine engine =
+        new SequencedExecuteEngine(
+            ProcessStatusInfo.of(ProcessStatus.FAILED, "remote failure", trackUri),
+            Collections.emptyList());
+
+    new TableProcessExecutor(new TestingTableProcess(), store, engine).run();
+
+    Assert.assertEquals(ProcessStatus.FAILED, store.getStatus());
+    Assert.assertEquals(trackUri, store.getSummary().get("trackUri"));
+  }
+
+  @Test
+  public void testIntermediateTrackUriIsRetainedWhenTerminalResponseOmitsIt() {
+    String trackUri = "http://spark.example.com/proxy/application_running/";
+    InMemoryTableProcessStore store = new InMemoryTableProcessStore();
+    SequencedExecuteEngine engine =
+        new SequencedExecuteEngine(
+            ProcessStatusInfo.of(ProcessStatus.RUNNING, "", trackUri),
+            Collections.singletonList(ProcessStatusInfo.of(ProcessStatus.SUCCESS, "")));
+
+    new TableProcessExecutor(new TestingTableProcess(), store, engine, 1L).run();
+
+    Assert.assertEquals(ProcessStatus.SUCCESS, store.getStatus());
+    Assert.assertEquals(trackUri, store.getSummary().get("trackUri"));
+  }
+
+  @Test
+  public void testCanceledProcessDoesNotPersistNewTrackUri() {
+    InMemoryTableProcessStore store = new InMemoryTableProcessStore();
+    SequencedExecuteEngine engine =
+        new SequencedExecuteEngine(
+            ProcessStatusInfo.of(
+                ProcessStatus.CANCELED, "", "http://spark.example.com/proxy/application_canceled/"),
+            Collections.emptyList());
+
+    new TableProcessExecutor(new TestingTableProcess(), store, engine).run();
+
+    Assert.assertEquals(ProcessStatus.CANCELED, store.getStatus());
+    Assert.assertFalse(store.getSummary().containsKey("trackUri"));
+  }
+
+  @Test
+  public void testNewTrackUriOverridesPersistedTrackUriAfterRetry() {
+    String oldTrackUri = "http://spark.example.com/proxy/application_old/";
+    String newTrackUri = "http://spark.example.com/proxy/application_new/";
+    InMemoryTableProcessStore store =
+        new InMemoryTableProcessStore(Collections.singletonMap("trackUri", oldTrackUri));
+    SequencedExecuteEngine engine =
+        new SequencedExecuteEngine(
+            ProcessStatusInfo.of(ProcessStatus.SUCCESS, "", newTrackUri), Collections.emptyList());
+
+    new TableProcessExecutor(new TestingTableProcess(), store, engine).run();
+
+    Assert.assertEquals(newTrackUri, store.getSummary().get("trackUri"));
+  }
+
+  @Test
+  public void testPersistedTrackUriIsRetainedWhenRetryHasNoNewTrackUri() {
+    String oldTrackUri = "http://spark.example.com/proxy/application_old/";
+    InMemoryTableProcessStore store =
+        new InMemoryTableProcessStore(Collections.singletonMap("trackUri", oldTrackUri));
+    SequencedExecuteEngine engine =
+        new SequencedExecuteEngine(
+            ProcessStatusInfo.of(ProcessStatus.SUCCESS, ""), Collections.emptyList());
+
+    new TableProcessExecutor(new TestingTableProcess(), store, engine).run();
+
+    Assert.assertEquals(oldTrackUri, store.getSummary().get("trackUri"));
+  }
+
   private static class SequencedExecuteEngine implements ExecuteEngine {
 
     private final ProcessStatusInfo firstStatus;
@@ -401,10 +490,15 @@ public class TestTableProcessExecutor {
     private String externalProcessIdentifier = "";
     private String failMessage = "";
     private long finishTime = 0L;
+    private Map<String, String> summary = new HashMap<>();
     private final List<String> events = new ArrayList<>();
     private final List<ProcessStatus> transitions = new ArrayList<>();
 
     private InMemoryTableProcessStore() {}
+
+    private InMemoryTableProcessStore(Map<String, String> summary) {
+      this.summary = new HashMap<>(summary);
+    }
 
     private InMemoryTableProcessStore(ProcessStatus status, String externalProcessIdentifier) {
       this.status = status;
@@ -473,7 +567,7 @@ public class TestTableProcessExecutor {
 
     @Override
     public Map<String, String> getSummary() {
-      return Collections.emptyMap();
+      return Collections.unmodifiableMap(summary);
     }
 
     @Override
@@ -502,6 +596,12 @@ public class TestTableProcessExecutor {
       transitions.add(newStatus);
       this.status = newStatus;
       this.externalProcessIdentifier = externalProcessIdentifier;
+      if (summary != null
+          && (processEvent == ProcessEvent.COMPLETE_SUCCESS
+              || processEvent == ProcessEvent.COMPLETE_FAILED
+              || processEvent == ProcessEvent.RETRY_REQUESTED)) {
+        this.summary = new HashMap<>(summary);
+      }
       if (processEvent == ProcessEvent.COMPLETE_FAILED) {
         this.failMessage = reason;
         this.finishTime = System.currentTimeMillis();

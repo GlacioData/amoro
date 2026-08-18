@@ -91,6 +91,14 @@ public class TestPaimonExpireSnapshotProcess {
   }
 
   @Test
+  public void testTriggerClampsRetainMaxBelowMinimum() throws IOException {
+    Optional<PaimonExpireSnapshotProcess> process = triggerWithSnapshotCount(10, "5");
+
+    Assert.assertFalse(process.isPresent());
+    Assert.assertTrue(triggerWithSnapshotCount(11, "5").isPresent());
+  }
+
+  @Test
   public void testTriggerSkipsWhenOriginalTableIsNotFileStoreTable() {
     TableRuntime runtime = runtimeWithCleanupState();
     AmoroTable<?> amoroTable = Mockito.mock(AmoroTable.class);
@@ -158,7 +166,7 @@ public class TestPaimonExpireSnapshotProcess {
     Assert.assertEquals("sl_real_time_merger", params.get("logUser"));
     Assert.assertEquals("AMORO", params.get("sourceTag"));
     Assert.assertEquals(
-        "{\"sparkVersion\":\"354\",\"paimon.version\":\"1.3\"}", params.get("conf"));
+        "{\"sparkVersion\":\"354\",\"spark.custom.paimon.version\":\"1.3\"}", params.get("conf"));
   }
 
   @Test
@@ -209,6 +217,62 @@ public class TestPaimonExpireSnapshotProcess {
             "options => 'snapshot.expire.limit=500,snapshot.expire.execution-mode=async,"
                 + "snapshot.ignore-empty-commit=true,snapshot.clean-empty-directories=true'"));
     Assert.assertFalse(sql.contains("max_deletes =>"));
+  }
+
+  @Test
+  public void testBuildExpireSnapshotsSqlClampsRetainMaxBelowMinimum() {
+    TableRuntime runtime = Mockito.mock(TableRuntime.class);
+    Mockito.when(runtime.getTableIdentifier())
+        .thenReturn(ServerTableIdentifier.of("catalog", "default", "orders", TableFormat.PAIMON));
+
+    Map<String, String> tableConfig = new HashMap<>();
+    tableConfig.put("snapshot.num-retained.max", "5");
+    Mockito.when(runtime.getTableConfig()).thenReturn(tableConfig);
+
+    PaimonExpireSnapshotProcess process =
+        new PaimonExpireSnapshotProcess(runtime, openedEngine(), 354);
+
+    Assert.assertTrue(process.buildExpireSnapshotsSql().contains("retain_max => 10"));
+  }
+
+  @Test
+  public void testBuildExpireSnapshotsSqlUsesMinimumForInvalidOrMissingRetainMax() {
+    TableRuntime runtime = Mockito.mock(TableRuntime.class);
+    Mockito.when(runtime.getTableIdentifier())
+        .thenReturn(ServerTableIdentifier.of("catalog", "default", "orders", TableFormat.PAIMON));
+
+    Map<String, String> tableConfig = new HashMap<>();
+    Mockito.when(runtime.getTableConfig()).thenReturn(tableConfig);
+
+    PaimonExpireSnapshotProcess process =
+        new PaimonExpireSnapshotProcess(runtime, openedEngine(), 354);
+
+    for (String retainMax : new String[] {null, "", "0", "-1", "invalid"}) {
+      if (retainMax == null) {
+        tableConfig.remove("snapshot.num-retained.max");
+      } else {
+        tableConfig.put("snapshot.num-retained.max", retainMax);
+      }
+      Assert.assertTrue(
+          "retain_max should use minimum for value " + retainMax,
+          process.buildExpireSnapshotsSql().contains("retain_max => 10"));
+    }
+  }
+
+  @Test
+  public void testBuildExpireSnapshotsSqlPreservesRetainMaxAboveMinimum() {
+    TableRuntime runtime = Mockito.mock(TableRuntime.class);
+    Mockito.when(runtime.getTableIdentifier())
+        .thenReturn(ServerTableIdentifier.of("catalog", "default", "orders", TableFormat.PAIMON));
+
+    Map<String, String> tableConfig = new HashMap<>();
+    tableConfig.put("snapshot.num-retained.max", "15");
+    Mockito.when(runtime.getTableConfig()).thenReturn(tableConfig);
+
+    PaimonExpireSnapshotProcess process =
+        new PaimonExpireSnapshotProcess(runtime, openedEngine(), 354);
+
+    Assert.assertTrue(process.buildExpireSnapshotsSql().contains("retain_max => 15"));
   }
 
   @Test

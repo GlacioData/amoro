@@ -25,18 +25,24 @@ public class ProcessStatusInfo {
 
   private final ProcessStatus status;
   private final String message;
+  private final String trackUri;
 
-  private ProcessStatusInfo(ProcessStatus status, String message) {
+  private ProcessStatusInfo(ProcessStatus status, String message, String trackUri) {
     this.status = Objects.requireNonNull(status, "status");
     this.message = message == null ? "" : message;
+    this.trackUri = trackUri == null ? "" : trackUri;
   }
 
   public static ProcessStatusInfo of(ProcessStatus status) {
-    return new ProcessStatusInfo(status, "");
+    return new ProcessStatusInfo(status, "", "");
   }
 
   public static ProcessStatusInfo of(ProcessStatus status, String message) {
-    return new ProcessStatusInfo(status, message);
+    return new ProcessStatusInfo(status, message, "");
+  }
+
+  public static ProcessStatusInfo of(ProcessStatus status, String message, String trackUri) {
+    return new ProcessStatusInfo(status, message, trackUri);
   }
 
   public ProcessStatus getStatus() {
@@ -45,5 +51,9 @@ public class ProcessStatusInfo {
 
   public String getMessage() {
     return message;
+  }
+
+  public String getTrackUri() {
+    return trackUri;
   }
 }

@@ -183,15 +183,40 @@ public class TestHttpRemoteSparkStandAloneSubmit {
   }
 
   @Test
-  public void testGetStatusInfoWithFailedErrMsg() {
-    String errMsg = "org.apache.spark.sql.catalyst.parser.ParseException: mismatched input 'CALL'";
+  public void testGetStatusInfoWithSucceededWebUi() {
+    String webUi = "http://spark.example.com/proxy/application_001/";
     mockServer.createContext(
         "/spark/job/state",
         exchange -> {
           String response =
               String.format(
-                  "{\"code\":0,\"msg\":\"操作成功\",\"data\":{\"qid\":\"123\",\"status\":\"FAILED\",\"errMsg\":\"%s\"}}",
-                  errMsg.replace("\\", "\\\\").replace("\"", "\\\""));
+                  "{\"code\":0,\"msg\":\"操作成功\",\"data\":{\"qid\":\"123\",\"status\":\"SUCCEEDED\",\"webUi\":\"%s\"}}",
+                  webUi);
+          byte[] bytes = response.getBytes(StandardCharsets.UTF_8);
+          exchange.getResponseHeaders().set("Content-Type", "application/json");
+          exchange.sendResponseHeaders(200, bytes.length);
+          try (OutputStream os = exchange.getResponseBody()) {
+            os.write(bytes);
+          }
+        });
+
+    ProcessStatusInfo statusInfo = engine.getStatusInfo("123");
+
+    Assert.assertEquals(ProcessStatus.SUCCESS, statusInfo.getStatus());
+    Assert.assertEquals(webUi, statusInfo.getTrackUri());
+  }
+
+  @Test
+  public void testGetStatusInfoWithFailedErrMsg() {
+    String errMsg = "org.apache.spark.sql.catalyst.parser.ParseException: mismatched input 'CALL'";
+    String webUi = "https://spark.example.com/proxy/application_002/";
+    mockServer.createContext(
+        "/spark/job/state",
+        exchange -> {
+          String response =
+              String.format(
+                  "{\"code\":0,\"msg\":\"操作成功\",\"data\":{\"qid\":\"123\",\"status\":\"FAILED\",\"errMsg\":\"%s\",\"webUi\":\"%s\"}}",
+                  errMsg.replace("\\", "\\\\").replace("\"", "\\\""), webUi);
           byte[] bytes = response.getBytes(StandardCharsets.UTF_8);
           exchange.getResponseHeaders().set("Content-Type", "application/json");
           exchange.sendResponseHeaders(200, bytes.length);
@@ -204,6 +229,67 @@ public class TestHttpRemoteSparkStandAloneSubmit {
 
     Assert.assertEquals(ProcessStatus.FAILED, statusInfo.getStatus());
     Assert.assertEquals(errMsg, statusInfo.getMessage());
+    Assert.assertEquals(webUi, statusInfo.getTrackUri());
+  }
+
+  @Test
+  public void testGetStatusInfoWithoutWebUiReturnsEmptyTrackUri() {
+    mockServer.createContext(
+        "/spark/job/state",
+        exchange -> {
+          String response =
+              "{\"code\":0,\"msg\":\"操作成功\",\"data\":{\"qid\":\"123\",\"status\":\"RUNNING\"}}";
+          byte[] bytes = response.getBytes(StandardCharsets.UTF_8);
+          exchange.getResponseHeaders().set("Content-Type", "application/json");
+          exchange.sendResponseHeaders(200, bytes.length);
+          try (OutputStream os = exchange.getResponseBody()) {
+            os.write(bytes);
+          }
+        });
+
+    ProcessStatusInfo statusInfo = engine.getStatusInfo("123");
+
+    Assert.assertEquals("", statusInfo.getTrackUri());
+  }
+
+  @Test
+  public void testGetStatusInfoWithNullWebUiReturnsEmptyTrackUri() {
+    mockServer.createContext(
+        "/spark/job/state",
+        exchange -> {
+          String response =
+              "{\"code\":0,\"msg\":\"操作成功\",\"data\":{\"qid\":\"123\",\"status\":\"RUNNING\",\"webUi\":null}}";
+          byte[] bytes = response.getBytes(StandardCharsets.UTF_8);
+          exchange.getResponseHeaders().set("Content-Type", "application/json");
+          exchange.sendResponseHeaders(200, bytes.length);
+          try (OutputStream os = exchange.getResponseBody()) {
+            os.write(bytes);
+          }
+        });
+
+    ProcessStatusInfo statusInfo = engine.getStatusInfo("123");
+
+    Assert.assertEquals("", statusInfo.getTrackUri());
+  }
+
+  @Test
+  public void testGetStatusInfoWithNonStringWebUiReturnsEmptyTrackUri() {
+    mockServer.createContext(
+        "/spark/job/state",
+        exchange -> {
+          String response =
+              "{\"code\":0,\"msg\":\"操作成功\",\"data\":{\"qid\":\"123\",\"status\":\"RUNNING\",\"webUi\":123}}";
+          byte[] bytes = response.getBytes(StandardCharsets.UTF_8);
+          exchange.getResponseHeaders().set("Content-Type", "application/json");
+          exchange.sendResponseHeaders(200, bytes.length);
+          try (OutputStream os = exchange.getResponseBody()) {
+            os.write(bytes);
+          }
+        });
+
+    ProcessStatusInfo statusInfo = engine.getStatusInfo("123");
+
+    Assert.assertEquals("", statusInfo.getTrackUri());
   }
 
   @Test
@@ -270,7 +356,12 @@ public class TestHttpRemoteSparkStandAloneSubmit {
     com.fasterxml.jackson.databind.JsonNode root = om.readTree(json);
 
     Assert.assertEquals("sql", root.get("jobType").asText());
-    Assert.assertEquals("SELECT 1", root.get("hql").asText());
+    Assert.assertEquals(
+        "SET spark.syntax.extension=true; SET spark.custom.paimon.version=1.3; "
+            + "SET spark.dynamicAllocation.enabled=true; SET spark.dynamicAllocation.minExecutors=0; "
+            + "SET spark.dynamicAllocation.initialExecutors=0; SET spark.dynamicAllocation.maxExecutors=2; "
+            + "SET spark.executor.instances=0;\nSELECT 1",
+        root.get("hql").asText());
     Assert.assertEquals("sl_hiido_developer", root.get("curUser").asText());
     Assert.assertEquals("sl_hiido_developer", root.get("logUser").asText());
     Assert.assertEquals("sl_hiido_developer", root.get("group").asText());
@@ -278,6 +369,54 @@ public class TestHttpRemoteSparkStandAloneSubmit {
     Assert.assertEquals(321, root.get("sparkVersion").asInt());
     Assert.assertEquals("SCHEDULE", root.get("sourceTag").asText());
     Assert.assertEquals("{\"sparkVersion\":\"321\"}", root.get("conf").asText());
+  }
+
+  @Test
+  public void testBuildSubmitRequestJsonSpark354AddsSpark354Switch() throws Exception {
+    Map<String, String> params = new HashMap<>();
+    params.put("hql", "SELECT 1");
+    params.put("sparkVersion", "354");
+
+    String json = engine.buildSubmitRequestJson(createTestProcess(params));
+
+    com.fasterxml.jackson.databind.ObjectMapper om =
+        new com.fasterxml.jackson.databind.ObjectMapper();
+    com.fasterxml.jackson.databind.JsonNode root = om.readTree(json);
+
+    Assert.assertEquals(354, root.get("sparkVersion").asInt());
+    Assert.assertEquals(
+        "SET spark.syntax.extension=true; SET spark.custom.spark354.enable=true; "
+            + "SET spark.custom.paimon.version=1.3; SET spark.dynamicAllocation.enabled=true; "
+            + "SET spark.dynamicAllocation.minExecutors=0; "
+            + "SET spark.dynamicAllocation.initialExecutors=0; "
+            + "SET spark.dynamicAllocation.maxExecutors=2; SET spark.executor.instances=0;\nSELECT 1",
+        root.get("hql").asText());
+  }
+
+  @Test
+  public void testBuildSubmitRequestJsonDefaultSpark354AddsSpark354Switch() throws Exception {
+    HttpRemoteSparkStandAloneSubmit default354Engine = new HttpRemoteSparkStandAloneSubmit();
+    default354Engine.open(Collections.singletonMap("default-spark-version", "354"));
+    try {
+      String json =
+          default354Engine.buildSubmitRequestJson(
+              createTestProcess(Collections.singletonMap("hql", "SELECT 1")));
+
+      com.fasterxml.jackson.databind.ObjectMapper om =
+          new com.fasterxml.jackson.databind.ObjectMapper();
+      com.fasterxml.jackson.databind.JsonNode root = om.readTree(json);
+
+      Assert.assertEquals(354, root.get("sparkVersion").asInt());
+      Assert.assertEquals(
+          "SET spark.syntax.extension=true; SET spark.custom.spark354.enable=true; "
+              + "SET spark.custom.paimon.version=1.3; SET spark.dynamicAllocation.enabled=true; "
+              + "SET spark.dynamicAllocation.minExecutors=0; "
+              + "SET spark.dynamicAllocation.initialExecutors=0; "
+              + "SET spark.dynamicAllocation.maxExecutors=2; SET spark.executor.instances=0;\nSELECT 1",
+          root.get("hql").asText());
+    } finally {
+      default354Engine.close();
+    }
   }
 
   @Test
@@ -293,7 +432,12 @@ public class TestHttpRemoteSparkStandAloneSubmit {
     com.fasterxml.jackson.databind.JsonNode root = om.readTree(json);
 
     Assert.assertEquals("sql", root.get("jobType").asText());
-    Assert.assertEquals("SHOW TABLES", root.get("hql").asText());
+    Assert.assertEquals(
+        "SET spark.syntax.extension=true; SET spark.custom.paimon.version=1.3; "
+            + "SET spark.dynamicAllocation.enabled=true; SET spark.dynamicAllocation.minExecutors=0; "
+            + "SET spark.dynamicAllocation.initialExecutors=0; SET spark.dynamicAllocation.maxExecutors=2; "
+            + "SET spark.executor.instances=0;\nSHOW TABLES",
+        root.get("hql").asText());
     // Defaults from engine.open() config
     Assert.assertEquals("test-user", root.get("curUser").asText());
     Assert.assertEquals("schedule", root.get("sourceTag").asText());
@@ -311,7 +455,15 @@ public class TestHttpRemoteSparkStandAloneSubmit {
         exchange -> {
           // Read and verify the request body contains expected fields
           String body = readBody(exchange.getRequestBody());
-          Assert.assertTrue("Request should contain hql", body.contains("\"hql\":\"SELECT 1\""));
+          com.fasterxml.jackson.databind.JsonNode root =
+              new com.fasterxml.jackson.databind.ObjectMapper().readTree(body);
+          Assert.assertEquals(
+              "SET spark.syntax.extension=true; SET spark.custom.paimon.version=1.3; "
+                  + "SET spark.dynamicAllocation.enabled=true; SET spark.dynamicAllocation.minExecutors=0; "
+                  + "SET spark.dynamicAllocation.initialExecutors=0; "
+                  + "SET spark.dynamicAllocation.maxExecutors=2; SET spark.executor.instances=0;\nSELECT 1",
+              root.get("hql").asText());
+          Assert.assertEquals("{\"sparkVersion\":\"321\"}", root.get("conf").asText());
           Assert.assertTrue(
               "Request should contain curUser",
               body.contains("\"curUser\":\"sl_hiido_developer\""));

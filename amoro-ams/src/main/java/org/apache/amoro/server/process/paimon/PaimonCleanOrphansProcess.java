@@ -165,7 +165,9 @@ public class PaimonCleanOrphansProcess extends TableProcess {
     params.put("userId", "470");
     params.put("sparkVersion", String.valueOf(sparkVersion));
     params.put("sourceTag", "AMORO");
-    params.put("conf", "{\"sparkVersion\":\"" + sparkVersion + "\",\"paimon.version\":\"1.3\"}");
+    params.put(
+        "conf",
+        "{\"sparkVersion\":\"" + sparkVersion + "\",\"spark.custom.paimon.version\":\"1.3\"}");
     return params;
   }
 

@@ -53,7 +53,8 @@ public class PaimonExpireSnapshotProcess extends TableProcess {
 
   private static final Duration DEFAULT_SNAPSHOT_TIME_RETAINED =
       CoreOptions.SNAPSHOT_TIME_RETAINED.defaultValue();
-  private static final int DEFAULT_SNAPSHOT_NUM_RETAINED_MAX = 10;
+  private static final int MIN_SNAPSHOT_NUM_RETAINED_MAX = 10;
+  private static final int DEFAULT_SNAPSHOT_NUM_RETAINED_MAX = MIN_SNAPSHOT_NUM_RETAINED_MAX;
 
   private static final String DEFAULT_SNAPSHOT_EXPIRE_LIMIT = "500";
   private static final String DEFAULT_SNAPSHOT_EXPIRE_EXECUTION_MODE = "async";
@@ -143,7 +144,9 @@ public class PaimonExpireSnapshotProcess extends TableProcess {
     params.put("userId", "470");
     params.put("sparkVersion", String.valueOf(sparkVersion));
     params.put("sourceTag", "AMORO");
-    params.put("conf", "{\"sparkVersion\":\"" + sparkVersion + "\",\"paimon.version\":\"1.3\"}");
+    params.put(
+        "conf",
+        "{\"sparkVersion\":\"" + sparkVersion + "\",\"spark.custom.paimon.version\":\"1.3\"}");
     return params;
   }
 
@@ -252,8 +255,9 @@ public class PaimonExpireSnapshotProcess extends TableProcess {
     if (value == null || value.isEmpty()) {
       return DEFAULT_SNAPSHOT_NUM_RETAINED_MAX;
     }
+    int retainMax;
     try {
-      return Integer.parseInt(value.trim());
+      retainMax = Integer.parseInt(value.trim());
     } catch (NumberFormatException e) {
       LOG.warn(
           "Failed to parse {} value '{}', using default {}",
@@ -262,6 +266,15 @@ public class PaimonExpireSnapshotProcess extends TableProcess {
           DEFAULT_SNAPSHOT_NUM_RETAINED_MAX);
       return DEFAULT_SNAPSHOT_NUM_RETAINED_MAX;
     }
+    if (retainMax < MIN_SNAPSHOT_NUM_RETAINED_MAX) {
+      LOG.warn(
+          "{} value '{}' is less than minimum {}, using minimum",
+          CoreOptions.SNAPSHOT_NUM_RETAINED_MAX.key(),
+          value,
+          MIN_SNAPSHOT_NUM_RETAINED_MAX);
+      return MIN_SNAPSHOT_NUM_RETAINED_MAX;
+    }
+    return retainMax;
   }
 
   static Duration resolveTriggerInterval(

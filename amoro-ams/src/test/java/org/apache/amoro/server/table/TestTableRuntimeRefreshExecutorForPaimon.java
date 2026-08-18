@@ -268,7 +268,7 @@ public class TestTableRuntimeRefreshExecutorForPaimon extends AMSServiceTestBase
     verify(table, times(1)).evaluatePendingInput(any(), anyInt(), eq(true));
     assertFalse(paimonRuntime.getLatestEvaluatedNeedOptimizing());
     assertEquals(120_000L, paimonRuntime.getLatestRefreshInterval());
-    assertEquals(82, paimonRuntime.getRuntimeHealthSnapshot().orElseThrow().getHealthScore());
+    assertEquals(82, paimonRuntime.getRuntimeHealthSnapshot().get().getHealthScore());
     assertEquals(
         82,
         tableManager()
@@ -288,8 +288,7 @@ public class TestTableRuntimeRefreshExecutorForPaimon extends AMSServiceTestBase
                 snapshotWithId(520L), successfulKey, successfulInput, false, successfulAnalysis))
         .execute(paimonRuntime);
 
-    RuntimeHealthSnapshot successfulSnapshot =
-        paimonRuntime.getRuntimeHealthSnapshot().orElseThrow();
+    RuntimeHealthSnapshot successfulSnapshot = paimonRuntime.getRuntimeHealthSnapshot().get();
     assertEquals(82, successfulSnapshot.getHealthScore());
     assertEquals(successfulKey.encoded(), successfulSnapshot.getHealthDetails().getEvaluationKey());
     assertEquals(82L, metricValue(TABLE_SUMMARY_HEALTH_SCORE));
@@ -309,7 +308,7 @@ public class TestTableRuntimeRefreshExecutorForPaimon extends AMSServiceTestBase
         "An invalid health result may still carry valid optimization planning facts",
         OptimizingStatus.PENDING,
         paimonRuntime.getOptimizingStatus());
-    RuntimeHealthSnapshot retainedSnapshot = paimonRuntime.getRuntimeHealthSnapshot().orElseThrow();
+    RuntimeHealthSnapshot retainedSnapshot = paimonRuntime.getRuntimeHealthSnapshot().get();
     assertEquals(82, retainedSnapshot.getHealthScore());
     assertEquals(successfulKey.encoded(), retainedSnapshot.getHealthDetails().getEvaluationKey());
     assertEquals(82L, metricValue(TABLE_SUMMARY_HEALTH_SCORE));
@@ -331,7 +330,7 @@ public class TestTableRuntimeRefreshExecutorForPaimon extends AMSServiceTestBase
 
     freshRuntime.evaluatePendingInputAndTransition(table, MAX_PENDING_PARTITIONS, true);
 
-    RuntimeHealthSnapshot snapshot = freshRuntime.getRuntimeHealthSnapshot().orElseThrow();
+    RuntimeHealthSnapshot snapshot = freshRuntime.getRuntimeHealthSnapshot().get();
     assertEquals(-1, snapshot.getHealthScore());
     assertEquals(
         Collections.singletonList("SNAPSHOT_SCAN_FAILED"),
@@ -348,7 +347,7 @@ public class TestTableRuntimeRefreshExecutorForPaimon extends AMSServiceTestBase
 
     paimonRuntime.invalidateCurrentAnalysisKey();
 
-    RuntimeHealthSnapshot snapshot = paimonRuntime.getRuntimeHealthSnapshot().orElseThrow();
+    RuntimeHealthSnapshot snapshot = paimonRuntime.getRuntimeHealthSnapshot().get();
     assertEquals(76, snapshot.getHealthScore());
     assertEquals(key.encoded(), snapshot.getHealthDetails().getEvaluationKey());
   }
@@ -569,14 +568,10 @@ public class TestTableRuntimeRefreshExecutorForPaimon extends AMSServiceTestBase
             .getTableRuntimeMata(paimonRuntime.getTableIdentifier())
             .getTableSummary()
             .getHealthScore());
-    assertEquals(40, paimonRuntime.getRuntimeHealthSnapshot().orElseThrow().getHealthScore());
+    assertEquals(40, paimonRuntime.getRuntimeHealthSnapshot().get().getHealthScore());
     assertEquals(
         secondKey.encoded(),
-        paimonRuntime
-            .getRuntimeHealthSnapshot()
-            .orElseThrow()
-            .getHealthDetails()
-            .getEvaluationKey());
+        paimonRuntime.getRuntimeHealthSnapshot().get().getHealthDetails().getEvaluationKey());
     assertFalse(paimonRuntime.takeTableAnalysis(firstKey).isPresent());
   }
 

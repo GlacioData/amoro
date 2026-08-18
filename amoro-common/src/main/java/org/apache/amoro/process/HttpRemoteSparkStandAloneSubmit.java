@@ -83,8 +83,16 @@ public class HttpRemoteSparkStandAloneSubmit implements ExecuteEngine {
   private static final String PARAM_CONF = "conf";
   private static final String PARAM_CLIENT_IP = "clientIp";
 
-  private static final String DEFAULT_SPARK_SESSION_SQL_PREFIX =
-      "set spark.syntax.extension=true; set spark.paimon.version=1.3;";
+  private static final String SPARK_SYNTAX_SESSION_SQL_PREFIX = "SET spark.syntax.extension=true;";
+  private static final String SPARK_354_SESSION_SQL_PREFIX =
+      "SET spark.custom.spark354.enable=true;";
+  private static final String SPARK_PAIMON_SESSION_SQL_PREFIX =
+      "SET spark.custom.paimon.version=1.3;";
+  private static final String SPARK_DYNAMIC_ALLOCATION_SQL_PREFIX =
+      "SET spark.dynamicAllocation.enabled=true; SET spark.dynamicAllocation.minExecutors=0; "
+          + "SET spark.dynamicAllocation.initialExecutors=0; "
+          + "SET spark.dynamicAllocation.maxExecutors=2; SET spark.executor.instances=0;";
+  private static final int SPARK_VERSION_354 = 354;
 
   private final ObjectMapper objectMapper = new ObjectMapper();
 
@@ -200,7 +208,9 @@ public class HttpRemoteSparkStandAloneSubmit implements ExecuteEngine {
 
       String remoteStatus = data.get("status").asText();
       String errMsg = data.hasNonNull("errMsg") ? data.get("errMsg").asText() : "";
-      return ProcessStatusInfo.of(mapRemoteState(remoteStatus), errMsg);
+      JsonNode webUi = data.get("webUi");
+      String trackUri = webUi != null && webUi.isTextual() ? webUi.textValue() : "";
+      return ProcessStatusInfo.of(mapRemoteState(remoteStatus), errMsg, trackUri);
     } catch (Exception e) {
       LOG.warn("Error querying spark job state for qid={}", processIdentifier, e);
       return ProcessStatusInfo.of(ProcessStatus.UNKNOWN, e.getMessage());
@@ -295,11 +305,11 @@ public class HttpRemoteSparkStandAloneSubmit implements ExecuteEngine {
 
     ObjectNode requestNode = objectMapper.createObjectNode();
     requestNode.put(PARAM_JOB_TYPE, "sql");
-    requestNode.put(PARAM_HQL, prependDefaultSparkSessionSql(hql));
+    int sparkVersion = parseInt(params.get(PARAM_SPARK_VERSION), defaultSparkVersion);
+    requestNode.put(PARAM_HQL, prependDefaultSparkSessionSql(hql, sparkVersion));
     requestNode.put(PARAM_CUR_USER, params.getOrDefault(PARAM_CUR_USER, executeUser));
     requestNode.put(PARAM_SOURCE_TAG, params.getOrDefault(PARAM_SOURCE_TAG, sourceTag));
-    requestNode.put(
-        PARAM_SPARK_VERSION, parseInt(params.get(PARAM_SPARK_VERSION), defaultSparkVersion));
+    requestNode.put(PARAM_SPARK_VERSION, sparkVersion);
 
     putIfPresent(requestNode, params, PARAM_LOG_USER);
     putIfPresent(requestNode, params, PARAM_USER_NAME);
@@ -319,8 +329,14 @@ public class HttpRemoteSparkStandAloneSubmit implements ExecuteEngine {
     }
   }
 
-  private String prependDefaultSparkSessionSql(String hql) {
-    return DEFAULT_SPARK_SESSION_SQL_PREFIX + "\n" + hql;
+  private String prependDefaultSparkSessionSql(String hql, int sparkVersion) {
+    String prefix = SPARK_SYNTAX_SESSION_SQL_PREFIX;
+    if (sparkVersion == SPARK_VERSION_354) {
+      prefix += " " + SPARK_354_SESSION_SQL_PREFIX;
+    }
+    prefix += " " + SPARK_PAIMON_SESSION_SQL_PREFIX;
+    prefix += " " + SPARK_DYNAMIC_ALLOCATION_SQL_PREFIX;
+    return prefix + "\n" + hql;
   }
 
   private String doPost(String path, String jsonBody) {

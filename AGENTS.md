@@ -21,7 +21,7 @@
 
 ## Project Overview
 
-Apache Amoro is a **Lakehouse management system** (Java 11, Maven, Vue 3 frontend). The central component is **AMS** (Amoro Management Service), which manages table metadata, self-optimizing, and catalog services for Iceberg, Hive, Paimon, and Hudi table formats.
+Apache Amoro is a **Lakehouse management system** (Java 8, Maven, Vue 3 frontend). The central component is **AMS** (Amoro Management Service), which manages table metadata, self-optimizing, and catalog services for Iceberg, Hive, Paimon, and Hudi table formats.
 
 ## Architecture
 
