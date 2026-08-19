@@ -120,6 +120,9 @@ public class TestTableRuntimeRefreshExecutorForPaimon extends AMSServiceTestBase
           "Expected DefaultTableRuntime, got " + runtime.getClass().getName());
     }
     paimonRuntime = runtime;
+    // This class verifies the inline refresh executor in isolation. Config lifecycle reconciliation
+    // belongs to DefaultOptimizingService/OptimizingQueue and has its own persisted-process tests.
+    ((DefaultTableRuntimeStore) paimonRuntime.store()).setRuntimeHandler(null);
 
     // The optimizer handler chain may have already transitioned the runtime to PENDING
     // during exploreTableRuntimes(). Reset to IDLE so each test starts clean.
@@ -288,7 +291,7 @@ public class TestTableRuntimeRefreshExecutorForPaimon extends AMSServiceTestBase
   }
 
   @Test
-  public void disablingSelfOptimizingStillClosesRunningProcess() {
+  public void disablingSelfOptimizingDoesNotCloseProcessInRefreshExecutor() {
     DefaultTableRuntime runtime = mock(DefaultTableRuntime.class);
     OptimizingProcess process = mock(OptimizingProcess.class);
     TableConfiguration originalConfig =
@@ -301,7 +304,7 @@ public class TestTableRuntimeRefreshExecutorForPaimon extends AMSServiceTestBase
 
     executorWith(paimonAmoroTable(null)).handleConfigChanged(runtime, originalConfig);
 
-    verify(process).close(false);
+    verify(process, never()).close(anyBoolean());
   }
 
   @Test

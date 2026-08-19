@@ -19,6 +19,7 @@
 package org.apache.amoro.server.process;
 
 import org.apache.amoro.TableFormat;
+import org.apache.amoro.TableRuntime;
 import org.apache.amoro.process.ProcessFactory;
 
 import java.util.Collections;
@@ -55,6 +56,10 @@ public final class ProcessFactoryRouter {
 
   public Set<TableFormat> supportedFormats() {
     return byFormat.keySet();
+  }
+
+  public boolean isOptimizingEligible(TableRuntime tableRuntime) {
+    return forFormat(tableRuntime.getFormat()).isOptimizingEligible(tableRuntime);
   }
 
   public List<ProcessFactory> delegates() {

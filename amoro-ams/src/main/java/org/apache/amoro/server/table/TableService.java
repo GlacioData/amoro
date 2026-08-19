@@ -23,6 +23,8 @@ import org.apache.amoro.ServerTableIdentifier;
 import org.apache.amoro.TableRuntime;
 import org.apache.amoro.server.catalog.InternalCatalog;
 
+import java.util.Optional;
+
 public interface TableService extends TableRuntimeHandler {
 
   void addHandlerChain(RuntimeHandlerChain handler);
@@ -36,6 +38,15 @@ public interface TableService extends TableRuntimeHandler {
   void onTableDropped(InternalCatalog catalog, ServerTableIdentifier identifier);
 
   TableRuntime getRuntime(Long tableId);
+
+  /** Return whether the in-memory runtime is still the current instance, including during init. */
+  boolean isCurrentRuntime(TableRuntime tableRuntime);
+
+  /**
+   * Return the persisted bucket ID only while the supplied runtime remains the current instance.
+   * This method is safe to call from handler initialization before the service is marked started.
+   */
+  Optional<String> getCurrentRuntimeBucketId(TableRuntime tableRuntime);
 
   default boolean contains(Long tableId) {
     return getRuntime(tableId) != null;

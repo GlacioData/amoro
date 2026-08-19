@@ -33,6 +33,7 @@ import static org.mockito.Mockito.when;
 import org.apache.amoro.AmoroTable;
 import org.apache.amoro.ServerTableIdentifier;
 import org.apache.amoro.TableFormat;
+import org.apache.amoro.config.OptimizingConfig;
 import org.apache.amoro.optimizing.OptimizingPlanResult;
 import org.apache.amoro.optimizing.OptimizingType;
 import org.apache.amoro.optimizing.TableOptimizingPlanner;
@@ -106,6 +107,11 @@ class TestOptimizingQueueEmptyPlanResult {
     setField(queue, "planningSlots", new java.util.concurrent.Semaphore(1));
     setField(
         queue,
+        "ownershipGuard",
+        (java.util.function.Function<DefaultTableRuntime, OptimizingOwnership>)
+            ignored -> OptimizingOwnership.OWNED);
+    setField(
+        queue,
         "scheduleLock",
         new java.util.concurrent.locks.ReentrantLock()); // not actually used in planInternal
     return queue;
@@ -144,6 +150,7 @@ class TestOptimizingQueueEmptyPlanResult {
     DefaultTableRuntime tableRuntime = mock(DefaultTableRuntime.class);
     when(tableRuntime.getTableIdentifier()).thenReturn(TEST_IDENTIFIER);
     when(tableRuntime.getFormat()).thenReturn(TableFormat.PAIMON);
+    when(tableRuntime.getOptimizingConfig()).thenReturn(new OptimizingConfig().setEnabled(true));
     when(tableRuntime.refresh(any())).thenReturn(tableRuntime);
 
     TableOptimizingPlanner planner = mock(TableOptimizingPlanner.class);
@@ -164,6 +171,7 @@ class TestOptimizingQueueEmptyPlanResult {
     ProcessFactory factory = mock(ProcessFactory.class);
     when(factory.supportedFormats())
         .thenReturn(java.util.Collections.singleton(TableFormat.PAIMON));
+    when(factory.isOptimizingEligible(tableRuntime)).thenReturn(true);
     when(factory.createPlanner(any(), any(), anyDouble(), anyLong())).thenReturn(planner);
     ProcessFactoryRouter router = new ProcessFactoryRouter(Collections.singletonList(factory));
 
@@ -194,6 +202,7 @@ class TestOptimizingQueueEmptyPlanResult {
     DefaultTableRuntime tableRuntime = mock(DefaultTableRuntime.class);
     when(tableRuntime.getTableIdentifier()).thenReturn(TEST_IDENTIFIER);
     when(tableRuntime.getFormat()).thenReturn(TableFormat.PAIMON);
+    when(tableRuntime.getOptimizingConfig()).thenReturn(new OptimizingConfig().setEnabled(true));
     when(tableRuntime.refresh(any())).thenReturn(tableRuntime);
 
     TableOptimizingPlanner planner = mock(TableOptimizingPlanner.class);
@@ -216,6 +225,7 @@ class TestOptimizingQueueEmptyPlanResult {
     ProcessFactory factory = mock(ProcessFactory.class);
     when(factory.supportedFormats())
         .thenReturn(java.util.Collections.singleton(TableFormat.PAIMON));
+    when(factory.isOptimizingEligible(tableRuntime)).thenReturn(true);
     when(factory.createPlanner(any(), any(), anyDouble(), anyLong())).thenReturn(planner);
     ProcessFactoryRouter router = new ProcessFactoryRouter(Collections.singletonList(factory));
 

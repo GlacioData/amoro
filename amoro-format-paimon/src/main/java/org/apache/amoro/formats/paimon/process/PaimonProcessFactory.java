@@ -31,6 +31,7 @@ import org.apache.amoro.config.TableConfiguration;
 import org.apache.amoro.formats.paimon.PaimonTable;
 import org.apache.amoro.formats.paimon.optimizing.PaimonCompactionInput;
 import org.apache.amoro.formats.paimon.optimizing.PaimonCompactionTask;
+import org.apache.amoro.formats.paimon.optimizing.PaimonOptimizingEligibility;
 import org.apache.amoro.formats.paimon.optimizing.commit.PaimonTableCommit;
 import org.apache.amoro.formats.paimon.optimizing.plan.PaimonOptimizingPlanner;
 import org.apache.amoro.formats.paimon.optimizing.plan.PaimonPrimaryKeyOptimizingPlanner;
@@ -105,6 +106,11 @@ public class PaimonProcessFactory implements ProcessFactory {
   @Override
   public Set<TableFormat> supportedFormats() {
     return enabled ? Collections.singleton(TableFormat.PAIMON) : Collections.emptySet();
+  }
+
+  @Override
+  public boolean isOptimizingEligible(TableRuntime tableRuntime) {
+    return PaimonOptimizingEligibility.isEligible(tableRuntime.getTableConfig());
   }
 
   @Override

@@ -68,6 +68,16 @@ public interface ProcessFactory extends ActivePlugin {
   }
 
   /**
+   * Return whether the table is eligible for format-specific optimizing.
+   *
+   * <p>The default preserves existing behavior for factories that do not have additional
+   * eligibility requirements. This method must only inspect cached runtime state.
+   */
+  default boolean isOptimizingEligible(TableRuntime tableRuntime) {
+    return true;
+  }
+
+  /**
    * Create a planner for the given table optimizing process.
    *
    * <p>Only called when {@link #supportedFormats()} contains {@code tableRuntime.getFormat()}.

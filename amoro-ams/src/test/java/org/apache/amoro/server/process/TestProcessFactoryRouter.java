@@ -19,13 +19,16 @@
 package org.apache.amoro.server.process;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import org.apache.amoro.TableFormat;
+import org.apache.amoro.TableRuntime;
 import org.apache.amoro.process.ProcessFactory;
 import org.junit.jupiter.api.Test;
 
@@ -48,6 +51,7 @@ public class TestProcessFactoryRouter {
     ProcessFactory factory = mock(ProcessFactory.class);
     when(factory.name()).thenReturn(name);
     when(factory.supportedFormats()).thenReturn(formats);
+    when(factory.isOptimizingEligible(any())).thenReturn(true);
     return factory;
   }
 
@@ -131,6 +135,46 @@ public class TestProcessFactoryRouter {
     assertSame(a, delegates.get(0));
     assertSame(b, delegates.get(1));
     assertThrows(UnsupportedOperationException.class, () -> delegates.add(a));
+  }
+
+  @Test
+  public void optimizingEligibility_routesToFormatFactory() {
+    TableRuntime tableRuntime = mock(TableRuntime.class);
+    when(tableRuntime.getFormat()).thenReturn(TableFormat.PAIMON);
+    ProcessFactory paimon = mockFactory("paimon", Collections.singleton(TableFormat.PAIMON));
+    when(paimon.isOptimizingEligible(tableRuntime)).thenReturn(false);
+
+    ProcessFactoryRouter router = new ProcessFactoryRouter(Collections.singletonList(paimon));
+
+    assertFalse(router.isOptimizingEligible(tableRuntime));
+  }
+
+  @Test
+  public void optimizingEligibility_unsupportedFormatIsExplicit() {
+    TableRuntime tableRuntime = mock(TableRuntime.class);
+    when(tableRuntime.getFormat()).thenReturn(UNREGISTERED_FORMAT);
+    ProcessFactoryRouter router = new ProcessFactoryRouter(Collections.emptyList());
+
+    UnsupportedOperationException ex =
+        assertThrows(
+            UnsupportedOperationException.class, () -> router.isOptimizingEligible(tableRuntime));
+
+    assertTrue(ex.getMessage().contains(UNREGISTERED_FORMAT.name()));
+  }
+
+  @Test
+  public void optimizingEligibility_factoryFailureIsNotConvertedToIneligible() {
+    TableRuntime tableRuntime = mock(TableRuntime.class);
+    when(tableRuntime.getFormat()).thenReturn(TableFormat.PAIMON);
+    ProcessFactory paimon = mockFactory("paimon", Collections.singleton(TableFormat.PAIMON));
+    IllegalStateException failure = new IllegalStateException("eligibility failed");
+    when(paimon.isOptimizingEligible(tableRuntime)).thenThrow(failure);
+
+    ProcessFactoryRouter router = new ProcessFactoryRouter(Collections.singletonList(paimon));
+
+    assertSame(
+        failure,
+        assertThrows(IllegalStateException.class, () -> router.isOptimizingEligible(tableRuntime)));
   }
 
   private static Set<TableFormat> setOf(TableFormat... formats) {

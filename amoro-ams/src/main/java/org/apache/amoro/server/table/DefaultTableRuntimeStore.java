@@ -172,7 +172,7 @@ public class DefaultTableRuntimeStore extends PersistentBase implements TableRun
 
   private class TableRuntimeOperationImpl implements TableRuntimeOperation {
 
-    private final TableRuntimeMeta oldMeta;
+    private TableRuntimeMeta oldMeta;
     private final List<Runnable> operations = Lists.newArrayList();
     private final Set<String> stateKeys = Sets.newHashSet();
     private final Map<String, String> oldStates = new ConcurrentHashMap<>();
@@ -180,10 +180,7 @@ public class DefaultTableRuntimeStore extends PersistentBase implements TableRun
 
     private final List<Consumer<TableRuntimeHandler>> handlerCallback = Lists.newArrayList();
 
-    public TableRuntimeOperationImpl() {
-      this.oldMeta = meta.copy();
-      states.forEach((k, v) -> oldStates.put(k, v.getStateValue()));
-    }
+    public TableRuntimeOperationImpl() {}
 
     @Override
     public <T> TableRuntimeOperation updateState(StateKey<T> key, Function<T, T> updater) {
@@ -216,11 +213,12 @@ public class DefaultTableRuntimeStore extends PersistentBase implements TableRun
     public TableRuntimeOperation updateStatusCode(Function<Integer, Integer> updater) {
       operations.add(
           () -> {
+            OptimizingStatus originalStatus = OptimizingStatus.ofCode(oldMeta.getStatusCode());
             Integer newStatusCode = updater.apply(oldMeta.getStatusCode());
             oldMeta.setStatusCode(newStatusCode);
+            handlerCallback.add(
+                handler -> handler.handleTableChanged(tableRuntime, originalStatus));
           });
-      OptimizingStatus status = OptimizingStatus.ofCode(oldMeta.getStatusCode());
-      handlerCallback.add(handler -> handler.handleTableChanged(tableRuntime, status));
       metaOperation = true;
       return this;
     }
@@ -229,13 +227,14 @@ public class DefaultTableRuntimeStore extends PersistentBase implements TableRun
     public TableRuntimeOperation updateTableConfig(Consumer<Map<String, String>> updater) {
       operations.add(
           () -> {
+            TableConfiguration oldConfiguration =
+                TableConfigurations.parseTableConfig(oldMeta.getTableConfig());
             Map<String, String> tableConfig = oldMeta.getTableConfig();
             updater.accept(tableConfig);
             oldMeta.setTableConfig(tableConfig);
+            handlerCallback.add(
+                handler -> handler.handleTableChanged(tableRuntime, oldConfiguration));
           });
-      TableConfiguration oldConfiguration =
-          TableConfigurations.parseTableConfig(oldMeta.getTableConfig());
-      handlerCallback.add(handler -> handler.handleTableChanged(tableRuntime, oldConfiguration));
       metaOperation = true;
       return this;
     }
@@ -257,9 +256,11 @@ public class DefaultTableRuntimeStore extends PersistentBase implements TableRun
       try (NestedSqlSession session = beginSession()) {
         try {
           tableLock.lock();
+          initializeWorkingSnapshot();
           operations.forEach(Runnable::run);
           persist();
           session.commit();
+          makeVisible();
         } catch (Throwable t) {
           LOG.error("failed to commit operations", t);
           session.rollback();
@@ -267,8 +268,17 @@ public class DefaultTableRuntimeStore extends PersistentBase implements TableRun
         } finally {
           tableLock.unlock();
         }
-        visitable();
       }
+      // A handler may start its own persistence transaction (for example, strict Process close).
+      // Invoke it only after the current NestedSqlSession is closed so its commit is not absorbed
+      // as a nested no-op after this operation has already committed.
+      notifyRuntimeHandler();
+    }
+
+    private void initializeWorkingSnapshot() {
+      oldMeta = meta.copy();
+      oldStates.clear();
+      states.forEach((key, state) -> oldStates.put(key, state.getStateValue()));
     }
 
     private void persist() {
@@ -286,7 +296,7 @@ public class DefaultTableRuntimeStore extends PersistentBase implements TableRun
           });
     }
 
-    private void visitable() {
+    private void makeVisible() {
       if (metaOperation) {
         meta.setGroupName(oldMeta.getGroupName());
         meta.setStatusCode(oldMeta.getStatusCode());
@@ -299,7 +309,9 @@ public class DefaultTableRuntimeStore extends PersistentBase implements TableRun
             TableRuntimeState state = states.get(key);
             state.setStateValue(oldStates.get(key));
           });
+    }
 
+    private void notifyRuntimeHandler() {
       if (runtimeHandler != null && tableRuntime != null) {
         handlerCallback.forEach(c -> c.accept(runtimeHandler));
       }

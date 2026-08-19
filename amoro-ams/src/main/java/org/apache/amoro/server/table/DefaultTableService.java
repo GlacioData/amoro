@@ -330,6 +330,29 @@ public class DefaultTableService extends PersistentBase implements TableService 
     return tableRuntimeMap.get(tableId);
   }
 
+  @Override
+  public boolean isCurrentRuntime(TableRuntime tableRuntime) {
+    if (tableRuntime == null || tableRuntime.getTableIdentifier() == null) {
+      return false;
+    }
+    Long tableId = tableRuntime.getTableIdentifier().getId();
+    return tableId != null && tableRuntimeMap.get(tableId) == tableRuntime;
+  }
+
+  @Override
+  public Optional<String> getCurrentRuntimeBucketId(TableRuntime tableRuntime) {
+    if (!isCurrentRuntime(tableRuntime)) {
+      return Optional.empty();
+    }
+    Long tableId = tableRuntime.getTableIdentifier().getId();
+    TableRuntimeMeta meta =
+        getAs(TableRuntimeMapper.class, mapper -> mapper.selectRuntime(tableId));
+    if (!isCurrentRuntime(tableRuntime) || meta == null) {
+      return Optional.empty();
+    }
+    return Optional.ofNullable(meta.getBucketId()).filter(bucketId -> !bucketId.trim().isEmpty());
+  }
+
   @VisibleForTesting
   public void setRuntime(TableRuntime tableRuntime) {
     checkStarted();

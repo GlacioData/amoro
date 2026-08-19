@@ -20,7 +20,10 @@ package org.apache.amoro.server.table;
 
 import org.apache.amoro.ServerTableIdentifier;
 import org.apache.amoro.TableFormat;
+import org.apache.amoro.TableRuntime;
+import org.apache.amoro.config.TableConfiguration;
 import org.apache.amoro.server.AMSManagerTestBase;
+import org.apache.amoro.server.optimizing.OptimizingStatus;
 import org.apache.amoro.server.persistence.PersistentBase;
 import org.apache.amoro.server.persistence.TableRuntimeMeta;
 import org.apache.amoro.server.persistence.TableRuntimeState;
@@ -33,6 +36,7 @@ import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
+import org.mockito.Mockito;
 
 import java.util.Collections;
 import java.util.List;
@@ -184,6 +188,50 @@ public class TestDefaultTableRuntimeStore extends AMSManagerTestBase {
     Assert.assertEquals("value2", store.getState(key2));
     Assert.assertFalse(store.getTableConfig().containsKey("key"));
     Assert.assertEquals(1, meta.getTableSummary().getHealthScore());
+  }
+
+  @Test
+  public void testOperationSnapshotIsTakenWhenCommitAcquiresLock() {
+    TableRuntimeStore store =
+        new DefaultTableRuntimeStore(tableIdentifier, meta, requiredKeys, Collections.emptyList());
+    TableRuntimeStore.TableRuntimeOperation delayedConfig =
+        store.begin().updateTableConfig(config -> config.put("key", "conf"));
+
+    store.begin().updateStatusCode(any -> 10086).commit();
+    delayedConfig.commit();
+
+    Assert.assertEquals(10086, store.getStatusCode());
+    Assert.assertEquals("conf", store.getTableConfig().get("key"));
+  }
+
+  @Test
+  public void testHandlerPersistenceStartsAfterOperationSessionCloses() {
+    DefaultTableRuntimeStore store =
+        new DefaultTableRuntimeStore(tableIdentifier, meta, requiredKeys, Collections.emptyList());
+    store.setTableRuntime(Mockito.mock(TableRuntime.class));
+    store.setRuntimeHandler(
+        new TableRuntimeHandler() {
+          @Override
+          public void handleTableChanged(
+              TableRuntime tableRuntime, OptimizingStatus originalStatus) {}
+
+          @Override
+          public void handleTableChanged(
+              TableRuntime tableRuntime, TableConfiguration originalConfig) {
+            store.begin().updateState(key1, ignored -> "from-handler").commit();
+          }
+        });
+
+    store.begin().updateTableConfig(config -> config.put("key", "conf")).commit();
+
+    Assert.assertEquals("from-handler", store.getState(key1));
+    Assert.assertEquals(
+        "from-handler",
+        persistence.allState(tableIdentifier.getId()).stream()
+            .filter(state -> key1.getKey().equals(state.getStateKey()))
+            .findFirst()
+            .orElseThrow(AssertionError::new)
+            .getStateValue());
   }
 
   class Persistence extends PersistentBase {

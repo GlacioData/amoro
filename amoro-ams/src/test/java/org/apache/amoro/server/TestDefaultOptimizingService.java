@@ -59,6 +59,7 @@ import org.apache.amoro.server.table.RuntimeHandlerChain;
 import org.apache.amoro.shade.guava32.com.google.common.collect.Lists;
 import org.apache.amoro.shade.guava32.com.google.common.collect.Maps;
 import org.apache.amoro.table.MixedTable;
+import org.apache.amoro.table.TableProperties;
 import org.apache.amoro.table.UnkeyedTable;
 import org.apache.amoro.utils.SerializationUtil;
 import org.apache.ibatis.session.SqlSession;
@@ -180,6 +181,30 @@ public class TestDefaultOptimizingService extends AMSTableTestBase {
         optimizingService().listTasks(defaultResourceGroup().getName()).get(0);
     optimizingService().completeTask(token, buildOptimizingTaskResult(task.getTaskId()));
     assertTaskCompleted(taskRuntime);
+  }
+
+  @Test
+  public void testConfigHandlerReconcilesRunningProcessThroughOwningQueue() {
+    OptimizingTask task = optimizingService().pollTask(token, THREAD_ID);
+    Assertions.assertNotNull(task);
+    DefaultTableRuntime runtime = getDefaultTableRuntime(serverTableIdentifier().getId());
+    long processId = runtime.getProcessId();
+    Assertions.assertTrue(processId > 0L);
+
+    runtime
+        .store()
+        .begin()
+        .updateTableConfig(config -> config.put(TableProperties.ENABLE_SELF_OPTIMIZING, "false"))
+        .commit();
+
+    Assertions.assertEquals(OptimizingStatus.IDLE, runtime.getOptimizingStatus());
+    Assertions.assertEquals(0L, runtime.getProcessId());
+    Assertions.assertNull(runtime.getOptimizingProcess());
+    try (SqlSession session = SqlSessionFactoryProvider.getInstance().get().openSession(true)) {
+      Assertions.assertEquals(
+          ProcessStatus.CLOSED,
+          session.getMapper(TableProcessMapper.class).getProcessMeta(processId).getStatus());
+    }
   }
 
   @Test
