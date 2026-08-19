@@ -460,6 +460,12 @@ public class DefaultTableRuntime extends AbstractTableRuntime implements Optimiz
     return optimizingProcess;
   }
 
+  public void detachOptimizingProcess(OptimizingProcess process) {
+    if (optimizingProcess == process) {
+      optimizingProcess = null;
+    }
+  }
+
   public void addTaskQuota(TaskRuntime.TaskQuota taskQuota) {
     doAsIgnoreError(OptimizingProcessMapper.class, mapper -> mapper.insertTaskQuota(taskQuota));
     taskQuotas.add(taskQuota);
@@ -600,10 +606,18 @@ public class DefaultTableRuntime extends AbstractTableRuntime implements Optimiz
   }
 
   public void completeProcess(OptimizingProcess process, boolean success) {
+    completeProcess(process, success, false);
+  }
+
+  public void completeProcessStrict(OptimizingProcess process, boolean success) {
+    completeProcess(process, success, true);
+  }
+
+  private void completeProcess(OptimizingProcess process, boolean success, boolean strict) {
     Objects.requireNonNull(process, "process is null when completing table process");
     if (!tryReleaseProcessOwner(process.getProcessId())) {
       long currentOwner = getProcessId();
-      if (currentOwner != process.getProcessId()) {
+      if (!strict && currentOwner != process.getProcessId()) {
         LOG.warn(
             "Skip completing process {} for table {} because current owner is {}",
             process.getProcessId(),

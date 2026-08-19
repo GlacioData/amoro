@@ -70,6 +70,7 @@ import org.apache.amoro.shade.guava32.com.google.common.collect.ImmutableMap;
 import org.apache.amoro.shade.guava32.com.google.common.collect.Lists;
 import org.apache.amoro.table.MixedTable;
 import org.apache.amoro.table.TableProperties;
+import org.apache.amoro.table.TableRuntimeStore;
 import org.apache.amoro.table.UnkeyedTable;
 import org.apache.amoro.table.health.TableAnalysisKey;
 import org.apache.amoro.utils.SerializationUtil;
@@ -1314,7 +1315,18 @@ public class TestOptimizingQueue extends AMSTableTestBase {
 
     Mockito.when(tableRuntime.getTableIdentifier()).thenReturn(tableIdentifier);
     Mockito.when(tableRuntime.getFormat()).thenReturn(TableFormat.PAIMON);
+    Mockito.when(tableRuntime.getOptimizingConfig())
+        .thenReturn(new OptimizingConfig().setEnabled(true));
     Mockito.when(tableRuntime.getOptimizingStatus()).thenReturn(OptimizingStatus.PENDING);
+    TableRuntimeStore runtimeStore = Mockito.mock(TableRuntimeStore.class);
+    Mockito.when(tableRuntime.store()).thenReturn(runtimeStore);
+    Mockito.doAnswer(
+            invocation -> {
+              invocation.<Runnable>getArgument(0).run();
+              return null;
+            })
+        .when(runtimeStore)
+        .synchronizedInvoke(Mockito.any());
     Mockito.doReturn(paimonTable).when(catalogManager).loadTable(tableIdentifier.getIdentifier());
     Mockito.when(paimonTable.format()).thenReturn(TableFormat.PAIMON);
 
@@ -1334,8 +1346,8 @@ public class TestOptimizingQueue extends AMSTableTestBase {
     Object process = planInternal.invoke(queue, tableRuntime);
 
     Assert.assertNull(process);
-    Mockito.verify(tableRuntime).beginPlanning();
-    Mockito.verify(tableRuntime).refresh(paimonTable);
+    Mockito.verify(tableRuntime, Mockito.never()).beginPlanning();
+    Mockito.verify(tableRuntime, Mockito.never()).refresh(paimonTable);
     Mockito.verify(tableRuntime).completeEmptyProcess();
     Mockito.verify(tableRuntime, Mockito.never()).planFailed();
 
@@ -1840,6 +1852,7 @@ public class TestOptimizingQueue extends AMSTableTestBase {
     DefaultTableRuntime runtime = Mockito.mock(DefaultTableRuntime.class);
     Mockito.when(runtime.getTableIdentifier()).thenReturn(identifier);
     Mockito.when(runtime.getFormat()).thenReturn(format);
+    Mockito.when(runtime.getOptimizingConfig()).thenReturn(new OptimizingConfig().setEnabled(true));
     Mockito.when(runtime.refresh(table)).thenReturn(runtime);
 
     TableOptimizingPlanner planner = Mockito.mock(TableOptimizingPlanner.class);
@@ -1847,6 +1860,7 @@ public class TestOptimizingQueue extends AMSTableTestBase {
 
     ProcessFactory factory = Mockito.mock(ProcessFactory.class);
     Mockito.when(factory.supportedFormats()).thenReturn(Collections.singleton(format));
+    Mockito.when(factory.isOptimizingEligible(runtime)).thenReturn(true);
     Mockito.when(
             factory.createPlanner(
                 Mockito.any(), Mockito.any(), Mockito.anyDouble(), Mockito.anyLong()))

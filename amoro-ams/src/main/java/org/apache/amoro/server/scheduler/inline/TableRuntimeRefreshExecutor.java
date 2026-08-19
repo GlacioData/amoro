@@ -21,9 +21,6 @@ package org.apache.amoro.server.scheduler.inline;
 import org.apache.amoro.AmoroTable;
 import org.apache.amoro.TableRuntime;
 import org.apache.amoro.config.OptimizingConfig;
-import org.apache.amoro.config.TableConfiguration;
-import org.apache.amoro.process.ProcessStatus;
-import org.apache.amoro.server.optimizing.OptimizingProcess;
 import org.apache.amoro.server.scheduler.PeriodicTableScheduler;
 import org.apache.amoro.server.table.DefaultTableRuntime;
 import org.apache.amoro.server.table.TableService;
@@ -62,20 +59,6 @@ public class TableRuntimeRefreshExecutor extends PeriodicTableScheduler {
 
     return Math.min(
         defaultTableRuntime.getOptimizingConfig().getMinorLeastInterval() * 4L / 5, interval);
-  }
-
-  @Override
-  public void handleConfigChanged(TableRuntime tableRuntime, TableConfiguration originalConfig) {
-    Preconditions.checkArgument(tableRuntime instanceof DefaultTableRuntime);
-    DefaultTableRuntime defaultTableRuntime = (DefaultTableRuntime) tableRuntime;
-    // After disabling self-optimizing, close the currently running optimizing process.
-    if (originalConfig.getOptimizingConfig().isEnabled()
-        && !tableRuntime.getTableConfiguration().getOptimizingConfig().isEnabled()) {
-      OptimizingProcess optimizingProcess = defaultTableRuntime.getOptimizingProcess();
-      if (optimizingProcess != null && optimizingProcess.getStatus() == ProcessStatus.RUNNING) {
-        optimizingProcess.close(false);
-      }
-    }
   }
 
   @Override

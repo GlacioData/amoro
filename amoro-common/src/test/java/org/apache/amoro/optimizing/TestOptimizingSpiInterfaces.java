@@ -203,6 +203,14 @@ public class TestOptimizingSpiInterfaces {
     assertFalse(planner.tableAnalysis().isPresent());
   }
 
+  @Test
+  @DisplayName("Process factory optimizing eligibility should default to true")
+  void testProcessFactoryOptimizingEligibilityDefaultsToTrue() {
+    ProcessFactory factory = new TestProcessFactory(new AtomicInteger(), new TestPlanner());
+
+    assertTrue(factory.isOptimizingEligible(null));
+  }
+
   private BaseOptimizingInput createTestInput() {
     return new BaseOptimizingInput() {};
   }

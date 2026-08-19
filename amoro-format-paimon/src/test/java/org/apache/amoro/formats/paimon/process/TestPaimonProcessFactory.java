@@ -220,6 +220,28 @@ public class TestPaimonProcessFactory {
   }
 
   @Test
+  @DisplayName("Optimizing eligibility delegates to raw Paimon table properties")
+  void testOptimizingEligibilityUsesRawTableProperties() {
+    PaimonProcessFactory factory = new PaimonProcessFactory();
+    TableRuntime runtime = mock(TableRuntime.class);
+    Map<String, String> eligible = new HashMap<>();
+    eligible.put(CoreOptions.WRITE_ONLY.key(), "true");
+    eligible.put(PaimonOptimizingEligibility.SELF_OPTIMIZING_ENABLED, "true");
+    Map<String, String> missingSelfOptimizing = new HashMap<>(eligible);
+    missingSelfOptimizing.remove(PaimonOptimizingEligibility.SELF_OPTIMIZING_ENABLED);
+    Map<String, String> writeOnlyDisabled = new HashMap<>(eligible);
+    writeOnlyDisabled.put(CoreOptions.WRITE_ONLY.key(), "false");
+
+    when(runtime.getTableConfig())
+        .thenReturn(eligible, missingSelfOptimizing, writeOnlyDisabled, Collections.emptyMap());
+
+    assertTrue(factory.isOptimizingEligible(runtime));
+    assertFalse(factory.isOptimizingEligible(runtime));
+    assertFalse(factory.isOptimizingEligible(runtime));
+    assertFalse(factory.isOptimizingEligible(runtime));
+  }
+
+  @Test
   @DisplayName("createPlanner rejects non-PaimonTable and accepts PaimonTable")
   void testCreatePlanner(@TempDir Path warehouse) throws Exception {
     PaimonProcessFactory factory = new PaimonProcessFactory();

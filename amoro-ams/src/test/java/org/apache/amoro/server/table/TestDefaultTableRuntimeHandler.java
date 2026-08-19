@@ -43,6 +43,7 @@ import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 @RunWith(Parameterized.class)
 public class TestDefaultTableRuntimeHandler extends AMSTableTestBase {
@@ -90,9 +91,20 @@ public class TestDefaultTableRuntimeHandler extends AMSTableTestBase {
 
     // initialize with a history table
     tableService = new DefaultTableService(new Configurations(), CATALOG_MANAGER, runtimeFactory);
-    handler = new TestHandler();
+    AtomicBoolean identityCheckedDuringInitialization = new AtomicBoolean();
+    handler =
+        new TestHandler() {
+          @Override
+          protected void initHandler(List<TableRuntime> tableRuntimeList) {
+            super.initHandler(tableRuntimeList);
+            tableRuntimeList.forEach(
+                runtime -> Assert.assertTrue(tableService.isCurrentRuntime(runtime)));
+            identityCheckedDuringInitialization.set(!tableRuntimeList.isEmpty());
+          }
+        };
     tableService.addHandlerChain(handler);
     tableService.initialize();
+    Assert.assertTrue(identityCheckedDuringInitialization.get());
     Assert.assertEquals(1, handler.getInitTables().size());
     Assert.assertEquals(
         (Long) createTableId.getId().longValue(),

@@ -89,9 +89,11 @@ import java.util.concurrent.LinkedTransferQueue;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
@@ -120,6 +122,7 @@ public class OptimizingQueue extends PersistentBase {
   private final OptimizerGroupMetrics metrics;
   private ResourceGroup optimizerGroup;
   private final ProcessFactoryRouter router;
+  private final Function<DefaultTableRuntime, OptimizingOwnership> ownershipGuard;
   private final Map<ServerTableIdentifier, AtomicInteger> optimizingTasksMap =
       new ConcurrentHashMap<>();
 
@@ -131,6 +134,26 @@ public class OptimizingQueue extends PersistentBase {
       List<DefaultTableRuntime> tableRuntimeList,
       int maxPlanningParallelism,
       ProcessFactoryRouter router) {
+    this(
+        catalogManager,
+        optimizerGroup,
+        quotaProvider,
+        planExecutor,
+        tableRuntimeList,
+        maxPlanningParallelism,
+        router,
+        ignored -> OptimizingOwnership.OWNED);
+  }
+
+  public OptimizingQueue(
+      CatalogManager catalogManager,
+      ResourceGroup optimizerGroup,
+      QuotaProvider quotaProvider,
+      Executor planExecutor,
+      List<DefaultTableRuntime> tableRuntimeList,
+      int maxPlanningParallelism,
+      ProcessFactoryRouter router,
+      Function<DefaultTableRuntime, OptimizingOwnership> ownershipGuard) {
     Preconditions.checkNotNull(optimizerGroup, "Optimizer group can not be null");
     this.planExecutor = planExecutor;
     this.optimizerGroup = optimizerGroup;
@@ -142,67 +165,108 @@ public class OptimizingQueue extends PersistentBase {
     this.maxPlanningParallelism = maxPlanningParallelism;
     this.planningSlots = new Semaphore(this.maxPlanningParallelism);
     this.router = router;
+    this.ownershipGuard = Preconditions.checkNotNull(ownershipGuard, "Ownership guard is null");
     this.metrics =
         new OptimizerGroupMetrics(
             optimizerGroup.getName(), MetricManager.getInstance().getGlobalRegistry(), this);
     this.metrics.register();
-    tableRuntimeList.forEach(this::initTableRuntime);
+    tableRuntimeList.forEach(tableRuntime -> recoverOwnedTable(tableRuntime, "STARTUP"));
   }
 
-  private void initTableRuntime(DefaultTableRuntime tableRuntime) {
-    try {
-      TableOptimizingProcess process = loadProcess(tableRuntime);
+  public void recoverOwnedTable(DefaultTableRuntime tableRuntime) {
+    recoverOwnedTable(tableRuntime, "OWNERSHIP_GAINED");
+  }
 
-      if (!tableRuntime.getOptimizingConfig().isEnabled()) {
-        closeProcessIfRunning(process);
+  private void recoverOwnedTable(DefaultTableRuntime tableRuntime, String trigger) {
+    try {
+      OptimizingOwnership ownership = ownershipGuard.apply(tableRuntime);
+      if (ownership != OptimizingOwnership.OWNED) {
+        LOG.debug(
+            "Optimizing reconciliation trigger={} table={} processId={} eligibility=NOT_EVALUATED"
+                + " ownership={} action=SKIP result=OWNERSHIP_CHANGED",
+            trigger,
+            tableRuntime.getTableIdentifier(),
+            tableRuntime.getProcessId(),
+            ownership);
         return;
       }
 
-      if (!isFormatSupported(tableRuntime)) {
-        closeProcessIfRunning(process);
+      OptimizingProcess localProcess = tableRuntime.getOptimizingProcess();
+      if (localProcess instanceof TableOptimizingProcess
+          && ((TableOptimizingProcess) localProcess).belongsTo(this)) {
+        if (localProcess.getStatus() == ProcessStatus.RUNNING) {
+          TableOptimizingProcess process = (TableOptimizingProcess) localProcess;
+          if (process.reconcileEligibility(trigger) == EligibilityReconciliationResult.ELIGIBLE) {
+            resumeOwnedTable(tableRuntime, process, trigger);
+          }
+        }
         return;
+      }
+
+      TableProcessMeta processMeta = loadProcessMeta(tableRuntime);
+      TableOptimizingProcess process = null;
+      if (isPersistedPaimonCommitReplay(tableRuntime, processMeta)) {
+        process = loadProcess(tableRuntime, processMeta);
+        if (canReplayPaimonCommittingProcess(process)) {
+          LOG.info(
+              "Paimon process {} on table {} is already COMMITTING with completed tasks during"
+                  + " recovery, keeping it for commit replay",
+              process.getProcessId(),
+              tableRuntime.getTableIdentifier());
+          return;
+        }
+      }
+
+      Optional<Boolean> eligibility = optimizingEligibility(tableRuntime);
+      if (!eligibility.isPresent()) {
+        LOG.warn(
+            "Optimizing reconciliation trigger={} table={} processId={} eligibility=UNKNOWN"
+                + " ownership=OWNED action=SKIP result=ERROR",
+            trigger,
+            tableRuntime.getTableIdentifier(),
+            tableRuntime.getProcessId());
+        return;
+      }
+
+      if (process == null) {
+        process = loadProcess(tableRuntime, processMeta);
+      }
+      if (!eligibility.get()) {
+        EligibilityReconciliationResult reconciliation =
+            process == null
+                ? reconcileEligibilityWithoutProcess(tableRuntime, trigger)
+                : reconcileProcessIfRunning(process, trigger);
+        if (reconciliation != EligibilityReconciliationResult.ELIGIBLE) {
+          return;
+        }
       }
 
       tableRuntime.resetTaskQuotas(
           System.currentTimeMillis() - AmoroServiceConstants.QUOTA_LOOK_BACK_TIME);
-
-      if (canReplayPaimonCommittingProcess(process)) {
-        LOG.info(
-            "Paimon process {} on table {} is already COMMITTING with completed tasks during"
-                + " recovery, keeping it for commit replay",
-            process.getProcessId(),
-            tableRuntime.getTableIdentifier());
-      } else if (canResumeProcess(process, tableRuntime)) {
-        if (process.allTasksPrepared()) {
-          LOG.info(
-              "All tasks already completed for process {} on table {} during recovery,"
-                  + " triggering commit",
-              process.getProcessId(),
-              tableRuntime.getTableIdentifier());
-          tableRuntime.beginCommitting();
-        } else {
-          tableQueue.offer(process);
-        }
-      } else {
-        resetTableForRecovery(process, tableRuntime);
-        scheduler.addTable(tableRuntime);
-      }
+      resumeOwnedTable(tableRuntime, process, trigger);
     } catch (Exception e) {
       LOG.error(
-          "Failed to initialize table runtime for table {}, skipping",
+          "Optimizing reconciliation trigger={} table={} processId={} eligibility=UNKNOWN"
+              + " ownership=OWNED action=RECOVER result={}",
+          trigger,
           tableRuntime.getTableIdentifier(),
+          tableRuntime.getProcessId(),
+          containsCause(e, OptimizingOwnerConflictException.class) ? "CAS_CONFLICT" : "ERROR",
           e);
     }
   }
 
-  private TableOptimizingProcess loadProcess(DefaultTableRuntime tableRuntime) {
+  private TableProcessMeta loadProcessMeta(DefaultTableRuntime tableRuntime) {
     if (tableRuntime.getProcessId() == 0) {
       return null;
     }
-    TableProcessMeta meta =
-        getAs(
-            TableProcessMapper.class, mapper -> mapper.getProcessMeta(tableRuntime.getProcessId()));
-    if (meta == null) {
+    return getAs(
+        TableProcessMapper.class, mapper -> mapper.getProcessMeta(tableRuntime.getProcessId()));
+  }
+
+  private TableOptimizingProcess loadProcess(
+      DefaultTableRuntime tableRuntime, TableProcessMeta processMeta) {
+    if (processMeta == null) {
       return null;
     }
     OptimizingProcessState state =
@@ -216,7 +280,39 @@ public class OptimizingQueue extends PersistentBase {
           tableRuntime.getTableIdentifier());
       return null;
     }
-    return new TableOptimizingProcess(tableRuntime, meta, state);
+    return new TableOptimizingProcess(tableRuntime, processMeta, state);
+  }
+
+  private boolean isPersistedPaimonCommitReplay(
+      DefaultTableRuntime tableRuntime, TableProcessMeta processMeta) {
+    if (tableRuntime.getFormat() != TableFormat.PAIMON
+        || tableRuntime.getOptimizingStatus() != OptimizingStatus.COMMITTING
+        || processMeta == null
+        || processMeta.getStatus() != ProcessStatus.RUNNING) {
+      return false;
+    }
+    int unfinishedTasks =
+        getAs(
+            OptimizingProcessMapper.class,
+            mapper ->
+                mapper.countUnfinishedTasks(
+                    tableRuntime.getTableIdentifier().getId(), processMeta.getProcessId()));
+    return unfinishedTasks == 0;
+  }
+
+  private Optional<Boolean> optimizingEligibility(DefaultTableRuntime tableRuntime) {
+    try {
+      if (!tableRuntime.getOptimizingConfig().isEnabled() || !isFormatSupported(tableRuntime)) {
+        return Optional.of(false);
+      }
+      return Optional.of(router.isOptimizingEligible(tableRuntime));
+    } catch (RuntimeException e) {
+      LOG.warn(
+          "Failed to evaluate optimizing eligibility for table {}",
+          tableRuntime.getTableIdentifier(),
+          e);
+      return Optional.empty();
+    }
   }
 
   private boolean canResumeProcess(
@@ -246,8 +342,10 @@ public class OptimizingQueue extends PersistentBase {
   }
 
   private void resetTableForRecovery(
-      TableOptimizingProcess process, DefaultTableRuntime tableRuntime) {
-    closeProcessIfRunning(process);
+      TableOptimizingProcess process, DefaultTableRuntime tableRuntime, String trigger) {
+    if (process != null && process.getStatus() == ProcessStatus.RUNNING) {
+      process.closeStrict(trigger, OptimizingOwnership.OWNED, "NOT_EVALUATED");
+    }
     if (tableRuntime.getOptimizingStatus() != OptimizingStatus.IDLE
         && tableRuntime.getOptimizingStatus() != OptimizingStatus.PENDING) {
       LOG.warn(
@@ -259,10 +357,57 @@ public class OptimizingQueue extends PersistentBase {
     }
   }
 
-  private void closeProcessIfRunning(TableOptimizingProcess process) {
+  private EligibilityReconciliationResult reconcileProcessIfRunning(
+      TableOptimizingProcess process, String trigger) {
     if (process != null && process.getStatus() == ProcessStatus.RUNNING) {
-      process.close(false);
+      return process.reconcileEligibility(trigger);
     }
+    return EligibilityReconciliationResult.UNKNOWN;
+  }
+
+  private void offerRecoveredProcess(
+      DefaultTableRuntime tableRuntime, TableOptimizingProcess process, String trigger) {
+    if (!process.offerIfEligibleAndOwned(trigger)) {
+      scheduler.removeTable(tableRuntime);
+      tableRuntime.detachOptimizingProcess(process);
+    }
+  }
+
+  private void resumeOwnedTable(
+      DefaultTableRuntime tableRuntime, TableOptimizingProcess process, String trigger) {
+    if (canResumeProcess(process, tableRuntime)) {
+      if (process.allTasksPrepared()) {
+        LOG.info(
+            "All tasks already completed for process {} on table {} during reconciliation,"
+                + " triggering commit",
+            process.getProcessId(),
+            tableRuntime.getTableIdentifier());
+        if (!process.beginCommittingIfEligible(trigger)
+            && process.getStatus() == ProcessStatus.RUNNING) {
+          offerRecoveredProcess(tableRuntime, process, trigger);
+        }
+      } else {
+        offerRecoveredProcess(tableRuntime, process, trigger);
+      }
+      return;
+    }
+
+    OptimizingOwnership resetOwnership = ownershipGuard.apply(tableRuntime);
+    if (resetOwnership != OptimizingOwnership.OWNED) {
+      scheduler.removeTable(tableRuntime);
+      tableRuntime.detachOptimizingProcess(process);
+      LOG.debug(
+          "Optimizing reconciliation trigger={} table={} processId={}"
+              + " eligibility=NOT_EVALUATED ownership={} action=SKIP"
+              + " result=OWNERSHIP_CHANGED",
+          trigger,
+          tableRuntime.getTableIdentifier(),
+          tableRuntime.getProcessId(),
+          resetOwnership);
+      return;
+    }
+    resetTableForRecovery(process, tableRuntime, trigger);
+    scheduler.addTable(tableRuntime);
   }
 
   public String getContainerName() {
@@ -283,6 +428,113 @@ public class OptimizingQueue extends PersistentBase {
           System.currentTimeMillis() - AmoroServiceConstants.QUOTA_LOOK_BACK_TIME);
       scheduler.addTable(tableRuntime);
     }
+  }
+
+  public void reconcileTableConfig(DefaultTableRuntime tableRuntime) {
+    try {
+      OptimizingOwnership ownership = ownershipGuard.apply(tableRuntime);
+      if (ownership != OptimizingOwnership.OWNED) {
+        LOG.info(
+            "Skip reconciling config for table {} in queue {} because ownership is {}",
+            tableRuntime.getTableIdentifier(),
+            optimizerGroup.getName(),
+            ownership);
+        return;
+      }
+
+      boolean recoverTaskQuotas =
+          tableRuntime.getOptimizingProcess() == null && tableRuntime.getProcessId() != 0L;
+      TableOptimizingProcess process = localRunningProcess(tableRuntime);
+      EligibilityReconciliationResult result =
+          process == null
+              ? reconcileEligibilityWithoutProcess(tableRuntime, "CONFIG_CHANGED")
+              : process.reconcileEligibility("CONFIG_CHANGED");
+      if (result == EligibilityReconciliationResult.ELIGIBLE) {
+        if (process == null) {
+          refreshTable(tableRuntime);
+        } else {
+          if (recoverTaskQuotas) {
+            tableRuntime.resetTaskQuotas(
+                System.currentTimeMillis() - AmoroServiceConstants.QUOTA_LOOK_BACK_TIME);
+          }
+          resumeOwnedTable(tableRuntime, process, "CONFIG_CHANGED");
+        }
+      } else if (result == EligibilityReconciliationResult.CLOSED) {
+        scheduler.removeTable(tableRuntime);
+      }
+    } catch (Exception e) {
+      LOG.error(
+          "Failed to reconcile optimizing config for table {} in queue {}",
+          tableRuntime.getTableIdentifier(),
+          optimizerGroup.getName(),
+          e);
+    }
+  }
+
+  private TableOptimizingProcess localRunningProcess(DefaultTableRuntime tableRuntime) {
+    OptimizingProcess localProcess = tableRuntime.getOptimizingProcess();
+    if (localProcess instanceof TableOptimizingProcess
+        && ((TableOptimizingProcess) localProcess).belongsTo(this)
+        && localProcess.getStatus() == ProcessStatus.RUNNING) {
+      return (TableOptimizingProcess) localProcess;
+    }
+    if (localProcess != null || tableRuntime.getProcessId() == 0L) {
+      return null;
+    }
+    TableProcessMeta processMeta = loadProcessMeta(tableRuntime);
+    if (processMeta == null || processMeta.getStatus() != ProcessStatus.RUNNING) {
+      return null;
+    }
+    return loadProcess(tableRuntime, processMeta);
+  }
+
+  private EligibilityReconciliationResult reconcileEligibilityWithoutProcess(
+      DefaultTableRuntime tableRuntime, String trigger) {
+    AtomicReference<EligibilityReconciliationResult> result =
+        new AtomicReference<>(EligibilityReconciliationResult.UNKNOWN);
+    tableRuntime
+        .store()
+        .synchronizedInvoke(
+            () -> {
+              if (tableRuntime.getOptimizingStatus() == OptimizingStatus.COMMITTING) {
+                LOG.info(
+                    "Optimizing reconciliation trigger={} table={} processId={}"
+                        + " eligibility=NOT_EVALUATED ownership=OWNED"
+                        + " action=KEEP_COMMITTING result=SUCCESS",
+                    trigger,
+                    tableRuntime.getTableIdentifier(),
+                    tableRuntime.getProcessId());
+                result.set(EligibilityReconciliationResult.KEEP_COMMITTING);
+                return;
+              }
+              PlanningFenceResult fence = evaluateOptimizingFence(tableRuntime, trigger);
+              if (fence == PlanningFenceResult.ALLOW) {
+                result.set(EligibilityReconciliationResult.ELIGIBLE);
+                return;
+              }
+              if (fence != PlanningFenceResult.INELIGIBLE) {
+                return;
+              }
+              if (tableRuntime.getProcessId() != 0L) {
+                LOG.warn(
+                    "Optimizing reconciliation trigger={} table={} processId={} eligibility=FALSE"
+                        + " ownership=OWNED action=SKIP result=PROCESS_NOT_LOADED",
+                    trigger,
+                    tableRuntime.getTableIdentifier(),
+                    tableRuntime.getProcessId());
+                return;
+              }
+              if (tableRuntime.getOptimizingStatus() != OptimizingStatus.IDLE) {
+                tableRuntime.completeEmptyProcess();
+                LOG.info(
+                    "Optimizing reconciliation trigger={} table={} processId=0 eligibility=FALSE"
+                        + " ownership=OWNED action=NORMALIZE_IDLE result=SUCCESS",
+                    trigger,
+                    tableRuntime.getTableIdentifier());
+              }
+              result.set(EligibilityReconciliationResult.CLOSED);
+            });
+    return result.get();
   }
 
   private boolean isFormatSupported(DefaultTableRuntime tableRuntime) {
@@ -312,6 +564,38 @@ public class OptimizingQueue extends PersistentBase {
         "Release queue {} with table {}",
         optimizerGroup.getName(),
         tableRuntime.getTableIdentifier());
+  }
+
+  public void detachTable(DefaultTableRuntime tableRuntime) {
+    scheduler.removeTable(tableRuntime);
+    List<TableOptimizingProcess> localProcesses =
+        tableQueue.stream()
+            .filter(process -> process.getTableId() == tableRuntime.getTableIdentifier().getId())
+            .collect(Collectors.toList());
+    localProcesses.forEach(
+        process -> {
+          clearProcess(process);
+          tableRuntime.detachOptimizingProcess(process);
+        });
+    OptimizingProcess attachedProcess = tableRuntime.getOptimizingProcess();
+    if (attachedProcess instanceof TableOptimizingProcess
+        && ((TableOptimizingProcess) attachedProcess).belongsTo(this)) {
+      clearProcess(attachedProcess);
+      tableRuntime.detachOptimizingProcess(attachedProcess);
+    }
+    LOG.info(
+        "Detach table {} from queue {} without changing its persisted optimizing process",
+        tableRuntime.getTableIdentifier(),
+        optimizerGroup.getName());
+  }
+
+  void closeProcessStrict(DefaultTableRuntime tableRuntime) {
+    OptimizingProcess process = tableRuntime.getOptimizingProcess();
+    Preconditions.checkState(
+        process instanceof TableOptimizingProcess,
+        "No local optimizing process found for table %s",
+        tableRuntime.getTableIdentifier());
+    ((TableOptimizingProcess) process).closeStrict();
   }
 
   private void clearProcess(OptimizingProcess optimizingProcess) {
@@ -447,8 +731,7 @@ public class OptimizingQueue extends PersistentBase {
       if (throwable != null) {
         LOG.error("Failed to plan table {}", tableRuntime.getTableIdentifier(), throwable);
       }
-      if (process != null) {
-        tableQueue.offer(process);
+      if (process != null && offerPlannedProcess(tableRuntime, process)) {
         String skipIds =
             skipTables.stream()
                 .map(ServerTableIdentifier::getId)
@@ -462,6 +745,11 @@ public class OptimizingQueue extends PersistentBase {
             currentTime - startTime,
             skipTables.size());
         LOG.debug("Skipped planning table IDs:{}", skipIds);
+      } else if (process != null) {
+        LOG.info(
+            "Skip offering planned process {} for table {} after final planning fence",
+            process.getProcessId(),
+            tableRuntime.getTableIdentifier());
       } else if (throwable == null) {
         LOG.info(
             "Skipping planning table {} with a total cost of {} ms.",
@@ -472,8 +760,26 @@ public class OptimizingQueue extends PersistentBase {
     } finally {
       planningTables.remove(tableRuntime.getTableIdentifier());
       planningSlots.release();
-      signalPlanningCompleted();
+      try {
+        if (needsPostPlanningRecovery(tableRuntime, process)) {
+          recoverOwnedTable(tableRuntime, "PLANNING_COMPLETED");
+        }
+      } finally {
+        signalPlanningCompleted();
+      }
     }
+  }
+
+  private boolean needsPostPlanningRecovery(
+      DefaultTableRuntime tableRuntime, TableOptimizingProcess process) {
+    if (tableRuntime.getOptimizingStatus() == OptimizingStatus.PLANNING
+        && tableRuntime.getProcessId() == 0L) {
+      return true;
+    }
+    return process != null
+        && process.getStatus() == ProcessStatus.RUNNING
+        && tableRuntime.getProcessId() == process.getProcessId()
+        && tableRuntime.getOptimizingProcess() == null;
   }
 
   private void signalPlanningCompleted() {
@@ -593,6 +899,9 @@ public class OptimizingQueue extends PersistentBase {
   }
 
   private TableOptimizingProcess planInternal(DefaultTableRuntime tableRuntime) {
+    if (!passPlanningFence(tableRuntime, "CANDIDATE_START")) {
+      return null;
+    }
     if (!prepareOwnerForPlanning(tableRuntime)) {
       return null;
     }
@@ -601,6 +910,10 @@ public class OptimizingQueue extends PersistentBase {
       ServerTableIdentifier identifier = tableRuntime.getTableIdentifier();
       AmoroTable<?> table = catalogManager.loadTable(identifier.getIdentifier());
       tableRuntime.refresh(table);
+
+      if (!passPlanningFence(tableRuntime, "AFTER_TABLE_REFRESH")) {
+        return null;
+      }
 
       if (!isFormatSupported(tableRuntime)) {
         tableRuntime.completeEmptyProcess();
@@ -639,6 +952,9 @@ public class OptimizingQueue extends PersistentBase {
           tableRuntime.completeEmptyProcess();
           return null;
         }
+        if (!passPlanningFence(tableRuntime, "BEFORE_PROCESS_PERSIST")) {
+          return null;
+        }
         return new TableOptimizingProcess(planResult, tableRuntime);
       } else {
         tableRuntime.completeEmptyProcess();
@@ -666,6 +982,97 @@ public class OptimizingQueue extends PersistentBase {
       LOG.error("Planning table {} failed", tableRuntime.getTableIdentifier(), throwable);
       throw throwable;
     }
+  }
+
+  private boolean passPlanningFence(DefaultTableRuntime tableRuntime, String stage) {
+    PlanningFenceResult fence = evaluateOptimizingFence(tableRuntime, stage);
+    if (fence == PlanningFenceResult.ALLOW) {
+      return true;
+    }
+    scheduler.removeTable(tableRuntime);
+    if (fence != PlanningFenceResult.INELIGIBLE) {
+      return false;
+    }
+    EligibilityReconciliationResult reconciliation =
+        reconcileEligibilityWithoutProcess(tableRuntime, stage);
+    return reconciliation == EligibilityReconciliationResult.ELIGIBLE;
+  }
+
+  private boolean offerPlannedProcess(
+      DefaultTableRuntime tableRuntime, TableOptimizingProcess process) {
+    PlanningFenceResult fence = evaluateOptimizingFence(tableRuntime, "BEFORE_LOCAL_QUEUE_OFFER");
+    if (fence == PlanningFenceResult.ALLOW || fence == PlanningFenceResult.INELIGIBLE) {
+      try {
+        if (process.offerIfEligibleAndOwned("BEFORE_LOCAL_QUEUE_OFFER")) {
+          return true;
+        }
+      } catch (RuntimeException e) {
+        LOG.warn(
+            "Failed to reconcile process {} for table {} before local queue offer",
+            process.getProcessId(),
+            tableRuntime.getTableIdentifier(),
+            e);
+      }
+    }
+    scheduler.removeTable(tableRuntime);
+    tableRuntime.detachOptimizingProcess(process);
+    return false;
+  }
+
+  private PlanningFenceResult evaluateOptimizingFence(
+      DefaultTableRuntime tableRuntime, String stage) {
+    OptimizingOwnership ownership;
+    try {
+      ownership = ownershipGuard.apply(tableRuntime);
+    } catch (Exception e) {
+      LOG.warn(
+          "Optimizing fence table={} trigger={} eligibility=NOT_EVALUATED ownership=UNKNOWN"
+              + " action=SKIP result=ERROR",
+          tableRuntime.getTableIdentifier(),
+          stage,
+          e);
+      return PlanningFenceResult.UNKNOWN;
+    }
+    if (ownership == OptimizingOwnership.NOT_OWNED) {
+      LOG.info(
+          "Optimizing fence table={} trigger={} eligibility=NOT_EVALUATED ownership=NOT_OWNED"
+              + " action=SKIP result=OWNERSHIP_CHANGED",
+          tableRuntime.getTableIdentifier(),
+          stage);
+      return PlanningFenceResult.NOT_OWNED;
+    }
+    if (ownership != OptimizingOwnership.OWNED) {
+      LOG.warn(
+          "Optimizing fence table={} trigger={} eligibility=NOT_EVALUATED ownership={}"
+              + " action=SKIP result=ERROR",
+          tableRuntime.getTableIdentifier(),
+          stage,
+          ownership);
+      return PlanningFenceResult.UNKNOWN;
+    }
+    Optional<Boolean> eligibility = optimizingEligibility(tableRuntime);
+    if (!eligibility.isPresent()) {
+      LOG.warn(
+          "Optimizing fence table={} trigger={} eligibility=UNKNOWN ownership=OWNED action=SKIP"
+              + " result=ERROR",
+          tableRuntime.getTableIdentifier(),
+          stage);
+      return PlanningFenceResult.UNKNOWN;
+    }
+    if (!eligibility.get()) {
+      LOG.info(
+          "Optimizing fence table={} trigger={} eligibility=FALSE ownership=OWNED action=SKIP"
+              + " result=SUCCESS",
+          tableRuntime.getTableIdentifier(),
+          stage);
+      return PlanningFenceResult.INELIGIBLE;
+    }
+    LOG.debug(
+        "Optimizing fence table={} trigger={} eligibility=TRUE ownership=OWNED action=ALLOW"
+            + " result=SUCCESS",
+        tableRuntime.getTableIdentifier(),
+        stage);
+    return PlanningFenceResult.ALLOW;
   }
 
   private boolean containsCause(Throwable throwable, Class<? extends Throwable> causeClass) {
@@ -892,6 +1299,10 @@ public class OptimizingQueue extends PersistentBase {
       return commitMode;
     }
 
+    private boolean belongsTo(OptimizingQueue queue) {
+      return OptimizingQueue.this == queue;
+    }
+
     @Override
     public OptimizingType getOptimizingType() {
       return optimizingType;
@@ -910,12 +1321,82 @@ public class OptimizingQueue extends PersistentBase {
           return;
         }
         if (tableRuntime.isAllowPartialCommit() && needCommit) {
-          tableRuntime.beginCommitting();
+          beginCommittingIfEligible("PARTIAL_CLOSE");
         } else {
           this.status = ProcessStatus.CLOSED;
           this.endTime = System.currentTimeMillis();
           persistAndSetCompleted(false);
         }
+      } finally {
+        lock.unlock();
+      }
+    }
+
+    private void closeStrict() {
+      closeStrict("STRICT_CLOSE", OptimizingOwnership.UNKNOWN, "UNKNOWN");
+    }
+
+    private void closeStrict(String trigger, OptimizingOwnership ownership, String eligibility) {
+      long startTime = System.currentTimeMillis();
+      lock.lock();
+      try {
+        if (this.status != ProcessStatus.RUNNING) {
+          LOG.debug(
+              "Optimizing reconciliation trigger={} table={} processId={} eligibility={}"
+                  + " ownership={} action=SKIP result=ALREADY_TERMINAL elapsedMs={}",
+              trigger,
+              tableRuntime.getTableIdentifier(),
+              processId,
+              eligibility,
+              ownership,
+              System.currentTimeMillis() - startTime);
+          return;
+        }
+        this.status = ProcessStatus.CLOSED;
+        this.endTime = System.currentTimeMillis();
+        try {
+          persistAndSetCompleted(false, true);
+        } catch (RuntimeException e) {
+          clearProcess(this);
+          tableRuntime.detachOptimizingProcess(this);
+          String result =
+              containsCause(e, OptimizingOwnerConflictException.class) ? "CAS_CONFLICT" : "ERROR";
+          if ("CAS_CONFLICT".equals(result)) {
+            LOG.warn(
+                "Optimizing reconciliation trigger={} table={} processId={} eligibility={}"
+                    + " ownership={} action=CLOSE_FALSE result={} elapsedMs={}",
+                trigger,
+                tableRuntime.getTableIdentifier(),
+                processId,
+                eligibility,
+                ownership,
+                result,
+                System.currentTimeMillis() - startTime,
+                e);
+          } else {
+            LOG.error(
+                "Optimizing reconciliation trigger={} table={} processId={} eligibility={}"
+                    + " ownership={} action=CLOSE_FALSE result={} elapsedMs={}",
+                trigger,
+                tableRuntime.getTableIdentifier(),
+                processId,
+                eligibility,
+                ownership,
+                result,
+                System.currentTimeMillis() - startTime,
+                e);
+          }
+          throw e;
+        }
+        LOG.info(
+            "Optimizing reconciliation trigger={} table={} processId={} eligibility={} ownership={}"
+                + " action=CLOSE_FALSE result=SUCCESS elapsedMs={}",
+            trigger,
+            tableRuntime.getTableIdentifier(),
+            processId,
+            eligibility,
+            ownership,
+            System.currentTimeMillis() - startTime);
       } finally {
         lock.unlock();
       }
@@ -981,7 +1462,7 @@ public class OptimizingQueue extends PersistentBase {
           if (allTasksPrepared()
               && tableRuntime.getOptimizingStatus().isProcessing()
               && tableRuntime.getOptimizingStatus() != OptimizingStatus.COMMITTING) {
-            tableRuntime.beginCommitting();
+            beginCommittingIfEligible("ALL_TASKS_SUCCESS");
           }
         } else if (taskRuntime.getStatus() == TaskRuntime.Status.FAILED) {
           if (taskRuntime.getRetry()
@@ -1000,7 +1481,7 @@ public class OptimizingQueue extends PersistentBase {
                   taskRuntime.getTaskId(),
                   processId);
               failedReason = taskRuntime.getFailReason();
-              tableRuntime.beginCommitting();
+              beginCommittingIfEligible("FAILED_TASK_PARTIAL_COMMIT");
             } else {
               LOG.info(
                   "Task {} has reached the max execute retry count. Process {} failed.",
@@ -1013,6 +1494,108 @@ public class OptimizingQueue extends PersistentBase {
             }
           }
         }
+      } finally {
+        lock.unlock();
+      }
+    }
+
+    private boolean beginCommittingIfEligible(String trigger) {
+      lock.lock();
+      try {
+        AtomicReference<PlanningFenceResult> fenceResult =
+            new AtomicReference<>(PlanningFenceResult.UNKNOWN);
+        tableRuntime
+            .store()
+            .synchronizedInvoke(
+                () -> {
+                  if (tableRuntime.getOptimizingStatus() == OptimizingStatus.COMMITTING) {
+                    fenceResult.set(PlanningFenceResult.ALLOW);
+                    LOG.info(
+                        "Optimizing reconciliation trigger={} table={} processId={}"
+                            + " eligibility=NOT_EVALUATED"
+                            + " ownership=OWNED action=KEEP_COMMITTING result=SUCCESS",
+                        trigger,
+                        tableRuntime.getTableIdentifier(),
+                        processId);
+                    return;
+                  }
+                  PlanningFenceResult fence = evaluateOptimizingFence(tableRuntime, trigger);
+                  fenceResult.set(fence);
+                  if (fence == PlanningFenceResult.ALLOW) {
+                    tableRuntime.beginCommitting();
+                    LOG.info(
+                        "Optimizing reconciliation trigger={} table={} processId={} eligibility=TRUE"
+                            + " ownership=OWNED action=ENTER_COMMITTING result=SUCCESS",
+                        trigger,
+                        tableRuntime.getTableIdentifier(),
+                        processId);
+                  } else if (fence == PlanningFenceResult.INELIGIBLE) {
+                    closeStrict(trigger, OptimizingOwnership.OWNED, "FALSE");
+                  }
+                });
+        return fenceResult.get() == PlanningFenceResult.ALLOW
+            && tableRuntime.getOptimizingStatus() == OptimizingStatus.COMMITTING;
+      } finally {
+        lock.unlock();
+      }
+    }
+
+    private EligibilityReconciliationResult reconcileEligibility(String trigger) {
+      lock.lock();
+      try {
+        AtomicReference<EligibilityReconciliationResult> result =
+            new AtomicReference<>(EligibilityReconciliationResult.UNKNOWN);
+        tableRuntime
+            .store()
+            .synchronizedInvoke(
+                () -> {
+                  if (tableRuntime.getOptimizingStatus() == OptimizingStatus.COMMITTING) {
+                    LOG.info(
+                        "Optimizing reconciliation trigger={} table={} processId={}"
+                            + " eligibility=NOT_EVALUATED"
+                            + " ownership=OWNED action=KEEP_COMMITTING result=SUCCESS",
+                        trigger,
+                        tableRuntime.getTableIdentifier(),
+                        processId);
+                    result.set(EligibilityReconciliationResult.KEEP_COMMITTING);
+                    return;
+                  }
+                  PlanningFenceResult fence = evaluateOptimizingFence(tableRuntime, trigger);
+                  if (fence == PlanningFenceResult.ALLOW) {
+                    result.set(EligibilityReconciliationResult.ELIGIBLE);
+                  } else if (fence == PlanningFenceResult.INELIGIBLE) {
+                    closeStrict(trigger, OptimizingOwnership.OWNED, "FALSE");
+                    result.set(EligibilityReconciliationResult.CLOSED);
+                  }
+                });
+        return result.get();
+      } finally {
+        lock.unlock();
+      }
+    }
+
+    private boolean offerIfEligibleAndOwned(String trigger) {
+      lock.lock();
+      try {
+        AtomicReference<Boolean> offered = new AtomicReference<>(false);
+        tableRuntime
+            .store()
+            .synchronizedInvoke(
+                () -> {
+                  if (status != ProcessStatus.RUNNING || tableRuntime.getProcessId() != processId) {
+                    return;
+                  }
+                  PlanningFenceResult fence = evaluateOptimizingFence(tableRuntime, trigger);
+                  if (fence == PlanningFenceResult.ALLOW) {
+                    if (tableQueue.stream().noneMatch(process -> process.processId == processId)) {
+                      tableQueue.offer(this);
+                    }
+                    offered.set(true);
+                  } else if (fence == PlanningFenceResult.INELIGIBLE) {
+                    closeStrict(trigger, OptimizingOwnership.OWNED, "FALSE");
+                  }
+                });
+        return offered.get();
       } finally {
         lock.unlock();
       }
@@ -1232,6 +1815,10 @@ public class OptimizingQueue extends PersistentBase {
     }
 
     private void persistAndSetCompleted(boolean success) {
+      persistAndSetCompleted(success, false);
+    }
+
+    private void persistAndSetCompleted(boolean success, boolean strictOwner) {
       doAsTransaction(
           () -> {
             if (!success) {
@@ -1253,7 +1840,13 @@ public class OptimizingQueue extends PersistentBase {
                           getFailedReason(),
                           new HashMap<>(),
                           getSummary().summaryAsMap(false))),
-          () -> tableRuntime.completeProcess(this, success),
+          () -> {
+            if (strictOwner) {
+              tableRuntime.completeProcessStrict(this, success);
+            } else {
+              tableRuntime.completeProcess(this, success);
+            }
+          },
           () -> clearProcess(this));
     }
 

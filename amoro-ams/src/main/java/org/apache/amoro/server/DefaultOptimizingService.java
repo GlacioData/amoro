@@ -42,6 +42,7 @@ import org.apache.amoro.server.catalog.CatalogManager;
 import org.apache.amoro.server.dashboard.model.OptimizerResourceInfo;
 import org.apache.amoro.server.ha.HighAvailabilityContainer;
 import org.apache.amoro.server.manager.AbstractOptimizerContainer;
+import org.apache.amoro.server.optimizing.OptimizingOwnership;
 import org.apache.amoro.server.optimizing.OptimizingProcess;
 import org.apache.amoro.server.optimizing.OptimizingQueue;
 import org.apache.amoro.server.optimizing.OptimizingStatus;
@@ -202,7 +203,8 @@ public class DefaultOptimizingService extends StatedPersistentBase
                   planExecutor,
                   Optional.ofNullable(tableRuntimes).orElseGet(ArrayList::new),
                   maxPlanningParallelism,
-                  router);
+                  router,
+                  this::currentOwnership);
           optimizingQueueByGroup.put(groupName, optimizingQueue);
           optimizerGroupKeeper.keepInTouch(groupName, 1);
         });
@@ -414,7 +416,8 @@ public class DefaultOptimizingService extends StatedPersistentBase
                   planExecutor,
                   new ArrayList<>(),
                   maxPlanningParallelism,
-                  router);
+                  router,
+                  this::currentOwnership);
           String groupName = resourceGroup.getName();
           optimizingQueueByGroup.put(groupName, optimizingQueue);
           optimizerGroupKeeper.keepInTouch(groupName, 1);
@@ -429,6 +432,37 @@ public class DefaultOptimizingService extends StatedPersistentBase
   public void updateResourceGroup(ResourceGroup resourceGroup) {
     Optional.ofNullable(optimizingQueueByGroup.get(resourceGroup.getName()))
         .ifPresent(queue -> queue.updateOptimizerGroup(resourceGroup));
+  }
+
+  OptimizingOwnership currentOwnership(DefaultTableRuntime tableRuntime) {
+    try {
+      if (!tableService.isCurrentRuntime(tableRuntime)) {
+        return OptimizingOwnership.NOT_OWNED;
+      }
+      if (!isMasterSlaveMode) {
+        return OptimizingOwnership.OWNED;
+      }
+      if (bucketAssignStore == null || haContainer == null) {
+        return OptimizingOwnership.UNKNOWN;
+      }
+      Optional<String> bucketId = tableService.getCurrentRuntimeBucketId(tableRuntime);
+      if (!bucketId.isPresent()) {
+        return OptimizingOwnership.UNKNOWN;
+      }
+      AmsServerInfo currentServerInfo = haContainer.getOptimizingServiceServerInfo();
+      if (currentServerInfo == null) {
+        return OptimizingOwnership.UNKNOWN;
+      }
+      return bucketAssignStore.getAssignments(currentServerInfo).contains(bucketId.get())
+          ? OptimizingOwnership.OWNED
+          : OptimizingOwnership.NOT_OWNED;
+    } catch (Exception e) {
+      LOG.warn(
+          "Optimizing ownership table={} ownership=UNKNOWN action=SKIP result=ERROR",
+          tableRuntime == null ? "null" : tableRuntime.getTableIdentifier(),
+          e);
+      return OptimizingOwnership.UNKNOWN;
+    }
   }
 
   public void dispose() {
@@ -493,22 +527,48 @@ public class DefaultOptimizingService extends StatedPersistentBase
         }
       }
 
-      // Binding new queue if the new group exists
-      newQueue.ifPresent(q -> q.refreshTable(tableRuntime));
+      // Reconcile against the refreshed raw table properties before binding the table for future
+      // planning. The queue owns Process/Task lifecycle and applies ownership and commit fences.
+      newQueue.ifPresent(q -> q.reconcileTableConfig(tableRuntime));
     }
 
     @Override
     public void handleTableAdded(AmoroTable<?> table, TableRuntime runtime) {
       DefaultTableRuntime tableRuntime = (DefaultTableRuntime) runtime;
-      getOptionalQueueByGroup(tableRuntime.getGroupName())
-          .ifPresent(q -> q.refreshTable(tableRuntime));
+      OptimizingOwnership ownership = currentOwnership(tableRuntime);
+      if (ownership == OptimizingOwnership.OWNED) {
+        getOptionalQueueByGroup(tableRuntime.getGroupName())
+            .ifPresent(queue -> queue.recoverOwnedTable(tableRuntime));
+      } else {
+        LOG.debug(
+            "Optimizing reconciliation trigger=OWNERSHIP_GAINED table={} processId={}"
+                + " eligibility=NOT_EVALUATED ownership={} action=SKIP"
+                + " result=OWNERSHIP_CHANGED",
+            tableRuntime.getTableIdentifier(),
+            tableRuntime.getProcessId(),
+            ownership);
+      }
     }
 
     @Override
     public void handleTableRemoved(TableRuntime runtime) {
       DefaultTableRuntime tableRuntime = (DefaultTableRuntime) runtime;
+      OptimizingOwnership ownership = currentOwnership(tableRuntime);
       getOptionalQueueByGroup(tableRuntime.getGroupName())
-          .ifPresent(queue -> queue.releaseTable(tableRuntime));
+          .ifPresent(
+              queue -> {
+                if (ownership == OptimizingOwnership.OWNED) {
+                  queue.releaseTable(tableRuntime);
+                } else {
+                  queue.detachTable(tableRuntime);
+                  LOG.info(
+                      "Optimizing reconciliation trigger=OWNERSHIP_LOST table={} processId={}"
+                          + " eligibility=NOT_EVALUATED ownership={} action=DETACH result=SUCCESS",
+                      tableRuntime.getTableIdentifier(),
+                      tableRuntime.getProcessId(),
+                      ownership);
+                }
+              });
     }
 
     @Override
