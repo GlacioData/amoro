@@ -99,9 +99,14 @@ public class TestFrameworkE2E {
     }
     try (Statement statement = adminConnection.createStatement()) {
       // the schema is already created by T9's IF NOT EXISTS script through the initializer; the
-      // E2E tables must start empty so every run asserts a full lifecycle from scratch
+      // E2E tables must start empty so every run asserts a full lifecycle from scratch. The
+      // process E2E drops its own table; tolerate its absence here (it recreates it itself).
       for (String table : new String[] {"amoro_resource", "amoro_process"}) {
-        statement.execute("DELETE FROM " + table);
+        try {
+          statement.execute("DELETE FROM " + table);
+        } catch (SQLException absent) {
+          // dropped by the sibling E2E; nothing to clean
+        }
       }
     }
   }
@@ -111,7 +116,11 @@ public class TestFrameworkE2E {
     if (adminConnection != null) {
       try (Statement statement = adminConnection.createStatement()) {
         for (String table : new String[] {"amoro_resource", "amoro_process"}) {
-          statement.execute("DELETE FROM " + table);
+          try {
+            statement.execute("DELETE FROM " + table);
+          } catch (SQLException absent) {
+            // dropped by the sibling E2E; nothing to clean
+          }
         }
       }
       adminConnection.close();
