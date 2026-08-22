@@ -27,13 +27,10 @@ import org.apache.amoro.process.engine.EngineTypes.SubmissionOutcome;
 import org.apache.amoro.process.engine.EngineTypes.SubmissionResolution;
 
 import java.util.LinkedHashMap;
-import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -51,11 +48,14 @@ public final class LocalEngineAdapter implements ProcessEnginePort {
 
   /** The action body: receives the payload and a cancel-flag; writes its summary. */
   public interface LocalAction {
-    void run(byte[] payload, Consumer<Map<String, Object>> summarySink, Runnable cancelled)
+    void run(
+        byte[] payload,
+        Consumer<Map<String, Object>> summarySink,
+        java.util.function.BooleanSupplier cancelRequested)
         throws Exception;
   }
 
-  private final ExecutorService actionPool;
+  private final java.util.concurrent.ThreadPoolExecutor actionPool;
   private final LocalAction action;
   private final Map<String, String> acknowledgedBySubmissionKey =
       new ConcurrentHashMap<String, String>(); // submissionKey -> externalId
@@ -70,7 +70,7 @@ public final class LocalEngineAdapter implements ProcessEnginePort {
 
   /** A no-op action body for wiring tests and demos: succeeds after a short delay. */
   public static LocalAction simulatedAction() {
-    return (payload, summarySink, cancelled) -> {
+    return (payload, summarySink, cancelRequested) -> {
       Thread.sleep(5L);
       Map<String, Object> summary = new LinkedHashMap<String, Object>();
       summary.put("simulated", true);
@@ -78,10 +78,19 @@ public final class LocalEngineAdapter implements ProcessEnginePort {
     };
   }
 
-  public LocalEngineAdapter(int poolSize, LocalAction action) {
+  /**
+   * @param poolSize action worker threads
+   * @param queueCapacity bounded dispatch queue: a full queue is an authoritative "nothing ran"
+   *     rejection (spec §6.1), unlike the unbounded v1 work queue
+   */
+  public LocalEngineAdapter(int poolSize, int queueCapacity, LocalAction action) {
     this.actionPool =
-        Executors.newFixedThreadPool(
+        new java.util.concurrent.ThreadPoolExecutor(
             poolSize,
+            poolSize,
+            60L,
+            TimeUnit.SECONDS,
+            new java.util.concurrent.ArrayBlockingQueue<Runnable>(queueCapacity),
             runnable -> {
               Thread thread =
                   new Thread(
@@ -121,7 +130,7 @@ public final class LocalEngineAdapter implements ProcessEnginePort {
     execution.observation = new EngineObservation("RUNNING", null, null, null);
     try {
       Map<String, Object> summary = new LinkedHashMap<String, Object>();
-      action.run(payload, summary::putAll, () -> execution.cancelRequested = true);
+      action.run(payload, summary::putAll, () -> execution.cancelRequested);
       if (execution.cancelRequested) {
         execution.observation = new EngineObservation("CANCELED", null, summary, null);
         return;
@@ -174,6 +183,8 @@ public final class LocalEngineAdapter implements ProcessEnginePort {
   @Override
   public CompletionStage<Void> release(String externalId) {
     executionsByExternalId.remove(externalId);
+    // the submission registry must not leak one entry per generation forever
+    acknowledgedBySubmissionKey.values().removeIf(id -> id.equals(externalId));
     return CompletableFuture.completedFuture(null);
   }
 
@@ -188,10 +199,5 @@ public final class LocalEngineAdapter implements ProcessEnginePort {
       Thread.currentThread().interrupt();
       actionPool.shutdownNow();
     }
-  }
-
-  @SuppressWarnings("unused")
-  private static List<String> keepImport() {
-    return null;
   }
 }

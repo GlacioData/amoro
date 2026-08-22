@@ -81,7 +81,7 @@ public class TestProcessE2EMysql {
   private static final class Stack implements AutoCloseable {
     final DefaultScheduler scheduler = DefaultScheduler.create(2, 50L);
     final LocalEngineAdapter engine =
-        new LocalEngineAdapter(2, LocalEngineAdapter.simulatedAction());
+        new LocalEngineAdapter(2, 64, LocalEngineAdapter.simulatedAction());
     final ProcessEngineDispatcher dispatcher = new ProcessEngineDispatcher(engine, 5_000L);
     final ProcessDomainAssembly assembly;
     final ProcessRestSupport rest;

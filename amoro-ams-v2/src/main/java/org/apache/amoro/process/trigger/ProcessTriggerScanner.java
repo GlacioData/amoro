@@ -91,9 +91,10 @@ public final class ProcessTriggerScanner {
             table.table(),
             idempotencyKey,
             plugin.action(),
-            engineOf(plugin),
+            engineOf(plugin, table.tableFormat()),
             evaluation.parameters(),
-            "SCHEDULED");
+            "SCHEDULED",
+            table.tableFormat());
         LOG.info(
             "Scheduled process created for {}.{}.{} action {}.",
             table.catalog(),
@@ -107,8 +108,10 @@ public final class ProcessTriggerScanner {
     }
   }
 
-  private static String engineOf(ProcessActionPlugin plugin) {
-    return plugin.supports("iceberg", "local") ? "local" : "remote-spark";
+  private static String engineOf(ProcessActionPlugin plugin, String tableFormat) {
+    // the (format, action, engine) pair is decided by the plugin against the table's real
+    // format — never guessed from the action alone (spec §6.2/§6.3)
+    return plugin.supports(tableFormat, "local") ? "local" : "remote-spark";
   }
 
   private static String windowOf(Instant fireTime) {

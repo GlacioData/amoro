@@ -29,20 +29,34 @@ public interface ManagedTablePort {
 
   List<TableSnapshot> scan();
 
-  /** Canonical coordinates plus the allowlisted maintenance stamps the gates consume. */
+  /**
+   * Canonical coordinates plus the allowlisted maintenance stamps the gates consume.
+   *
+   * <p>Deviation note: the spec's ManagedTableSnapshot also carries an allowlisted config view, and
+   * the port is cursor-paged and asynchronous; the first version ships the synchronous minimal
+   * snapshot the interval gates need. The production adapter over {@code table_identifier ⋈
+   * table_metadata} lands with the real format integrations.
+   */
   final class TableSnapshot {
     private final String catalog;
     private final String database;
     private final String table;
     private final String tableId;
+    private final String tableFormat; // iceberg | paimon | ...
     private final String lastMaintenanceAt; // RFC 3339; epoch when never maintained
 
     public TableSnapshot(
-        String catalog, String database, String table, String tableId, String lastMaintenanceAt) {
+        String catalog,
+        String database,
+        String table,
+        String tableId,
+        String tableFormat,
+        String lastMaintenanceAt) {
       this.catalog = catalog;
       this.database = database;
       this.table = table;
       this.tableId = tableId;
+      this.tableFormat = tableFormat;
       this.lastMaintenanceAt = lastMaintenanceAt;
     }
 
@@ -60,6 +74,10 @@ public interface ManagedTablePort {
 
     public String tableId() {
       return tableId;
+    }
+
+    public String tableFormat() {
+      return tableFormat;
     }
 
     public String lastMaintenanceAt() {

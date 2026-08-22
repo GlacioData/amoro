@@ -35,9 +35,17 @@ public final class ProcessTtlCleaner {
   private static final Logger LOG = LoggerFactory.getLogger(ProcessTtlCleaner.class);
 
   private final ProcessDomainAssembly assembly;
+  private final org.apache.amoro.process.engine.ExecutionHandleRegistry handleRegistry;
 
   public ProcessTtlCleaner(ProcessDomainAssembly assembly) {
+    this(assembly, new org.apache.amoro.process.engine.ExecutionHandleRegistry());
+  }
+
+  public ProcessTtlCleaner(
+      ProcessDomainAssembly assembly,
+      org.apache.amoro.process.engine.ExecutionHandleRegistry handleRegistry) {
     this.assembly = assembly;
+    this.handleRegistry = handleRegistry;
   }
 
   /** One bounded cleaning round; returns the number of durable deletes issued. */
@@ -58,6 +66,11 @@ public final class ProcessTtlCleaner {
       ProcessResource resource = assembly.repository().get(name);
       if (!ProcessFinality.isFinal(resource) || resource.status().finishedAt() == null) {
         continue; // raced back to life or never stamped: skip, the index will drop it
+      }
+      if (handleRegistry.hasPendingHandle(name)) {
+        // spec §9.1: a row may not disappear while its local engine handle is pending
+        // release — otherwise the handle leaks forever with no durable trace
+        continue;
       }
       try {
         assembly

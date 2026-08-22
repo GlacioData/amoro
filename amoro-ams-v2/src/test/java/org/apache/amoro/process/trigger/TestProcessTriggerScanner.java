@@ -167,11 +167,21 @@ public class TestProcessTriggerScanner {
       racer.join(10_000);
     }
 
-    long count =
+    // exactly one ACTIVE process per table: the admission mutex spans check AND durable
+    // create for both scanner and REST entries (spec §5.2, review Critical-1)
+    for (String tableName : new String[] {"orders", "events"}) {
+      long activeForTable =
+          assembly.indexProjection().current().resourcesByName().values().stream()
+              .filter(r -> tableName.equals(r.spec().table().table()))
+              .filter(r -> !org.apache.amoro.process.ProcessFinality.isFinal(r))
+              .count();
+      assertEquals(1, activeForTable, "table " + tableName + " has exactly one active process");
+    }
+    long total =
         assembly.indexProjection().current().resourcesByName().values().stream()
             .filter(r -> "SCHEDULED".equals(r.spec().triggerSource()))
             .count();
-    assertTrue(count <= 4, "no table exceeds one ACTIVE process (admission is exclusive)");
+    assertEquals(2, total, "two tables, one scheduled process each — no duplicates");
     // every table ends with at least one process attempt
     await()
         .atMost(5, TimeUnit.SECONDS)
@@ -188,7 +198,8 @@ public class TestProcessTriggerScanner {
     void add(String catalog, String db, String table, String tableId) {
       tables.put(
           tableId,
-          new TableSnapshot(catalog, db, table, tableId, java.time.Instant.EPOCH.toString()));
+          new TableSnapshot(
+              catalog, db, table, tableId, "iceberg", java.time.Instant.EPOCH.toString()));
     }
 
     void markFreshlyMaintained(String catalog, String db, String table) {
@@ -201,6 +212,7 @@ public class TestProcessTriggerScanner {
                   snapshot.database(),
                   snapshot.table(),
                   snapshot.tableId(),
+                  snapshot.tableFormat(),
                   java.time.Instant.now().toString()));
         }
       }

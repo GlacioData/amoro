@@ -60,7 +60,7 @@ public class TestLocalEngine {
             128,
             10_000L,
             65536);
-    engine = new LocalEngineAdapter(2, LocalEngineAdapter.simulatedAction());
+    engine = new LocalEngineAdapter(2, 64, LocalEngineAdapter.simulatedAction());
     dispatcher = new ProcessEngineDispatcher(engine, 5_000L);
   }
 
@@ -126,6 +126,34 @@ public class TestLocalEngine {
         assembly.repository().get("local-1").status().finishedAt() != null,
         "the terminal write stamps the top-level finishedAt");
     await().atMost(10, TimeUnit.SECONDS).until(() -> scheduler.registrySize() == 0);
+  }
+
+  @Test
+  public void fullQueueIsAnAuthoritativeRejection() throws Exception {
+    // pool 1, queue 1: first occupies the worker, second fills the queue, third is rejected
+    // with a provable "nothing ran" — never UNKNOWN (spec §6.1)
+    java.util.concurrent.CountDownLatch block = new java.util.concurrent.CountDownLatch(1);
+    LocalEngineAdapter tiny =
+        new LocalEngineAdapter(1, 1, (payload, summarySink, cancelRequested) -> block.await());
+    try {
+      org.apache.amoro.process.engine.ProcessEngineDispatcher tinyDispatcher =
+          new org.apache.amoro.process.engine.ProcessEngineDispatcher(tiny, 5_000L);
+      tinyDispatcher.submit("p", "k1", "h", new byte[] {1});
+      tinyDispatcher.submit("p", "k2", "h", new byte[] {1});
+      org.apache.amoro.process.engine.EngineTypes.SubmissionOutcome third =
+          tinyDispatcher
+              .submit("p", "k3", "h", new byte[] {1})
+              .toCompletableFuture()
+              .get(5, TimeUnit.SECONDS);
+      assertEquals(
+          org.apache.amoro.process.engine.EngineTypes.SubmissionOutcome.Kind.REJECTED,
+          third.kind());
+      org.junit.jupiter.api.Assertions.assertTrue(
+          third.reason() != null && third.reason().contains("CAPACITY"));
+    } finally {
+      block.countDown();
+      tiny.shutdown(5_000L);
+    }
   }
 
   @Test

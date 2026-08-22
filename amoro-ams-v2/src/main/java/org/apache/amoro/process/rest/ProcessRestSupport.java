@@ -56,6 +56,10 @@ public final class ProcessRestSupport {
   private final ProcessDomainAssembly assembly;
   private final TableCatalogPort tableCatalog;
 
+  /** Admission mutexes per (tableId|action): serialize REST and scanner creates (spec §5.2). */
+  private final java.util.concurrent.ConcurrentHashMap<String, Object> admissionLocks =
+      new java.util.concurrent.ConcurrentHashMap<String, Object>();
+
   /** P6 (ManagedTablePort) replaces this minimal catalog port. */
   public interface TableCatalogPort {
     boolean exists(String catalog, String database, String table);
@@ -93,7 +97,8 @@ public final class ProcessRestSupport {
       String action,
       String engine,
       Map<String, Object> parameters) {
-    return create(catalog, database, table, idempotencyKey, action, engine, parameters, "MANUAL");
+    return create(
+        catalog, database, table, idempotencyKey, action, engine, parameters, "MANUAL", "iceberg");
   }
 
   public CreateResult create(
@@ -105,6 +110,28 @@ public final class ProcessRestSupport {
       String engine,
       Map<String, Object> parameters,
       String triggerSource) {
+    return create(
+        catalog,
+        database,
+        table,
+        idempotencyKey,
+        action,
+        engine,
+        parameters,
+        triggerSource,
+        "iceberg");
+  }
+
+  public CreateResult create(
+      String catalog,
+      String database,
+      String table,
+      String idempotencyKey,
+      String action,
+      String engine,
+      Map<String, Object> parameters,
+      String triggerSource,
+      String tableFormat) {
     requireIdempotencyKey(idempotencyKey);
     if (!ProcessActionCatalog.isKnownAction(action)) {
       throw ApiError.of("INVALID_ACTION", "unknown action '" + action + "'");

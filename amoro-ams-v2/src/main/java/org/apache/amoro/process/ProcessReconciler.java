@@ -58,6 +58,7 @@ public final class ProcessReconciler implements Controller {
   private final Scheduler scheduler;
   private final Clock clock;
   private final long retryDelayMillis;
+  private final org.apache.amoro.process.engine.ExecutionHandleRegistry handleRegistry;
 
   /** Wall-clock abstraction (UTC instants as RFC 3339 strings). */
   public interface Clock {
@@ -75,12 +76,31 @@ public final class ProcessReconciler implements Controller {
       Scheduler scheduler,
       Clock clock,
       long retryDelayMillis) {
+    this(
+        processName,
+        repository,
+        engine,
+        scheduler,
+        clock,
+        retryDelayMillis,
+        new org.apache.amoro.process.engine.ExecutionHandleRegistry());
+  }
+
+  public ProcessReconciler(
+      String processName,
+      RepositoryFacade<ProcessResource> repository,
+      ProcessEngineDispatcher engine,
+      Scheduler scheduler,
+      Clock clock,
+      long retryDelayMillis,
+      org.apache.amoro.process.engine.ExecutionHandleRegistry handleRegistry) {
     this.processName = processName;
     this.repository = repository;
     this.engine = engine;
     this.scheduler = scheduler;
     this.clock = clock;
     this.retryDelayMillis = retryDelayMillis;
+    this.handleRegistry = handleRegistry;
   }
 
   @Override
@@ -133,8 +153,16 @@ public final class ProcessReconciler implements Controller {
     }
     String phase = resource.status().phase();
     if ("PENDING".equals(phase) || "UNKNOWN".equals(phase)) {
-      // no dispatch evidence beyond CREATED: resolve before cancelling blindly
-      return submitStep(resource, true);
+      String submitState =
+          resource.status().attempt() != null ? resource.status().attempt().submitState() : null;
+      if ("CREATED".equals(submitState) || submitState == null) {
+        // provably never dispatched (spec §7.4): cancel directly, no engine work at all
+        return casWrite(resource, directCanceled(resource)) ? Step.DONE : Step.DONE;
+      }
+      // DISPATCHING/UNKNOWN/CONFLICT: dispatch evidence exists but no external id — the
+      // submission-resolution path owns it; conservatively CANCELING and observe rounds
+      // plus the manual submission resolution converge it
+      return casTransition(resource, "CANCELING");
     }
     if ("SUBMITTED".equals(phase) || "RUNNING".equals(phase)) {
       return casTransition(resource, "CANCELING");
@@ -152,8 +180,11 @@ public final class ProcessReconciler implements Controller {
 
   private Step submitStep(ProcessResource resource, boolean cancelling) {
     ProcessResource.ProcessAttempt attempt = ensureAttempt(resource);
+    if (cancelling) {
+      throw new IllegalStateException("cancel path never dispatches new submissions");
+    }
     if (resource.status().attempt() == null) {
-      // persist the attempt first (process spec §7.3: durable DISPATCHING before dispatch)
+      // persist the attempt first (process spec §7.3: the attempt exists before dispatch)
       ProcessResource.ProcessStatus status = resource.status();
       ProcessResource.ProcessStatus withAttempt =
           new ProcessResource.ProcessStatus(
@@ -171,7 +202,52 @@ public final class ProcessReconciler implements Controller {
               status.startedAt(),
               status.finishedAt());
       casWrite(resource, withAttempt);
-      return Step.DONE; // the next round dispatches with the durable attempt
+      return Step.DONE; // the next round stages DISPATCHING
+    }
+    String state = attempt.submitState();
+    if ("UNKNOWN".equals(state) || "CONFLICT".equals(state)) {
+      // unresolved submission: never blind-resubmit the same key (spec §7.3); the manual
+      // submission-resolution endpoint or a future resolve round owns this attempt
+      LOG.info(
+          "Process {} attempt {} is {}; awaiting manual submission resolution.",
+          processName,
+          attempt.submissionKey(),
+          state);
+      return Step.WAIT;
+    }
+    if (!"DISPATCHING".equals(state)) {
+      // durable DISPATCHING first (spec §7.3): a crash after this write restarts into
+      // resolution instead of a duplicate submit of the same key
+      ProcessResource.ProcessStatus status = resource.status();
+      ProcessResource.ProcessAttempt dispatching =
+          new ProcessResource.ProcessAttempt(
+              attempt.dispatchGeneration(),
+              attempt.submissionKey(),
+              attempt.requestHash(),
+              "DISPATCHING",
+              attempt.externalId(),
+              attempt.dispatchedAt(),
+              attempt.retryDisposition(),
+              attempt.finishedAt(),
+              attempt.submissionHistory(),
+              attempt.manualResolutions());
+      casWrite(
+          resource,
+          new ProcessResource.ProcessStatus(
+              status.phase(),
+              status.retryNumber(),
+              dispatching,
+              status.attemptHistory(),
+              status.lastObservedAt(),
+              null,
+              status.engineBackoffAttempts(),
+              status.conditions(),
+              status.summary(),
+              status.failure(),
+              status.submittedAt(),
+              status.startedAt(),
+              status.finishedAt()));
+      return Step.DONE; // the next round performs the actual dispatch
     }
     String submissionKey = attempt.submissionKey();
     engine
@@ -179,7 +255,7 @@ public final class ProcessReconciler implements Controller {
         .whenComplete(
             (outcome, error) ->
                 applySubmitOutcome(
-                    processName, submissionKey, attempt.requestHash(), outcome, error, cancelling));
+                    processName, submissionKey, attempt.requestHash(), outcome, error, false));
     return Step.DISPATCHED;
   }
 
@@ -187,11 +263,14 @@ public final class ProcessReconciler implements Controller {
     ProcessResource.ProcessAttempt attempt = resource.status().attempt();
     if (attempt == null || attempt.externalId() == null) {
       // no external identity: the submit side owns this resource for now
-      return submitStep(resource, !runDesired);
+      return submitStep(resource, false);
     }
+    String submissionKey = attempt.submissionKey();
     engine
         .observe(processName, attempt.externalId())
-        .whenComplete((observation, error) -> applyObservation(processName, observation, error));
+        .whenComplete(
+            (observation, error) ->
+                applyObservation(processName, submissionKey, observation, error));
     return Step.DISPATCHED;
   }
 
@@ -204,14 +283,17 @@ public final class ProcessReconciler implements Controller {
       // cancellation already accepted: observe rounds record the terminal phase
       return observeStep(resource, false);
     }
+    String submissionKey = attempt.submissionKey();
     engine
         .cancel(processName, attempt.externalId())
-        .whenComplete((outcome, error) -> applyCancelOutcome(processName, outcome, error));
+        .whenComplete(
+            (outcome, error) -> applyCancelOutcome(processName, submissionKey, outcome, error));
     return Step.DISPATCHED;
   }
 
   void applyCancelOutcome(
       String name,
+      String submissionKey,
       org.apache.amoro.process.engine.EngineTypes.CancellationOutcome outcome,
       Throwable error) {
     try {
@@ -349,20 +431,29 @@ public final class ProcessReconciler implements Controller {
         case REJECTED:
           casWrite(current, terminal("FAILED", current, "REJECTED: " + outcome.reason()));
           return;
-        case UNAVAILABLE:
         case UNKNOWN:
         case CONFLICT:
+          // persist the unresolved state: later rounds never blind-resubmit this key and
+          // the manual submission-resolution endpoint (or a resolve round) owns it
+          casWrite(
+              current,
+              withSubmitState(
+                  current,
+                  outcome.kind() == SubmissionOutcome.Kind.UNKNOWN ? "UNKNOWN" : "CONFLICT"));
+          return;
+        case UNAVAILABLE:
         default:
-          // first version: leave the phase; the periodic reconcile re-dispatches and the
-          // engine backoff counters pace it
-          LOG.info("Submit of {} classified {}; awaiting next round.", name, outcome.kind());
+          // provably never sent: the same key is retried on the next round
+          LOG.info(
+              "Submit of {} classified {}; retrying same key next round.", name, outcome.kind());
       }
     } catch (RuntimeException e) {
       LOG.warn("Applying submit result of {} failed.", name, e);
     }
   }
 
-  void applyObservation(String name, ProcessObservation observation, Throwable error) {
+  void applyObservation(
+      String name, String submissionKey, ProcessObservation observation, Throwable error) {
     try {
       ProcessResource current = repository.get(name);
       if (error != null) {
@@ -419,13 +510,100 @@ public final class ProcessReconciler implements Controller {
               status.submittedAt(),
               status.startedAt(),
               finishedAt);
-      casWrite(current, next);
+      boolean written = casWrite(current, next);
+      if (written) {
+        // the terminal result is durable: the engine handle may be cleaned up now
+        String externalId = attempt != null ? attempt.externalId() : null;
+        if (externalId != null) {
+          handleRegistry.track(name, externalId);
+          engine
+              .release("local", externalId)
+              .whenComplete(
+                  (ignored, releaseError) -> {
+                    if (releaseError == null) {
+                      handleRegistry.release(name);
+                    }
+                  });
+        }
+      }
     } catch (RuntimeException e) {
       LOG.warn("Applying observation of {} failed.", name, e);
     }
   }
 
   // ------------------------------------------------------------------ helpers
+
+  /** direct CANCELED for a provably-never-dispatched attempt (spec §7.4 first row). */
+  private ProcessResource.ProcessStatus directCanceled(ProcessResource resource) {
+    ProcessResource.ProcessStatus status = resource.status();
+    String now = clock.now();
+    return new ProcessResource.ProcessStatus(
+        "CANCELED",
+        status.retryNumber(),
+        closeForCancel(status.attempt(), now),
+        status.attemptHistory(),
+        status.lastObservedAt(),
+        now,
+        status.engineBackoffAttempts(),
+        status.conditions(),
+        status.summary(),
+        null,
+        status.submittedAt(),
+        status.startedAt(),
+        now);
+  }
+
+  private ProcessResource.ProcessAttempt closeForCancel(
+      ProcessResource.ProcessAttempt attempt, String now) {
+    if (attempt == null) {
+      return null;
+    }
+    return new ProcessResource.ProcessAttempt(
+        attempt.dispatchGeneration(),
+        attempt.submissionKey(),
+        attempt.requestHash(),
+        attempt.submitState(),
+        attempt.externalId(),
+        attempt.dispatchedAt(),
+        "FINAL",
+        now,
+        attempt.submissionHistory(),
+        attempt.manualResolutions());
+  }
+
+  private ProcessResource.ProcessStatus withSubmitState(ProcessResource current, String state) {
+    ProcessResource.ProcessStatus status = current.status();
+    ProcessResource.ProcessAttempt attempt = status.attempt();
+    if (attempt == null) {
+      return status;
+    }
+    ProcessResource.ProcessAttempt marked =
+        new ProcessResource.ProcessAttempt(
+            attempt.dispatchGeneration(),
+            attempt.submissionKey(),
+            attempt.requestHash(),
+            state,
+            attempt.externalId(),
+            attempt.dispatchedAt(),
+            attempt.retryDisposition(),
+            attempt.finishedAt(),
+            attempt.submissionHistory(),
+            attempt.manualResolutions());
+    return new ProcessResource.ProcessStatus(
+        status.phase(),
+        status.retryNumber(),
+        marked,
+        status.attemptHistory(),
+        status.lastObservedAt(),
+        null,
+        status.engineBackoffAttempts(),
+        status.conditions(),
+        status.summary(),
+        status.failure(),
+        status.submittedAt(),
+        status.startedAt(),
+        status.finishedAt());
+  }
 
   private ProcessResource.ProcessAttempt ensureAttempt(ProcessResource resource) {
     ProcessResource.ProcessAttempt attempt = resource.status().attempt();
@@ -522,6 +700,7 @@ public final class ProcessReconciler implements Controller {
       return true;
     } catch (org.apache.amoro.persistence.exception.PreconditionFailedException raced) {
       // another writer won; the next reconcile round reads the fresh state (level-triggered)
+      LOG.debug("CAS for {} lost a race; next round converges.", current.name());
       return false;
     }
   }

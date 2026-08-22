@@ -126,7 +126,9 @@ public final class ProcessEngineDispatcher {
   }
 
   public CompletionStage<Void> release(String executionEngine, String externalId) {
-    return adapter.release(externalId); // release identities are cleanup-only, never gated
+    // release is cleanup-only (never single-flight gated) but still time-bounded so a hanging
+    // adapter can never leave a claimed cleanup pending forever (spec §6.1: five futures bound)
+    return bounded(adapter.release(externalId), null);
   }
 
   // ------------------------------------------------------------------ internals
@@ -177,20 +179,28 @@ public final class ProcessEngineDispatcher {
       if (raced != null) {
         continue; // stale completed entry from an earlier command; replace it
       }
-      command
-          .get()
-          .whenComplete(
-              (result, error) -> {
-                try {
-                  if (error != null) {
-                    created.completeExceptionally(error);
-                  } else {
-                    created.complete(result);
-                  }
-                } finally {
-                  inFlight.remove(identity, created);
-                }
-              });
+      CompletableFuture<T> adapterFuture;
+      try {
+        adapterFuture = command.get();
+      } catch (RuntimeException synchronousFailure) {
+        // an adapter that throws before returning a future must not poison the identity:
+        // fail this caller and release the slot (spec: commands degrade, never hang)
+        created.completeExceptionally(synchronousFailure);
+        inFlight.remove(identity, created);
+        return created;
+      }
+      adapterFuture.whenComplete(
+          (result, error) -> {
+            try {
+              if (error != null) {
+                created.completeExceptionally(error);
+              } else {
+                created.complete(result);
+              }
+            } finally {
+              inFlight.remove(identity, created);
+            }
+          });
       return created;
     }
   }

@@ -43,12 +43,31 @@ import java.util.concurrent.TimeUnit;
 @Timeout(90)
 public class TestProcessReconciler {
 
+  /** Counts submissions while delegating to the scriptable fake. */
+  static final class CountingFakeEngine extends FakeEngineAdapter {
+    private final java.util.concurrent.atomic.AtomicLong counter;
+
+    CountingFakeEngine(java.util.concurrent.atomic.AtomicLong counter) {
+      this.counter = counter;
+    }
+
+    @Override
+    public java.util.concurrent.CompletionStage<
+            org.apache.amoro.process.engine.EngineTypes.SubmissionOutcome>
+        submit(String submissionKey, String requestHash, byte[] payload) {
+      counter.incrementAndGet();
+      return super.submit(submissionKey, requestHash, payload);
+    }
+  }
+
   private static String externalIdOf(String name) {
     return "fake-app-" + Math.abs((name + ":0:0").hashCode());
   }
 
   private DefaultScheduler scheduler;
-  private FakeEngineAdapter engine;
+  private CountingFakeEngine engine;
+  private final java.util.concurrent.atomic.AtomicLong submitCalls =
+      new java.util.concurrent.atomic.AtomicLong();
   private ProcessEngineDispatcher dispatcher;
   private ProcessDomainAssembly assembly;
 
@@ -56,7 +75,7 @@ public class TestProcessReconciler {
   public void setUp() {
     scheduler = DefaultScheduler.create(2, 50L);
     scheduler.start();
-    engine = new FakeEngineAdapter();
+    engine = new CountingFakeEngine(submitCalls);
     dispatcher = new ProcessEngineDispatcher(engine, 5_000L);
     assembly =
         new ProcessDomainAssembly(
@@ -180,6 +199,91 @@ public class TestProcessReconciler {
         .atMost(20, TimeUnit.SECONDS)
         .until(() -> ProcessFinality.isFinal(assembly.repository().get("cancel-1")));
     await().atMost(10, TimeUnit.SECONDS).until(() -> scheduler.registrySize() == 0);
+  }
+
+  @Test
+  public void cancelOfNeverDispatchedProcessDoesZeroEngineWork() throws Exception {
+    // create WITHOUT scheduling the reconciler first: no attempt exists yet (the reconciler
+    // persists it), so the resource is provably never dispatched and cancel must not submit
+    java.util.Map<String, Object> parameters = new java.util.LinkedHashMap<String, Object>();
+    parameters.put("retainLast", 1);
+    ProcessResource created =
+        assembly
+            .repository()
+            .create(
+                new ProcessResource(
+                    "cancel-3",
+                    new ProcessResource.ProcessSpec(
+                        new ProcessResource.TableRef("prod", "db", "t", "42"),
+                        "expire-snapshots",
+                        "local",
+                        "MANUAL",
+                        "2026-08-22T10:00:00Z",
+                        "CANCEL",
+                        new ProcessResource.RequestIdentity("sha256:k", "sha256:r"),
+                        parameters,
+                        new ProcessResource.RetryPolicy(3, 2, 30)),
+                    new ProcessResource.ProcessStatus(
+                        "PENDING",
+                        0,
+                        null,
+                        null,
+                        null,
+                        null,
+                        new ProcessResource.EngineBackoff(0, 0, 0, 0),
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null)));
+    long submitsBefore = submitCalls.get();
+
+    ProcessReconciler reconciler =
+        new ProcessReconciler(
+            "cancel-3",
+            assembly.repository(),
+            dispatcher,
+            scheduler,
+            ProcessReconciler.Clock.systemUtc(),
+            100L);
+    scheduler.schedule(reconciler);
+
+    await().atMost(10, TimeUnit.SECONDS).until(() -> "CANCELED".equals(phaseOf("cancel-3")));
+    assertEquals(
+        submitsBefore,
+        submitCalls.get(),
+        "cancel of a never-dispatched process performs zero engine submissions");
+    await().atMost(10, TimeUnit.SECONDS).until(() -> scheduler.registrySize() == 0);
+  }
+
+  @Test
+  public void unknownSubmitOutcomeNeverBlindResubmits() throws Exception {
+    createAndSchedule("unknown-1");
+    // first submit returns UNKNOWN: the state machine must persist the unresolved state and
+    // never resubmit the same submissionKey (spec §7.3)
+    engine.setBehavior(
+        new org.apache.amoro.process.engine.FakeEngineAdapter.Behavior() {
+          @Override
+          public org.apache.amoro.process.engine.EngineTypes.SubmissionOutcome onSubmit(
+              String submissionKey) {
+            return org.apache.amoro.process.engine.EngineTypes.SubmissionOutcome.unknown();
+          }
+        });
+    await()
+        .atMost(10, TimeUnit.SECONDS)
+        .until(
+            () -> {
+              ProcessResource r = assembly.repository().get("unknown-1");
+              return r.status().attempt() != null
+                  && "UNKNOWN".equals(r.status().attempt().submitState());
+            });
+    long submitsAtUnresolved = submitCalls.get();
+    Thread.sleep(500L); // several periods pass
+    assertEquals(
+        submitsAtUnresolved,
+        submitCalls.get(),
+        "an unresolved submission is never blind-resubmitted with the same key");
   }
 
   private String phaseOf(String name) {
