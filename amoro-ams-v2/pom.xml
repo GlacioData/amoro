@@ -27,11 +27,11 @@
 
     <artifactId>amoro-ams-v2</artifactId>
     <name>Amoro AMS v2</name>
-    <description>Spring Boot 3 based next-generation AMS host. Starts as the home of the Process
-        control plane (spec/status + Transition state machine, see
-        tasks/process-control-plane-spec.md) and absorbs AMS responsibilities module by
-        module. Compiled with a Java 17 toolchain while the rest of the reactor stays on
-        the Java 8 baseline.</description>
+    <description>Spring Boot 3 based next-generation AMS skeleton. The planned Process control
+        plane (spec/status + Transition state machine) is defined in
+        tasks/amoro-ams-v2-process-spec.md and will use the generic resource framework defined in
+        tasks/amoro-ams-v2-framework-spec.md. Compiled with a Java 17 toolchain while the rest of
+        the reactor stays on the Java 8 baseline.</description>
 
     <properties>
         <!-- Java 17 via toolchains; the reactor itself may keep running on JDK 8/11 -->
@@ -106,7 +106,8 @@
                 <jdk>[17,)</jdk>
             </activation>
             <properties>
-                <spotless.skip>true</spotless.skip>
+                <spotless.check.skip>true</spotless.check.skip>
+                <spotless.apply.skip>true</spotless.apply.skip>
             </properties>
             <build>
                 <plugins>
