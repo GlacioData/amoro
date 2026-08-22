@@ -63,6 +63,11 @@ public final class VersionAwareJacksonSerde<R> implements ResourceSerde<R> {
     this.maxResourceBytes = maxResourceBytes;
     this.mapper =
         serdeFormat == SerdeFormat.YAML ? new ObjectMapper(new YAMLFactory()) : new ObjectMapper();
+    // creator binding by constructor parameter name (kept by the -parameters compile flag);
+    // without the module Jackson cannot name multi-arg constructor arguments
+    this.mapper.registerModule(
+        new com.fasterxml.jackson.module.paramnames.ParameterNamesModule(
+            com.fasterxml.jackson.annotation.JsonCreator.Mode.PROPERTIES));
     this.mapper.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
   }
 

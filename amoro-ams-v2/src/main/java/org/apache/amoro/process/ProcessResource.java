@@ -18,6 +18,8 @@
 
 package org.apache.amoro.process;
 
+import com.fasterxml.jackson.annotation.JsonAutoDetect;
+import com.fasterxml.jackson.annotation.JsonCreator;
 import org.apache.amoro.persistence.ControlledResource;
 
 import java.util.ArrayList;
@@ -35,6 +37,10 @@ import java.util.Objects;
  * version-CAS modifies; histories are bounded (attempts ≤ maxRetries, submission generations ≤
  * maxSubmissionRetries) so the max-legal shape stays under the framework's 64KiB document bound.
  */
+@JsonAutoDetect(
+    fieldVisibility = JsonAutoDetect.Visibility.ANY,
+    getterVisibility = JsonAutoDetect.Visibility.NONE,
+    isGetterVisibility = JsonAutoDetect.Visibility.NONE)
 public final class ProcessResource implements ControlledResource {
 
   public static final String API_VERSION = "process/v1";
@@ -52,6 +58,7 @@ public final class ProcessResource implements ControlledResource {
     this(API_VERSION, name, COLLECTION, 0L, spec, status);
   }
 
+  @JsonCreator
   public ProcessResource(
       String apiVersion,
       String name,
@@ -145,7 +152,12 @@ public final class ProcessResource implements ControlledResource {
   // ------------------------------------------------------------------ spec section
 
   /** The frozen creation intent plus the monotonic desired state (process spec §3.1). */
+  @JsonAutoDetect(
+      fieldVisibility = JsonAutoDetect.Visibility.ANY,
+      getterVisibility = JsonAutoDetect.Visibility.NONE,
+      isGetterVisibility = JsonAutoDetect.Visibility.NONE)
   public static final class ProcessSpec {
+
     private final TableRef table;
     private final String action; // lower-kebab wire value, e.g. expire-snapshots
     private final String executionEngine; // remote-spark | local
@@ -156,6 +168,7 @@ public final class ProcessResource implements ControlledResource {
     private final java.util.Map<String, Object> parameters; // frozen at creation
     private final RetryPolicy retryPolicy;
 
+    @JsonCreator
     public ProcessSpec(
         TableRef table,
         String action,
@@ -264,12 +277,17 @@ public final class ProcessResource implements ControlledResource {
   }
 
   /** Canonical table coordinates (strings end to end; tableId never a number). */
+  @JsonAutoDetect(
+      fieldVisibility = JsonAutoDetect.Visibility.ANY,
+      getterVisibility = JsonAutoDetect.Visibility.NONE,
+      isGetterVisibility = JsonAutoDetect.Visibility.NONE)
   public static final class TableRef {
     private final String catalog;
     private final String database;
     private final String table;
     private final String tableId;
 
+    @JsonCreator
     public TableRef(String catalog, String database, String table, String tableId) {
       this.catalog = Objects.requireNonNull(catalog, "catalog");
       this.database = Objects.requireNonNull(database, "database");
@@ -315,10 +333,15 @@ public final class ProcessResource implements ControlledResource {
   }
 
   /** Creation-intent identity hashes; raw keys are never stored. */
+  @JsonAutoDetect(
+      fieldVisibility = JsonAutoDetect.Visibility.ANY,
+      getterVisibility = JsonAutoDetect.Visibility.NONE,
+      isGetterVisibility = JsonAutoDetect.Visibility.NONE)
   public static final class RequestIdentity {
     private final String idempotencyKeyHash;
     private final String requestHash;
 
+    @JsonCreator
     public RequestIdentity(String idempotencyKeyHash, String requestHash) {
       this.idempotencyKeyHash = Objects.requireNonNull(idempotencyKeyHash, "idempotencyKeyHash");
       this.requestHash = Objects.requireNonNull(requestHash, "requestHash");
@@ -352,11 +375,16 @@ public final class ProcessResource implements ControlledResource {
   }
 
   /** Server-frozen retry budgets (first version fixed: 3/2/30s, process spec §8.3). */
+  @JsonAutoDetect(
+      fieldVisibility = JsonAutoDetect.Visibility.ANY,
+      getterVisibility = JsonAutoDetect.Visibility.NONE,
+      isGetterVisibility = JsonAutoDetect.Visibility.NONE)
   public static final class RetryPolicy {
     private final int maxRetries;
     private final int maxSubmissionRetries;
     private final int retryDelaySeconds;
 
+    @JsonCreator
     public RetryPolicy(int maxRetries, int maxSubmissionRetries, int retryDelaySeconds) {
       this.maxRetries = maxRetries;
       this.maxSubmissionRetries = maxSubmissionRetries;
@@ -398,6 +426,10 @@ public final class ProcessResource implements ControlledResource {
   // ------------------------------------------------------------------ status section
 
   /** The mutable execution view, written only through version-CAS Transitions. */
+  @JsonAutoDetect(
+      fieldVisibility = JsonAutoDetect.Visibility.ANY,
+      getterVisibility = JsonAutoDetect.Visibility.NONE,
+      isGetterVisibility = JsonAutoDetect.Visibility.NONE)
   public static final class ProcessStatus {
     private final String phase; // v1 ten-state names
     private final int retryNumber;
@@ -413,6 +445,7 @@ public final class ProcessResource implements ControlledResource {
     private final String startedAt;
     private final String finishedAt;
 
+    @JsonCreator
     public ProcessStatus(
         String phase,
         int retryNumber,
@@ -562,6 +595,10 @@ public final class ProcessResource implements ControlledResource {
   }
 
   /** The current action attempt: latest submission generation plus audit slots. */
+  @JsonAutoDetect(
+      fieldVisibility = JsonAutoDetect.Visibility.ANY,
+      getterVisibility = JsonAutoDetect.Visibility.NONE,
+      isGetterVisibility = JsonAutoDetect.Visibility.NONE)
   public static final class ProcessAttempt {
     private final int dispatchGeneration;
     private final String submissionKey;
@@ -574,6 +611,7 @@ public final class ProcessResource implements ControlledResource {
     private final List<SubmissionSummary> submissionHistory; // bounded generations
     private final ManualResolutions manualResolutions;
 
+    @JsonCreator
     public ProcessAttempt(
         int dispatchGeneration,
         String submissionKey,
@@ -678,6 +716,10 @@ public final class ProcessResource implements ControlledResource {
   }
 
   /** Archived ended submission generation (audit). */
+  @JsonAutoDetect(
+      fieldVisibility = JsonAutoDetect.Visibility.ANY,
+      getterVisibility = JsonAutoDetect.Visibility.NONE,
+      isGetterVisibility = JsonAutoDetect.Visibility.NONE)
   public static final class SubmissionSummary {
     private final int dispatchGeneration;
     private final String submissionKey;
@@ -686,6 +728,7 @@ public final class ProcessResource implements ControlledResource {
     private final String manualResolution;
     private final String finishedAt;
 
+    @JsonCreator
     public SubmissionSummary(
         int dispatchGeneration,
         String submissionKey,
@@ -726,10 +769,15 @@ public final class ProcessResource implements ControlledResource {
   }
 
   /** Attempt-bound manual resolution audit (null when none). */
+  @JsonAutoDetect(
+      fieldVisibility = JsonAutoDetect.Visibility.ANY,
+      getterVisibility = JsonAutoDetect.Visibility.NONE,
+      isGetterVisibility = JsonAutoDetect.Visibility.NONE)
   public static final class ManualResolutions {
     private final String submission; // JSON audit record or null
     private final String execution;
 
+    @JsonCreator
     public ManualResolutions(String submission, String execution) {
       this.submission = submission;
       this.execution = execution;
@@ -763,12 +811,17 @@ public final class ProcessResource implements ControlledResource {
   }
 
   /** Per-operation engine backoff counters, persisted across restarts (0..7 saturated). */
+  @JsonAutoDetect(
+      fieldVisibility = JsonAutoDetect.Visibility.ANY,
+      getterVisibility = JsonAutoDetect.Visibility.NONE,
+      isGetterVisibility = JsonAutoDetect.Visibility.NONE)
   public static final class EngineBackoff {
     private final int submit;
     private final int resolve;
     private final int observe;
     private final int cancel;
 
+    @JsonCreator
     public EngineBackoff(int submit, int resolve, int observe, int cancel) {
       this.submit = submit;
       this.resolve = resolve;
@@ -814,6 +867,10 @@ public final class ProcessResource implements ControlledResource {
   }
 
   /** A status condition; type-unique, ≤ 8 entries (process spec §3.4). */
+  @JsonAutoDetect(
+      fieldVisibility = JsonAutoDetect.Visibility.ANY,
+      getterVisibility = JsonAutoDetect.Visibility.NONE,
+      isGetterVisibility = JsonAutoDetect.Visibility.NONE)
   public static final class Condition {
     private final String type;
     private final String status; // "True" | "False"
@@ -822,6 +879,7 @@ public final class ProcessResource implements ControlledResource {
     private final String lastTransitionTime;
     private final String lastUpdateTime;
 
+    @JsonCreator
     public Condition(
         String type,
         String status,
@@ -885,10 +943,15 @@ public final class ProcessResource implements ControlledResource {
   }
 
   /** Bounded action result summary (trackUri validated at the adapter boundary). */
+  @JsonAutoDetect(
+      fieldVisibility = JsonAutoDetect.Visibility.ANY,
+      getterVisibility = JsonAutoDetect.Visibility.NONE,
+      isGetterVisibility = JsonAutoDetect.Visibility.NONE)
   public static final class Summary {
     private final String trackUri;
     private final java.util.Map<String, Object> result;
 
+    @JsonCreator
     public Summary(String trackUri, java.util.Map<String, Object> result) {
       this.trackUri = trackUri;
       this.result =
@@ -924,6 +987,10 @@ public final class ProcessResource implements ControlledResource {
   }
 
   /** Archived action attempt (retry history), bounded by maxRetries. */
+  @JsonAutoDetect(
+      fieldVisibility = JsonAutoDetect.Visibility.ANY,
+      getterVisibility = JsonAutoDetect.Visibility.NONE,
+      isGetterVisibility = JsonAutoDetect.Visibility.NONE)
   public static final class AttemptSummary {
     private final int retryNumber;
     private final int dispatchGeneration;
@@ -937,6 +1004,7 @@ public final class ProcessResource implements ControlledResource {
     private final String finishedAt;
     private final String reason;
 
+    @JsonCreator
     public AttemptSummary(
         int retryNumber,
         int dispatchGeneration,
