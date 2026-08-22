@@ -1,8 +1,9 @@
 # amoro-ams-v2 Process 实际调度生命流程（Runbook）
 
-> 基于 `jira/process-dev` 分支实际实现（Framework T1–T12 + Process P1–P4 已交付，提交
-> `724ed7be4`…`230cb6187`）整理。权威设计见 `amoro-ams-v2-process-spec.md`；本文描述
-> **代码里真实发生的事**，并标注与 spec 的当前差异。
+> 基于 `jira/process-dev` 分支实际实现（Framework T1–T12 + Process P1–P8 全部交付，
+> 提交 `724ed7be4`…`e63a8bd4f`）整理。权威设计见 `amoro-ams-v2-process-spec.md`；本文描述
+> **代码里真实发生的事**，并标注与 spec 的当前差异。离线 183 + docker-it（真 MySQL 5.7）
+> 192 测试全绿。
 
 ## 0. 组件地图（已实现）
 
@@ -129,16 +130,24 @@ postStart():
 | mailbox 满 | 写方快速失败（stage exceptional），绝不先确认后补写 |
 | 进程崩溃 | 重启 postStart 全量重放，level-triggered 自然收敛 |
 
-## 4. 当前与 spec 的差异（如实）
+## 4. P5–P8 已交付内容（本轮更新）
+
+- **P5 REST `/api/ams/v2`**：create（幂等键/服务端冻结 retryPolicy/单活跃准入/终态后重放 200+原资源）、GET 点查、列表（createdAt DESC、单快照 items+total、page≥1/pageSize 1..50）、PATCH 取消（FAILED 归并同 CAS 防 TTL 死角）、submission/execution 人工消解（双身份校验+DISPATCHING 门控+审计同 CAS）；统一错误体 {code,message,timestamp,traceId}，PersistenceException→503、未知字段→400。
+- **P6 触发扫描**：`ManagedTablePort`（只读表快照）+ `ProcessActionPlugin`（interval 门控+冻结参数）+ `ProcessTriggerScanner`（复用 REST 准入、per-(tableId,action) mutex、分钟窗口幂等键、表级隔离）。
+- **P7 本地引擎**：`LocalEngineAdapter` 有界 action 池（submit 立即 ACK、observe 收敛、容量满=权威 REJECTED、释放后 observe=LOST、协作式 cancel）——真实 adapter 非 fake；远端 Spark 按用户决策以 `FakeEngineAdapter` 单测模拟。
+- **P8 TTL**：`ProcessTtlCleaner` 从 expiryOrder 顺序读到 cutoff、有界批次、逐条 CAS delete；真 MySQL E2E 覆盖 REST→本地引擎→终态→TTL→重启重放全链路。
+
+## 5. 当前与 spec 的差异（如实）
 
 1. **读索引**：首版用不可变 Map 快照（语义等价），spec 的 persistent rank tree O(log) 渐进上界延后（`ProcessIndexSnapshot` 可替换）。
-2. **ExecutionUnresolved/SubmissionUnresolved 人工消解**（spec §3.4/§8.5/§8.6）：状态机已按"不盲重投"处理，专用 REST 端点与 condition 体系属 P5 未交付部分。
-3. **EngineBackoff 持久化计数、conditions、nextReconcileAt 门控**：模型字段齐全，Reconciler 首版以周期轮询替代精确门控（语义收敛等价、效率差异）。
-4. **P5–P8 未交付**：REST `/api/ams/v2`、Scanner/ManagedTablePort、真实 HTTP Spark adapter（现为 fake 模拟——用户决策）、TTL cleaner、v1 差异矩阵文档。
+2. **EngineBackoff 持久化计数、conditions、nextReconcileAt 精确门控**：模型字段齐全，Reconciler 首版以周期轮询替代精确门控（语义收敛等价、效率差异）。
+3. **远端 Spark adapter**：按用户决策单测模拟（FakeEngineAdapter），真实 HTTP 提交未实现。
+4. **L2/L3 业务边界待用户确认**：首版 action scope（5 pair 候选）、scheduled trigger 兼容承诺、真实格式维护动作（Iceberg/Paimon 调用）接入。
+5. **CI workflow**：现有 core workflow 不含 JDK17 toolchain/path filter，本地验证为当前门禁（README 声明）。
 
-## 5. 验证现状
+## 6. 验证现状
 
-- 离线全量 **153 tests** 绿（`JAVA_HOME=jdk11 ./mvnw -pl amoro-ams-v2 test`）
-- 真 MySQL 5.7.44 集成绿（`-Pdocker-it`，`AMORO_V2_MYSQL_*` 环境变量）
+- 离线全量 **183 tests** 绿（`JAVA_HOME=jdk11 ./mvnw -pl amoro-ams-v2 test`）
+- docker-it（真 MySQL 5.7.44 @3306/amoro_v2）**192 tests** 全绿（`AMORO_V2_MYSQL_PASSWORD=... ./mvnw -pl amoro-ams-v2 test -Pdocker-it`）
 - 双 JDK 构建（JDK11 reactor / JDK17 boot jar）与 spotless/checkstyle/rat 全过
-- 每个任务均经独立 code review（3 次 Request-changes 全部修复）后本地原子提交
+- 每个任务均经独立 code review（框架+P5 共 4 次 Request-changes 全部修复）后本地原子提交
