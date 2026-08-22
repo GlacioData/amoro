@@ -93,6 +93,18 @@ public final class ProcessRestSupport {
       String action,
       String engine,
       Map<String, Object> parameters) {
+    return create(catalog, database, table, idempotencyKey, action, engine, parameters, "MANUAL");
+  }
+
+  public CreateResult create(
+      String catalog,
+      String database,
+      String table,
+      String idempotencyKey,
+      String action,
+      String engine,
+      Map<String, Object> parameters,
+      String triggerSource) {
     requireIdempotencyKey(idempotencyKey);
     if (!ProcessActionCatalog.isKnownAction(action)) {
       throw ApiError.of("INVALID_ACTION", "unknown action '" + action + "'");
@@ -156,7 +168,7 @@ public final class ProcessRestSupport {
                 new ProcessResource.TableRef(catalog, database, table, tableId),
                 action,
                 engine,
-                "MANUAL",
+                triggerSource,
                 now(),
                 "RUN",
                 new ProcessResource.RequestIdentity(keyHash, requestHash),
