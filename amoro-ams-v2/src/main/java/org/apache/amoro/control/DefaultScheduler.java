@@ -291,11 +291,13 @@ public final class DefaultScheduler implements Scheduler {
 
   // ---------------------------------------------------------------- test observability
 
-  int registrySize() {
+  /** Observability: live single-flight entries (wired to metrics in the Spring assembly). */
+  public int registrySize() {
     return registry.size();
   }
 
-  int queuedWrappers() {
+  /** Observability: wrappers currently waiting in the delay queue. */
+  public int queuedWrappers() {
     return queue.size();
   }
 }

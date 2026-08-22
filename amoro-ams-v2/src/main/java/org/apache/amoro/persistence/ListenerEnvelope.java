@@ -40,6 +40,7 @@ public final class ListenerEnvelope<R extends ControlledResource> {
   private final long resourceVersion;
   private final EventType eventType;
   private final R detachedResource;
+  private final PersistenceListener<R> listener;
 
   public ListenerEnvelope(
       String listenerIdentity,
@@ -48,12 +49,29 @@ public final class ListenerEnvelope<R extends ControlledResource> {
       long resourceVersion,
       EventType eventType,
       R detachedResource) {
+    this(listenerIdentity, domain, name, resourceVersion, eventType, detachedResource, null);
+  }
+
+  public ListenerEnvelope(
+      String listenerIdentity,
+      String domain,
+      String name,
+      long resourceVersion,
+      EventType eventType,
+      R detachedResource,
+      PersistenceListener<R> listener) {
     this.listenerIdentity = Objects.requireNonNull(listenerIdentity, "listenerIdentity");
     this.domain = Objects.requireNonNull(domain, "domain");
     this.name = Objects.requireNonNull(name, "name");
     this.resourceVersion = resourceVersion;
     this.eventType = Objects.requireNonNull(eventType, "eventType");
     this.detachedResource = Objects.requireNonNull(detachedResource, "detachedResource");
+    this.listener = listener;
+  }
+
+  /** The listener this event targets; null only in tests that inspect the identity tuple. */
+  public PersistenceListener<R> listener() {
+    return listener;
   }
 
   public String listenerIdentity() {

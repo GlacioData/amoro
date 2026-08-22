@@ -500,7 +500,8 @@ public final class InMemoryPersistence<R extends ControlledResource>
               resource.name(),
               resource.resourceVersion(),
               type,
-              serde.detachedCopy(resource));
+              serde.detachedCopy(resource),
+              listener);
       HandoffResult result;
       try {
         result = eventSink.handoff(envelope);
