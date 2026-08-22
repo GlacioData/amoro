@@ -42,6 +42,15 @@ under the License.
     <suppress
             files="org[/\\]apache[/\\]amoro[/\\]trino[/\\]keyed[/\\]KeyedConnectorSplit\.java"
             checks="Regexp"/>
+
+    <!-- The self-contained Spring Boot 3 module consumes the Jackson that Boot itself manages
+         (spring-boot-starter-web); the amoro-shaded jackson is a v1 reactor artifact and must
+         not leak into v2. Scoped to the amoro-ams-v2 source tree only (the suppressions DTD in
+         use cannot filter by message, so the module also loses the getXxx Regexp guards —
+         acceptable for an isolated module, same precedent as the Javalin/Trino suppressions). -->
+    <suppress
+            files="amoro-ams-v2[/\\]src[/\\].*"
+            checks="Regexp"/>
     <suppress
             files="org[/\\]apache[/\\]amoro[/\\]trino[/\\]keyed[/\\]KeyedTableHandle\.java"
             checks="Regexp"/>
