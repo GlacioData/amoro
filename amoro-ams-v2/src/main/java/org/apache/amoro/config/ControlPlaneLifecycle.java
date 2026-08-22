@@ -37,6 +37,7 @@ import java.util.Objects;
  */
 public final class ControlPlaneLifecycle implements SmartLifecycle {
 
+  private final Runnable startActions;
   private final Runnable schedulerStop;
   private final Runnable dispatcherStop;
   private final Runnable lanesStop;
@@ -45,6 +46,12 @@ public final class ControlPlaneLifecycle implements SmartLifecycle {
 
   public ControlPlaneLifecycle(
       Runnable schedulerStop, Runnable dispatcherStop, Runnable lanesStop) {
+    this(() -> {}, schedulerStop, dispatcherStop, lanesStop);
+  }
+
+  public ControlPlaneLifecycle(
+      Runnable startActions, Runnable schedulerStop, Runnable dispatcherStop, Runnable lanesStop) {
+    this.startActions = Objects.requireNonNull(startActions, "startActions");
     this.schedulerStop = Objects.requireNonNull(schedulerStop, "schedulerStop");
     this.dispatcherStop = Objects.requireNonNull(dispatcherStop, "dispatcherStop");
     this.lanesStop = Objects.requireNonNull(lanesStop, "lanesStop");
@@ -57,6 +64,7 @@ public final class ControlPlaneLifecycle implements SmartLifecycle {
       long shutdownTimeoutMillis) {
     Duration timeout = Duration.ofMillis(shutdownTimeoutMillis);
     return new ControlPlaneLifecycle(
+        scheduler::start,
         () -> scheduler.shutdown(timeout),
         () -> dispatcher.shutdown(timeout),
         () -> {
@@ -68,7 +76,10 @@ public final class ControlPlaneLifecycle implements SmartLifecycle {
 
   @Override
   public void start() {
-    running = true; // scheduler workers start lazily on first start() call by the factory bean
+    // workers boot here: by now every domain has registered its replay via postStart, so the
+    // controllers enqueued by listeners find workers waiting
+    startActions.run();
+    running = true;
   }
 
   @Override

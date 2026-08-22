@@ -223,7 +223,7 @@ public class TestProcessDomain {
   }
 
   /** Minimal fake durable store (name -> YAML bytes). */
-  static final class TestPersistenceBlobStore
+  public static final class TestPersistenceBlobStore
       implements org.apache.amoro.persistence.blob.BlobStore {
     final java.util.concurrent.ConcurrentHashMap<String, byte[]> rows =
         new java.util.concurrent.ConcurrentHashMap<>();

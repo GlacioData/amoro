@@ -99,16 +99,56 @@ public class ControlPlaneAutoConfiguration {
     return new ControlPlaneDomainFactory(mapper, properties, dispatcher);
   }
 
+  /** The Process domain on its dedicated {@code amoro_process} table (Base64(YAML)). */
+  @Bean
+  public org.apache.amoro.process.ProcessDomainAssembly processDomainAssembly(
+      ResourceBlobMapper mapper,
+      ListenerDispatcher<ControlledResource> dispatcher,
+      DefaultScheduler scheduler,
+      ControlPlaneSchemaInitializer schemaInitializer) {
+    org.apache.amoro.persistence.blob.MyBatisBlobStore processBlobStore =
+        new org.apache.amoro.persistence.blob.MyBatisBlobStore(
+            org.apache.amoro.process.ProcessDomainAssembly.DOMAIN, mapper);
+    // one dispatcher serves every domain: envelopes carry their typed listener reference,
+    // so the cross-domain variance is bridged here (same rationale as the domain factory)
+    @SuppressWarnings("unchecked")
+    org.apache.amoro.persistence.ListenerEventSink<org.apache.amoro.process.ProcessResource>
+        processSink =
+            (org.apache.amoro.persistence.ListenerEventSink<
+                    org.apache.amoro.process.ProcessResource>)
+                (org.apache.amoro.persistence.ListenerEventSink<?>) dispatcher;
+    org.apache.amoro.process.ProcessDomainAssembly assembly =
+        new org.apache.amoro.process.ProcessDomainAssembly(
+            processBlobStore,
+            processSink,
+            scheduler,
+            properties.getActor().getQueueCapacity(),
+            properties.getRepository().getTimeoutMs(),
+            properties.getStorage().getMaxResourceBytes());
+    // restart replay (spec §8.7): rebuild the read model from the durable rows, then the
+    // POST_START events re-schedule every live controller
+    assembly.persistence().postStart();
+    return assembly;
+  }
+
+  @Bean
+  public org.apache.amoro.process.rest.ProcessRestSupport processRestSupport(
+      org.apache.amoro.process.ProcessDomainAssembly assembly) {
+    return new org.apache.amoro.process.rest.ProcessRestSupport(assembly);
+  }
+
   @Bean
   public ControlPlaneLifecycle controlPlaneLifecycle(
       DefaultScheduler scheduler,
       ListenerDispatcher<ControlledResource> dispatcher,
+      org.apache.amoro.process.ProcessDomainAssembly processDomain,
       org.springframework.context.ApplicationContext context) {
     List<InMemoryPersistence<?>> domains = new ArrayList<InMemoryPersistence<?>>();
     for (InMemoryPersistence<?> untyped :
         context.getBeansOfType(InMemoryPersistence.class).values()) {
       domains.add(untyped);
     }
+    domains.add(processDomain.persistence());
     ControlPlaneLifecycle lifecycle =
         ControlPlaneLifecycle.from(
             scheduler, dispatcher, domains, properties.getLifecycle().getShutdownTimeoutMs());
