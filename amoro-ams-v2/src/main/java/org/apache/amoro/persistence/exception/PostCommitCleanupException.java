@@ -36,4 +36,8 @@ public class PostCommitCleanupException extends PersistenceException {
             + "; name fenced until repair",
         cause);
   }
+
+  public PostCommitCleanupException(String domain, String name) {
+    this(domain, name, null);
+  }
 }

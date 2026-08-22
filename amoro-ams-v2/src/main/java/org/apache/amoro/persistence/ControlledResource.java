@@ -42,4 +42,12 @@ public interface ControlledResource {
    * Callers never choose values.
    */
   long resourceVersion();
+
+  /**
+   * Returns an equivalent resource carrying the given version, with every other field preserved.
+   * The framework uses this on the mutation lane to assign versions after applying an update
+   * function; callers never invoke it. Must return a fresh instance (returning {@code this} is only
+   * acceptable when the version already matches).
+   */
+  ControlledResource withResourceVersion(long newResourceVersion);
 }

@@ -127,6 +127,12 @@ public class TestVersionAwareSerde {
     }
 
     @Override
+    public ControlledResource withResourceVersion(long newResourceVersion) {
+      return new FakeResource(
+          apiVersion, name, collection, newResourceVersion, payload, renamedValue);
+    }
+
+    @Override
     public boolean equals(Object o) {
       if (this == o) {
         return true;

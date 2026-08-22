@@ -185,6 +185,15 @@ public final class BlobStoreActor {
     return closed;
   }
 
+  /**
+   * True when called from the lane thread itself. Persistence services use this to fail fast on
+   * reentrant calls from inside a lane task (an update function calling back into the service would
+   * deadlock on the single-threaded lane).
+   */
+  public boolean isLaneThread() {
+    return Thread.currentThread() == laneThread;
+  }
+
   // ------------------------------------------------------------------ internals
 
   private static final class LaneMessage<T> {
