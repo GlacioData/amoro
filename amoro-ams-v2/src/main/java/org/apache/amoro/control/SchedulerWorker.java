@@ -112,6 +112,14 @@ final class SchedulerWorker implements Runnable {
     ScheduledController.InvocationResult result = polled.invokeOnce();
 
     synchronized (entry) {
+      if (!running.getAsBoolean()) {
+        // shutting down: the invocation result is dropped instead of requeued — the level-
+        // triggered restart replay reschedules from the durable store
+        LOG.debug("Dropping completed invocation of {} during shutdown.", entry.key);
+        entry.state = ScheduledEntry.State.TERMINATED;
+        registry.remove(entry.key, entry);
+        return;
+      }
       if (entry.state == ScheduledEntry.State.TERMINATED) {
         // unschedule raced the invocation: this generation dies, identity-aware remove protects
         // any entry recreated under the same key

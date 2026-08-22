@@ -29,6 +29,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -145,6 +146,10 @@ public final class DefaultScheduler implements Scheduler {
     long deadline = clock.currentTimeMillisPlus(delayMillis);
     ControllerKey key = controller.key();
     while (true) {
+      // re-check on every retry: shutdown may have started while we were losing races
+      if (shutdown) {
+        throw new RejectedExecutionException("scheduler is shut down");
+      }
       ScheduledEntry entry = registry.get(key);
       if (entry == null) {
         ScheduledController wrapper =
@@ -157,6 +162,12 @@ public final class DefaultScheduler implements Scheduler {
           // blocks here until the offer lands, so its queue.remove cannot miss the wrapper and
           // leave a ghost element nobody owns
           synchronized (candidate) {
+            if (shutdown) {
+              // drain started between publication and the offer: undo and reject, never leave
+              // a registered-but-unowned wrapper behind
+              registry.remove(key, candidate);
+              throw new RejectedExecutionException("scheduler is shut down");
+            }
             if (candidate.state != ScheduledEntry.State.TERMINATED) {
               queue.offer(wrapper);
               waitStrategy.signal();
@@ -171,6 +182,11 @@ public final class DefaultScheduler implements Scheduler {
         entry = existing; // lost the race: fall through and merge with the winner
       }
       synchronized (entry) {
+        if (shutdown) {
+          // ThreadPoolExecutor-style recheck: the drain may have cleared the registry while we
+          // were waiting for this monitor — reject instead of requeueing into a dead scheduler
+          throw new RejectedExecutionException("scheduler is shut down");
+        }
         if (entry.state == ScheduledEntry.State.TERMINATED) {
           // stale generation: identity-aware cleanup, then retry with a fresh lookup
           registry.remove(key, entry);
@@ -229,15 +245,41 @@ public final class DefaultScheduler implements Scheduler {
     }
   }
 
+  /**
+   * Graceful shutdown (fidelity ledger #1): reject new schedules, stop picking up work, wait at
+   * most {@code timeout} for in-flight invocations, then release — level-triggered restart replay
+   * converges whatever was dropped. A non-positive {@code timeout} means immediate release.
+   * Idempotent: only the first call performs the drain; later calls (and {@link
+   * #unschedule(ControllerKey)}) never throw.
+   */
   @Override
   public synchronized void shutdown(Duration timeout) {
     Objects.requireNonNull(timeout, "timeout");
+    if (shutdown) {
+      return;
+    }
     shutdown = true;
-    waitStrategy.signal();
+    waitStrategy.signal(); // wake parked workers so they observe the stop flag
     ExecutorService pool = workerPool;
     if (pool != null) {
-      pool.shutdown(); // workers exit at the loop top; in-flight invokes complete naturally
+      pool.shutdown();
+      try {
+        long timeoutMillis = Math.max(0L, timeout.toMillis());
+        if (!pool.awaitTermination(timeoutMillis, TimeUnit.MILLISECONDS)) {
+          LOG.warn(
+              "Scheduler shutdown timed out after {}; releasing with in-flight invocations.",
+              timeout);
+          pool.shutdownNow();
+        }
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        pool.shutdownNow();
+      }
     }
+    // the scheduler is dead: remaining registrations are meaningless (restart replays from the
+    // durable store), so drain them instead of leaking entries
+    registry.clear();
+    queue.clear();
   }
 
   private void mergeRescheduleRequest(ScheduledEntry entry, long deadline) {
