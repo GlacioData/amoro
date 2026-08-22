@@ -26,7 +26,16 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.client.TestRestTemplate;
 import org.springframework.boot.test.web.server.LocalServerPort;
 
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@SpringBootTest(
+    webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
+    properties = {
+      // mybatis-spring-boot-starter's auto-configuration demands a DataSource; the skeleton
+      // app has none of its own yet, so the smoke test supplies an embedded Derby one (T10
+      // wires the real datasource assembly)
+      "spring.datasource.url=jdbc:derby:memory:amoroV2AppSmoke;create=true",
+      "spring.datasource.driver-class-name=org.apache.derby.iapi.jdbc.AutoloadedDriver",
+      "spring.sql.init.mode=never"
+    })
 class AmoroAmsV2ApplicationTests {
 
   @LocalServerPort private int port;
