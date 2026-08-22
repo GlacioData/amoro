@@ -113,6 +113,11 @@ public class FakeEngineAdapter implements ProcessEnginePort {
       return CompletableFuture.completedFuture(override);
     }
     EngineObservation observation = executionsByExternalId.get(externalId);
+    System.out.println(
+        "[fake] observe id="
+            + externalId
+            + " -> "
+            + (observation == null ? "NOT_FOUND" : observation.remotePhase()));
     return CompletableFuture.completedFuture(
         observation == null
             ? ProcessObservation.notFound()
