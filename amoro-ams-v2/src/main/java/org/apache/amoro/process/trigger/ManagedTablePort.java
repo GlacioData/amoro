@@ -19,6 +19,9 @@
 package org.apache.amoro.process.trigger;
 
 import java.util.List;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Objects;
 
 /**
  * The v2-scoped read-only view of managed tables (process spec §6.3). The production adapter reads
@@ -27,7 +30,32 @@ import java.util.List;
  */
 public interface ManagedTablePort {
 
-  List<TableSnapshot> scan();
+  /** Returns a stable page strictly after {@code cursor}; null starts a new scan. */
+  TablePage scanAfter(String cursor, int batchSize);
+
+  /** Immutable cursor page. A null next cursor marks the end of the current stable traversal. */
+  final class TablePage {
+    private final List<TableSnapshot> tables;
+    private final String nextCursor;
+
+    public TablePage(List<TableSnapshot> tables, String nextCursor) {
+      this.tables =
+          Collections.unmodifiableList(
+              new ArrayList<>(Objects.requireNonNull(tables, "tables")));
+      this.nextCursor = nextCursor;
+      if (tables.isEmpty() && nextCursor != null) {
+        throw new IllegalArgumentException("an empty table page cannot advance the cursor");
+      }
+    }
+
+    public List<TableSnapshot> tables() {
+      return tables;
+    }
+
+    public String nextCursor() {
+      return nextCursor;
+    }
+  }
 
   /**
    * Canonical coordinates plus the allowlisted maintenance stamps the gates consume.

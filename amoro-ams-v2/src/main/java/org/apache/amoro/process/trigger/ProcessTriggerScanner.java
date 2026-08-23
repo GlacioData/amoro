@@ -18,59 +18,81 @@
 
 package org.apache.amoro.process.trigger;
 
-import org.apache.amoro.process.rest.ProcessRestSupport;
+import org.apache.amoro.process.ProcessAdmissionException;
+import org.apache.amoro.process.ProcessCreateIntent;
+import org.apache.amoro.process.ProcessCreationResult;
+import org.apache.amoro.process.ProcessCreationService;
+import org.apache.amoro.process.ProcessResource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.time.Clock;
 import java.time.Instant;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.HashSet;
+import java.util.Objects;
+import java.util.Set;
 
 /**
  * The scheduled trigger (process spec §6.3): scans the managed tables, asks each action plugin
  * whether the table is due, and routes eligible tables through the SAME admission path as the REST
- * create (idempotent key, single-active slot). A per-(tableId,action) mutex serializes concurrent
- * scans inside this process; table failures are isolated so one broken table never aborts the
- * round.
+ * create (idempotent key, single-active slot). The scanner owns no admission lock: all manual and
+ * scheduled callers share the singleton creation service. Table failures are isolated so one
+ * broken simulated fact never aborts the round.
  */
 public final class ProcessTriggerScanner {
 
   private static final Logger LOG = LoggerFactory.getLogger(ProcessTriggerScanner.class);
 
-  private final ProcessRestSupport rest;
+  private final ProcessCreationService creationService;
   private final ManagedTablePort tables;
   private final ProcessActionPlugin plugin;
   private final String scanIdentity;
-
-  /** Admission mutexes per (tableId|action); single-instance only (spec §5.2 note). */
-  private final ConcurrentHashMap<String, Object> admissionLocks =
-      new ConcurrentHashMap<String, Object>();
+  private final Clock clock;
+  private final int batchSize;
 
   public ProcessTriggerScanner(
-      ProcessRestSupport rest,
+      ProcessCreationService creationService,
       ManagedTablePort tables,
       ProcessActionPlugin plugin,
-      String scanIdentity) {
-    this.rest = rest;
-    this.tables = tables;
-    this.plugin = plugin;
-    this.scanIdentity = scanIdentity;
+      String scanIdentity,
+      Clock clock,
+      int batchSize) {
+    this.creationService = Objects.requireNonNull(creationService, "creationService");
+    this.tables = Objects.requireNonNull(tables, "tables");
+    this.plugin = Objects.requireNonNull(plugin, "plugin");
+    this.scanIdentity = Objects.requireNonNull(scanIdentity, "scanIdentity");
+    this.clock = Objects.requireNonNull(clock, "clock");
+    if (batchSize < 1 || batchSize > 1000) {
+      throw new IllegalArgumentException("batchSize must be in [1, 1000]");
+    }
+    this.batchSize = batchSize;
   }
 
   /** One trigger round: scan → gate → idempotent create for each eligible table. */
   public void scanOnce() {
-    Instant fireTime = Instant.now();
-    for (ManagedTablePort.TableSnapshot table : tables.scan()) {
-      try {
-        evaluateAndMaybeCreate(table, fireTime);
-      } catch (RuntimeException isolated) {
-        LOG.warn(
-            "Trigger for {}.{}.{} isolated and skipped this round.",
-            table.catalog(),
-            table.database(),
-            table.table(),
-            isolated);
+    Instant fireTime = Instant.now(clock);
+    String cursor = null;
+    Set<String> visitedCursors = new HashSet<>();
+    do {
+      ManagedTablePort.TablePage page = tables.scanAfter(cursor, batchSize);
+      for (ManagedTablePort.TableSnapshot table : page.tables()) {
+        try {
+          evaluateAndMaybeCreate(table, fireTime);
+        } catch (RuntimeException isolated) {
+          LOG.warn(
+              "Trigger for {}.{}.{} isolated and skipped this round.",
+              table.catalog(),
+              table.database(),
+              table.table(),
+              isolated);
+        }
       }
-    }
+      String next = page.nextCursor();
+      if (next != null && (!visitedCursors.add(next) || next.equals(cursor))) {
+        throw new IllegalStateException("ManagedTablePort returned a repeated cursor: " + next);
+      }
+      cursor = next;
+    } while (cursor != null);
   }
 
   private void evaluateAndMaybeCreate(ManagedTablePort.TableSnapshot table, Instant fireTime) {
@@ -78,40 +100,41 @@ public final class ProcessTriggerScanner {
     if (!evaluation.shouldCreate()) {
       return;
     }
+    String engine = evaluation.executionEngine();
     String lockKey = table.tableId() + "|" + plugin.action();
-    Object admission = admissionLocks.computeIfAbsent(lockKey, key -> new Object());
-    synchronized (admission) {
-      // the idempotency key is stable per (table, action, scan window): replays in the same
-      // window return the original resource instead of duplicating
-      String idempotencyKey = "scan|" + scanIdentity + "|" + lockKey + "|" + windowOf(fireTime);
-      try {
-        rest.create(
-            table.catalog(),
-            table.database(),
-            table.table(),
-            idempotencyKey,
-            plugin.action(),
-            engineOf(plugin, table.tableFormat()),
-            evaluation.parameters(),
-            "SCHEDULED",
-            table.tableFormat());
-        LOG.info(
-            "Scheduled process created for {}.{}.{} action {}.",
-            table.catalog(),
-            table.database(),
-            table.table(),
-            plugin.action());
-      } catch (org.apache.amoro.process.rest.ApiError admissionRejected) {
-        // ACTIVE_PROCESS_EXISTS and same-window replay are normal scheduled outcomes
-        LOG.debug("Scheduled create for {} rejected: {}", lockKey, admissionRejected.getMessage());
-      }
+    if (!plugin.supports(table.tableFormat(), engine)) {
+      LOG.warn(
+          "Scheduled pair is not deployed; skipping format={}, action={}, engine={}.",
+          table.tableFormat(),
+          plugin.action(),
+          engine);
+      return;
     }
-  }
-
-  private static String engineOf(ProcessActionPlugin plugin, String tableFormat) {
-    // the (format, action, engine) pair is decided by the plugin against the table's real
-    // format — never guessed from the action alone (spec §6.2/§6.3)
-    return plugin.supports(tableFormat, "local") ? "local" : "remote-spark";
+    String idempotencyKey = "scan|" + scanIdentity + "|" + lockKey + "|" + windowOf(fireTime);
+    try {
+      ProcessCreationResult result =
+          creationService.create(
+              ProcessCreateIntent.resolve(
+                  new ProcessResource.TableRef(
+                      table.catalog(),
+                      table.database(),
+                      table.table(),
+                      table.tableId()),
+                  plugin.action(),
+                  engine,
+                  "SCHEDULED",
+                  idempotencyKey,
+                  evaluation.parameters()));
+      LOG.info(
+          "Scheduled process {} for {}.{}.{} action {}.",
+          result.replayed() ? "replayed" : "created",
+          table.catalog(),
+          table.database(),
+          table.table(),
+          plugin.action());
+    } catch (ProcessAdmissionException admissionRejected) {
+      LOG.debug("Scheduled create for {} rejected: {}", lockKey, admissionRejected.getMessage());
+    }
   }
 
   private static String windowOf(Instant fireTime) {

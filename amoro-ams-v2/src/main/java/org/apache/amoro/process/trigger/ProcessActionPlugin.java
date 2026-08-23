@@ -38,19 +38,28 @@ public interface ProcessActionPlugin {
   /** One of: create with frozen parameters, or skip this window. */
   final class ScheduledEvaluation {
     private final Object parameters;
+    private final String executionEngine;
     private final boolean create;
 
-    private ScheduledEvaluation(Map<String, Object> parameters, boolean create) {
+    private ScheduledEvaluation(
+        String executionEngine, Map<String, Object> parameters, boolean create) {
       this.parameters = parameters;
+      this.executionEngine = executionEngine;
       this.create = create;
     }
 
-    public static ScheduledEvaluation create(Map<String, Object> parameters) {
-      return new ScheduledEvaluation(parameters, true);
+    public static ScheduledEvaluation create(
+        String executionEngine, Map<String, Object> parameters) {
+      return new ScheduledEvaluation(
+          java.util.Objects.requireNonNull(executionEngine, "executionEngine"),
+          java.util.Collections.unmodifiableMap(
+              new java.util.LinkedHashMap<>(
+                  java.util.Objects.requireNonNull(parameters, "parameters"))),
+          true);
     }
 
     public static ScheduledEvaluation skip() {
-      return new ScheduledEvaluation(null, false);
+      return new ScheduledEvaluation(null, null, false);
     }
 
     @SuppressWarnings("unchecked")
@@ -60,6 +69,13 @@ public interface ProcessActionPlugin {
 
     public boolean shouldCreate() {
       return create;
+    }
+
+    public String executionEngine() {
+      if (!create) {
+        throw new IllegalStateException("a skipped evaluation has no execution engine");
+      }
+      return executionEngine;
     }
   }
 }

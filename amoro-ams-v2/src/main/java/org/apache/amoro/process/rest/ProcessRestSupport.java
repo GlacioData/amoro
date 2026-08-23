@@ -154,34 +154,16 @@ public final class ProcessRestSupport {
     }
 
     String tableId = tableCatalog.tableId(catalog, database, table);
-    String keyHash = sha256(idempotencyKey);
-    String requestHash =
-        sha256(
-            catalog
-                + "|"
-                + database
-                + "|"
-                + table
-                + "|"
-                + action
-                + "|"
-                + engine
-                + "|"
-                + canonical(parameters));
-
-    Map<String, Object> frozen =
-        parameters == null ? new LinkedHashMap<String, Object>() : new LinkedHashMap<>(parameters);
     try {
       ProcessCreationResult result =
           creationService.create(
-              new ProcessCreateIntent(
+              ProcessCreateIntent.resolve(
                   new ProcessResource.TableRef(catalog, database, table, tableId),
                   action,
                   engine,
                   triggerSource,
-                  keyHash,
-                  requestHash,
-                  frozen));
+                  idempotencyKey,
+                  parameters));
       return new CreateResult(result.resource(), result.replayed());
     } catch (ProcessAdmissionException admission) {
       switch (admission.code()) {

@@ -18,10 +18,15 @@
 
 package org.apache.amoro.process;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.Collections;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.TreeMap;
 
 /** Canonical, already-authorized creation intent shared by manual and scheduled entry points. */
 public final class ProcessCreateIntent {
@@ -54,6 +59,43 @@ public final class ProcessCreateIntent {
             new LinkedHashMap<>(Objects.requireNonNull(parameters, "parameters")));
   }
 
+  /**
+   * Resolves a caller-visible idempotency key into the canonical identity shared by REST and
+   * scheduled creation. The raw key is never stored in the Process resource.
+   */
+  public static ProcessCreateIntent resolve(
+      ProcessResource.TableRef table,
+      String action,
+      String executionEngine,
+      String triggerSource,
+      String rawIdempotencyKey,
+      Map<String, Object> parameters) {
+    Objects.requireNonNull(rawIdempotencyKey, "rawIdempotencyKey");
+    Map<String, Object> frozen =
+        parameters == null ? Collections.emptyMap() : new LinkedHashMap<>(parameters);
+    String requestHash =
+        sha256(
+            table.catalog()
+                + "|"
+                + table.database()
+                + "|"
+                + table.table()
+                + "|"
+                + action
+                + "|"
+                + executionEngine
+                + "|"
+                + canonical(frozen));
+    return new ProcessCreateIntent(
+        table,
+        action,
+        executionEngine,
+        triggerSource,
+        sha256(rawIdempotencyKey),
+        requestHash,
+        frozen);
+  }
+
   public ProcessResource.TableRef table() {
     return table;
   }
@@ -84,5 +126,63 @@ public final class ProcessCreateIntent {
 
   String admissionScope() {
     return table.tableId() + "|" + action;
+  }
+
+  private static String canonical(Object value) {
+    StringBuilder builder = new StringBuilder();
+    appendCanonical(value, builder);
+    return builder.toString();
+  }
+
+  private static void appendCanonical(Object value, StringBuilder builder) {
+    if (value == null) {
+      builder.append("null");
+    } else if (value instanceof String) {
+      builder
+          .append('"')
+          .append(((String) value).replace("\\", "\\\\").replace("\"", "\\\""))
+          .append('"');
+    } else if (value instanceof Number || value instanceof Boolean) {
+      builder.append(value);
+    } else if (value instanceof Map) {
+      Map<String, Object> sorted = new TreeMap<>();
+      for (Map.Entry<?, ?> entry : ((Map<?, ?>) value).entrySet()) {
+        sorted.put(String.valueOf(entry.getKey()), entry.getValue());
+      }
+      builder.append('{');
+      boolean first = true;
+      for (Map.Entry<String, Object> entry : sorted.entrySet()) {
+        if (!first) {
+          builder.append(',');
+        }
+        first = false;
+        appendCanonical(entry.getKey(), builder);
+        builder.append(':');
+        appendCanonical(entry.getValue(), builder);
+      }
+      builder.append('}');
+    } else if (value instanceof List) {
+      builder.append('[');
+      boolean first = true;
+      for (Object item : (List<?>) value) {
+        if (!first) {
+          builder.append(',');
+        }
+        first = false;
+        appendCanonical(item, builder);
+      }
+      builder.append(']');
+    } else {
+      appendCanonical(String.valueOf(value), builder);
+    }
+  }
+
+  private static String sha256(String input) {
+    try {
+      MessageDigest digest = MessageDigest.getInstance("SHA-256");
+      return HexFormat.of().formatHex(digest.digest(input.getBytes(StandardCharsets.UTF_8)));
+    } catch (Exception e) {
+      throw new IllegalStateException("SHA-256 is unavailable", e);
+    }
   }
 }

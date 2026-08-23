@@ -25,6 +25,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import org.apache.amoro.control.DefaultScheduler;
 import org.apache.amoro.persistence.HandoffResult;
 import org.apache.amoro.process.ProcessDomainAssembly;
+import org.apache.amoro.process.ProcessCreationService;
 import org.apache.amoro.process.TestProcessDomain;
 import org.apache.amoro.process.rest.ProcessRestSupport;
 import org.junit.jupiter.api.AfterEach;
@@ -33,6 +34,9 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
 import java.time.Duration;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -48,6 +52,7 @@ public class TestProcessTriggerScanner {
   private DefaultScheduler scheduler;
   private ProcessDomainAssembly assembly;
   private ProcessRestSupport rest;
+  private ProcessCreationService creationService;
   private InMemoryManagedTables tables;
   private ProcessTriggerScanner scanner;
 
@@ -63,16 +68,20 @@ public class TestProcessTriggerScanner {
             128,
             10_000L,
             65536);
-    rest = new ProcessRestSupport(assembly);
+    creationService = new ProcessCreationService(assembly);
+    rest = new ProcessRestSupport(assembly, creationService);
     tables = new InMemoryManagedTables();
     tables.add("prod", "db1", "orders", "42");
     tables.add("prod", "db1", "events", "43");
     scanner =
         new ProcessTriggerScanner(
-            rest,
+            creationService,
             tables,
-            new FixedIntervalActionPlugin("expire-snapshots", "local", 3600),
-            "scan-1");
+            new FixedIntervalActionPlugin(
+                "expire-snapshots", "local", 3600, tables.observedFireTimes),
+            "scan-1",
+            Clock.fixed(Instant.parse("2026-08-23T12:34:56Z"), ZoneOffset.UTC),
+            1);
   }
 
   @AfterEach
@@ -119,6 +128,21 @@ public class TestProcessTriggerScanner {
   }
 
   @Test
+  public void oneBrokenSimulatedFactDoesNotAbortTheRound() {
+    tables.tables.put(
+        "42",
+        new ManagedTablePort.TableSnapshot(
+            "prod", "db1", "orders", "42", "iceberg", "not-an-instant"));
+
+    scanner.scanOnce();
+
+    assertEquals(1, assembly.indexProjection().current().resourcesByName().size());
+    assertEquals(
+        "events",
+        assembly.indexProjection().current().resourcesByName().values().iterator().next().spec().table().table());
+  }
+
+  @Test
   public void scanCreatesAgainAfterThePreviousProcessTerminates() throws Exception {
     scanner.scanOnce();
     // terminate one table's process, then rescan: a fresh process is admitted
@@ -142,10 +166,12 @@ public class TestProcessTriggerScanner {
     // the active slot even though the idempotency key differs by window
     ProcessTriggerScanner nextWindow =
         new ProcessTriggerScanner(
-            rest,
+            creationService,
             tables,
             new FixedIntervalActionPlugin("expire-snapshots", "local", 3600),
-            "scan-2");
+            "scan-2",
+            Clock.fixed(Instant.parse("2026-08-23T12:35:56Z"), ZoneOffset.UTC),
+            1);
     nextWindow.scanOnce();
     long ordersCount =
         assembly.indexProjection().current().resourcesByName().values().stream()
@@ -188,12 +214,68 @@ public class TestProcessTriggerScanner {
         .until(() -> assembly.indexProjection().current().resourcesByName().size() >= 2);
   }
 
+  @Test
+  public void independentScannerInstancesShareCreationAdmission() throws Exception {
+    ProcessTriggerScanner second =
+        new ProcessTriggerScanner(
+            creationService,
+            tables,
+            new FixedIntervalActionPlugin("expire-snapshots", "local", 3600),
+            "scan-2",
+            Clock.fixed(Instant.parse("2026-08-23T12:35:56Z"), ZoneOffset.UTC),
+            1);
+    Thread first = new Thread(scanner::scanOnce, "first-scanner");
+    Thread other = new Thread(second::scanOnce, "second-scanner");
+    first.start();
+    other.start();
+    first.join(10_000L);
+    other.join(10_000L);
+
+    assertEquals(2, assembly.indexProjection().current().resourcesByName().size());
+  }
+
+  @Test
+  public void unsupportedEnginePairIsSkippedWithoutGuessingRemote() {
+    ProcessTriggerScanner unsupported =
+        new ProcessTriggerScanner(
+            creationService,
+            tables,
+            new FixedIntervalActionPlugin("expire-snapshots", "not-deployed", 3600) {
+              @Override
+              public boolean supports(String tableFormat, String executionEngine) {
+                return false;
+              }
+            },
+            "unsupported",
+            Clock.fixed(Instant.parse("2026-08-23T12:34:56Z"), ZoneOffset.UTC),
+            2);
+
+    unsupported.scanOnce();
+
+    assertTrue(assembly.indexProjection().current().resourcesByName().isEmpty());
+  }
+
+  @Test
+  public void scannerUsesStableCursorBatchAndInjectedLogicalTime() {
+    scanner.scanOnce();
+
+    assertEquals(java.util.Arrays.asList(null, "42"), tables.requestedCursors);
+    assertEquals(java.util.Arrays.asList(1, 1), tables.requestedBatchSizes);
+    assertEquals(
+        java.util.Arrays.asList(
+            Instant.parse("2026-08-23T12:34:56Z"), Instant.parse("2026-08-23T12:34:56Z")),
+        tables.observedFireTimes);
+  }
+
   // ------------------------------------------------------------------ fakes
 
   /** In-memory ManagedTablePort: tables with a lastMaintenanceAt stamp. */
   static final class InMemoryManagedTables implements ManagedTablePort {
     final java.util.Map<String, TableSnapshot> tables =
         new java.util.concurrent.ConcurrentHashMap<String, TableSnapshot>();
+    final List<String> requestedCursors = new java.util.concurrent.CopyOnWriteArrayList<>();
+    final List<Integer> requestedBatchSizes = new java.util.concurrent.CopyOnWriteArrayList<>();
+    final List<Instant> observedFireTimes = new java.util.concurrent.CopyOnWriteArrayList<>();
 
     void add(String catalog, String db, String table, String tableId) {
       tables.put(
@@ -219,21 +301,45 @@ public class TestProcessTriggerScanner {
     }
 
     @Override
-    public List<TableSnapshot> scan() {
-      return new java.util.ArrayList<TableSnapshot>(tables.values());
+    public TablePage scanAfter(String cursor, int batchSize) {
+      requestedCursors.add(cursor);
+      requestedBatchSizes.add(batchSize);
+      List<TableSnapshot> ordered = new java.util.ArrayList<>(tables.values());
+      ordered.sort(java.util.Comparator.comparing(TableSnapshot::tableId));
+      List<TableSnapshot> page =
+          ordered.stream()
+              .filter(snapshot -> cursor == null || snapshot.tableId().compareTo(cursor) > 0)
+              .limit(batchSize)
+              .collect(java.util.stream.Collectors.toList());
+      String next =
+          !page.isEmpty()
+                  && ordered.stream()
+                      .anyMatch(
+                          snapshot ->
+                              snapshot.tableId().compareTo(page.get(page.size() - 1).tableId()) > 0)
+              ? page.get(page.size() - 1).tableId()
+              : null;
+      return new TablePage(page, next);
     }
   }
 
   /** Fixed-interval gate: eligible when the last maintenance is older than intervalSeconds. */
-  static final class FixedIntervalActionPlugin implements ProcessActionPlugin {
+  static class FixedIntervalActionPlugin implements ProcessActionPlugin {
     private final String action;
     private final String engine;
     private final int intervalSeconds;
+    private final List<Instant> observedFireTimes;
 
     FixedIntervalActionPlugin(String action, String engine, int intervalSeconds) {
+      this(action, engine, intervalSeconds, new java.util.concurrent.CopyOnWriteArrayList<>());
+    }
+
+    FixedIntervalActionPlugin(
+        String action, String engine, int intervalSeconds, List<Instant> observedFireTimes) {
       this.action = action;
       this.engine = engine;
       this.intervalSeconds = intervalSeconds;
+      this.observedFireTimes = observedFireTimes;
     }
 
     @Override
@@ -249,6 +355,7 @@ public class TestProcessTriggerScanner {
     @Override
     public ScheduledEvaluation evaluateScheduled(
         ManagedTablePort.TableSnapshot table, java.time.Instant logicalFireTime) {
+      observedFireTimes.add(logicalFireTime);
       java.time.Instant last = java.time.Instant.parse(table.lastMaintenanceAt());
       if (logicalFireTime.minusSeconds(intervalSeconds).isBefore(last)) {
         return ScheduledEvaluation.skip();
@@ -256,7 +363,7 @@ public class TestProcessTriggerScanner {
       Map<String, Object> parameters = new LinkedHashMap<String, Object>();
       parameters.put("olderThanMillis", 1L);
       parameters.put("retainLast", 1);
-      return ScheduledEvaluation.create(parameters);
+      return ScheduledEvaluation.create(engine, parameters);
     }
   }
 }
