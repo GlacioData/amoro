@@ -207,10 +207,9 @@ public final class InMemoryPersistence<R extends ControlledResource>
    * Repair of one fenced name (framework spec §5.1): reload the durable row on the lane and
    * reconcile the cache; for a cleanup-pending fence the staged deletion hook is retried with the
    * staged snapshot. For an outcome-unknown fence, repair publishes the durable delta through the
-   * same projection, hook and listener chain as a confirmed mutation. The fence clears only when
-   * the repair succeeded. A successful repair of a CLEANUP_PENDING fence does NOT re-emit the
-   * AFTER_DELETED event that the failed delete never handed off — listener-side compensation is the
-   * domain repair sweep's job (framework spec §6).
+   * same projection, hook and listener chain as a confirmed mutation. A delete stays visible in
+   * canonical/projection state until its cleanup hook succeeds, preserving admission reservations.
+   * The fence clears only after the complete repair is published.
    */
   public void repair(String name) {
     Objects.requireNonNull(name, "name");
@@ -332,10 +331,10 @@ public final class InMemoryPersistence<R extends ControlledResource>
           "delete of " + id + " did not commit (resolved as previous state by point read)");
     }
 
-    // durable delete confirmed: publish the removal, then run the in-lane hook before the
-    // stage completes and before any same-name mutation dequeues
-    canonical.remove(id);
-    commitProjections(prepared);
+    // Durable delete confirmed. Keep the stale canonical/projection reservation until the hook
+    // succeeds: releasing it first would let a different name in the same domain scope overtake a
+    // failed cleanup. The name fence blocks same-name mutation; domain projections keep broader
+    // admission scopes fail-closed.
     try {
       deletionHook.afterDurableDelete(detachedCurrent);
     } catch (Throwable hookFailure) {
@@ -343,6 +342,8 @@ public final class InMemoryPersistence<R extends ControlledResource>
       fenced.put(id, Fence.CLEANUP_PENDING);
       throw new PostCommitCleanupException(domain.domainName(), id, hookFailure);
     }
+    canonical.remove(id);
+    commitProjections(prepared);
     handoff(ListenerEnvelope.EventType.AFTER_DELETED, detachedCurrent);
     return serde.detachedCopy(detachedCurrent);
   }
@@ -381,10 +382,20 @@ public final class InMemoryPersistence<R extends ControlledResource>
     }
     if (fence == Fence.CLEANUP_PENDING) {
       R staged = pendingHookCleanup.get(name);
-      if (staged != null) {
-        deletionHook.afterDurableDelete(staged); // throws -> stays fenced
-        pendingHookCleanup.remove(name);
+      if (staged == null) {
+        throw new IllegalStateException(
+            "missing staged deletion snapshot for cleanup repair of "
+                + resourceCollection
+                + "/"
+                + name);
       }
+      PreparedProjectionUpdate[] prepared =
+          prepareProjections(PersistenceChange.deleted(serde.detachedCopy(staged)));
+      deletionHook.afterDurableDelete(staged); // throws -> canonical/projections stay reserved
+      canonical.remove(name);
+      commitProjections(prepared);
+      pendingHookCleanup.remove(name);
+      handoff(ListenerEnvelope.EventType.AFTER_DELETED, staged);
       fenced.remove(name);
       return;
     }
@@ -426,8 +437,6 @@ public final class InMemoryPersistence<R extends ControlledResource>
       R detachedPrevious = serde.detachedCopy(previous);
       PreparedProjectionUpdate[] prepared =
           prepareProjections(PersistenceChange.deleted(detachedPrevious));
-      canonical.remove(name);
-      commitProjections(prepared);
       try {
         deletionHook.afterDurableDelete(detachedPrevious);
       } catch (Throwable hookFailure) {
@@ -435,6 +444,8 @@ public final class InMemoryPersistence<R extends ControlledResource>
         fenced.put(name, Fence.CLEANUP_PENDING);
         throw new PostCommitCleanupException(domain.domainName(), name, hookFailure);
       }
+      canonical.remove(name);
+      commitProjections(prepared);
       handoff(ListenerEnvelope.EventType.AFTER_DELETED, detachedPrevious);
     } else {
       PreparedProjectionUpdate[] prepared =

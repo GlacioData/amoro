@@ -751,7 +751,10 @@ public class TestInMemoryPersistence {
 
   @Test
   public void hookFailureFencesTheNameUntilRepairCleanup() throws Exception {
+    persistence.addListener(new NoOpListener());
     join(persistence.create(new FakeResource("r1", "p", 0)));
+    int commitsBeforeDelete = projection.commits.get();
+    int eventsBeforeDelete = sink.envelopes.size();
     hook.behavior =
         r -> {
           throw new IllegalStateException("hook cleanup failed");
@@ -759,7 +762,12 @@ public class TestInMemoryPersistence {
 
     CompletionStage<FakeResource> failed = persistence.delete("r1");
     assertTrue(causeOf(failed) instanceof PostCommitCleanupException);
-    assertNullSilently(persistence.get("r1")); // the delete itself stays durable
+    assertEquals(
+        "p",
+        join(persistence.get("r1")).payload(),
+        "the stale canonical/projection remains reserved until cleanup succeeds");
+    assertEquals(commitsBeforeDelete, projection.commits.get());
+    assertEquals(eventsBeforeDelete, sink.envelopes.size());
 
     // fenced: same-name create rejected
     CompletionStage<FakeResource> blocked = persistence.create(new FakeResource("r1", "p", 0));
@@ -769,6 +777,12 @@ public class TestInMemoryPersistence {
     AtomicBoolean repairedHookSawResource = new AtomicBoolean(false);
     hook.behavior = r -> repairedHookSawResource.set(r != null && "r1".equals(r.name()));
     persistence.repair("r1");
+
+    assertNullSilently(persistence.get("r1"));
+    assertEquals(commitsBeforeDelete + 1, projection.commits.get());
+    assertEquals(PersistenceChange.Type.DELETE, projection.prepared.get(1).type());
+    assertEquals(eventsBeforeDelete + 1, sink.envelopes.size());
+    assertEquals(ListenerEnvelope.EventType.AFTER_DELETED, sink.envelopes.get(1).eventType());
 
     FakeResource recreated = join(persistence.create(new FakeResource("r1", "p2", 0)));
     assertEquals(1, recreated.resourceVersion());
@@ -880,6 +894,59 @@ public class TestInMemoryPersistence {
     assertEquals(
         ListenerEnvelope.EventType.AFTER_DELETED,
         sink.envelopes.get(sink.envelopes.size() - 1).eventType());
+  }
+
+  @Test
+  public void repairProjectionPrepareFailureKeepsFenceAndOldCanonical() throws Exception {
+    persistence.addListener(new NoOpListener());
+    join(persistence.create(new FakeResource("r1", "p", 0)));
+    int commitsBeforeUnknown = projection.commits.get();
+    int eventsBeforeUnknown = sink.envelopes.size();
+
+    blob.script = blob.commitThenFindThirdValue;
+    CompletionStage<FakeResource> unknown =
+        persistence.modify("r1", r -> r.withPayloadAndCounter("p2", 0));
+    assertTrue(causeOf(unknown) instanceof PersistenceOutcomeUnknownException);
+
+    blob.script = null;
+    projection.failPrepare = true;
+    assertThrows(CompletionException.class, () -> persistence.repair("r1"));
+    assertTrue(persistence.fencedNames().contains("r1"));
+    assertEquals("p", join(persistence.get("r1")).payload());
+    assertEquals(commitsBeforeUnknown, projection.commits.get());
+    assertEquals(eventsBeforeUnknown, sink.envelopes.size());
+
+    projection.failPrepare = false;
+    persistence.repair("r1");
+    assertEquals("third-value", join(persistence.get("r1")).payload());
+    assertFalse(persistence.fencedNames().contains("r1"));
+  }
+
+  @Test
+  public void unknownDeleteHookFailureKeepsOldProjectionUntilRepairRetry() throws Exception {
+    persistence.addListener(new NoOpListener());
+    join(persistence.create(new FakeResource("r1", "p", 0)));
+    int commitsBeforeUnknown = projection.commits.get();
+    int eventsBeforeUnknown = sink.envelopes.size();
+
+    blob.script = FakeBlobStore.COMMIT_THEN_BOTH_READS_FAIL;
+    CompletionStage<FakeResource> unknown = persistence.delete("r1");
+    assertTrue(causeOf(unknown) instanceof PersistenceOutcomeUnknownException);
+
+    blob.script = null;
+    hook.behavior = r -> { throw new IllegalStateException("repair hook failed"); };
+    assertThrows(CompletionException.class, () -> persistence.repair("r1"));
+    assertTrue(persistence.fencedNames().contains("r1"));
+    assertEquals("p", join(persistence.get("r1")).payload());
+    assertEquals(commitsBeforeUnknown, projection.commits.get());
+    assertEquals(eventsBeforeUnknown, sink.envelopes.size());
+
+    hook.behavior = r -> {};
+    persistence.repair("r1");
+    assertNullSilently(persistence.get("r1"));
+    assertEquals(commitsBeforeUnknown + 1, projection.commits.get());
+    assertEquals(eventsBeforeUnknown + 1, sink.envelopes.size());
+    assertFalse(persistence.fencedNames().contains("r1"));
   }
 
   @Test
