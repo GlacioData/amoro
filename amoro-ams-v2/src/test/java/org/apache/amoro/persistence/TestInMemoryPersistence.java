@@ -668,6 +668,7 @@ public class TestInMemoryPersistence {
 
   @Test
   public void unresolvableOutcomeFencesTheKeyUntilRepair() throws Exception {
+    persistence.addListener(new NoOpListener());
     blob.script = FakeBlobStore.COMMIT_THEN_BOTH_READS_FAIL;
     CompletionStage<FakeResource> unknown = persistence.create(new FakeResource("r1", "p", 0));
     assertTrue(causeOf(unknown) instanceof PersistenceOutcomeUnknownException);
@@ -683,6 +684,12 @@ public class TestInMemoryPersistence {
         1,
         join(persistence.get("r1")).resourceVersion(),
         "repair must recover the committed write into the cache");
+    assertEquals(1, projection.commits.get(), "repair must publish the recovered create");
+    assertEquals(
+        PersistenceChange.Type.CREATE,
+        projection.prepared.get(projection.prepared.size() - 1).type());
+    assertEquals(1, sink.envelopes.size(), "repair must emit a compensating create event");
+    assertEquals(ListenerEnvelope.EventType.AFTER_CREATED, sink.envelopes.get(0).eventType());
   }
 
   @Test
@@ -815,7 +822,10 @@ public class TestInMemoryPersistence {
 
   @Test
   public void unknownOutcomeWithThirdValueFencesUntilRepair() throws Exception {
+    persistence.addListener(new NoOpListener());
     join(persistence.create(new FakeResource("r1", "p", 0)));
+    int commitsBeforeUnknown = projection.commits.get();
+    int eventsBeforeUnknown = sink.envelopes.size();
     // the row exists but holds bytes matching neither the candidate nor the previous state
     blob.script = blob.commitThenFindThirdValue;
     CompletionStage<FakeResource> unknown =
@@ -829,6 +839,47 @@ public class TestInMemoryPersistence {
         "third-value",
         repaired.payload(),
         "repair adopts the durable row verbatim after unresolvable outcome");
+    assertEquals(
+        commitsBeforeUnknown + 1,
+        projection.commits.get(),
+        "repair must publish the recovered modify");
+    PersistenceChange<FakeResource> repairChange =
+        projection.prepared.get(projection.prepared.size() - 1);
+    assertEquals(PersistenceChange.Type.MODIFY, repairChange.type());
+    assertEquals("p", repairChange.previous().payload());
+    assertEquals("third-value", repairChange.current().payload());
+    assertEquals(eventsBeforeUnknown + 1, sink.envelopes.size());
+    assertEquals(
+        ListenerEnvelope.EventType.AFTER_MODIFIED,
+        sink.envelopes.get(sink.envelopes.size() - 1).eventType());
+  }
+
+  @Test
+  public void unknownDeleteRepairPublishesProjectionHookAndEvent() throws Exception {
+    persistence.addListener(new NoOpListener());
+    join(persistence.create(new FakeResource("r1", "p", 0)));
+    int commitsBeforeUnknown = projection.commits.get();
+    int eventsBeforeUnknown = sink.envelopes.size();
+    int hooksBeforeUnknown = hook.calls.get();
+
+    blob.script = FakeBlobStore.COMMIT_THEN_BOTH_READS_FAIL;
+    CompletionStage<FakeResource> unknown = persistence.delete("r1");
+    assertTrue(causeOf(unknown) instanceof PersistenceOutcomeUnknownException);
+
+    blob.script = null;
+    persistence.repair("r1");
+
+    assertNullSilently(persistence.get("r1"));
+    assertEquals(commitsBeforeUnknown + 1, projection.commits.get());
+    PersistenceChange<FakeResource> repairChange =
+        projection.prepared.get(projection.prepared.size() - 1);
+    assertEquals(PersistenceChange.Type.DELETE, repairChange.type());
+    assertEquals("r1", repairChange.previous().name());
+    assertEquals(hooksBeforeUnknown + 1, hook.calls.get());
+    assertEquals(eventsBeforeUnknown + 1, sink.envelopes.size());
+    assertEquals(
+        ListenerEnvelope.EventType.AFTER_DELETED,
+        sink.envelopes.get(sink.envelopes.size() - 1).eventType());
   }
 
   @Test

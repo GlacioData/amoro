@@ -206,9 +206,11 @@ public final class InMemoryPersistence<R extends ControlledResource>
   /**
    * Repair of one fenced name (framework spec §5.1): reload the durable row on the lane and
    * reconcile the cache; for a cleanup-pending fence the staged deletion hook is retried with the
-   * staged snapshot. The fence clears only when the repair succeeded. A successful repair of a
-   * CLEANUP_PENDING fence does NOT re-emit the AFTER_DELETED event that the failed delete never
-   * handed off — listener-side compensation is the domain repair sweep's job (framework spec §6).
+   * staged snapshot. For an outcome-unknown fence, repair publishes the durable delta through the
+   * same projection, hook and listener chain as a confirmed mutation. The fence clears only when
+   * the repair succeeded. A successful repair of a CLEANUP_PENDING fence does NOT re-emit the
+   * AFTER_DELETED event that the failed delete never handed off — listener-side compensation is the
+   * domain repair sweep's job (framework spec §6).
    */
   public void repair(String name) {
     Objects.requireNonNull(name, "name");
@@ -374,6 +376,9 @@ public final class InMemoryPersistence<R extends ControlledResource>
 
   private void repairInLane(String name) {
     Fence fence = fenced.get(name);
+    if (fence == null) {
+      return;
+    }
     if (fence == Fence.CLEANUP_PENDING) {
       R staged = pendingHookCleanup.get(name);
       if (staged != null) {
@@ -383,12 +388,61 @@ public final class InMemoryPersistence<R extends ControlledResource>
       fenced.remove(name);
       return;
     }
-    // OUTCOME_UNKNOWN: reload the durable row and reconcile the cache with the store
+
+    // OUTCOME_UNKNOWN: publish the durable delta through every rebuildable projection. Preparing
+    // happens before the canonical cache changes, so a preparation failure leaves the old snapshot
+    // visible and the name fenced for a later retry.
+    R previous = canonical.get(name);
     Optional<byte[]> row = blobStore.find(resourceCollection, name);
-    if (row.isPresent()) {
-      canonical.put(name, serde.deserialize(row.get()).resource());
-    } else {
+    byte[] durableBytes = row.orElse(null);
+    byte[] previousBytes = previous == null ? null : serde.serialize(previous);
+    if (Arrays.equals(durableBytes, previousBytes)) {
+      fenced.remove(name);
+      return;
+    }
+
+    R current = null;
+    if (durableBytes != null) {
+      current = serde.detachedCopy(serde.deserialize(durableBytes).resource());
+      if (!name.equals(current.name()) || !resourceCollection.equals(current.collection())) {
+        throw new IllegalStateException(
+            "durable row identity mismatch during repair of "
+                + resourceCollection
+                + "/"
+                + name
+                + ": got "
+                + current.collection()
+                + "/"
+                + current.name());
+      }
+    }
+
+    if (previous == null) {
+      PreparedProjectionUpdate[] prepared =
+          prepareProjections(PersistenceChange.created(serde.detachedCopy(current)));
+      publish(name, current, prepared);
+      handoff(ListenerEnvelope.EventType.AFTER_CREATED, current);
+    } else if (current == null) {
+      R detachedPrevious = serde.detachedCopy(previous);
+      PreparedProjectionUpdate[] prepared =
+          prepareProjections(PersistenceChange.deleted(detachedPrevious));
       canonical.remove(name);
+      commitProjections(prepared);
+      try {
+        deletionHook.afterDurableDelete(detachedPrevious);
+      } catch (Throwable hookFailure) {
+        pendingHookCleanup.put(name, detachedPrevious);
+        fenced.put(name, Fence.CLEANUP_PENDING);
+        throw new PostCommitCleanupException(domain.domainName(), name, hookFailure);
+      }
+      handoff(ListenerEnvelope.EventType.AFTER_DELETED, detachedPrevious);
+    } else {
+      PreparedProjectionUpdate[] prepared =
+          prepareProjections(
+              PersistenceChange.modified(
+                  serde.detachedCopy(previous), serde.detachedCopy(current)));
+      publish(name, current, prepared);
+      handoff(ListenerEnvelope.EventType.AFTER_MODIFIED, current);
     }
     fenced.remove(name);
   }
