@@ -19,12 +19,19 @@
 
 # amoro-ams-v2 Process 资源设计规格
 
-> 状态：**Draft / P0 技术评审已完成；首版 action scope、scheduled trigger 兼容承诺与 P7B 本地执行放置共 3 项业务边界待逐项确认；代码尚未实现**
+> 状态：**Implemented / simulation-only Process 控制面已通过本地交付门禁**
 >
-> 评审基线：`jira/process-dev`，commit `1cfa9728f2d9b3e56e025c02ba7e9afc5054b335`，2026-08-22
+> 评审范围：`jira/process-dev`，从 `0b6f133bf6b4b63ae03305997c3424fbe23bae27` 开始至本次
+> 文档提交，2026-08-24
 >
-> 实施计划：`tasks/ams-v2-process-plan.md`；任务清单：`tasks/ams-v2-process-todo.md`
-> 本文中的 `ProcessResource`、`ProcessEnginePort`、Controller、REST 路由和表结构均为待实现设计，不代表当前仓库已有相应代码。
+> 当前修复计划：`tasks/plan.md`；任务清单：`tasks/todo.md`。旧的
+> `tasks/ams-v2-process-plan.md` 与 `tasks/ams-v2-process-todo.md` 仅保留历史设计上下文，不再作为本轮实施依据。
+>
+> **本次范围锁定：不接入、不依赖、不加载、不执行任何 Iceberg/Paimon Action 逻辑。**
+> 本 Spec 的运行时、REST 示例、SPI 注册和端到端用例统一使用 `simulated` format 与
+> `dummy-maintenance` action，避免把控制面模拟误解为格式能力。Local 与 Remote 都只用显式
+> simulator/dummy 跑通 Process 全调度流程；不会加载真实表、修改元数据/文件或提交 Spark 作业。
+> 任何真实格式 Action 必须由后续独立 Spec 设计和交付。
 
 ---
 
@@ -36,7 +43,7 @@
 
 1. 定时扫描或手工请求生成不可变执行规格；
 2. 将 Process 先持久化，再通过 level-triggered Controller 调和；
-3. 支持远端 Spark 与本地线程池两类引擎；
+3. 通过统一 SPI 接入 Local 与 Remote 两类引擎，并在本 Spec 中用 simulator 验证两者；
 4. 对提交不确定、取消竞态、进程重启和版本升级保持可恢复、可审计；
 5. 提供 `/api/ams/v2` 创建、查询、列表、取消和人工消解接口；
 6. 明确 v1 的事实基线、差异、迁移路径和兼容边界。
@@ -46,7 +53,11 @@
 - 不复用 v1 `ProcessService`/`TableProcessExecutor` 的线程模型或事件状态机；
 - 不原地迁移或接管 v1 正在执行的 Process；
 - 不在本轮实现多 AMS 实例并发写；
-- 不修改 v1 Process 状态机、SQL、Thrift、REST 响应或前端语义；唯一兼容例外是 P8 可在 v1 Javalin 路由层增加只读 endpoint usage counter，用于证明迁移退场条件，不读取或记录 parameters；
+- 不引入、迁移或实现 Iceberg `expire-snapshots`、`clean-orphans`；
+- 不引入、迁移或实现 Paimon `sync-table-meta`；
+- 不加载真实 Iceberg/Paimon 表，不调用格式 Action API，不修改表元数据或数据文件；
+- 不提交真实 Remote Spark 作业，也不实现真实远端协议 adapter；
+- 不修改 `amoro-ams` 的 Process 状态机、SQL、Thrift、REST、指标或前端语义；本 Spec 的代码范围仅为 `amoro-ams-v2`；
 - 不在本轮引入鉴权或字段级权限控制。
 
 ### 1.3 成功标准
@@ -56,8 +67,11 @@
 - 数据库提交成功是 create/modify/delete 成功确认的前提；
 - 固定终态、可重试失败、提交未知和取消未知均有确定处理；
 - 同一 `(tableId, action)` 的两个并发入口最多创建一个活跃 Process；
-- v1/v2 差异矩阵、灰度切换和回退边界可直接用于实施；
-- 所有新增能力在完成代码与测试之前保持 Draft，不标记为已实现。
+- 显式模拟 profile 下，Local 与 Remote 均能完成 create→schedule→submit→observe/cancel→terminal→release→TTL，并覆盖 UNKNOWN/LOST/重启恢复；
+- 所有模拟结果携带 `simulated=true`，默认生产配置不宣告任何格式 action pair；
+- 依赖与运行时测试能证明没有加载或改变 Iceberg/Paimon 表，也没有提交真实 Spark 作业；
+- v1/v2 差异矩阵明确本 Spec 不承接真实 Action 流量；
+- 只有本 Spec 的通用控制面与 simulator 标记为已实现；任何真实格式 Action 仍不属于已交付能力。
 
 ---
 
@@ -67,7 +81,7 @@
 
 | 事实 | 证据 |
 |---|---|
-| `amoro-ams-v2` 当前只有 Spring Boot 启动类、`HealthController`、配置和健康检查测试，没有 Process、控制面持久化或 `/api/ams/v2/processes` 实现 | `amoro-ams-v2/src/main/java/org/apache/amoro/AmoroAmsV2Application.java`；`amoro-ams-v2/src/main/java/org/apache/amoro/controller/HealthController.java` |
+| `amoro-ams-v2` 已有 Process resource、persistence、engine、reconciler、REST、scanner 与 TTL 初版代码；这些代码是本轮审查对象，不等于已经满足本 Spec | `amoro-ams-v2/src/main/java/org/apache/amoro/process/`；`amoro-ams-v2/src/main/java/org/apache/amoro/persistence/`；`amoro-ams-v2/src/main/java/org/apache/amoro/config/ControlPlaneAutoConfiguration.java` |
 | v1 有十个 Process 状态 | `amoro-common/src/main/java/org/apache/amoro/process/ProcessStatus.java` |
 | v1 事件只有 SUBMIT/COMPLETE/RETRY/CANCEL/KILL 六类，没有 `CANCEL_CONFIRMED` | `amoro-common/src/main/java/org/apache/amoro/process/ProcessEvent.java` |
 | v1 `ExecuteEngine` 没有四分类提交、提交消解或统一观测契约 | `amoro-common/src/main/java/org/apache/amoro/process/ExecuteEngine.java` |
@@ -105,12 +119,13 @@ name: "1948372910284737281"    # 永远按字符串传输，避免 JavaScript 64
 resourceVersion: 7
 spec:
   table:
-    catalog: prod
-    database: db1
-    table: orders
-    tableId: "42"
-  action: expire-snapshots      # v2 稳定 wire value：lower-kebab-case
-  executionEngine: remote-spark
+    catalog: simulated
+    database: demo
+    table: table
+    tableId: "simulated-demo-table"
+    tableFormat: simulated       # 创建时冻结，提交时按 format/action/engine 精确选择插件
+  action: dummy-maintenance     # 仅为控制面模拟 action，不对应任何格式维护能力
+  executionEngine: remote-spark # 不提交真实 Spark 作业
   triggerSource: MANUAL         # MANUAL / SCHEDULED
   createdAt: 2026-08-22T10:00:00Z
   desiredState: RUN             # RUN / CANCEL；只允许 RUN -> CANCEL
@@ -118,8 +133,8 @@ spec:
     idempotencyKeyHash: "sha256:2a4f..." # 不存原始 Idempotency-Key
     requestHash: "sha256:87bc..."        # path + canonical request body
   parameters:                   # 创建时冻结；提交、重试、恢复均只读
-    olderThanMillis: 1724284800000
-    retainLast: 1
+    delayMillis: 5
+    outcome: SUCCESS
   retryPolicy:
     maxRetries: 3               # 初始尝试之外允许的重试次数
     maxSubmissionRetries: 2     # 每个 action attempt 内，初次派发之外允许的新代次提交次数
@@ -132,7 +147,7 @@ status:
     submissionKey: "1948372910284737281:1:1"
     requestHash: "sha256:9f3a..."
     submitState: ACKNOWLEDGED    # CREATED/DISPATCHING/ACKNOWLEDGED/REJECTED/UNKNOWN/CONFLICT/UNAVAILABLE
-    externalId: application_001
+    externalId: simulated-execution-001
     dispatchedAt: 2026-08-22T10:00:05Z
     retryDisposition: AUTO       # AUTO/ALLOW/FINAL；人工执行消解可覆盖
     finishedAt: null             # 当前 action attempt 结束时间；可早于资源最终 finishedAt
@@ -257,12 +272,12 @@ flowchart TB
     SCAN["Scheduled Trigger Scanner"]
     CREATE["ProcessCreationService\n冻结参数 + 单活跃准入"]
     COMMAND["ProcessCommandService\ndesired/submission/execution 消解"]
-    TABLE["ManagedTablePort\n只读 v1 metadata compatibility adapter"]
+    TABLE["ManagedTablePort\n显式 simulated facts"]
     ACTION["ProcessActionPlugin\nvalidate/freeze/build command"]
     REPO["ProcessRepository"]
     PERSIST["PersistenceService\nresourceVersion + durable-first"]
     ACTOR["MutationSequencer / BlobStoreActor\nactor 内 read/apply/write"]
-    DB[("amoro_process\nBase64(YAML)")]
+    DB[("amoro_process_v2\nBase64(YAML)")]
     STATE["ProcessResourceIndexSnapshot\nresourcesByName + active/idempotency/read/expiry\nsingle AtomicReference read model"]
     RELEASEIDX["ExecutionHandleReleaseIndex\n有界 cleanup projection"]
     LDISPATCH["ListenerDispatcher\n异步 pair-order + retry/alert"]
@@ -275,8 +290,8 @@ flowchart TB
     DISPATCH["ProcessEngineDispatcher\n异步 + 命令 single-flight"]
     PORT["ProcessEnginePort\nCompletionStage"]
     RESULT["ProcessResultApplier\nattempt 语义 CAS"]
-    REMOTE["Remote Spark Adapter"]
-    LOCAL["Local Executor Adapter"]
+    REMOTE["Simulated Remote Engine\n显式 profile"]
+    LOCAL["Simulated Local Engine\n显式 profile"]
 
     API --> CREATE
     API --> COMMAND
@@ -462,23 +477,28 @@ interface ProcessEnginePort {
 - `release(externalId)` 不是业务取消，而是“该 externalId 的执行终态结果已写入 Process”的幂等资源释放。任意 mutation（异步 observation/cancel 回调或 `ManualResolutionTransition`）只有在固定终态或 FAILED（包括预算内可重试 FAILED）CAS 成功时，`ProcessIndexProjection` 才把该 attempt 放入 release index；CAS 失败或结果仍为 SUBMITTED/RUNNING 时禁止产生 entry。`ExecutionHandleReaper` 是唯一的 `release` 调用方，`ProcessResultApplier`、REST 与 CommandService 都不直接 release，避免人工消解与异步结果出现不同 owner。attempt 归档必须保留 externalId，使崩溃重放可再次清理旧 attempt。重复 release 和未知 handle 必须成功 no-op；远端 adapter 可立即 no-op，本地 adapter 删除 terminal result/handle；
 - 执行终态 CAS 与 release 之间的窗口由独立 `ExecutionHandleReaper` 收敛：它按有序 execution-release index 有界扫描，失败按独立有界退避重试，不反转已持久化结果。周期 sweep 是正确性路径，terminal listener/reaper wake 只缩短延迟；即使 listener 丢失或进程在 CAS 后崩溃，postStart 也会从当前/历史 attempt 重建。当前 attempt 为 ExecutionUnresolved 时，只冻结该 identity 的四个业务命令；reaper 仍必须继续清理其他已 durable terminal attempt。TTL 在所有 local handle 已 release 前禁止删除 Process 行，不能用 delete 时的 volatile delta 补偿。为防 registry 永久泄漏，本地 terminal result 另有可配置 hard retention（默认 7 天）；超时仍未收到 release 时清理并告警；若对应终态尚未 durable，之后 observe 返回 LOST、由人工执行消解处理，不能伪造业务终态；
 - 进程在异步回调前崩溃时，由已持久化的 DISPATCHING/nextReconcileAt 在重启后进入 resolve；同一进程内的慢 submit future 未完成时绝不调用 resolve。若本地 action 已派发但 ACK 尚未持久化，该精确 crash window 必须收敛到 ExecutionUnresolved，人工执行消解允许在没有 externalId 时按 submissionKey/requestHash 完成；
-- 当前 `HttpRemoteSparkStandAloneSubmit` 只可复用已验证的 URL/字段映射，不能原样作为 v2 端口实现。
+- 当前 `HttpRemoteSparkStandAloneSubmit` 仅作为风险事实参考；本 Spec 不复用其 URL/字段映射，也不实现真实 v2 远端端口。
 
 ### 6.2 Action wire value
 
-v2 API 采用稳定 lower-kebab-case，由 `ProcessActionRegistry` 显式映射到格式实现。首版 action matrix 固定如下；这是 create 时的能力边界，不在运行到一半后降级：
+v2 API 的 action 使用稳定 lower-kebab-case，由 Action SPI 显式注册。本 Spec 只注册显式
+simulated/test profile 下的 `dummy-maintenance`；默认生产 profile 的 action catalog 为空。本轮
+禁止注册或在运行时示例中复用真实格式 Action 名称，以免将状态机验证误报为格式能力交付。
 
-| v2 action | Paimon 候选 pair / engine | Iceberg 候选 pair / engine |
-|---|---|---|
-| `expire-snapshots` | `EXPIRE-SNAPSHOTS` / `remote-spark` | `EXPIRE-SNAPSHOTS` / `local` |
-| `clean-orphans` | `CLEAN-ORPHANS` / `remote-spark` | `CLEAN-ORPHAN-FILES` / `local` |
-| `sync-table-meta` | `SYNC-TABLE-META` / `local` | 不支持 |
+| wire action | simulated table format | simulated engine | 本 Spec 行为 |
+|---|---|---|---|
+| `dummy-maintenance` | `simulated` | `local` / `remote-spark` | 仅返回脚本化模拟结果，不读取或修改任何真实表 |
 
-上表是当前文档候选 scope，不是仓库事实能够自动决定的产品优先级。当前 v1 还支持 Iceberg `expire-data/clean-dangling-delete/auto-create-tags/sync-hive-tables` 等维护动作；是否首版只交付上表 5 个 pair 必须由业务决策 L2 明确确认。L2 未关闭前不得把任何 pair 注册为 v2 supported；若确认当前候选，则 P7A 交付两个 Paimon remote pair，P7B 交付两个 Iceberg local pair和一个 Paimon local pair（无论 P7B 最终选 native 还是 v1 execution proxy）。不支持或尚未完成的 `(tableFormat, action, executionEngine)` 在 create 时返回 `400 INVALID_ACTION`，不得注册后延迟到运行期失败。不得直接把 `EXPIRE_SNAPSHOTS` 等下划线值写入 v2 wire contract。
+该 fixture 必须同时满足：仅显式 profile 可见、结果含 `simulated=true`、日志明确
+`SIMULATED_EXECUTION`、无格式依赖/真实表对象/远端提交。默认 profile 对该 pair 返回
+`400 INVALID_ACTION` 或 `400 INVALID_ENGINE`。未来真实实现的 action 名称、参数和 engine 映射
+由独立 Action Spec 决定，不属于本文承诺。
 
 ### 6.3 表事实与 Action 集成边界
 
-`amoro-ams-v2` 当前没有 v1 `TableManager/TableRuntime` 依赖，但 create/scanner 必须验证真实 tableId、format 与触发条件。当前代码证明仅靠 `table_identifier INNER JOIN table_metadata` 不足以复刻 scheduled gate：`PaimonExpireSnapshotProcess.trigger` 还读取 cleanup state、实际 `snapshotCount` 与 retainMax；`PaimonCleanOrphansProcess.trigger` 还读取 cleanup state、current snapshot commitTime，并对 static-table decision 回写时间；Iceberg factory 用 cleanup state 做 interval gate，本地 action 成功后再通过 `TableRuntime.updateState` 回写。v2 因此固定以下自有技术端口，禁止 P6 临时注入 `org.apache.amoro.server.*` 类型或直接调用 v1 Process Service：
+`amoro-ams-v2` 通过以下中立端口预留表事实、定时判定和 Action 接入能力。本文只验证端口和
+编排，不实现 Iceberg/Paimon 的 probe、参数语义或 Action。禁止注入 `org.apache.amoro.server.*`
+类型、直接调用 v1 Process Service，或在 simulator 内加载真实格式表：
 
 ```java
 interface ManagedTablePort {
@@ -507,15 +527,31 @@ interface ProcessActionPlugin {
 }
 ```
 
-`ManagedTableSnapshot` 只含 canonical coordinates、string tableId、format 和 action allowlist 后的配置视图；`TableProbeFacts` 只允许 action 声明的标量（首个候选为 Paimon snapshotCount/currentSnapshotCommitTime），probe adapter 内部可用 server-side catalog profile 加载表，但 credentials、keytab、principal secret、完整 Hadoop site 或原始 table object 都不得返回、落入 Process 或日志。基础事实读取来自 `table_identifier INNER JOIN table_metadata`，已有查询见 `TableMetaMapper.selectTableMetaByName`；v2 首个 `V1ManagedTableReadAdapter` 使用 v2 自有只读 Mapper 适配该 schema，三库 contract test 锁定列名/format/tableId，不复用 v1 Java Service，也不写 v1 表。
+`ManagedTableSnapshot` 只含 canonical coordinates、string tableId 与 format 等调度所需事实；创建时
+将 `tableFormat` 冻结进 `spec.table`，后续提交按 `(tableFormat,action,executionEngine)` 精确选择插件，
+不得根据实时表重新推断格式，也不得携带 credentials、完整 Hadoop 配置或原始格式表对象。本 Spec 只交付显式 profile 下的
+`SimulatedManagedTablePort`，不交付 MyBatis/catalog/格式表实现。`ManagedTableProbePort` 同样只有
+脚本化 dummy 实现，用于返回“应创建/应跳过/探测失败”等事实。真实
+snapshotCount、commitTime、文件列表、metastore 状态及 table-property precedence 全部留给后续 Spec。
 
-`ScheduledActionCheckpointPort` 只写 v2 自有 `amoro_process_trigger` Framework domain，key 为 `(tableId,canonicalAction)`，记录 `lastGateAt/reason/resourceVersion`；它不写 v1 `table_runtime_state`。灰度首次无 v2 checkpoint 时，允许一个 v2 自有只读 seed mapper 读取 `table_runtime_state.state_key='cleanup_state'` 的 allowlist timestamp 字段并解析成 checkpoint seed，以免切流后立刻重复维护；解析失败隔离到该表并告警，禁止导入其他 runtime state。后续 trigger 事实使用 v2 checkpoint、最新成功 Process 的冻结 trigger/finished time及实时 allowlisted probe；所有 scheduled interval 必须不长于 Process retention，保证成功 Process 被 TTL 删除前 interval gate 已自然过期。这个 schema adapter 是迁移期明确兼容边，不代表复用 v1 Process 实现。
+`ScheduledActionCheckpointPort` 只写 v2 自有 Framework domain，key 为
+`(tableId,canonicalAction)`；不读取或写入 v1 `table_runtime_state`。`ScheduledEvaluation` 只能返回
+“创建冻结模拟 intent”“无操作”或“记录模拟 skip decision”，不能自行写 Process 或调用引擎。
+scanner 使用稳定 cursor/batch 和 injected logical fire time，经唯一 `ProcessCreationService` 创建，
+因此手工和定时入口共享同表同 action 单活跃约束。
 
-`ScheduledEvaluation` 只能返回“创建冻结 intent”“无操作”或“只持久化 checkpoint 的 skip decision”，不能自行写数据库/调用引擎。若 L3 选择保留 v1 scheduled 语义，Paimon expire 必须执行 interval + snapshotCount>retainMax gate；Paimon clean-orphans 必须执行 interval + non-static + snapshotCommitTime>lastGateAt gate，static skip 以 logicalFireTime durable 更新 v2 checkpoint；Iceberg 两个候选 action 使用最新成功 Process/v1 seed 的 interval gate。若 L3 选择 v2 固定 schedule/Process-history 重设计，则必须先在 §10 差异矩阵明确删除哪些 snapshot-count/static-table/cleanup-state gate、可能增加的任务和元数据 I/O，再改写 P7 验收；当前仓库不能替用户决定该兼容承诺。
+手工参数与 scheduled dummy facts 都经同一个 `ProcessActionPlugin` 产出
+`FrozenActionIntent`。本 Spec 只定义通用字段、上限与 canonicalization；不得定义或声称兼容真实
+Iceberg/Paimon Action 参数。retry/recovery 只读取冻结 Process spec，不重新计算脚本化结果。
 
-手工参数与 scheduled probe 都必须经同一个 `ProcessActionPlugin` 产出 `FrozenActionIntent`。其中所有非敏感、会影响 action 语义的值（例如 olderThan、retain count、trigger snapshot/time）在 create 前 canonicalize 并写入 `spec.parameters`；后续 retry/recovery 的 `buildSubmission` 只能读取冻结 Process spec 与已命名的 server engine profile，禁止重新读取实时 table properties 后改变命令语义。scanner 使用 `ManagedTablePort.scan` 的稳定 cursor/batch，逐表加载 checkpoint/probe/最新成功 Process 后调用 action plugin；表加载/格式探测/probe/checkpoint 失败隔离到该表并记录指标，不中断整轮。
+scheduled Process 的时间黑名单准入由
+[`amoro-ams-v2-process-time-blacklist-spec.md`](amoro-ams-v2-process-time-blacklist-spec.md)
+定义。首版只消费待创建 `ProcessSpec.parameters` 中的 `process.blacklist.time`，不从表配置读取；
+命中或非法非空配置时不得创建 durable Process，`MANUAL` 和已有 Process 不受影响。
 
-P6 交付上述端口、`amoro_process_trigger` domain、只读 metadata/v1 checkpoint-seed adapter、scanner 编排和 fake probe/action plugin；P7A/P7B 在 L2/L3/L1 相应门禁关闭后分别交付真实 probe/action plugin 与 engine adapter。由此 P6 可以独立测试准入与事实冻结，P7 才声明具体格式动作已可运行。
+本 Spec 只交付上述端口、scanner 编排、Local/Remote simulator 与 dummy probe/action plugin。
+真实 probe、格式参数 schema、Iceberg/Paimon Action 和 Remote Spark adapter 均不得出现在本轮
+依赖、实现、SPI 注册或交付声明中。
 
 ---
 
@@ -725,7 +761,7 @@ flowchart LR
     PERSIST["PersistenceService\ndurable-first + resourceVersion"]
     CACHE["Canonical Cache"]
     INDEX["ProcessResourceIndexSnapshot\nactive/idempotency/read/expiry"]
-    DB[("amoro_process")]
+    DB[("amoro_process_v2")]
 
     V1C["v1 Dashboard / Client"]
     V1API["/api/ams/v1 table process list"]
@@ -745,7 +781,7 @@ flowchart LR
     V1DB -. "no projection / no dual write" .- DB
 ```
 
-图中虚线只表示迁移期的显式隔离，不表示数据同步。v2 路由不代理 v1，v1 前端也不会自动读取 `amoro_process`。
+图中虚线只表示迁移期的显式隔离，不表示数据同步。v2 路由不代理 v1，v1 前端也不会自动读取 `amoro_process_v2`。
 
 ### 8.3 创建
 
@@ -753,11 +789,11 @@ flowchart LR
 
 ```json
 {
-  "action": "expire-snapshots",
+  "action": "dummy-maintenance",
   "executionEngine": "remote-spark",
   "parameters": {
-    "olderThanMillis": 1724284800000,
-    "retainLast": 1
+    "delayMillis": 5,
+    "outcome": "SUCCESS"
   }
 }
 ```
@@ -785,8 +821,8 @@ flowchart LR
   "submissionKey": "1948372910284737281:1:1",
   "requestHash": "sha256:9f3a...",
   "resolution": "ACKNOWLEDGED",
-  "externalId": "application_001",
-  "reason": "verified in Spark history server"
+  "externalId": "simulated-application-001",
+  "reason": "verified by simulated submission ledger"
 }
 ```
 
@@ -797,7 +833,7 @@ flowchart LR
   "submissionKey": "1948372910284737281:1:1",
   "requestHash": "sha256:9f3a...",
   "resolution": "NOT_FOUND",
-  "reason": "verified by remote submission ledger"
+  "reason": "verified by simulated submission ledger"
 }
 ```
 
@@ -840,7 +876,7 @@ flowchart LR
       "collection": "process",
       "name": "1948372910284737281",
       "resourceVersion": 7,
-      "spec": { "action": "expire-snapshots", "parameters": {} },
+      "spec": { "action": "dummy-maintenance", "parameters": {} },
       "status": { "phase": "RUNNING" }
     }
   ],
@@ -908,7 +944,7 @@ reaper cursor 是 exclusive `ReleaseOrderKey`；每轮从 `higherEntry(cursor)` 
 
 ### 9.1 TTL 清理
 
-运行时禁止 `TRUNCATE amoro_process`。`ProcessTtlCleaner` 不遍历全 cache，而是从 `ProcessExpiryIndex(finishedAt ASC,name ASC)` 用稳定 cursor 读取至 cutoff 为止；单轮最多取得 batchSize 个候选。索引只选择：
+运行时禁止 `TRUNCATE amoro_process_v2`。`ProcessTtlCleaner` 不遍历全 cache，而是从 `ProcessExpiryIndex(finishedAt ASC,name ASC)` 用稳定 cursor 读取至 cutoff 为止；单轮最多取得 batchSize 个候选。索引只选择：
 
 - 满足 §7.1 最终谓词；
 - `finishedAt < now - retention`；
@@ -932,7 +968,7 @@ reaper cursor 是 exclusive `ReleaseOrderKey`；每轮从 `higherEntry(cursor)` 
 | 维度 | v1 当前事实 | v2 决策 | 迁移影响 |
 |---|---|---|---|
 | 实现 | `ProcessService` + `TableProcessExecutor` + 事件迁移 | 新资源控制面 + level-triggered reconcile | 不复用运行时状态机 |
-| 存储 | v1 process/关系表 | `amoro_process` Base64(YAML) | 不双写、不直接行迁移 |
+| 存储 | v1 process/关系表 | `amoro_process_v2` Base64(YAML) | 不双写、不直接行迁移 |
 | 列表路径 | `/api/ams/v1/tables/catalogs/{catalog}/dbs/{db}/tables/{table}/processes` | `/api/ams/v2/tables/{catalog}/{db}/{table}/processes` | 客户端显式切换 |
 | 列表页 | `OkResponse.result={list,total}`，query=`type,status,page,pageSize` | 直接 `{items,total,page,pageSize}`，query=`action,status,page,pageSize` | 前端 adapter 改造 |
 | 表不存在 | 200 + 空页 | 404 `TABLE_NOT_FOUND` | 调用方处理 404 |
@@ -948,23 +984,30 @@ reaper cursor 是 exclusive `ReleaseOrderKey`；每轮从 `higherEntry(cursor)` 
 
 ### 10.2 灰度与回退
 
-1. 部署 v2，但关闭 scanner 和创建入口；验证 DB、健康检查和只读能力。
-2. 选择表/action 灰度；先停止对应 v1 新建，等待其活跃 Process 排空。
-3. 开启 v2 scanner/创建入口，并把该灰度范围的读流量切到 v2。
-4. v1 历史记录继续由 v1 endpoint 读取至其保留期结束；v2 不伪装成统一历史视图。
-5. 回退时停止 v2 新建，等待或人工收敛 v2 活跃资源，再恢复 v1 新建；不得让两个实现同时为同一表/action 调度。
+本 Spec **不授权任何真实 Action 流量从 v1 切到 v2**，因此不存在 Iceberg/Paimon 维护任务的
+生产灰度。本文的“灰度”仅指在隔离环境启用 simulated profile：
+
+1. 默认 profile 验证 DB、REST、scanner 与空 action catalog；
+2. 在测试/演示环境启用 simulator，使用 dummy table facts 创建 Process；
+3. 验证 Local/Remote 的成功、失败、取消、UNKNOWN、LOST、重启、release 与 TTL；
+4. 关闭 simulated profile 后确认 pair 消失，真实表状态和远端作业系统均无变化。
+
+未来只有独立 Action Spec 完成真实实现、风险评审和格式级验证后，才能另行设计生产灰度与回退。
 
 ### 10.3 明确不兼容边界
 
 - v2 不接管 v1 活跃 Process、externalId 或 retryNumber；
-- 迁移期 v2 只通过 `ManagedTablePort` 读取现有 `table_identifier/table_metadata` 表事实；这是只读 schema compatibility adapter，不复用 v1 Process Service、不向 v1 表双写。现有 metadata schema 变更必须先通过 v2 三库 contract test；
+- 本 Spec 的 `ManagedTablePort` 只提供模拟 facts，不读取现有 `table_identifier/table_metadata`，不复用 v1 Process Service，也不向 v1 表双写；
+- 本 Spec 不保证 v2 与 v1 的 Action 参数、触发条件、结果摘要或副作用兼容；simulator 结果不能与 v1 真实执行结果比较为等价；
 - v2 不承诺 v1 的即时 CANCELED、200 空页、Action 大写值或响应包装；
 - v1/v2 并行期不保证跨两套存储的“全局同表同 action 单活跃”，由灰度范围开关保证互斥；
 - 前端改造、权限系统和统一历史查询是后续专题，不属于本轮实现。
 
 ### 10.4 v1 生命周期与废弃门禁
 
-当前 **不废弃 v1，也没有删除日期**：v2 尚未实现，更未经过生产证明。v1 只有在以下证据全部成立后，才能进入 advisory deprecation：
+当前 **不废弃 v1，也没有删除日期**。即使本文的 Process 控制面与 simulator 全部通过，因本
+Spec 不交付任何真实格式 Action，也不能据此替代或废弃 v1。v1 只有在后续真实 Action Spec 完成，
+且以下证据全部成立后，才能进入 advisory deprecation：
 
 1. v2 覆盖已登记的关键 action/engine/客户端；
 2. 至少一个完整生产观察窗口内，v2 成功率、延迟、UNKNOWN、取消收敛和重复创建指标达标；
@@ -974,7 +1017,10 @@ reaper cursor 是 exclusive `ReleaseOrderKey`；每轮从 `higherEntry(cursor)` 
 
 进入 advisory deprecation 后仍不自动删除代码。删除 v1 需要独立决策、零使用量指标和单独实施计划；本 Spec 不授权删除 v1 代码、表、路由或配置。
 
-灰度期至少记录：按版本/action 的 create 数、active 数、terminal 结果、UNKNOWN/SubmissionUnresolved 数、取消收敛时长、API 调用方与 v1 endpoint 使用量。v2 指标来自 v2 Micrometer counter/gauge/timer；当前仓库没有可直接复用的 v1 endpoint counter，因此 P8 的明确兼容例外是在 v1 Javalin route after-handler 增加只读 counter，label 仅含稳定 route template、method、status，不含 catalog/table/parameters 等高基数字段或敏感数据。反向代理 access log 可作旁证，但未验证部署覆盖前不能作为唯一验收来源。没有这些可回查数据源，不能证明迁移完成。
+模拟验证至少记录：按 action/engine 的 create 数、active 数、terminal 结果、
+UNKNOWN/SubmissionUnresolved 数、取消收敛时长和 `simulated` 标记。指标仅在 `amoro-ams-v2`
+通过 Micrometer 暴露；本文不要求也不授权修改 v1 endpoint counter。由于本 Spec 没有真实 Action
+流量，这些指标只能证明控制面模拟流程，不得作为迁移完成或 v1 退场证据。
 
 ---
 
@@ -990,11 +1036,11 @@ reaper cursor 是 exclusive `ReleaseOrderKey`；每轮从 `higherEntry(cursor)` 
 | 人工消解 | submission ACK/NOT_FOUND、execution 五终态与 retryAllowed、attempt/generation identity、无 externalId 的 LOST、迟到命令、重复幂等、冲突 409、审计 reason、终态时间戳 |
 | 取消 | 未派发、派发未知、已 ACK、运行中、远端已终态、cancel/observe 不可用、重启续取消；初始 supportsCancellation=false 与同 capabilityVersion 的 CancellationUnsupported 即使 cancel deadline 已到也保持零 cancel I/O、只按 poll observe；执行 NOT_FOUND/LOST 进入 ExecutionUnresolved 且五个命令端口零调用；新 capabilityVersion+true 才恢复 cancel |
 | 准入 | REST 与 scanner 并发创建，同 `(tableId,action)` 恰一成功 |
-| 表事实/Action | v2 read-only Mapper 对三库当前 metadata schema contract；无 `server.*` 类型泄漏；凭据不进入 snapshot/Process/日志；五个首版 format/action/engine pair 均在 create 时验证 |
+| 表事实/Action | `ManagedTablePort`/probe 为中立接口；本 Spec 只有 simulated facts；无 `server.*`/MyBatis format adapter 类型泄漏；默认 catalog 无格式 pair；simulated profile 的 fixture 只产出 `simulated=true`，且依赖/调用检查证明无 Iceberg/Paimon Action |
 | REST | JSON contract、page/pageSize 上限和稳定排序、404 差异、完整 parameters、统一错误码；persistent rank tree 更新 O(log n)、第 N 页不扫描前页 |
-| adapter | 远端与本地分别测试；本地任务不阻塞调度 worker；现有 HTTP 异常不得误报 NOT_FOUND；ALREADY_TERMINAL 禁止运行态；trackUri scheme/user-info/control-char 校验；每次执行的终态结果（含可重试 FAILED）CAS 成功后 release、失败前不 release、reaper 补偿/重复幂等 |
+| adapter | Local/Remote simulator 分别通过同一 contract；本地模拟任务不阻塞调度 worker；不进行真实 HTTP/Spark/格式调用；ALREADY_TERMINAL 禁止运行态；trackUri scheme/user-info/control-char 校验；每次模拟执行的终态结果（含可重试 FAILED）CAS 成功后 release、失败前不 release、reaper 补偿/重复幂等 |
 | TTL | ProcessExpiryIndex cursor/batch，不全量 cache scan；只删过期最终资源，活跃/可重试 FAILED/未消解提交或执行不删除；任一 local release pending/in-flight/failed 都阻止删行，release success 后才允许 delete，覆盖 success→delete 与 delete→crash 竞态；same-lane delete hook 直接 unschedule，delete 失败不撤销调度，旧 delete 不误杀同名新 entry |
-| E2E | 创建→提交→运行→终态；创建→取消竞态；本地派发后 ACK 落库前崩溃→LOST 人工收敛；DB 重放；v1/v2 灰度互斥 |
+| E2E | Local/Remote simulated profile：创建→提交→运行→终态→release→TTL；创建→取消竞态；本地模拟派发后 ACK 落库前崩溃→LOST 人工收敛；DB 重放；断言零真实表加载、零格式副作用、零 Spark 提交 |
 
 历史提交 `7a60c87db` 的竞态测试只能作为场景来源；v2 必须在当前分支重新创建测试，不能把历史测试计为已通过。
 
@@ -1002,20 +1048,17 @@ reaper cursor 是 exclusive `ReleaseOrderKey`；每轮从 `higherEntry(cursor)` 
 
 ## 12. 实施顺序
 
-实施顺序以 `tasks/ams-v2-process-plan.md` 和 `tasks/ams-v2-process-todo.md` 为准：
+实施顺序以 `tasks/plan.md` 和 `tasks/todo.md` 为准：
 
-1. P0 文档技术评审（本轮完成）；
-2. P1 模型/serde；
-3. P2 域持久化、不变量和准入原语；
-4. P3 引擎端口与 fake adapter；
-5. P4 状态机、listener 和调度修复；
-6. P5 REST 查询/取消/人工消解；
-7. P6 触发创建与并发准入；
-8. P7A 远端 adapter；
-9. P7B 本地 adapter；
-10. P8 列表、TTL、迁移文档与端到端验收。
+1. 同步 Spec、域不变量和持久化修复；
+2. 统一手工/定时创建及同表同 action 单活跃准入；
+3. 建立 Engine/Action SPI、Dispatcher 与 Local identity；
+4. 完成 RUN/CANCEL、人工消解、补偿调度和 release 收敛；
+5. 交付 Local/Remote simulator，跑通相同 contract；
+6. 完成 REST、ordered index、TTL、Spring 装配与 simulated E2E。
 
-实施门禁采用确定性的先后顺序：先按 Framework 固定序列完成 T1-T12，并逐 Task 通过 JUnit 5 RED→GREEN、五轴 Review、相关验证与本地原子提交；随后按 **P1 → P2 → P3 → P4 → P5 → P6 → P7A → P7B → P8** 执行同一逐 Task 门禁。§13.3 的本地执行放置决策最迟在 P7B 前关闭，不阻塞 Framework T1-T12 或 P1-P7A。细粒度技术依赖只解释能力来源，不授权并行、提前穿插或跳过未提交节点。
+任何任务不得引入真实 Iceberg/Paimon Action 或 Remote Spark 提交；发现该类需求时必须停止当前
+任务，另开 Action Spec，而不是扩大本文范围。
 
 ---
 
@@ -1029,14 +1072,17 @@ reaper cursor 是 exclusive `ReleaseOrderKey`；每轮从 `higherEntry(cursor)` 
 - 单节点先行；多节点并发保证是未来前置工程，不在本期隐式承诺；
 - UNKNOWN 提交和 LOST 本地执行均保留 attempt-bound 人工消解，当前引擎能力不足时不盲重投；
 - TTL 采用最终资源条件批量删除，不使用运行时 truncate。
+- 本 Spec 的 Local 与 Remote 都只用 simulator；默认生产 profile 不注册模拟或格式 action pair；
+- Iceberg `expire-snapshots/clean-orphans`、Paimon `sync-table-meta` 的真实实现明确后置到独立 Spec。
 
 ### 13.2 仍需在实现前由仓库/环境验证，不是业务选择
 
-- 远端 Spark 服务能否增加 submission ledger/resolve 接口；若不能，人工消解长期保留；
-- 每个 action 的冻结 parameters schema 与 summary.result 内部字段上限；必须落在 §3.1 已定的 16 KiB/8 KiB 全局上限内，由相应格式 adapter 的代码和测试定稿；
+- simulator 的脚本 schema 与 summary.result 内部字段上限；必须落在 §3.1 已定的 16 KiB/8 KiB 全局上限内；
 - `mybatis-spring-boot-starter`、MySQL connector 与 Boot 3.5/MySQL 5.7 的精确兼容版本；由 T9 编译和 docker-it 定稿；
 - CI 是否执行 docker-it；不影响本地实现，但影响发布门禁声明。
 
-### 13.3 唯一待用户确认的业务/迁移边界
+### 13.3 已关闭的范围边界
 
-- **P7B 本地 action 放置位置**：当前 P7B 文本按“在 `amoro-ams-v2` 内新增本地 action pool，并为选定 format/action 重写 `ProcessActionPlugin`”展开；历史方案则因 Iceberg maintenance/Paimon sync 依赖 v1 `TableRuntime` 与表元数据写路径，建议首阶段由 `AmsLocalEngineAdapter` 代理 v1 AMS 内部执行端点。两者都会保持 v2 Process 状态机、资源模型和 `/api/ams/v2` 全新，但依赖面、部署故障域、P7B 工作量和 v1 兼容代码改动完全不同，无法仅由当前仓库事实替用户决定。该决策不阻塞 Framework 或 P1-P7A，但确认前不得开始 P7B。
+- 本轮不选择真实 Local Action 的放置位置，不代理 v1，也不在 v2 实现格式 Action；
+- 本轮不选择真实 Remote Spark 协议，只保留 Port/SPI 并用 simulator 验证；
+- 定时触发只验证可插拔判定接口、cursor/batch 和统一创建链；真实表条件逻辑后续补充。

@@ -1,13 +1,18 @@
 # Amoro AMS v2 (Spring Boot 3)
 
-Spring Boot 3 based next-generation AMS host, now containing the **generic resource
-control-plane framework** (scheduler + seven-layer persistence, Tasks T1–T12 complete).
-The **Process control plane** (spec/status + Transition state machine, tasks P1–P8) is being
-implemented on top of it. Authoritative designs: `tasks/amoro-ams-v2-framework-spec.md` and
-`tasks/amoro-ams-v2-process-spec.md`; implementation companions live next to them in
-`tasks/`. Historical design inputs (`tasks/process-appmanager-redesign-options.md`,
-`tasks/process-control-plane-spec.md`, `tasks/process-reconciler-architecture.md`) are
-superseded background only.
+Spring Boot 3 based next-generation AMS host, containing the generic resource control-plane
+framework and the v2 Process orchestration plane. The Process implementation is deliberately a
+**simulation-only control-flow delivery**: it proves manual/scheduled creation, durable state,
+Local/Remote Engine SPI dispatch, reconciliation, cancellation, manual resolution, restart,
+execution-handle release, and TTL.
+
+This module does **not** connect or implement any Iceberg/Paimon Action—including Iceberg
+`expire-snapshots` / `clean-orphans` and Paimon `sync-table-meta`—does not load a real table, and
+does not submit a real Spark job. Simulation providers are disabled by default and require
+`amoro.process.simulation.enabled=true`; the default Engine/Action registries are empty. See
+[`ARCHITECTURE.md`](ARCHITECTURE.md) for the complete lifecycle, thread pools, component and
+sequence diagrams. Authoritative designs are `tasks/amoro-ams-v2-framework-spec.md` and
+`tasks/amoro-ams-v2-process-spec.md`.
 
 The rest of the reactor stays on the Java 8 baseline; this module compiles with
 **Java 17 via Maven toolchains**, so the usual JDK 8/11 reactor builds keep working.
@@ -28,7 +33,7 @@ org.apache.amoro
 ├── serde        # T7: VersionAwareJacksonSerde (JSON/YAML, converter chains, latest-only
 │                #   writes, 64KiB bound), SerdeRegistry (eager validation)
 └── config       # T10: amoro.control.* properties, Spring assembly, SmartLifecycle
-                 #   shutdown ordering (scheduler -> dispatcher -> lanes), dialect-aware
+                 #   bounded shutdown ordering (maintenance -> scheduler -> engines -> listeners -> lanes)
                  #   idempotent schema initializer, domain factory
 ```
 
@@ -79,20 +84,18 @@ curl http://localhost:1640/api/ams/v2/health
 # on an embedded database). Executes with >0 tests — no silent skips:
 JAVA_HOME=/path/to/jdk-11 ./mvnw -pl amoro-ams-v2 test
 
-# real-MySQL integration (five SQL semantics, dialect DDL, E2E restart replay).
-# Defaults to localhost:3306/amoro_v2; point AMORO_V2_MYSQL_* at any MySQL 5.7:
-export AMORO_V2_MYSQL_PASSWORD=...   # user/url via AMORO_V2_MYSQL_USER/_URL
-JAVA_HOME=/path/to/jdk-11 ./mvnw -pl amoro-ams-v2 test -Pdocker-it
+# isolated local-Docker MySQL 5.7 integration through Testcontainers
+# (SQL semantics, dialect DDL, Process lifecycle, release/TTL and restart replay):
+JAVA_HOME=/path/to/jdk-11 ./mvnw -pl amoro-ams-v2 -Pdocker-it -Dgroups=docker-mysql test
 
 # formatting/checkstyle gates:
 JAVA_HOME=/path/to/jdk-11 ./mvnw -pl amoro-ams-v2 validate
 ```
 
-The docker-mysql group is excluded through a property-driven surefire configuration
-(`docker-mysql.excluded`); `-Pdocker-it` clears the property instead of relying on
-overridable literal exclusions, so a plain `test` run can never silently include or
-mis-skip the group. Without a reachable MySQL the group skips explicitly (assumption),
-never silently.
+The docker-mysql group is excluded through a property-driven Surefire configuration.
+`-Pdocker-it` clears that exclusion and starts an isolated `mysql:5.7.44` Testcontainers database;
+it never probes, truncates, or drops a user-managed local database. Docker unavailability is a test
+failure for this explicit profile, not a skipped green build.
 
 ## Configuration
 
@@ -101,6 +104,13 @@ serialization bound, actor mailbox capacity, listener pool/retry, repository tim
 the unified lifecycle shutdown budget — all validated fail-fast at startup. The
 datasource comes from `spring.datasource.*` (defaults to embedded Derby, override with
 `AMORO_V2_DATASOURCE_*`).
+
+`amoro.process.*` controls creation policy, reconcile deadlines, Engine timeout, bounded result
+persistence, active rescheduling, execution release and TTL. All values fail fast at startup.
+`amoro.process.simulation.enabled` defaults to `false`; only an explicit `true` selects the dummy
+Local/Remote providers and simulated table/action facts. A Process freezes `tableFormat` with its
+table identity, so dispatch selects the exact `(tableFormat, action, executionEngine)` provider
+without loading or re-resolving a table.
 
 ## Deployed schema
 
