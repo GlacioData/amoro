@@ -18,11 +18,13 @@
 
 package org.apache.amoro.process.engine;
 
+import java.util.Collection;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.regex.Pattern;
 
 /**
  * Engine selection by {@code spec.executionEngine} (process spec §6.1): each engine name maps to
@@ -33,6 +35,8 @@ import java.util.Optional;
  */
 public final class ProcessEngineRegistry {
 
+  private static final Pattern ENGINE_NAME = Pattern.compile("[a-z][a-z0-9-]{0,63}");
+
   private final Map<String, ProcessEngineDispatcher> dispatchersByEngine;
 
   private ProcessEngineRegistry(Map<String, ProcessEngineDispatcher> dispatchersByEngine) {
@@ -41,6 +45,42 @@ public final class ProcessEngineRegistry {
 
   public static Builder builder() {
     return new Builder();
+  }
+
+  /** Selects one deployment mode after validating every factory's (engineName, mode) identity. */
+  public static ProcessEngineRegistry fromFactories(
+      Collection<? extends ProcessEngineFactory> factories,
+      ProviderMode activeMode,
+      ProcessEngineFactory.Context context,
+      long commandTimeoutMillis) {
+    Objects.requireNonNull(factories, "factories");
+    Objects.requireNonNull(activeMode, "activeMode");
+    Objects.requireNonNull(context, "context");
+    Map<String, String> identities = new LinkedHashMap<>();
+    Builder builder = builder();
+    for (ProcessEngineFactory factory : factories) {
+      Objects.requireNonNull(factory, "engine factory");
+      String engineName = requireEngineName(factory.engineName());
+      ProviderMode mode = Objects.requireNonNull(factory.mode(), "engine factory mode");
+      String identity = engineName + "|" + mode;
+      String previous = identities.putIfAbsent(identity, factory.getClass().getName());
+      if (previous != null) {
+        throw new IllegalArgumentException(
+            "duplicate engine factory identity "
+                + identity
+                + ": "
+                + previous
+                + " and "
+                + factory.getClass().getName());
+      }
+      if (mode == activeMode) {
+        builder.registerPort(
+            engineName,
+            Objects.requireNonNull(factory.create(context), "engine factory result"),
+            commandTimeoutMillis);
+      }
+    }
+    return builder.build();
   }
 
   /** One-engine convenience used by tests that wire a single dispatcher. */
@@ -65,7 +105,7 @@ public final class ProcessEngineRegistry {
         new LinkedHashMap<String, ProcessEngineDispatcher>();
 
     public Builder register(String executionEngine, ProcessEngineDispatcher dispatcher) {
-      Objects.requireNonNull(executionEngine, "executionEngine");
+      requireEngineName(executionEngine);
       Objects.requireNonNull(dispatcher, "dispatcher");
       if (engines.putIfAbsent(executionEngine, dispatcher) != null) {
         throw new IllegalArgumentException(
@@ -82,5 +122,13 @@ public final class ProcessEngineRegistry {
     public ProcessEngineRegistry build() {
       return new ProcessEngineRegistry(engines);
     }
+  }
+
+  private static String requireEngineName(String executionEngine) {
+    if (executionEngine == null || !ENGINE_NAME.matcher(executionEngine).matches()) {
+      throw new IllegalArgumentException(
+          "executionEngine is not a canonical wire name: " + executionEngine);
+    }
+    return executionEngine;
   }
 }

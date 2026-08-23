@@ -55,6 +55,7 @@ public final class ProcessRestSupport {
   private final ProcessDomainAssembly assembly;
   private final TableCatalogPort tableCatalog;
   private final ProcessCreationService creationService;
+  private final ProcessActionCatalog actionCatalog;
 
   /** P6 (ManagedTablePort) replaces this minimal catalog port. */
   public interface TableCatalogPort {
@@ -64,25 +65,50 @@ public final class ProcessRestSupport {
   }
 
   public ProcessRestSupport(ProcessDomainAssembly assembly) {
-    this(assembly, defaultCatalog(), new ProcessCreationService(assembly));
+    this(
+        assembly,
+        defaultCatalog(),
+        new ProcessCreationService(assembly),
+        ProcessActionCatalog.simulatedRoutingFixtures());
   }
 
   public ProcessRestSupport(ProcessDomainAssembly assembly, TableCatalogPort tableCatalog) {
-    this(assembly, tableCatalog, new ProcessCreationService(assembly));
+    this(
+        assembly,
+        tableCatalog,
+        new ProcessCreationService(assembly),
+        ProcessActionCatalog.simulatedRoutingFixtures());
   }
 
   public ProcessRestSupport(
       ProcessDomainAssembly assembly, ProcessCreationService creationService) {
-    this(assembly, defaultCatalog(), creationService);
+    this(
+        assembly,
+        defaultCatalog(),
+        creationService,
+        ProcessActionCatalog.simulatedRoutingFixtures());
   }
 
   public ProcessRestSupport(
       ProcessDomainAssembly assembly,
       TableCatalogPort tableCatalog,
       ProcessCreationService creationService) {
+    this(
+        assembly,
+        tableCatalog,
+        creationService,
+        ProcessActionCatalog.simulatedRoutingFixtures());
+  }
+
+  public ProcessRestSupport(
+      ProcessDomainAssembly assembly,
+      TableCatalogPort tableCatalog,
+      ProcessCreationService creationService,
+      ProcessActionCatalog actionCatalog) {
     this.assembly = assembly;
     this.tableCatalog = tableCatalog;
     this.creationService = creationService;
+    this.actionCatalog = actionCatalog;
   }
 
   // ------------------------------------------------------------------ create
@@ -142,10 +168,10 @@ public final class ProcessRestSupport {
       String triggerSource,
       String tableFormat) {
     requireIdempotencyKey(idempotencyKey);
-    if (!ProcessActionCatalog.isKnownAction(action)) {
+    if (!actionCatalog.isKnownAction(action)) {
       throw ApiError.of("INVALID_ACTION", "unknown action '" + action + "'");
     }
-    if (!ProcessActionCatalog.supports(action, engine)) {
+    if (!actionCatalog.supports(tableFormat, action, engine)) {
       throw ApiError.of(
           "INVALID_ENGINE", "action '" + action + "' does not support engine '" + engine + "'");
     }

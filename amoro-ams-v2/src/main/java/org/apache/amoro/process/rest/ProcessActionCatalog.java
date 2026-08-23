@@ -18,45 +18,101 @@
 
 package org.apache.amoro.process.rest;
 
-import java.util.Collections;
-import java.util.LinkedHashMap;
-import java.util.Map;
+import org.apache.amoro.process.engine.ProcessEngineRegistry;
+import org.apache.amoro.process.trigger.ProcessActionRegistry;
 
-/**
- * The first-version (tableFormat, action, executionEngine) allowlist (process spec §6.2). The L2
- * business decision on the exact first-version scope is still open; until it closes, the catalog
- * below mirrors the spec's candidate matrix, and create-time validation rejects any unlisted pair
- * with INVALID_ACTION/INVALID_ENGINE instead of failing later at runtime.
- */
+import java.util.Collections;
+import java.util.LinkedHashSet;
+import java.util.Objects;
+import java.util.Set;
+
+/** Immutable create-admission catalog derived from deployed Engine and Action providers. */
 public final class ProcessActionCatalog {
 
-  /** action -> engine -> true. */
-  private static final Map<String, Map<String, Boolean>> SUPPORTED;
+  private final Set<Pair> pairs;
+  private final Set<String> actions;
 
-  static {
-    Map<String, Map<String, Boolean>> matrix = new LinkedHashMap<String, Map<String, Boolean>>();
-    Map<String, Boolean> expire = new LinkedHashMap<String, Boolean>();
-    expire.put("local", true);
-    expire.put("remote-spark", true);
-    matrix.put("expire-snapshots", Collections.unmodifiableMap(expire));
-    Map<String, Boolean> orphans = new LinkedHashMap<String, Boolean>();
-    orphans.put("local", true);
-    orphans.put("remote-spark", true);
-    matrix.put("clean-orphans", Collections.unmodifiableMap(orphans));
-    Map<String, Boolean> sync = new LinkedHashMap<String, Boolean>();
-    sync.put("local", true);
-    matrix.put("sync-table-meta", Collections.unmodifiableMap(sync));
-    SUPPORTED = Collections.unmodifiableMap(matrix);
+  private ProcessActionCatalog(Set<Pair> pairs) {
+    this.pairs = Collections.unmodifiableSet(new LinkedHashSet<>(pairs));
+    Set<String> known = new LinkedHashSet<>();
+    for (Pair pair : pairs) {
+      known.add(pair.action);
+    }
+    this.actions = Collections.unmodifiableSet(known);
   }
 
-  private ProcessActionCatalog() {}
-
-  public static boolean isKnownAction(String action) {
-    return SUPPORTED.containsKey(action);
+  public static ProcessActionCatalog from(
+      ProcessEngineRegistry engines, ProcessActionRegistry actions) {
+    Objects.requireNonNull(engines, "engines");
+    Objects.requireNonNull(actions, "actions");
+    Set<Pair> deployed = new LinkedHashSet<>();
+    for (ProcessActionRegistry.Entry entry : actions.entries()) {
+      for (String format : entry.tableFormats()) {
+        for (String engine : engines.engines().keySet()) {
+          if (entry.plugin().supports(format, engine)) {
+            deployed.add(new Pair(format, entry.action(), engine));
+          }
+        }
+      }
+    }
+    return new ProcessActionCatalog(deployed);
   }
 
-  public static boolean supports(String action, String engine) {
-    Map<String, Boolean> engines = SUPPORTED.get(action);
-    return engines != null && engines.containsKey(engine);
+  /** Explicit routing fixtures retained only for isolated framework tests until Spring SPI wiring. */
+  public static ProcessActionCatalog simulatedRoutingFixtures() {
+    Set<Pair> fixtures = new LinkedHashSet<>();
+    fixtures.add(new Pair("iceberg", "expire-snapshots", "local"));
+    fixtures.add(new Pair("iceberg", "expire-snapshots", "remote-spark"));
+    fixtures.add(new Pair("iceberg", "clean-orphans", "local"));
+    fixtures.add(new Pair("iceberg", "clean-orphans", "remote-spark"));
+    fixtures.add(new Pair("paimon", "sync-table-meta", "local"));
+    return new ProcessActionCatalog(fixtures);
+  }
+
+  public static ProcessActionCatalog empty() {
+    return new ProcessActionCatalog(Collections.emptySet());
+  }
+
+  public boolean isKnownAction(String action) {
+    return actions.contains(action);
+  }
+
+  public boolean supports(String tableFormat, String action, String engine) {
+    return pairs.contains(new Pair(tableFormat, action, engine));
+  }
+
+  public Set<String> actions() {
+    return actions;
+  }
+
+  private static final class Pair {
+    private final String tableFormat;
+    private final String action;
+    private final String engine;
+
+    private Pair(String tableFormat, String action, String engine) {
+      this.tableFormat = Objects.requireNonNull(tableFormat, "tableFormat");
+      this.action = Objects.requireNonNull(action, "action");
+      this.engine = Objects.requireNonNull(engine, "engine");
+    }
+
+    @Override
+    public boolean equals(Object other) {
+      if (this == other) {
+        return true;
+      }
+      if (!(other instanceof Pair)) {
+        return false;
+      }
+      Pair that = (Pair) other;
+      return tableFormat.equals(that.tableFormat)
+          && action.equals(that.action)
+          && engine.equals(that.engine);
+    }
+
+    @Override
+    public int hashCode() {
+      return Objects.hash(tableFormat, action, engine);
+    }
   }
 }
