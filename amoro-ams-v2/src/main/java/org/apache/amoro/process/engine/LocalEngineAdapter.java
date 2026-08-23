@@ -28,6 +28,8 @@ import org.apache.amoro.process.engine.EngineTypes.SubmissionResolution;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Objects;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentHashMap;
@@ -57,11 +59,12 @@ public final class LocalEngineAdapter implements ProcessEnginePort {
 
   private final java.util.concurrent.ThreadPoolExecutor actionPool;
   private final LocalAction action;
-  private final Map<String, String> acknowledgedBySubmissionKey =
-      new ConcurrentHashMap<String, String>(); // submissionKey -> externalId
+  private static final int SUBMISSION_LOCK_STRIPES = 256;
+
+  private final LocalSubmissionLedger submissionLedger = new LocalSubmissionLedger();
   private final Map<String, LocalExecution> executionsByExternalId =
       new ConcurrentHashMap<String, LocalExecution>();
-  private final AtomicInteger externalIdSequence = new AtomicInteger();
+  private final Object[] submissionLocks = new Object[SUBMISSION_LOCK_STRIPES];
 
   private static final class LocalExecution {
     volatile EngineObservation observation;
@@ -84,6 +87,12 @@ public final class LocalEngineAdapter implements ProcessEnginePort {
    *     rejection (spec §6.1), unlike the unbounded v1 work queue
    */
   public LocalEngineAdapter(int poolSize, int queueCapacity, LocalAction action) {
+    if (poolSize <= 0) {
+      throw new IllegalArgumentException("poolSize must be > 0");
+    }
+    if (queueCapacity <= 0) {
+      throw new IllegalArgumentException("queueCapacity must be > 0");
+    }
     this.actionPool =
         new java.util.concurrent.ThreadPoolExecutor(
             poolSize,
@@ -98,7 +107,10 @@ public final class LocalEngineAdapter implements ProcessEnginePort {
               thread.setDaemon(true);
               return thread;
             });
-    this.action = action;
+    this.action = Objects.requireNonNull(action, "action");
+    for (int i = 0; i < submissionLocks.length; i++) {
+      submissionLocks[i] = new Object();
+    }
   }
 
   private static final AtomicInteger poolSequence = new AtomicInteger();
@@ -112,18 +124,38 @@ public final class LocalEngineAdapter implements ProcessEnginePort {
   @Override
   public CompletionStage<SubmissionOutcome> submit(
       String submissionKey, String requestHash, byte[] submissionPayload) {
-    String externalId = "local-" + externalIdSequence.incrementAndGet();
-    LocalExecution execution = new LocalExecution();
-    execution.observation = new EngineObservation("SUBMITTED", null, null, null);
-    try {
-      actionPool.execute(() -> runAction(externalId, execution, submissionPayload));
-    } catch (RejectedExecutionException capacityExhausted) {
-      // provably nothing ran: an authoritative rejection, not UNKNOWN
-      return CompletableFuture.completedFuture(SubmissionOutcome.rejected("CAPACITY_EXHAUSTED"));
+    Objects.requireNonNull(submissionKey, "submissionKey");
+    Objects.requireNonNull(requestHash, "requestHash");
+    byte[] frozenPayload =
+        java.util.Arrays.copyOf(
+            Objects.requireNonNull(submissionPayload, "submissionPayload"),
+            submissionPayload.length);
+    Object lock =
+        submissionLocks[(submissionKey.hashCode() & Integer.MAX_VALUE) % submissionLocks.length];
+    synchronized (lock) {
+      java.util.Optional<LocalSubmissionLedger.Entry> existing =
+          submissionLedger.find(submissionKey);
+      if (existing.isPresent()) {
+        LocalSubmissionLedger.Entry entry = existing.get();
+        return CompletableFuture.completedFuture(
+            entry.requestHash().equals(requestHash)
+                ? SubmissionOutcome.acknowledged(entry.externalId())
+                : SubmissionOutcome.conflict());
+      }
+      String externalId = "local-" + UUID.randomUUID();
+      LocalExecution execution = new LocalExecution();
+      execution.observation = new EngineObservation("SUBMITTED", null, null, null);
+      try {
+        actionPool.execute(() -> runAction(externalId, execution, frozenPayload));
+      } catch (RejectedExecutionException capacityExhausted) {
+        // provably nothing ran: an authoritative rejection, not UNKNOWN
+        return CompletableFuture.completedFuture(
+            SubmissionOutcome.rejected("CAPACITY_EXHAUSTED"));
+      }
+      submissionLedger.record(submissionKey, requestHash, externalId);
+      executionsByExternalId.put(externalId, execution);
+      return CompletableFuture.completedFuture(SubmissionOutcome.acknowledged(externalId));
     }
-    acknowledgedBySubmissionKey.put(submissionKey, externalId);
-    executionsByExternalId.put(externalId, execution);
-    return CompletableFuture.completedFuture(SubmissionOutcome.acknowledged(externalId));
   }
 
   private void runAction(String externalId, LocalExecution execution, byte[] payload) {
@@ -149,11 +181,16 @@ public final class LocalEngineAdapter implements ProcessEnginePort {
   @Override
   public CompletionStage<SubmissionResolution> resolveSubmission(
       String submissionKey, String requestHash) {
-    String externalId = acknowledgedBySubmissionKey.get(submissionKey);
+    java.util.Optional<LocalSubmissionLedger.Entry> entry = submissionLedger.find(submissionKey);
+    if (entry.isEmpty()) {
+      return CompletableFuture.completedFuture(
+          SubmissionResolution.lost(
+              "local submission ledger has no restart-safe record for this dispatch"));
+    }
     return CompletableFuture.completedFuture(
-        externalId == null
-            ? SubmissionResolution.notFound()
-            : SubmissionResolution.acknowledged(externalId));
+        entry.get().requestHash().equals(requestHash)
+            ? SubmissionResolution.acknowledged(entry.get().externalId())
+            : SubmissionResolution.conflict());
   }
 
   @Override
@@ -184,8 +221,13 @@ public final class LocalEngineAdapter implements ProcessEnginePort {
   public CompletionStage<Void> release(String externalId) {
     executionsByExternalId.remove(externalId);
     // the submission registry must not leak one entry per generation forever
-    acknowledgedBySubmissionKey.values().removeIf(id -> id.equals(externalId));
+    submissionLedger.removeExternalId(externalId);
     return CompletableFuture.completedFuture(null);
+  }
+
+  /** Number of accepted identities retained until terminal release; exposed for diagnostics. */
+  public int submissionCount() {
+    return submissionLedger.size();
   }
 
   /** No-arg overload for Spring's inferred destroy method. */
