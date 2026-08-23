@@ -114,12 +114,23 @@ public final class ProcessIndexSnapshot {
     String tableKey = resource.spec().table().tableId() + "|" + resource.spec().action();
     // the idempotency slot survives terminal transitions: a completed create must still
     // replay to its original resource (spec §8.3); only a delete releases it
-    idempotent.putIfAbsent(
-        tableKey + "|" + resource.spec().request().idempotencyKeyHash(), resource.name());
+    String idempotencyScope =
+        tableKey + "|" + resource.spec().request().idempotencyKeyHash();
+    String idempotencyIncumbent = idempotent.get(idempotencyScope);
+    if (idempotencyIncumbent != null && !idempotencyIncumbent.equals(resource.name())) {
+      throw new ProcessIndexConflictException(
+          "IDEMPOTENCY_KEY", idempotencyScope, idempotencyIncumbent, resource.name());
+    }
+    idempotent.put(idempotencyScope, resource.name());
     if (ProcessFinality.isFinal(resource)) {
       return; // final resources never occupy the admission slot
     }
-    active.putIfAbsent(tableKey, resource.name());
+    String activeIncumbent = active.get(tableKey);
+    if (activeIncumbent != null && !activeIncumbent.equals(resource.name())) {
+      throw new ProcessIndexConflictException(
+          "ACTIVE_PROCESS", tableKey, activeIncumbent, resource.name());
+    }
+    active.put(tableKey, resource.name());
   }
 
   private static List<String> rebuildExpiryOrder(Map<String, ProcessResource> resources) {

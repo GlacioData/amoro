@@ -37,6 +37,7 @@ import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.TimeUnit;
 
 /** P2: the Process domain assembly over a fake durable store — index views + hook semantics. */
@@ -104,6 +105,53 @@ public class TestProcessDomain {
 
     // a different table/action combination is independent
     assertEquals(Optional.empty(), snapshot.activeProcessOf("43", "expire-snapshots"));
+  }
+
+  @Test
+  public void secondActiveResourceIsRejectedBeforeDurableInsert() {
+    assembly.repository().create(newResource("p1", "42"));
+
+    ProcessIndexConflictException conflict =
+        assertThrows(
+            ProcessIndexConflictException.class,
+            () -> assembly.repository().create(newResource("p2", "42")));
+
+    assertEquals("ACTIVE_PROCESS", conflict.conflictType());
+    assertEquals(1, blob.rows.size());
+    assertFalse(blob.rows.containsKey("p2"));
+    assertEquals(
+        Optional.of("p1"),
+        assembly.indexProjection().current().activeProcessOf("42", "expire-snapshots"));
+  }
+
+  @Test
+  public void restartFailsClosedWhenDurableRowsContainDuplicateActiveScope() {
+    assembly.repository().create(newResource("p1", "42"));
+    TestPersistenceBlobStore otherBlob = new TestPersistenceBlobStore();
+    ProcessDomainAssembly other =
+        new ProcessDomainAssembly(
+            otherBlob, event -> HandoffResult.ACCEPTED, scheduler, 128, 10_000L, 65536);
+    ProcessDomainAssembly restarted = null;
+    try {
+      other.repository().create(newResource("p2", "42"));
+      blob.rows.put("p2", otherBlob.rows.get("p2"));
+      restarted =
+          new ProcessDomainAssembly(
+              blob, event -> HandoffResult.ACCEPTED, scheduler, 128, 10_000L, 65536);
+      ProcessDomainAssembly conflicting = restarted;
+
+      CompletionException failure =
+          assertThrows(CompletionException.class, () -> conflicting.persistence().postStart());
+      assertTrue(failure.getCause() instanceof ProcessIndexConflictException);
+      String message = failure.getCause().getMessage();
+      assertTrue(message.contains("p1"));
+      assertTrue(message.contains("p2"));
+    } finally {
+      other.persistence().shutdown(Duration.ofSeconds(5));
+      if (restarted != null) {
+        restarted.persistence().shutdown(Duration.ofSeconds(5));
+      }
+    }
   }
 
   @Test
