@@ -42,11 +42,12 @@ import java.util.List;
 public final class ProcessDomainAssembly {
 
   public static final PersistenceDomain DOMAIN =
-      new PersistenceDomain("process", "amoro_process", SerdeFormat.YAML);
+      new PersistenceDomain("process", "amoro_process_v2", SerdeFormat.YAML);
 
   private final InMemoryPersistence<ProcessResource> persistence;
   private final RepositoryFacade<ProcessResource> repository;
   private final ProcessIndexProjection indexProjection;
+  private final org.apache.amoro.process.engine.ExecutionHandleRegistry handleRegistry;
 
   public ProcessDomainAssembly(
       BlobStore blobStore,
@@ -55,7 +56,26 @@ public final class ProcessDomainAssembly {
       int mailboxCapacity,
       long repositoryTimeoutMillis,
       int maxResourceBytes) {
+    this(
+        blobStore,
+        eventSink,
+        scheduler,
+        mailboxCapacity,
+        repositoryTimeoutMillis,
+        maxResourceBytes,
+        new org.apache.amoro.process.engine.ExecutionHandleRegistry());
+  }
+
+  public ProcessDomainAssembly(
+      BlobStore blobStore,
+      ListenerEventSink<ProcessResource> eventSink,
+      Scheduler scheduler,
+      int mailboxCapacity,
+      long repositoryTimeoutMillis,
+      int maxResourceBytes,
+      org.apache.amoro.process.engine.ExecutionHandleRegistry handleRegistry) {
     this.indexProjection = new ProcessIndexProjection();
+    this.handleRegistry = handleRegistry;
     ResourceSerde<ProcessResource> serde =
         new VersionAwareJacksonSerde<ProcessResource>(
             ProcessResource.class,
@@ -74,6 +94,11 @@ public final class ProcessDomainAssembly {
             singleProjection(),
             deleted -> scheduler.unschedule(ControllerKey.of("process", deleted.name())));
     this.repository = new RepositoryFacade<ProcessResource>(persistence, repositoryTimeoutMillis);
+  }
+
+  /** Shared execution-handle registry: reconcilers track, the TTL cleaner gates on it. */
+  public org.apache.amoro.process.engine.ExecutionHandleRegistry handleRegistry() {
+    return handleRegistry;
   }
 
   private List<org.apache.amoro.persistence.DurableStateProjection<ProcessResource>>

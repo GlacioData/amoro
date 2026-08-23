@@ -13,7 +13,7 @@
 | 持久化 | `InMemoryPersistence` + `BlobStoreActor`（persistence/blob） | 每域单线程 mutation lane：read→detached→CAS→apply→版本→serde→projection prepare→DB→发布→hook→listener |
 | 事件 | `ListenerDispatcher`（persistence） | 有界队列 + 按 (listener,domain,name) pair 保序 + 有界重试 |
 | serde | `VersionAwareJacksonSerde`（serde） | Base64(YAML/JSON) 文档、版本链、64KiB 上界 |
-| Process 域 | `ProcessDomainAssembly`（process） | `amoro_process` 表、聚合索引快照（准入/幂等/过期）、删除 hook=同 lane unschedule |
+| Process 域 | `ProcessDomainAssembly`（process） | `amoro_process_v2` 表、聚合索引快照（准入/幂等/过期）、删除 hook=同 lane unschedule |
 | 状态机 | `ProcessReconciler`（process） | level-triggered Controller：RUN/CANCEL 全路径 |
 | 引擎 | `ProcessEngineDispatcher` + `LocalEngineAdapter`/`FakeEngineAdapter`（process/engine） | 引擎命令同键并发去重 + 强制超时（submit 超时归类 UNKNOWN）；本地引擎为真实线程池实现，远端 Spark 用可编程模拟适配器（用户决策） |
 
@@ -42,7 +42,7 @@ flowchart TB
     PERSIST["InMemoryPersistence（L5）<br/>持久化优先写路径 · resourceVersion CAS · 异常结果围栏与修复"]
     LANE["BlobStoreActor（L6）<br/>每域单线程 mutation lane"]
     BLOB["MyBatisBlobStore（L7）<br/>五种 SQL · 表名白名单"]
-    DB[("amoro_process<br/>Base64(YAML)")]
+    DB[("amoro_process_v2<br/>Base64(YAML)")]
     IDX["ProcessIndexProjection<br/>聚合快照：resourcesByName<br/>+ 准入/幂等/过期索引"]
     LD["ListenerDispatcher<br/>按 (listener,domain,name) 保序 · 有界重试"]
     SCHED["DefaultScheduler<br/>同键并发去重 · DelayQueue · 退避"]
@@ -178,7 +178,7 @@ sequenceDiagram
     participant R as REST/Scanner
     participant S as ProcessRestSupport
     participant L as 串行写线程(BlobStoreActor)
-    participant DB as amoro_process 表
+    participant DB as amoro_process_v2 表
     participant E as ListenerDispatcher
     participant K as DefaultScheduler
     participant C as ProcessReconciler
@@ -264,7 +264,7 @@ REST/Scanner → ProcessDomainAssembly.repository.create(resource v0)
        candidate = resource.withVersion(1)
        bytes = serde.serialize(candidate)        # 超过 65536B 直接失败
        projection.prepare(created(detached))     # 纯计算，DB 前失败零副作用
-       blobStore.insert(amoro_process, name, Base64(YAML))   # ← 持久化边界：此后失败进入结果未知处理
+       blobStore.insert(amoro_process_v2, name, Base64(YAML))   # ← 持久化边界：此后失败进入结果未知处理
        canonical.put + projection.commit         # O(1) 原子切换
        listener handoff(AFTER_CREATED)           # 异步，绝不阻塞/反转 stage
 返回 v1，phase=PENDING, desired=RUN
@@ -348,7 +348,7 @@ delete(name, version):
 
 ```
 postStart():
-  blobStore.forEach(amoro_process)            # 全量游标
+  blobStore.forEach(amoro_process_v2)            # 全量游标
     → serde.deserialize（旧版本经 Converter 链懒升级并回写）
     → canonical 重建 + ProcessIndexProjection 逐资源 prepare/commit 重建索引
   → 逐资源 handoff POST_START → listener → scheduler.schedule

@@ -188,6 +188,11 @@ public final class LocalEngineAdapter implements ProcessEnginePort {
     return CompletableFuture.completedFuture(null);
   }
 
+  /** No-arg overload for Spring's inferred destroy method. */
+  public void shutdown() {
+    shutdown(5_000L);
+  }
+
   /** Bounded shutdown of the action pool. */
   public void shutdown(long timeoutMillis) {
     actionPool.shutdown();

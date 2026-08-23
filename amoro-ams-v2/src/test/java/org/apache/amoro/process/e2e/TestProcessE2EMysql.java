@@ -134,7 +134,7 @@ public class TestProcessE2EMysql {
     }
     try (Statement statement = admin.createStatement()) {
       // the process E2E owns its table exclusively for a clean lifecycle from scratch
-      statement.execute("DROP TABLE IF EXISTS amoro_process");
+      statement.execute("DROP TABLE IF EXISTS amoro_process_v2");
     }
     org.apache.ibatis.datasource.unpooled.UnpooledDataSource dataSource =
         new org.apache.ibatis.datasource.unpooled.UnpooledDataSource(
@@ -155,7 +155,7 @@ public class TestProcessE2EMysql {
     try (Statement statement = admin.createStatement()) {
       for (String piece : script.split(";")) {
         String sql = piece.trim();
-        if (sql.toUpperCase().contains("AMORO_PROCESS")) {
+        if (sql.toUpperCase().contains("AMORO_PROCESS_V2")) {
           statement.execute(sql);
         }
       }
@@ -166,7 +166,7 @@ public class TestProcessE2EMysql {
   public static void tearDown() throws Exception {
     if (admin != null) {
       try (Statement statement = admin.createStatement()) {
-        statement.execute("DROP TABLE IF EXISTS amoro_process");
+        statement.execute("DROP TABLE IF EXISTS amoro_process_v2");
       }
       admin.close();
     }

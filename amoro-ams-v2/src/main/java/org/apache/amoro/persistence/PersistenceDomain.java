@@ -31,11 +31,15 @@ import java.util.Objects;
  */
 public final class PersistenceDomain {
 
-  /** Whitelist of physical tables the blob layer may target. */
+  /**
+   * Whitelist of physical tables the blob layer may target. The deployed schema creates only {@code
+   * amoro_process_v2} (the single process table doing persistence AND state tracking); {@code
+   * amoro_resource} stays available for framework-generic domains that opt in, with their table
+   * created by that domain's own setup rather than the shipped DDL.
+   */
   public enum Table {
-    AMORO_RESOURCE("amoro_resource"),
-    AMORO_PROCESS("amoro_process"),
-    AMORO_PROCESS_TRIGGER("amoro_process_trigger");
+    AMORO_PROCESS_V2("amoro_process_v2"),
+    AMORO_RESOURCE("amoro_resource");
 
     private final String physicalName;
 

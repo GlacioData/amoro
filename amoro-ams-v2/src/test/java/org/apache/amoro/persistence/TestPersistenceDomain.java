@@ -34,14 +34,15 @@ public class TestPersistenceDomain {
     assertEquals("resource", resource.domainName());
     assertEquals(SerdeFormat.JSON, resource.serdeFormat());
 
-    PersistenceDomain process = new PersistenceDomain("process", "amoro_process", SerdeFormat.YAML);
+    PersistenceDomain process =
+        new PersistenceDomain("process", "amoro_process_v2", SerdeFormat.YAML);
     assertEquals(SerdeFormat.YAML, process.serdeFormat());
 
-    // the process-spec checkpoint domain must also be bindable, via the enum overload
-    PersistenceDomain trigger =
+    // the enum overload binds the deployed single table directly
+    PersistenceDomain viaEnum =
         new PersistenceDomain(
-            "process-trigger", PersistenceDomain.Table.AMORO_PROCESS_TRIGGER, SerdeFormat.JSON);
-    assertEquals("amoro_process_trigger", trigger.table());
+            "process", PersistenceDomain.Table.AMORO_PROCESS_V2, SerdeFormat.YAML);
+    assertEquals("amoro_process_v2", viaEnum.table());
   }
 
   @Test
@@ -49,7 +50,8 @@ public class TestPersistenceDomain {
     // table names feed MyBatis SQL, so only whitelisted enum-backed names are legal
     assertThrows(
         IllegalArgumentException.class,
-        () -> new PersistenceDomain("evil", "amoro_process; DROP TABLE users", SerdeFormat.JSON));
+        () ->
+            new PersistenceDomain("evil", "amoro_process_v2; DROP TABLE users", SerdeFormat.JSON));
     assertThrows(
         IllegalArgumentException.class,
         () -> new PersistenceDomain("evil", "appmanager", SerdeFormat.JSON));

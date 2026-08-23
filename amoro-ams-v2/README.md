@@ -102,6 +102,12 @@ the unified lifecycle shutdown budget — all validated fail-fast at startup. Th
 datasource comes from `spring.datasource.*` (defaults to embedded Derby, override with
 `AMORO_V2_DATASOURCE_*`).
 
+## Deployed schema
+
+The shipped DDL creates exactly ONE table, `amoro_process_v2`, which carries the whole
+Process domain (persistence AND state tracking). Framework-generic domains that opt in
+(e.g. `amoro_resource`) own their table creation — it is not part of the shipped DDL.
+
 ## Notes
 
 - `jacoco.skip=true`: the repo-wide jacoco 0.8.7 cannot instrument Java 17 class files.

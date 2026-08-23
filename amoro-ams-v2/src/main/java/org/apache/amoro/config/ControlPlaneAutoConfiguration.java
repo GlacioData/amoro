@@ -125,9 +125,8 @@ public class ControlPlaneAutoConfiguration {
             properties.getActor().getQueueCapacity(),
             properties.getRepository().getTimeoutMs(),
             properties.getStorage().getMaxResourceBytes());
-    // restart replay (spec §8.7): rebuild the read model from the durable rows, then the
-    // POST_START events re-schedule every live controller
-    assembly.persistence().postStart();
+    // NOTE: postStart is intentionally NOT called here — the scheduling listener must be
+    // registered first so the replay's POST_START events reach it (see processSchedulingListener)
     return assembly;
   }
 
@@ -135,6 +134,90 @@ public class ControlPlaneAutoConfiguration {
   public org.apache.amoro.process.rest.ProcessRestSupport processRestSupport(
       org.apache.amoro.process.ProcessDomainAssembly assembly) {
     return new org.apache.amoro.process.rest.ProcessRestSupport(assembly);
+  }
+
+  // ------------------------------------------------------------------ process runtime (engines +
+  // scheduling)
+
+  /**
+   * The local execution engine: a bounded action pool. Pool sizing reuses the scheduler worker
+   * budget and the actor mailbox capacity — dedicated {@code amoro.process.*} keys can be added
+   * when the tuning needs diverge.
+   */
+  @Bean(destroyMethod = "shutdown")
+  public org.apache.amoro.process.engine.LocalEngineAdapter localEngineAdapter() throws Exception {
+    return new org.apache.amoro.process.engine.LocalEngineAdapter(
+        Math.max(2, properties.getScheduler().getWorkers() / 2),
+        properties.getActor().getQueueCapacity(),
+        org.apache.amoro.process.engine.LocalEngineAdapter.simulatedAction());
+  }
+
+  /**
+   * Engine registry keyed by {@code spec.executionEngine}. "local" is deployed out of the box; a
+   * remote-Spark engine plugs in by registering another {@link
+   * org.apache.amoro.process.engine.ProcessEnginePort} here — the reconciler looks the engine up
+   * per process and waits (Step.WAIT) for engines that are not deployed.
+   */
+  @Bean
+  public org.apache.amoro.process.engine.ProcessEngineRegistry processEngineRegistry(
+      org.apache.amoro.process.engine.LocalEngineAdapter localEngineAdapter) {
+    return org.apache.amoro.process.engine.ProcessEngineRegistry.builder()
+        .registerPort("local", localEngineAdapter, properties.getRepository().getTimeoutMs())
+        .build();
+  }
+
+  /**
+   * The scheduling bridge: durable create/modify/replay events register a {@link
+   * org.apache.amoro.process.ProcessReconciler} for that process on the shared scheduler — this is
+   * what makes a REST-created process actually run without any manual wiring.
+   */
+  @Bean
+  public org.apache.amoro.persistence.PersistenceListener<org.apache.amoro.process.ProcessResource>
+      processSchedulingListener(
+          org.apache.amoro.process.ProcessDomainAssembly assembly,
+          org.apache.amoro.process.engine.ProcessEngineRegistry engines,
+          DefaultScheduler scheduler) {
+    org.apache.amoro.persistence.PersistenceListener<org.apache.amoro.process.ProcessResource>
+        listener =
+            new org.apache.amoro.persistence.PersistenceListener<
+                org.apache.amoro.process.ProcessResource>() {
+              @Override
+              public void afterCreated(org.apache.amoro.process.ProcessResource resource) {
+                schedule(resource);
+              }
+
+              @Override
+              public void afterModified(org.apache.amoro.process.ProcessResource resource) {
+                schedule(resource);
+              }
+
+              @Override
+              public void afterDeleted(org.apache.amoro.process.ProcessResource resource) {
+                // the deletion hook already unscheduled the key in the mutation lane
+              }
+
+              @Override
+              public void postStart(org.apache.amoro.process.ProcessResource existing) {
+                schedule(existing);
+              }
+
+              private void schedule(org.apache.amoro.process.ProcessResource resource) {
+                scheduler.schedule(
+                    new org.apache.amoro.process.ProcessReconciler(
+                        resource.name(),
+                        assembly.repository(),
+                        engines,
+                        scheduler,
+                        org.apache.amoro.process.ProcessReconciler.Clock.systemUtc(),
+                        1_000L,
+                        assembly.handleRegistry()));
+              }
+            };
+    assembly.persistence().addListener(listener);
+    // restart replay (spec §8.7) happens HERE, after the listener is registered: the read
+    // model rebuilds from the durable rows and every live process is re-scheduled
+    assembly.persistence().postStart();
+    return listener;
   }
 
   @Bean

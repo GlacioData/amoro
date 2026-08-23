@@ -54,7 +54,7 @@ public final class ProcessReconciler implements Controller {
 
   private final String processName;
   private final RepositoryFacade<ProcessResource> repository;
-  private final ProcessEngineDispatcher engine;
+  private final org.apache.amoro.process.engine.ProcessEngineRegistry engines;
   private final Scheduler scheduler;
   private final Clock clock;
   private final long retryDelayMillis;
@@ -79,7 +79,7 @@ public final class ProcessReconciler implements Controller {
     this(
         processName,
         repository,
-        engine,
+        org.apache.amoro.process.engine.ProcessEngineRegistry.single("local", engine),
         scheduler,
         clock,
         retryDelayMillis,
@@ -89,14 +89,14 @@ public final class ProcessReconciler implements Controller {
   public ProcessReconciler(
       String processName,
       RepositoryFacade<ProcessResource> repository,
-      ProcessEngineDispatcher engine,
+      org.apache.amoro.process.engine.ProcessEngineRegistry engines,
       Scheduler scheduler,
       Clock clock,
       long retryDelayMillis,
       org.apache.amoro.process.engine.ExecutionHandleRegistry handleRegistry) {
     this.processName = processName;
     this.repository = repository;
-    this.engine = engine;
+    this.engines = engines;
     this.scheduler = scheduler;
     this.clock = clock;
     this.retryDelayMillis = retryDelayMillis;
@@ -249,6 +249,14 @@ public final class ProcessReconciler implements Controller {
               status.finishedAt()));
       return Step.DONE; // the next round performs the actual dispatch
     }
+    ProcessEngineDispatcher engine = engineOf(resource);
+    if (engine == null) {
+      LOG.info(
+          "Engine '{}' for {} is not deployed; waiting (resource stays durable).",
+          resource.spec().executionEngine(),
+          processName);
+      return Step.WAIT;
+    }
     String submissionKey = attempt.submissionKey();
     engine
         .submit(processName, submissionKey, attempt.requestHash(), payloadOf(resource))
@@ -264,6 +272,14 @@ public final class ProcessReconciler implements Controller {
     if (attempt == null || attempt.externalId() == null) {
       // no external identity: the submit side owns this resource for now
       return submitStep(resource, false);
+    }
+    ProcessEngineDispatcher engine = engineOf(resource);
+    if (engine == null) {
+      LOG.info(
+          "Engine '{}' for {} is not deployed; waiting (resource stays durable).",
+          resource.spec().executionEngine(),
+          processName);
+      return Step.WAIT;
     }
     String submissionKey = attempt.submissionKey();
     engine
@@ -282,6 +298,14 @@ public final class ProcessReconciler implements Controller {
     if ("CANCEL_REQUESTED".equals(attempt.submitState())) {
       // cancellation already accepted: observe rounds record the terminal phase
       return observeStep(resource, false);
+    }
+    ProcessEngineDispatcher engine = engineOf(resource);
+    if (engine == null) {
+      LOG.info(
+          "Engine '{}' for {} is not deployed; waiting (resource stays durable).",
+          resource.spec().executionEngine(),
+          processName);
+      return Step.WAIT;
     }
     String submissionKey = attempt.submissionKey();
     engine
@@ -514,10 +538,11 @@ public final class ProcessReconciler implements Controller {
       if (written) {
         // the terminal result is durable: the engine handle may be cleaned up now
         String externalId = attempt != null ? attempt.externalId() : null;
-        if (externalId != null) {
+        ProcessEngineDispatcher engine = engineOf(current);
+        if (externalId != null && engine != null) {
           handleRegistry.track(name, externalId);
           engine
-              .release("local", externalId)
+              .release(current.spec().executionEngine(), externalId)
               .whenComplete(
                   (ignored, releaseError) -> {
                     if (releaseError == null) {
@@ -603,6 +628,16 @@ public final class ProcessReconciler implements Controller {
         status.submittedAt(),
         status.startedAt(),
         status.finishedAt());
+  }
+
+  /**
+   * The dispatcher serving this process's {@code spec.executionEngine}; empty when the engine is
+   * not deployed in this installation (e.g. remote Spark not yet wired). The caller waits — the
+   * resource stays durable and the next round retries the lookup.
+   */
+  private org.apache.amoro.process.engine.ProcessEngineDispatcher engineOf(
+      ProcessResource resource) {
+    return engines.dispatcherFor(resource.spec().executionEngine()).orElse(null);
   }
 
   private ProcessResource.ProcessAttempt ensureAttempt(ProcessResource resource) {

@@ -87,11 +87,14 @@ public class TestMyBatisBlobStoreMysql {
     SqlSessionFactory factory = sqlSessionFactory();
     resourceStore =
         new MyBatisBlobStore(
-            new PersistenceDomain("resource", "amoro_resource", SerdeFormat.JSON),
+            new PersistenceDomain(
+                "resource",
+                PersistenceDomain.Table.AMORO_RESOURCE.physicalName(),
+                SerdeFormat.JSON),
             factory.openSession(true).getMapper(ResourceBlobMapper.class));
     processStore =
         new MyBatisBlobStore(
-            new PersistenceDomain("process", "amoro_process", SerdeFormat.YAML),
+            new PersistenceDomain("process", "amoro_process_v2", SerdeFormat.YAML),
             factory.openSession(true).getMapper(ResourceBlobMapper.class));
     clearTables();
   }
@@ -106,10 +109,20 @@ public class TestMyBatisBlobStoreMysql {
 
   private static void clearTables() throws SQLException {
     try (Statement statement = connection.createStatement()) {
-      for (String table :
-          new String[] {"amoro_resource", "amoro_process", "amoro_process_trigger"}) {
+      for (String table : new String[] {"amoro_process_v2"}) {
         statement.execute("DELETE FROM " + table);
       }
+    }
+  }
+
+  /** amoro_resource is not shipped: the dual-domain test creates it inline. */
+  private static void ensureResourceTable(Connection connection) throws Exception {
+    try (Statement statement = connection.createStatement()) {
+      statement.execute(
+          "CREATE TABLE IF NOT EXISTS amoro_resource (name VARCHAR(256) NOT NULL, "
+              + "collection CHAR(50) NOT NULL, value MEDIUMTEXT NOT NULL, "
+              + "last_updated DATETIME NOT NULL, PRIMARY KEY (name)) "
+              + "ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
     }
   }
 
@@ -197,7 +210,10 @@ public class TestMyBatisBlobStoreMysql {
 
     MyBatisBlobStore restarted =
         new MyBatisBlobStore(
-            new PersistenceDomain("resource", "amoro_resource", SerdeFormat.JSON),
+            new PersistenceDomain(
+                "resource",
+                PersistenceDomain.Table.AMORO_RESOURCE.physicalName(),
+                SerdeFormat.JSON),
             sqlSessionFactory().openSession(true).getMapper(ResourceBlobMapper.class));
     assertArrayEquals(bytes("{\"v\":7}"), restarted.find(collection, "reload").orElse(null));
   }

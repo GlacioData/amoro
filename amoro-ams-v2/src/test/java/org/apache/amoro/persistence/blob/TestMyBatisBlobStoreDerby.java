@@ -70,6 +70,18 @@ public class TestMyBatisBlobStoreDerby {
   public void setUp() throws Exception {
     connection = DriverManager.getConnection(JDBC_URL);
     runDerbySchemaWithMetadataGuard(connection);
+    // amoro_resource is NOT in the shipped single-table DDL: the dual-domain isolation test
+    // creates it inline (framework-generic domains own their table setup)
+    try (Statement statement = connection.createStatement()) {
+      statement.execute(
+          "CREATE TABLE amoro_resource (name VARCHAR(256) NOT NULL, "
+              + "collection CHAR(50) NOT NULL, value CLOB NOT NULL, "
+              + "last_updated TIMESTAMP NOT NULL, PRIMARY KEY (name))");
+    } catch (SQLException alreadyExists) {
+      if (!"X0Y32".equals(alreadyExists.getSQLState())) {
+        throw alreadyExists;
+      }
+    }
     SqlSessionFactory factory = sqlSessionFactory();
     resourceStore =
         new MyBatisBlobStore(
@@ -77,7 +89,7 @@ public class TestMyBatisBlobStoreDerby {
             factory.openSession(true).getMapper(ResourceBlobMapper.class));
     processStore =
         new MyBatisBlobStore(
-            new PersistenceDomain("process", "amoro_process", SerdeFormat.YAML),
+            new PersistenceDomain("process", "amoro_process_v2", SerdeFormat.YAML),
             factory.openSession(true).getMapper(ResourceBlobMapper.class));
     clearTables();
   }
@@ -86,8 +98,7 @@ public class TestMyBatisBlobStoreDerby {
   public void tearDown() throws Exception {
     clearTables();
     try (Statement statement = connection.createStatement()) {
-      for (String table :
-          new String[] {"amoro_resource", "amoro_process", "amoro_process_trigger"}) {
+      for (String table : new String[] {"amoro_process_v2", "amoro_resource"}) {
         statement.execute("DROP TABLE " + table);
       }
     }
@@ -101,8 +112,7 @@ public class TestMyBatisBlobStoreDerby {
 
   private void clearTables() throws SQLException {
     try (Statement statement = connection.createStatement()) {
-      for (String table :
-          new String[] {"amoro_resource", "amoro_process", "amoro_process_trigger"}) {
+      for (String table : new String[] {"amoro_process_v2", "amoro_resource"}) {
         statement.execute("DELETE FROM " + table);
       }
     }
@@ -137,7 +147,7 @@ public class TestMyBatisBlobStoreDerby {
       while (tables.next()) {
         found.add(tables.getString("TABLE_NAME"));
       }
-      missing = found.size() < 3; // any of the three domain tables absent -> run the script
+      missing = found.size() < 2; // any of the two test tables absent -> run the script
     }
     if (!missing) {
       return; // second initialization is a no-op: idempotent by metadata guard
@@ -251,19 +261,21 @@ public class TestMyBatisBlobStoreDerby {
     String postgres = Files.readString(Path.of("src/main/resources/schema-postgres.sql"));
     String derby = Files.readString(Path.of("src/main/resources/schema-derby.sql"));
 
-    // MySQL 5.7: MEDIUMTEXT/DATETIME, IF NOT EXISTS
-    assertTrue(mysql.contains("value      MEDIUMTEXT   NOT NULL"));
+    // MySQL 5.7: MEDIUMTEXT/DATETIME; the SHIPPED DDL creates exactly one table
+    assertTrue(mysql.contains("MEDIUMTEXT   NOT NULL"));
     assertTrue(mysql.contains("last_updated DATETIME     NOT NULL"));
-    assertTrue(mysql.contains("CREATE TABLE IF NOT EXISTS amoro_resource"));
+    assertTrue(mysql.contains("CREATE TABLE IF NOT EXISTS amoro_process_v2"));
+    assertFalse(mysql.contains("amoro_resource"), "generic-domain tables are not shipped");
 
     // PostgreSQL: TEXT/TIMESTAMP(3) WITHOUT TIME ZONE (static contract only — no runtime test)
-    assertTrue(postgres.contains("value      TEXT         NOT NULL"));
+    assertTrue(postgres.contains("TEXT         NOT NULL"));
     assertTrue(postgres.contains("last_updated TIMESTAMP(3) WITHOUT TIME ZONE NOT NULL"));
 
     // Derby: CLOB/TIMESTAMP, plain CREATE (10.14 has no IF NOT EXISTS); strip the explanatory
     // header comment first, which mentions the missing syntax in prose
-    assertTrue(derby.contains("value      CLOB         NOT NULL"));
+    assertTrue(derby.contains("CLOB         NOT NULL"));
     assertTrue(derby.contains("last_updated TIMESTAMP    NOT NULL"));
+    assertTrue(derby.contains("CREATE TABLE amoro_process_v2"));
     assertFalse(
         derby.replaceAll("--[^\\n]*", "").contains("CREATE TABLE IF NOT EXISTS"),
         "the shipped Derby script must stay 10.14-compatible");
@@ -272,10 +284,8 @@ public class TestMyBatisBlobStoreDerby {
       assertTrue(
           ddl.contains("Licensed to the Apache Software Foundation"),
           "every DDL carries the Apache license header (rat)");
-      for (String table :
-          new String[] {"amoro_resource", "amoro_process", "amoro_process_trigger"}) {
-        assertTrue(ddl.contains(table), "each dialect defines " + table);
-      }
+      // the shipped DDL defines exactly the single deployed table
+      assertTrue(ddl.contains("amoro_process_v2"), "each dialect defines the process table");
       assertTrue(ddl.contains("PRIMARY KEY (name)"), "name is the primary key everywhere");
     }
   }
