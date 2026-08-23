@@ -46,6 +46,7 @@ public final class ProcessDomainAssembly {
 
   private final InMemoryPersistence<ProcessResource> persistence;
   private final RepositoryFacade<ProcessResource> repository;
+  private final ProcessInvariantValidator invariantValidator;
   private final ProcessIndexProjection indexProjection;
   private final org.apache.amoro.process.engine.ExecutionHandleRegistry handleRegistry;
 
@@ -74,6 +75,7 @@ public final class ProcessDomainAssembly {
       long repositoryTimeoutMillis,
       int maxResourceBytes,
       org.apache.amoro.process.engine.ExecutionHandleRegistry handleRegistry) {
+    this.invariantValidator = new ProcessInvariantValidator();
     this.indexProjection = new ProcessIndexProjection();
     this.handleRegistry = handleRegistry;
     ResourceSerde<ProcessResource> serde =
@@ -91,7 +93,7 @@ public final class ProcessDomainAssembly {
             blobStore,
             mailboxCapacity,
             eventSink,
-            singleProjection(),
+            domainProjections(),
             deleted -> scheduler.unschedule(ControllerKey.of("process", deleted.name())));
     this.repository = new RepositoryFacade<ProcessResource>(persistence, repositoryTimeoutMillis);
   }
@@ -102,9 +104,10 @@ public final class ProcessDomainAssembly {
   }
 
   private List<org.apache.amoro.persistence.DurableStateProjection<ProcessResource>>
-      singleProjection() {
+      domainProjections() {
     List<org.apache.amoro.persistence.DurableStateProjection<ProcessResource>> projections =
         new ArrayList<org.apache.amoro.persistence.DurableStateProjection<ProcessResource>>();
+    projections.add(invariantValidator);
     projections.add(indexProjection);
     return projections;
   }

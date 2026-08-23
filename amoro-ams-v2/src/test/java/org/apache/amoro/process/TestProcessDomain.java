@@ -19,8 +19,10 @@
 package org.apache.amoro.process;
 
 import static org.awaitility.Awaitility.await;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.apache.amoro.control.DefaultScheduler;
@@ -102,6 +104,51 @@ public class TestProcessDomain {
 
     // a different table/action combination is independent
     assertEquals(Optional.empty(), snapshot.activeProcessOf("43", "expire-snapshots"));
+  }
+
+  @Test
+  public void invalidDomainMutationFailsBeforeDurableWriteAndProjectionPublish() {
+    ProcessResource created = assembly.repository().create(newResource("p1", "42"));
+    byte[] durableBefore = blob.rows.get("p1").clone();
+    ProcessResource.ProcessSpec spec = created.spec();
+    ProcessResource.ProcessSpec changedAction =
+        new ProcessResource.ProcessSpec(
+            spec.table(),
+            "clean-orphans",
+            spec.executionEngine(),
+            spec.triggerSource(),
+            spec.createdAt(),
+            spec.desiredState(),
+            spec.request(),
+            spec.parameters(),
+            spec.retryPolicy());
+
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            assembly
+                .repository()
+                .modify(
+                    created.name(),
+                    created.resourceVersion(),
+                    resource -> resource.withSpec(changedAction)));
+
+    assertArrayEquals(durableBefore, blob.rows.get("p1"));
+    assertEquals(created, assembly.repository().get("p1"));
+    assertEquals(
+        Optional.of("p1"),
+        assembly.indexProjection().current().activeProcessOf("42", "expire-snapshots"));
+    assertEquals(
+        Optional.empty(),
+        assembly.indexProjection().current().activeProcessOf("42", "clean-orphans"));
+
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            assembly
+                .repository()
+                .create(newResource("p2", "43").withStatus(newResource("p2", "43").status().withPhase("BROKEN"))));
+    assertEquals(1, blob.rows.size(), "invalid create must fail before the durable insert");
   }
 
   @Test
