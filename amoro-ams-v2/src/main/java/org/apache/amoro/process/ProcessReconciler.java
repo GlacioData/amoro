@@ -258,12 +258,19 @@ public final class ProcessReconciler implements Controller {
       return Step.WAIT;
     }
     String submissionKey = attempt.submissionKey();
-    engine
-        .submit(processName, submissionKey, attempt.requestHash(), payloadOf(resource))
-        .whenComplete(
-            (outcome, error) ->
-                applySubmitOutcome(
-                    processName, submissionKey, attempt.requestHash(), outcome, error, false));
+    org.apache.amoro.process.engine.ProcessEngineDispatcher.CommandFlight<SubmissionOutcome>
+        flight =
+            engine.submit(
+                processName, submissionKey, attempt.requestHash(), payloadOf(resource));
+    flight.whenComplete(
+        (outcome, error) -> {
+          try {
+            applySubmitOutcome(
+                processName, submissionKey, attempt.requestHash(), outcome, error, false);
+          } finally {
+            flight.markDurablyHandled();
+          }
+        });
     return Step.DISPATCHED;
   }
 
@@ -282,11 +289,16 @@ public final class ProcessReconciler implements Controller {
       return Step.WAIT;
     }
     String submissionKey = attempt.submissionKey();
-    engine
-        .observe(processName, attempt.externalId())
-        .whenComplete(
-            (observation, error) ->
-                applyObservation(processName, submissionKey, observation, error));
+    org.apache.amoro.process.engine.ProcessEngineDispatcher.CommandFlight<ProcessObservation>
+        flight = engine.observe(processName, attempt.externalId());
+    flight.whenComplete(
+        (observation, error) -> {
+          try {
+            applyObservation(processName, submissionKey, observation, error);
+          } finally {
+            flight.markDurablyHandled();
+          }
+        });
     return Step.DISPATCHED;
   }
 
@@ -308,10 +320,17 @@ public final class ProcessReconciler implements Controller {
       return Step.WAIT;
     }
     String submissionKey = attempt.submissionKey();
-    engine
-        .cancel(processName, attempt.externalId())
-        .whenComplete(
-            (outcome, error) -> applyCancelOutcome(processName, submissionKey, outcome, error));
+    org.apache.amoro.process.engine.ProcessEngineDispatcher.CommandFlight<
+            org.apache.amoro.process.engine.EngineTypes.CancellationOutcome>
+        flight = engine.cancel(processName, attempt.externalId());
+    flight.whenComplete(
+        (outcome, error) -> {
+          try {
+            applyCancelOutcome(processName, submissionKey, outcome, error);
+          } finally {
+            flight.markDurablyHandled();
+          }
+        });
     return Step.DISPATCHED;
   }
 
@@ -541,14 +560,19 @@ public final class ProcessReconciler implements Controller {
         ProcessEngineDispatcher engine = engineOf(current);
         if (externalId != null && engine != null) {
           handleRegistry.track(name, externalId);
-          engine
-              .release(current.spec().executionEngine(), externalId)
-              .whenComplete(
-                  (ignored, releaseError) -> {
-                    if (releaseError == null) {
-                      handleRegistry.release(name);
-                    }
-                  });
+          org.apache.amoro.process.engine.ProcessEngineDispatcher.CommandFlight<Void>
+              releaseFlight =
+                  engine.release(current.spec().executionEngine(), externalId);
+          releaseFlight.whenComplete(
+              (ignored, releaseError) -> {
+                try {
+                  if (releaseError == null) {
+                    handleRegistry.release(name);
+                  }
+                } finally {
+                  releaseFlight.markDurablyHandled();
+                }
+              });
         }
       }
     } catch (RuntimeException e) {

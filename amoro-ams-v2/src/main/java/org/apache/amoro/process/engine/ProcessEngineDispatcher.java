@@ -18,6 +18,9 @@
 
 package org.apache.amoro.process.engine;
 
+import org.apache.amoro.process.engine.EngineCommandIdentity.ExecutionIdentity;
+import org.apache.amoro.process.engine.EngineCommandIdentity.ReleaseIdentity;
+import org.apache.amoro.process.engine.EngineCommandIdentity.SubmissionIdentity;
 import org.apache.amoro.process.engine.EngineTypes.CancellationOutcome;
 import org.apache.amoro.process.engine.EngineTypes.ProcessObservation;
 import org.apache.amoro.process.engine.EngineTypes.SubmissionOutcome;
@@ -32,25 +35,63 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Function;
 import java.util.function.Supplier;
 
 /**
- * Business-command single-flight over one {@link ProcessEnginePort} (process spec §6.1): {@code
- * SubmissionIdentity(process,submissionKey,requestHash)} merges concurrent submit AND resolve calls
- * into one adapter call until the future and its result application complete; {@code
- * ExecutionIdentity(process,externalId)} merges observe and cancel. Controllers hitting an
- * in-flight identity get an already-completed marker instead of a second adapter call. Every
- * adapter future is force-completed at the configured {@code commandTimeoutMillis}: a submit
- * timeout degrades conservatively to UNKNOWN (side effects undetermined), the other commands to
- * UNAVAILABLE.
+ * Typed cross-operation single-flight boundary over one {@link ProcessEnginePort}. Business
+ * identities remain claimed after the adapter future completes and are released only when the
+ * caller confirms that the classified result was durably handled. Release duplicates merge into
+ * the same cleanup flight.
  */
-public final class ProcessEngineDispatcher {
+public final class ProcessEngineDispatcher implements AutoCloseable {
 
-  /** Marker returned to callers that hit an in-flight identity; no adapter call happens. */
+  /** Marker returned when a related business command owns the identity. */
   public static final class CommandInFlightException extends RuntimeException {
-    public CommandInFlightException(String identity) {
+    public CommandInFlightException(EngineCommandIdentity identity) {
       super("engine command already in flight: " + identity);
+    }
+  }
+
+  /** Release timeouts are failures; null is never used as a successful timeout sentinel. */
+  public static final class EngineCommandTimeoutException extends RuntimeException {
+    public EngineCommandTimeoutException(long timeoutMillis, EngineCommandIdentity identity) {
+      super("engine command timed out after " + timeoutMillis + "ms: " + identity);
+    }
+  }
+
+  /** Result plus explicit durable-apply acknowledgement. */
+  public static final class CommandFlight<T> {
+    private final CompletionStage<T> result;
+    private final Runnable durableHandled;
+    private final AtomicBoolean handled = new AtomicBoolean();
+
+    private CommandFlight(CompletionStage<T> result, Runnable durableHandled) {
+      this.result = result;
+      this.durableHandled = durableHandled;
+    }
+
+    public CompletionStage<T> result() {
+      return result;
+    }
+
+    public CompletableFuture<T> toCompletableFuture() {
+      return result.toCompletableFuture();
+    }
+
+    /** Convenience for callback-based callers. */
+    public CompletionStage<T> whenComplete(
+        java.util.function.BiConsumer<? super T, ? super Throwable> action) {
+      return result.whenComplete(action);
+    }
+
+    /** Idempotently releases the identity after result persistence/handling has completed. */
+    public void markDurablyHandled() {
+      if (handled.compareAndSet(false, true)) {
+        durableHandled.run();
+      }
     }
   }
 
@@ -58,8 +99,8 @@ public final class ProcessEngineDispatcher {
 
   private final ProcessEnginePort adapter;
   private final long commandTimeoutMillis;
-  private final ConcurrentHashMap<String, CompletableFuture<?>> inFlight =
-      new ConcurrentHashMap<String, CompletableFuture<?>>();
+  private final ConcurrentHashMap<EngineCommandIdentity, CommandFlight<?>> inFlight =
+      new ConcurrentHashMap<>();
   private final ScheduledExecutorService timeoutExecutor;
   private final AtomicInteger commandSequence = new AtomicInteger();
 
@@ -86,63 +127,127 @@ public final class ProcessEngineDispatcher {
   }
 
   public EngineTypes.EngineCapabilities capabilities() {
-    return adapter.capabilities();
+    return EngineBoundaryValidator.capabilities(adapter.capabilities());
   }
 
-  public CompletionStage<SubmissionOutcome> submit(
+  public CommandFlight<SubmissionOutcome> submit(
       String processName, String submissionKey, String requestHash, byte[] payload) {
-    return dispatch(
-        "submit:" + processName + "/" + submissionKey + "/" + requestHash,
-        // submit timeout: side effects undetermined -> UNKNOWN, never blind resubmit
-        () ->
-            bounded(
-                adapter.submit(submissionKey, requestHash, payload), SubmissionOutcome.unknown()),
-        SubmissionOutcome.class);
+    SubmissionIdentity identity =
+        new SubmissionIdentity(processName, submissionKey, requestHash);
+    return dispatchBusiness(
+        identity,
+        () -> adapter.submit(submissionKey, requestHash, payload),
+        SubmissionOutcome.unknown(),
+        EngineBoundaryValidator::submission);
   }
 
-  public CompletionStage<SubmissionResolution> resolveSubmission(
+  public CommandFlight<SubmissionResolution> resolveSubmission(
       String processName, String submissionKey, String requestHash) {
-    return dispatch(
-        "resolve:" + processName + "/" + submissionKey + "/" + requestHash,
-        () ->
-            bounded(
-                adapter.resolveSubmission(submissionKey, requestHash),
-                SubmissionResolution.unavailable()),
-        SubmissionResolution.class);
+    SubmissionIdentity identity =
+        new SubmissionIdentity(processName, submissionKey, requestHash);
+    return dispatchBusiness(
+        identity,
+        () -> adapter.resolveSubmission(submissionKey, requestHash),
+        SubmissionResolution.unavailable(),
+        EngineBoundaryValidator::resolution);
   }
 
-  public CompletionStage<ProcessObservation> observe(String processName, String externalId) {
-    return dispatch(
-        "observe:" + processName + "/" + externalId,
-        () -> bounded(adapter.observe(externalId), ProcessObservation.unavailable()),
-        ProcessObservation.class);
+  public CommandFlight<ProcessObservation> observe(String processName, String externalId) {
+    ExecutionIdentity identity = new ExecutionIdentity(processName, externalId);
+    return dispatchBusiness(
+        identity,
+        () -> adapter.observe(externalId),
+        ProcessObservation.unavailable(),
+        EngineBoundaryValidator::observation);
   }
 
-  public CompletionStage<CancellationOutcome> cancel(String processName, String externalId) {
-    return dispatch(
-        "cancel:" + processName + "/" + externalId,
-        () -> bounded(adapter.cancel(externalId), CancellationOutcome.unavailable()),
-        CancellationOutcome.class);
+  public CommandFlight<CancellationOutcome> cancel(String processName, String externalId) {
+    ExecutionIdentity identity = new ExecutionIdentity(processName, externalId);
+    return dispatchBusiness(
+        identity,
+        () -> adapter.cancel(externalId),
+        CancellationOutcome.unavailable(),
+        EngineBoundaryValidator::cancellation);
   }
 
-  public CompletionStage<Void> release(String executionEngine, String externalId) {
-    // release is cleanup-only (never single-flight gated) but still time-bounded so a hanging
-    // adapter can never leave a claimed cleanup pending forever (spec §6.1: five futures bound)
-    return bounded(adapter.release(externalId), null);
+  public CommandFlight<Void> release(String executionEngine, String externalId) {
+    ReleaseIdentity identity = new ReleaseIdentity(executionEngine, externalId);
+    while (true) {
+      CommandFlight<?> existing = inFlight.get(identity);
+      if (existing != null) {
+        @SuppressWarnings("unchecked")
+        CommandFlight<Void> merged = (CommandFlight<Void>) existing;
+        return merged;
+      }
+      CompletableFuture<Void> result = new CompletableFuture<>();
+      CommandFlight<Void>[] holder = flightHolder();
+      CommandFlight<Void> created =
+          new CommandFlight<>(result, () -> inFlight.remove(identity, holder[0]));
+      holder[0] = created;
+      CommandFlight<?> raced = inFlight.putIfAbsent(identity, created);
+      if (raced == null) {
+        boundedRelease(identity, () -> adapter.release(externalId))
+            .whenComplete(
+                (ignored, error) -> {
+                  if (error != null) {
+                    result.completeExceptionally(error);
+                  } else {
+                    result.complete(null);
+                  }
+                });
+        return created;
+      }
+    }
   }
 
-  // ------------------------------------------------------------------ internals
+  private <T> CommandFlight<T> dispatchBusiness(
+      EngineCommandIdentity identity,
+      Supplier<CompletionStage<T>> command,
+      T timeoutFallback,
+      Function<T, T> validator) {
+    if (inFlight.containsKey(identity)) {
+      throw new CommandInFlightException(identity);
+    }
+    CompletableFuture<T> result = new CompletableFuture<>();
+    CommandFlight<T>[] holder = flightHolder();
+    CommandFlight<T> created =
+        new CommandFlight<>(result, () -> inFlight.remove(identity, holder[0]));
+    holder[0] = created;
+    CommandFlight<?> raced = inFlight.putIfAbsent(identity, created);
+    if (raced != null) {
+      throw new CommandInFlightException(identity);
+    }
+    try {
+      bounded(identity, command.get(), timeoutFallback, validator)
+          .whenComplete(
+              (value, error) -> {
+                if (error != null) {
+                  result.completeExceptionally(error);
+                } else {
+                  result.complete(value);
+                }
+              });
+    } catch (RuntimeException synchronousFailure) {
+      result.completeExceptionally(synchronousFailure);
+    }
+    return created;
+  }
 
-  private <T> CompletableFuture<T> bounded(CompletionStage<T> stage, T timeoutFallback) {
-    CompletableFuture<T> bounded = new CompletableFuture<T>();
+  private <T> CompletableFuture<T> bounded(
+      EngineCommandIdentity identity,
+      CompletionStage<T> stage,
+      T timeoutFallback,
+      Function<T, T> validator) {
+    Objects.requireNonNull(stage, "adapter command future");
+    CompletableFuture<T> bounded = new CompletableFuture<>();
     java.util.concurrent.ScheduledFuture<?> guard =
         timeoutExecutor.schedule(
             () -> {
               if (bounded.complete(timeoutFallback)) {
                 LOG.warn(
-                    "Engine command timed out after {}ms; degrading to {}.",
-                    commandTimeoutMillis,
-                    describe(timeoutFallback));
+                    "Engine command {} timed out after {}ms; applying conservative classification.",
+                    identity,
+                    commandTimeoutMillis);
               }
             },
             commandTimeoutMillis,
@@ -153,60 +258,58 @@ public final class ProcessEngineDispatcher {
           if (error != null) {
             bounded.completeExceptionally(error);
           } else {
-            bounded.complete(result);
+            try {
+              bounded.complete(validator.apply(result));
+            } catch (RuntimeException invalid) {
+              LOG.warn("Engine command {} returned an invalid result.", identity, invalid);
+              bounded.complete(timeoutFallback);
+            }
           }
         });
     return bounded;
   }
 
-  private static String describe(Object fallback) {
-    return fallback.toString();
+  private CompletableFuture<Void> boundedRelease(
+      EngineCommandIdentity identity, Supplier<CompletionStage<Void>> command) {
+    CompletableFuture<Void> bounded = new CompletableFuture<>();
+    CompletionStage<Void> stage;
+    try {
+      stage = Objects.requireNonNull(command.get(), "adapter release future");
+    } catch (RuntimeException synchronousFailure) {
+      bounded.completeExceptionally(synchronousFailure);
+      return bounded;
+    }
+    java.util.concurrent.ScheduledFuture<?> guard =
+        timeoutExecutor.schedule(
+            () ->
+                bounded.completeExceptionally(
+                    new EngineCommandTimeoutException(commandTimeoutMillis, identity)),
+            commandTimeoutMillis,
+            TimeUnit.MILLISECONDS);
+    stage.whenComplete(
+        (ignored, error) -> {
+          guard.cancel(false);
+          if (error != null) {
+            bounded.completeExceptionally(error);
+          } else {
+            bounded.complete(null);
+          }
+        });
+    return bounded;
   }
 
   @SuppressWarnings("unchecked")
-  private <T> CompletableFuture<T> dispatch(
-      String identity, Supplier<CompletableFuture<T>> command, Class<T> type) {
-    while (true) {
-      CompletableFuture<?> existing = inFlight.get(identity);
-      if (existing != null && !existing.isDone()) {
-        throw new CommandInFlightException(identity);
-      }
-      CompletableFuture<T> created = new CompletableFuture<T>();
-      CompletableFuture<?> raced = inFlight.putIfAbsent(identity, created);
-      if (raced != null && !raced.isDone()) {
-        throw new CommandInFlightException(identity);
-      }
-      if (raced != null) {
-        continue; // stale completed entry from an earlier command; replace it
-      }
-      CompletableFuture<T> adapterFuture;
-      try {
-        adapterFuture = command.get();
-      } catch (RuntimeException synchronousFailure) {
-        // an adapter that throws before returning a future must not poison the identity:
-        // fail this caller and release the slot (spec: commands degrade, never hang)
-        created.completeExceptionally(synchronousFailure);
-        inFlight.remove(identity, created);
-        return created;
-      }
-      adapterFuture.whenComplete(
-          (result, error) -> {
-            try {
-              if (error != null) {
-                created.completeExceptionally(error);
-              } else {
-                created.complete(result);
-              }
-            } finally {
-              inFlight.remove(identity, created);
-            }
-          });
-      return created;
-    }
+  private static <T> CommandFlight<T>[] flightHolder() {
+    return (CommandFlight<T>[]) new CommandFlight<?>[1];
   }
 
-  /** For tests/ops: identities currently holding an adapter call. */
+  /** Includes completed results that still await durable handling. */
   public int inFlightCount() {
-    return (int) inFlight.values().stream().filter(f -> !f.isDone()).count();
+    return inFlight.size();
+  }
+
+  @Override
+  public void close() {
+    timeoutExecutor.shutdownNow();
   }
 }

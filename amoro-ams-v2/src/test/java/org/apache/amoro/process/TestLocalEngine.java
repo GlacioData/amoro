@@ -158,11 +158,10 @@ public class TestLocalEngine {
 
   @Test
   public void directPortSemanticsAckObserveCancelRelease() throws Exception {
-    SubmissionOutcome outcome =
-        dispatcher
-            .submit("p", "p:0:0", "sha256:r", new byte[] {1})
-            .toCompletableFuture()
-            .get(5, TimeUnit.SECONDS);
+    org.apache.amoro.process.engine.ProcessEngineDispatcher.CommandFlight<SubmissionOutcome>
+        submitFlight = dispatcher.submit("p", "p:0:0", "sha256:r", new byte[] {1});
+    SubmissionOutcome outcome = submitFlight.toCompletableFuture().get(5, TimeUnit.SECONDS);
+    submitFlight.markDurablyHandled();
     assertEquals(SubmissionOutcome.Kind.ACKNOWLEDGED, outcome.kind());
     String externalId = outcome.externalId();
 
@@ -170,19 +169,30 @@ public class TestLocalEngine {
     await()
         .atMost(5, TimeUnit.SECONDS)
         .until(
-            () ->
-                dispatcher
-                    .observe("p", externalId)
-                    .toCompletableFuture()
-                    .get(1, TimeUnit.SECONDS)
-                    .observation()
-                    .remotePhase()
-                    .equals("SUCCESS"));
+            () -> {
+              org.apache.amoro.process.engine.ProcessEngineDispatcher.CommandFlight<
+                      ProcessObservation>
+                  flight = dispatcher.observe("p", externalId);
+              try {
+                ProcessObservation observation =
+                    flight.toCompletableFuture().get(1, TimeUnit.SECONDS);
+                return observation.kind() == ProcessObservation.Kind.KNOWN
+                    && "SUCCESS".equals(observation.observation().remotePhase());
+              } finally {
+                flight.markDurablyHandled();
+              }
+            });
 
     // observing a released handle is LOST (side effects may exist) — never NOT_FOUND
-    dispatcher.release("local", externalId).toCompletableFuture().get(5, TimeUnit.SECONDS);
+    org.apache.amoro.process.engine.ProcessEngineDispatcher.CommandFlight<Void> releaseFlight =
+        dispatcher.release("local", externalId);
+    releaseFlight.toCompletableFuture().get(5, TimeUnit.SECONDS);
+    releaseFlight.markDurablyHandled();
+    org.apache.amoro.process.engine.ProcessEngineDispatcher.CommandFlight<ProcessObservation>
+        observeFlight = dispatcher.observe("p", externalId);
     ProcessObservation afterRelease =
-        dispatcher.observe("p", externalId).toCompletableFuture().get(5, TimeUnit.SECONDS);
+        observeFlight.toCompletableFuture().get(5, TimeUnit.SECONDS);
+    observeFlight.markDurablyHandled();
     assertEquals(ProcessObservation.Kind.LOST, afterRelease.kind());
   }
 }
