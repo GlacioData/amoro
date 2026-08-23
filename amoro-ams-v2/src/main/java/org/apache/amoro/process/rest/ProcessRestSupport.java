@@ -20,9 +20,12 @@ package org.apache.amoro.process.rest;
 
 import org.apache.amoro.persistence.exception.PreconditionFailedException;
 import org.apache.amoro.persistence.exception.ResourceDoesNotExist;
+import org.apache.amoro.process.ProcessAdmissionException;
+import org.apache.amoro.process.ProcessCreateIntent;
+import org.apache.amoro.process.ProcessCreationResult;
+import org.apache.amoro.process.ProcessCreationService;
 import org.apache.amoro.process.ProcessDomainAssembly;
 import org.apache.amoro.process.ProcessFinality;
-import org.apache.amoro.process.ProcessIndexSnapshot;
 import org.apache.amoro.process.ProcessResource;
 import org.apache.amoro.process.ProcessResource.ProcessAttempt;
 import org.apache.amoro.process.ProcessResource.ProcessStatus;
@@ -37,7 +40,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.TreeMap;
-import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * The service layer behind {@code /api/ams/v2/processes} (process spec §8). Idempotent create with
@@ -50,15 +52,9 @@ public final class ProcessRestSupport {
 
   private static final int REASON_LIMIT = 512;
 
-  /** Monotonic across restarts: time-based high bits + per-process low bits. */
-  private static final AtomicLong NAME_SEQUENCE = new AtomicLong();
-
   private final ProcessDomainAssembly assembly;
   private final TableCatalogPort tableCatalog;
-
-  /** Admission mutexes per (tableId|action): serialize REST and scanner creates (spec §5.2). */
-  private final java.util.concurrent.ConcurrentHashMap<String, Object> admissionLocks =
-      new java.util.concurrent.ConcurrentHashMap<String, Object>();
+  private final ProcessCreationService creationService;
 
   /** P6 (ManagedTablePort) replaces this minimal catalog port. */
   public interface TableCatalogPort {
@@ -68,12 +64,25 @@ public final class ProcessRestSupport {
   }
 
   public ProcessRestSupport(ProcessDomainAssembly assembly) {
-    this(assembly, defaultCatalog());
+    this(assembly, defaultCatalog(), new ProcessCreationService(assembly));
   }
 
   public ProcessRestSupport(ProcessDomainAssembly assembly, TableCatalogPort tableCatalog) {
+    this(assembly, tableCatalog, new ProcessCreationService(assembly));
+  }
+
+  public ProcessRestSupport(
+      ProcessDomainAssembly assembly, ProcessCreationService creationService) {
+    this(assembly, defaultCatalog(), creationService);
+  }
+
+  public ProcessRestSupport(
+      ProcessDomainAssembly assembly,
+      TableCatalogPort tableCatalog,
+      ProcessCreationService creationService) {
     this.assembly = assembly;
     this.tableCatalog = tableCatalog;
+    this.creationService = creationService;
   }
 
   // ------------------------------------------------------------------ create
@@ -160,70 +169,32 @@ public final class ProcessRestSupport {
                 + "|"
                 + canonical(parameters));
 
-    ProcessIndexSnapshot index = assembly.indexProjection().current();
-    // idempotency replay: same key AND same intent returns the original resource, final or not
-    Optional<String> holder = index.idempotentHolderOf(tableId, action, keyHash);
-    if (holder.isPresent()) {
-      ProcessResource original;
-      try {
-        original = assembly.repository().get(holder.get());
-      } catch (ResourceDoesNotExist raced) {
-        original = null; // holder vanished concurrently; fall through to admission
-      }
-      if (original != null) {
-        if (original.spec().request().requestHash().equals(requestHash)) {
-          return new CreateResult(original, true);
-        }
-        throw ApiError.of(
-            "IDEMPOTENCY_KEY_REUSED",
-            "the idempotency key was already used for a different request");
-      }
-    }
-    if (index.activeProcessOf(tableId, action).isPresent()) {
-      throw ApiError.of(
-          "ACTIVE_PROCESS_EXISTS",
-          "an active process already exists for table " + tableId + " action " + action);
-    }
-
     Map<String, Object> frozen =
         parameters == null ? new LinkedHashMap<String, Object>() : new LinkedHashMap<>(parameters);
-    String name = nextName();
-    ProcessResource resource =
-        new ProcessResource(
-            name,
-            new ProcessResource.ProcessSpec(
-                new ProcessResource.TableRef(catalog, database, table, tableId),
-                action,
-                engine,
-                triggerSource,
-                now(),
-                "RUN",
-                new ProcessResource.RequestIdentity(keyHash, requestHash),
-                frozen,
-                new ProcessResource.RetryPolicy(3, 2, 30)),
-            initialStatus(name));
     try {
-      return new CreateResult(assembly.repository().create(resource), false);
-    } catch (org.apache.amoro.persistence.exception.ResourceAlreadyExists raced) {
-      throw ApiError.of("ACTIVE_PROCESS_EXISTS", "a concurrent create won the admission slot");
+      ProcessCreationResult result =
+          creationService.create(
+              new ProcessCreateIntent(
+                  new ProcessResource.TableRef(catalog, database, table, tableId),
+                  action,
+                  engine,
+                  triggerSource,
+                  keyHash,
+                  requestHash,
+                  frozen));
+      return new CreateResult(result.resource(), result.replayed());
+    } catch (ProcessAdmissionException admission) {
+      switch (admission.code()) {
+        case ACTIVE_PROCESS_EXISTS:
+          throw ApiError.of("ACTIVE_PROCESS_EXISTS", admission.getMessage());
+        case IDEMPOTENCY_KEY_REUSED:
+          throw ApiError.of("IDEMPOTENCY_KEY_REUSED", admission.getMessage());
+        case ADMISSION_IN_PROGRESS:
+          throw ApiError.of("IDEMPOTENCY_IN_PROGRESS", admission.getMessage());
+        default:
+          throw new AssertionError("unknown admission code " + admission.code());
+      }
     }
-  }
-
-  private static ProcessStatus initialStatus(String name) {
-    return new ProcessStatus(
-        "PENDING",
-        0,
-        firstAttempt(name, 0),
-        null,
-        null,
-        null,
-        new ProcessResource.EngineBackoff(0, 0, 0, 0),
-        null,
-        null,
-        null,
-        null,
-        null,
-        null);
   }
 
   private static ProcessAttempt firstAttempt(String name, int retryNumber) {
@@ -860,12 +831,6 @@ public final class ProcessRestSupport {
     } catch (Exception e) {
       throw new IllegalStateException(e);
     }
-  }
-
-  /** Time-based monotonic name: survives restarts without colliding with earlier rows. */
-  private static String nextName() {
-    long id = (System.currentTimeMillis() << 20) | (NAME_SEQUENCE.incrementAndGet() & 0xFFFFF);
-    return String.valueOf(id);
   }
 
   private static TableCatalogPort defaultCatalog() {

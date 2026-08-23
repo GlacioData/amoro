@@ -131,9 +131,17 @@ public class ControlPlaneAutoConfiguration {
   }
 
   @Bean
-  public org.apache.amoro.process.rest.ProcessRestSupport processRestSupport(
+  public org.apache.amoro.process.ProcessCreationService processCreationService(
       org.apache.amoro.process.ProcessDomainAssembly assembly) {
-    return new org.apache.amoro.process.rest.ProcessRestSupport(assembly);
+    return new org.apache.amoro.process.ProcessCreationService(assembly);
+  }
+
+  @Bean
+  public org.apache.amoro.process.rest.ProcessRestSupport processRestSupport(
+      org.apache.amoro.process.ProcessDomainAssembly assembly,
+      org.apache.amoro.process.ProcessCreationService creationService) {
+    return new org.apache.amoro.process.rest.ProcessRestSupport(
+        assembly, creationService);
   }
 
   // ------------------------------------------------------------------ process runtime (engines +
