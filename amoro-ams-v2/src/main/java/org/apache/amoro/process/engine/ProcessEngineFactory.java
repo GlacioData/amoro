@@ -18,6 +18,8 @@
 
 package org.apache.amoro.process.engine;
 
+import org.apache.amoro.process.engine.local.LocalActionRegistry;
+
 import java.util.Objects;
 
 /**
@@ -36,13 +38,59 @@ public interface ProcessEngineFactory {
   /** Immutable framework-owned construction context. */
   final class Context {
     private final String instanceId;
+    private final int workerThreads;
+    private final int queueCapacity;
+    private final LocalActionRegistry localActions;
+    private final int localTerminalResultRetentionDays;
 
     public Context(String instanceId) {
+      this(instanceId, 2, 1024);
+    }
+
+    public Context(String instanceId, int workerThreads, int queueCapacity) {
+      this(instanceId, workerThreads, queueCapacity, LocalActionRegistry.empty());
+    }
+
+    public Context(
+        String instanceId, int workerThreads, int queueCapacity, LocalActionRegistry localActions) {
+      this(instanceId, workerThreads, queueCapacity, localActions, 7);
+    }
+
+    public Context(
+        String instanceId,
+        int workerThreads,
+        int queueCapacity,
+        LocalActionRegistry localActions,
+        int localTerminalResultRetentionDays) {
       this.instanceId = Objects.requireNonNull(instanceId, "instanceId");
+      if (workerThreads <= 0 || queueCapacity <= 0 || localTerminalResultRetentionDays < 1) {
+        throw new IllegalArgumentException(
+            "workerThreads, queueCapacity and localTerminalResultRetentionDays must be > 0");
+      }
+      this.workerThreads = workerThreads;
+      this.queueCapacity = queueCapacity;
+      this.localActions = Objects.requireNonNull(localActions, "localActions");
+      this.localTerminalResultRetentionDays = localTerminalResultRetentionDays;
     }
 
     public String instanceId() {
       return instanceId;
+    }
+
+    public int workerThreads() {
+      return workerThreads;
+    }
+
+    public int queueCapacity() {
+      return queueCapacity;
+    }
+
+    public LocalActionRegistry localActions() {
+      return localActions;
+    }
+
+    public int localTerminalResultRetentionDays() {
+      return localTerminalResultRetentionDays;
     }
   }
 }

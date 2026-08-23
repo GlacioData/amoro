@@ -26,11 +26,17 @@ import org.apache.amoro.process.engine.EngineTypes.ProcessObservation;
 import org.apache.amoro.process.engine.EngineTypes.SubmissionOutcome;
 import org.apache.amoro.process.engine.EngineTypes.SubmissionResolution;
 
+import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -40,6 +46,8 @@ final class EngineBoundaryValidator {
   private static final int MAX_ID_BYTES = 512;
   private static final int MAX_REASON_BYTES = 1024;
   private static final int MAX_SUMMARY_BYTES = 8192;
+  private static final com.fasterxml.jackson.databind.ObjectMapper SUMMARY_MAPPER =
+      new com.fasterxml.jackson.databind.ObjectMapper();
   private static final Set<String> PHASES =
       Collections.unmodifiableSet(
           new HashSet<>(
@@ -52,8 +60,7 @@ final class EngineBoundaryValidator {
   private EngineBoundaryValidator() {}
 
   static EngineCapabilities capabilities(EngineCapabilities capabilities) {
-    if (capabilities == null
-        || !bounded(capabilities.capabilityVersion(), 1, 128)) {
+    if (capabilities == null || !bounded(capabilities.capabilityVersion(), 1, 128)) {
       throw new IllegalArgumentException("invalid engine capability snapshot");
     }
     return capabilities;
@@ -98,9 +105,7 @@ final class EngineBoundaryValidator {
       case UNAVAILABLE:
       case UNSUPPORTED:
       case CONFLICT:
-        return resolution.externalId() == null
-            ? resolution
-            : SubmissionResolution.unavailable();
+        return resolution.externalId() == null ? resolution : SubmissionResolution.unavailable();
       default:
         return SubmissionResolution.unavailable();
     }
@@ -153,12 +158,13 @@ final class EngineBoundaryValidator {
     } else if (failure != null) {
       return null;
     }
-    if (estimatedSummaryBytes(observation.summaryDelta()) > MAX_SUMMARY_BYTES) {
+    Map<String, Object> summary = freezeSummary(observation.summaryDelta());
+    if (summary == null) {
       return null;
     }
     String trackUri = validTrackUri(observation.trackUri()) ? observation.trackUri() : null;
     return new EngineObservation(
-        observation.remotePhase(), trackUri, observation.summaryDelta(), observation.failure());
+        observation.remotePhase(), trackUri, summary, observation.failure());
   }
 
   private static boolean validTrackUri(String value) {
@@ -181,8 +187,100 @@ final class EngineBoundaryValidator {
     }
   }
 
-  private static int estimatedSummaryBytes(Map<String, Object> summary) {
-    return String.valueOf(summary).getBytes(StandardCharsets.UTF_8).length;
+  private static Map<String, Object> freezeSummary(Map<String, Object> summary) {
+    if (summary == null || summary.isEmpty()) {
+      return Collections.emptyMap();
+    }
+    try {
+      SummaryBudget budget = new SummaryBudget(MAX_SUMMARY_BYTES);
+      @SuppressWarnings("unchecked")
+      Map<String, Object> frozen =
+          (Map<String, Object>)
+              freezeJson(summary, new IdentityHashMap<Object, Boolean>(), budget, 0);
+      return SUMMARY_MAPPER.writeValueAsBytes(frozen).length <= MAX_SUMMARY_BYTES ? frozen : null;
+    } catch (IllegalArgumentException
+        | com.fasterxml.jackson.core.JsonProcessingException invalid) {
+      return null;
+    }
+  }
+
+  private static Object freezeJson(
+      Object value, IdentityHashMap<Object, Boolean> ancestors, SummaryBudget budget, int depth) {
+    if (depth > 32) {
+      throw new IllegalArgumentException("summary nesting is too deep");
+    }
+    if (value == null) {
+      budget.add(4);
+      return null;
+    }
+    if (value instanceof String) {
+      budget.add(((String) value).getBytes(StandardCharsets.UTF_8).length + 2);
+      return value;
+    }
+    if (value instanceof Boolean
+        || value instanceof Byte
+        || value instanceof Short
+        || value instanceof Integer
+        || value instanceof Long
+        || value instanceof BigInteger
+        || value instanceof BigDecimal) {
+      budget.add(String.valueOf(value).getBytes(StandardCharsets.UTF_8).length);
+      return value;
+    }
+    if (value instanceof Float || value instanceof Double) {
+      double number = ((Number) value).doubleValue();
+      if (!Double.isFinite(number)) {
+        throw new IllegalArgumentException("summary number must be finite");
+      }
+      budget.add(String.valueOf(value).getBytes(StandardCharsets.UTF_8).length);
+      return value;
+    }
+    if (!(value instanceof Map) && !(value instanceof List)) {
+      throw new IllegalArgumentException("summary contains a non-JSON value");
+    }
+    if (ancestors.put(value, Boolean.TRUE) != null) {
+      throw new IllegalArgumentException("summary contains a cycle");
+    }
+    try {
+      if (value instanceof Map) {
+        budget.add(2);
+        Map<String, Object> copy = new LinkedHashMap<>();
+        for (Map.Entry<?, ?> entry : ((Map<?, ?>) value).entrySet()) {
+          if (!(entry.getKey() instanceof String)) {
+            throw new IllegalArgumentException("summary object keys must be strings");
+          }
+          String key = (String) entry.getKey();
+          budget.add(key.getBytes(StandardCharsets.UTF_8).length + 4);
+          copy.put(key, freezeJson(entry.getValue(), ancestors, budget, depth + 1));
+        }
+        return Collections.unmodifiableMap(copy);
+      }
+      budget.add(2);
+      List<Object> copy = new ArrayList<>();
+      for (Object item : (List<?>) value) {
+        budget.add(1);
+        copy.add(freezeJson(item, ancestors, budget, depth + 1));
+      }
+      return Collections.unmodifiableList(copy);
+    } finally {
+      ancestors.remove(value);
+    }
+  }
+
+  private static final class SummaryBudget {
+    private final int maximum;
+    private int used;
+
+    private SummaryBudget(int maximum) {
+      this.maximum = maximum;
+    }
+
+    private void add(int bytes) {
+      used = Math.addExact(used, bytes);
+      if (used > maximum) {
+        throw new IllegalArgumentException("summary is too large");
+      }
+    }
   }
 
   private static boolean nullableBounded(String value, int maxBytes) {

@@ -58,7 +58,8 @@ public final class ProcessActionRegistry {
       Set<String> formats =
           new LinkedHashSet<>(Objects.requireNonNull(factory.tableFormats(), "tableFormats"));
       if (formats.isEmpty()) {
-        throw new IllegalArgumentException("action factory " + action + " declares no table format");
+        throw new IllegalArgumentException(
+            "action factory " + action + " declares no table format");
       }
       for (String format : formats) {
         requireWireName(format, "table format");
@@ -106,10 +107,7 @@ public final class ProcessActionRegistry {
     private final ProviderMode mode;
 
     private Entry(
-        String action,
-        Set<String> tableFormats,
-        ProcessActionPlugin plugin,
-        ProviderMode mode) {
+        String action, Set<String> tableFormats, ProcessActionPlugin plugin, ProviderMode mode) {
       this.action = action;
       this.tableFormats = Collections.unmodifiableSet(new LinkedHashSet<>(tableFormats));
       this.plugin = plugin;

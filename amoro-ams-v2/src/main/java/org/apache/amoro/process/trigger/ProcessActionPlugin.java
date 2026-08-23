@@ -18,6 +18,10 @@
 
 package org.apache.amoro.process.trigger;
 
+import org.apache.amoro.process.ProcessCreateIntent;
+import org.apache.amoro.process.ProcessResource;
+
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.Map;
 
@@ -31,6 +35,30 @@ public interface ProcessActionPlugin {
   String action();
 
   boolean supports(String tableFormat, String executionEngine);
+
+  /** Validates and freezes format-neutral manual input before admission and persistence. */
+  default Map<String, Object> validateAndFreezeManual(Map<String, Object> parameters) {
+    return ProcessCreateIntent.freezeParameters(
+        parameters == null ? java.util.Collections.emptyMap() : parameters);
+  }
+
+  /**
+   * Builds an engine payload only from the frozen spec and an allowlisted simulation profile. No
+   * implementation may load a managed table while executing this method.
+   */
+  default byte[] buildSubmission(
+      ProcessResource.ProcessSpec frozenSpec, Map<String, Object> simulationProfile) {
+    java.util.Map<String, Object> frozenProfile =
+        validateAndFreezeManual(
+            simulationProfile == null ? java.util.Collections.emptyMap() : simulationProfile);
+    ProcessResource.ProcessSpec spec = java.util.Objects.requireNonNull(frozenSpec, "frozenSpec");
+    return (spec.action()
+            + "|"
+            + ProcessCreateIntent.canonicalParameters(spec.parameters())
+            + "|"
+            + ProcessCreateIntent.canonicalParameters(frozenProfile))
+        .getBytes(StandardCharsets.UTF_8);
+  }
 
   ScheduledEvaluation evaluateScheduled(
       ManagedTablePort.TableSnapshot table, Instant logicalFireTime);

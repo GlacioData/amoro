@@ -22,50 +22,64 @@ import org.apache.amoro.control.Controller;
 import org.apache.amoro.control.ControllerKey;
 import org.apache.amoro.control.Scheduler;
 import org.apache.amoro.control.TerminalState;
+import org.apache.amoro.persistence.exception.PreconditionFailedException;
 import org.apache.amoro.persistence.facade.RepositoryFacade;
-import org.apache.amoro.process.engine.EngineTypes.EngineObservation;
+import org.apache.amoro.process.engine.EngineTypes.CancellationOutcome;
 import org.apache.amoro.process.engine.EngineTypes.ProcessObservation;
 import org.apache.amoro.process.engine.EngineTypes.SubmissionOutcome;
+import org.apache.amoro.process.engine.EngineTypes.SubmissionResolution;
 import org.apache.amoro.process.engine.ProcessEngineDispatcher;
+import org.apache.amoro.process.engine.ProcessEngineDispatcher.CommandFlight;
+import org.apache.amoro.process.engine.ProcessEngineRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 
 /**
- * The level-triggered Process controller (process spec §7): each invoke reads the latest durable
- * resource, performs at most one logical step — a version-CAS write or ONE async engine command —
- * and relies on the scheduler period for the next round. Engine callbacks apply results through
- * {@link ProcessResultApplier} with the same CAS discipline. Terminal phases throw {@link
- * TerminalState}.
+ * Level-triggered Process controller. A round first honors persisted conditions/deadlines, then
+ * performs at most one state-machine operation. A fresh submission is persisted as DISPATCHING
+ * before the adapter call; any DISPATCHING observed on a later invocation is resolved and is never
+ * blindly submitted.
  */
 public final class ProcessReconciler implements Controller {
 
-  /** One reconcile round's outcome for the scheduler. */
   public enum Step {
-    DONE, // a durable write happened; reschedule at the period
-    WAIT, // business gating: reschedule after the configured delay
-    DISPATCHED // an async engine command is in flight; its callback will reschedule
+    DONE,
+    WAIT,
+    DISPATCHED
   }
 
   private static final Logger LOG = LoggerFactory.getLogger(ProcessReconciler.class);
+  private static final long DEFAULT_SUBMISSION_UNRESOLVED_MILLIS = 60_000L;
+  private static final long DEFAULT_CANCEL_RETRY_MILLIS = 10_000L;
+  private static final long DEFAULT_COMMAND_IN_FLIGHT_MILLIS = 250L;
+  private static final long DEFAULT_EXECUTION_UNRESOLVED_MILLIS = 300_000L;
 
   private final String processName;
   private final RepositoryFacade<ProcessResource> repository;
-  private final org.apache.amoro.process.engine.ProcessEngineRegistry engines;
+  private final ProcessEngineRegistry engines;
   private final Scheduler scheduler;
   private final Clock clock;
-  private final long retryDelayMillis;
-  private final org.apache.amoro.process.engine.ExecutionHandleRegistry handleRegistry;
+  private final long pollIntervalMillis;
+  private final long submissionUnresolvedMillis;
+  private final long cancelRetryMillis;
+  private final long commandInFlightMillis;
+  private final long executionUnresolvedMillis;
+  private final ProcessResultApplier resultApplier;
+  private final ProcessResultPersistenceRetryer resultRetryer;
+  private final ProcessSubmissionBuilder submissionBuilder;
 
-  /** Wall-clock abstraction (UTC instants as RFC 3339 strings). */
+  /** UTC wall clock persisted as RFC 3339. */
   public interface Clock {
     String now();
 
     static Clock systemUtc() {
-      return () -> java.time.Instant.now().toString();
+      return () -> Instant.now().toString();
     }
   }
 
@@ -75,32 +89,127 @@ public final class ProcessReconciler implements Controller {
       ProcessEngineDispatcher engine,
       Scheduler scheduler,
       Clock clock,
-      long retryDelayMillis) {
+      long pollIntervalMillis) {
     this(
         processName,
         repository,
-        org.apache.amoro.process.engine.ProcessEngineRegistry.single("local", engine),
+        ProcessEngineRegistry.single("local", engine),
         scheduler,
         clock,
-        retryDelayMillis,
-        new org.apache.amoro.process.engine.ExecutionHandleRegistry());
+        pollIntervalMillis,
+        new org.apache.amoro.process.engine.ExecutionHandleRegistry(),
+        null);
   }
 
   public ProcessReconciler(
       String processName,
       RepositoryFacade<ProcessResource> repository,
-      org.apache.amoro.process.engine.ProcessEngineRegistry engines,
+      ProcessEngineRegistry engines,
       Scheduler scheduler,
       Clock clock,
-      long retryDelayMillis,
-      org.apache.amoro.process.engine.ExecutionHandleRegistry handleRegistry) {
-    this.processName = processName;
-    this.repository = repository;
-    this.engines = engines;
-    this.scheduler = scheduler;
-    this.clock = clock;
-    this.retryDelayMillis = retryDelayMillis;
-    this.handleRegistry = handleRegistry;
+      long pollIntervalMillis,
+      org.apache.amoro.process.engine.ExecutionHandleRegistry ignoredLegacyHandleRegistry) {
+    this(
+        processName,
+        repository,
+        engines,
+        scheduler,
+        clock,
+        pollIntervalMillis,
+        ignoredLegacyHandleRegistry,
+        null);
+  }
+
+  public ProcessReconciler(
+      String processName,
+      RepositoryFacade<ProcessResource> repository,
+      ProcessEngineRegistry engines,
+      Scheduler scheduler,
+      Clock clock,
+      long pollIntervalMillis,
+      org.apache.amoro.process.engine.ExecutionHandleRegistry ignoredLegacyHandleRegistry,
+      ProcessResultPersistenceRetryer resultRetryer) {
+    this(
+        processName,
+        repository,
+        engines,
+        scheduler,
+        clock,
+        pollIntervalMillis,
+        DEFAULT_SUBMISSION_UNRESOLVED_MILLIS,
+        DEFAULT_CANCEL_RETRY_MILLIS,
+        DEFAULT_COMMAND_IN_FLIGHT_MILLIS,
+        DEFAULT_EXECUTION_UNRESOLVED_MILLIS,
+        resultRetryer);
+  }
+
+  public ProcessReconciler(
+      String processName,
+      RepositoryFacade<ProcessResource> repository,
+      ProcessEngineRegistry engines,
+      Scheduler scheduler,
+      Clock clock,
+      long pollIntervalMillis,
+      long submissionUnresolvedMillis,
+      long cancelRetryMillis,
+      long commandInFlightMillis,
+      long executionUnresolvedMillis,
+      ProcessResultPersistenceRetryer resultRetryer) {
+    this(
+        processName,
+        repository,
+        engines,
+        scheduler,
+        clock,
+        pollIntervalMillis,
+        submissionUnresolvedMillis,
+        cancelRetryMillis,
+        commandInFlightMillis,
+        executionUnresolvedMillis,
+        resultRetryer,
+        ProcessSubmissionBuilder.deterministic());
+  }
+
+  public ProcessReconciler(
+      String processName,
+      RepositoryFacade<ProcessResource> repository,
+      ProcessEngineRegistry engines,
+      Scheduler scheduler,
+      Clock clock,
+      long pollIntervalMillis,
+      long submissionUnresolvedMillis,
+      long cancelRetryMillis,
+      long commandInFlightMillis,
+      long executionUnresolvedMillis,
+      ProcessResultPersistenceRetryer resultRetryer,
+      ProcessSubmissionBuilder submissionBuilder) {
+    this.processName = Objects.requireNonNull(processName, "processName");
+    this.repository = Objects.requireNonNull(repository, "repository");
+    this.engines = Objects.requireNonNull(engines, "engines");
+    this.scheduler = Objects.requireNonNull(scheduler, "scheduler");
+    this.clock = Objects.requireNonNull(clock, "clock");
+    if (pollIntervalMillis <= 0
+        || submissionUnresolvedMillis <= 0
+        || cancelRetryMillis <= 0
+        || commandInFlightMillis <= 0
+        || executionUnresolvedMillis <= 0) {
+      throw new IllegalArgumentException("all Process reconcile intervals must be > 0");
+    }
+    this.pollIntervalMillis = pollIntervalMillis;
+    this.submissionUnresolvedMillis = submissionUnresolvedMillis;
+    this.cancelRetryMillis = cancelRetryMillis;
+    this.commandInFlightMillis = commandInFlightMillis;
+    this.executionUnresolvedMillis = executionUnresolvedMillis;
+    this.resultRetryer = resultRetryer;
+    this.submissionBuilder = Objects.requireNonNull(submissionBuilder, "submissionBuilder");
+    this.resultApplier =
+        new ProcessResultApplier(
+            repository,
+            clock::now,
+            4,
+            pollIntervalMillis,
+            submissionUnresolvedMillis,
+            executionUnresolvedMillis);
   }
 
   @Override
@@ -111,289 +220,533 @@ public final class ProcessReconciler implements Controller {
   @Override
   public void invoke() {
     ProcessResource resource = repository.get(processName);
-    Step step =
-        "CANCEL".equals(resource.spec().desiredState()) ? cancelStep(resource) : runStep(resource);
-    switch (step) {
-      case DONE:
-        return; // the framework period reschedules us
-      case WAIT:
-        scheduler.schedule(this, Duration.ofMillis(retryDelayMillis));
-        return;
-      case DISPATCHED:
-        return; // the async callback completes the round
-      default:
-        throw new AssertionError(step);
-    }
-  }
-
-  // ------------------------------------------------------------------ desired = RUN
-
-  private Step runStep(ProcessResource resource) {
-    if (ProcessFinality.isFinal(resource)) {
-      throw TerminalState.INSTANCE;
-    }
-    String phase = resource.status().phase();
-    if ("PENDING".equals(phase) || "UNKNOWN".equals(phase)) {
-      return submitStep(resource, false);
-    }
-    if ("SUBMITTED".equals(phase) || "RUNNING".equals(phase) || "CANCELING".equals(phase)) {
-      return observeStep(resource, true);
-    }
-    if ("FAILED".equals(phase)) {
-      return retryStep(resource);
-    }
-    throw new IllegalStateException("unexpected phase " + phase);
-  }
-
-  // ------------------------------------------------------------------ desired = CANCEL
-
-  private Step cancelStep(ProcessResource resource) {
-    if (ProcessFinality.isFinal(resource)) {
-      throw TerminalState.INSTANCE;
-    }
-    String phase = resource.status().phase();
-    if ("PENDING".equals(phase) || "UNKNOWN".equals(phase)) {
-      String submitState =
-          resource.status().attempt() != null ? resource.status().attempt().submitState() : null;
-      if ("CREATED".equals(submitState) || submitState == null) {
-        // provably never dispatched (spec §7.4): cancel directly, no engine work at all
-        return casWrite(resource, directCanceled(resource)) ? Step.DONE : Step.DONE;
-      }
-      // DISPATCHING/UNKNOWN/CONFLICT: dispatch evidence exists but no external id — the
-      // submission-resolution path owns it; conservatively CANCELING and observe rounds
-      // plus the manual submission resolution converge it
-      return casTransition(resource, "CANCELING");
-    }
-    if ("SUBMITTED".equals(phase) || "RUNNING".equals(phase)) {
-      return casTransition(resource, "CANCELING");
-    }
-    if ("CANCELING".equals(phase)) {
-      return cancelingStep(resource);
-    }
-    if ("FAILED".equals(phase)) {
-      throw TerminalState.INSTANCE; // desired=CANCEL makes FAILED final
-    }
-    throw new IllegalStateException("unexpected phase " + phase);
-  }
-
-  // ------------------------------------------------------------------ steps
-
-  private Step submitStep(ProcessResource resource, boolean cancelling) {
-    ProcessResource.ProcessAttempt attempt = ensureAttempt(resource);
-    if (cancelling) {
-      throw new IllegalStateException("cancel path never dispatches new submissions");
-    }
-    if (resource.status().attempt() == null) {
-      // persist the attempt first (process spec §7.3: the attempt exists before dispatch)
-      ProcessResource.ProcessStatus status = resource.status();
-      ProcessResource.ProcessStatus withAttempt =
-          new ProcessResource.ProcessStatus(
-              status.phase(),
-              status.retryNumber(),
-              attempt,
-              status.attemptHistory(),
-              status.lastObservedAt(),
-              null,
-              status.engineBackoffAttempts(),
-              status.conditions(),
-              status.summary(),
-              status.failure(),
-              status.submittedAt(),
-              status.startedAt(),
-              status.finishedAt());
-      casWrite(resource, withAttempt);
-      return Step.DONE; // the next round stages DISPATCHING
-    }
-    String state = attempt.submitState();
-    if ("UNKNOWN".equals(state) || "CONFLICT".equals(state)) {
-      // unresolved submission: never blind-resubmit the same key (spec §7.3); the manual
-      // submission-resolution endpoint or a future resolve round owns this attempt
-      LOG.info(
-          "Process {} attempt {} is {}; awaiting manual submission resolution.",
-          processName,
-          attempt.submissionKey(),
-          state);
-      return Step.WAIT;
-    }
-    if (!"DISPATCHING".equals(state)) {
-      // durable DISPATCHING first (spec §7.3): a crash after this write restarts into
-      // resolution instead of a duplicate submit of the same key
-      ProcessResource.ProcessStatus status = resource.status();
-      ProcessResource.ProcessAttempt dispatching =
-          new ProcessResource.ProcessAttempt(
-              attempt.dispatchGeneration(),
-              attempt.submissionKey(),
-              attempt.requestHash(),
-              "DISPATCHING",
-              attempt.externalId(),
-              attempt.dispatchedAt(),
-              attempt.retryDisposition(),
-              attempt.finishedAt(),
-              attempt.submissionHistory(),
-              attempt.manualResolutions());
-      casWrite(
-          resource,
-          new ProcessResource.ProcessStatus(
-              status.phase(),
-              status.retryNumber(),
-              dispatching,
-              status.attemptHistory(),
-              status.lastObservedAt(),
-              null,
-              status.engineBackoffAttempts(),
-              status.conditions(),
-              status.summary(),
-              status.failure(),
-              status.submittedAt(),
-              status.startedAt(),
-              status.finishedAt()));
-      return Step.DONE; // the next round performs the actual dispatch
-    }
-    ProcessEngineDispatcher engine = engineOf(resource);
-    if (engine == null) {
-      LOG.info(
-          "Engine '{}' for {} is not deployed; waiting (resource stays durable).",
-          resource.spec().executionEngine(),
-          processName);
-      return Step.WAIT;
-    }
-    String submissionKey = attempt.submissionKey();
-    org.apache.amoro.process.engine.ProcessEngineDispatcher.CommandFlight<SubmissionOutcome>
-        flight =
-            engine.submit(
-                processName, submissionKey, attempt.requestHash(), payloadOf(resource));
-    flight.whenComplete(
-        (outcome, error) -> {
-          try {
-            applySubmitOutcome(
-                processName, submissionKey, attempt.requestHash(), outcome, error, false);
-          } finally {
-            flight.markDurablyHandled();
-          }
-        });
-    return Step.DISPATCHED;
-  }
-
-  private Step observeStep(ProcessResource resource, boolean runDesired) {
-    ProcessResource.ProcessAttempt attempt = resource.status().attempt();
-    if (attempt == null || attempt.externalId() == null) {
-      // no external identity: the submit side owns this resource for now
-      return submitStep(resource, false);
-    }
-    ProcessEngineDispatcher engine = engineOf(resource);
-    if (engine == null) {
-      LOG.info(
-          "Engine '{}' for {} is not deployed; waiting (resource stays durable).",
-          resource.spec().executionEngine(),
-          processName);
-      return Step.WAIT;
-    }
-    String submissionKey = attempt.submissionKey();
-    org.apache.amoro.process.engine.ProcessEngineDispatcher.CommandFlight<ProcessObservation>
-        flight = engine.observe(processName, attempt.externalId());
-    flight.whenComplete(
-        (observation, error) -> {
-          try {
-            applyObservation(processName, submissionKey, observation, error);
-          } finally {
-            flight.markDurablyHandled();
-          }
-        });
-    return Step.DISPATCHED;
-  }
-
-  private Step cancelingStep(ProcessResource resource) {
-    ProcessResource.ProcessAttempt attempt = resource.status().attempt();
-    if (attempt == null || attempt.externalId() == null) {
-      return observeStep(resource, false);
-    }
-    if ("CANCEL_REQUESTED".equals(attempt.submitState())) {
-      // cancellation already accepted: observe rounds record the terminal phase
-      return observeStep(resource, false);
-    }
-    ProcessEngineDispatcher engine = engineOf(resource);
-    if (engine == null) {
-      LOG.info(
-          "Engine '{}' for {} is not deployed; waiting (resource stays durable).",
-          resource.spec().executionEngine(),
-          processName);
-      return Step.WAIT;
-    }
-    String submissionKey = attempt.submissionKey();
-    org.apache.amoro.process.engine.ProcessEngineDispatcher.CommandFlight<
-            org.apache.amoro.process.engine.EngineTypes.CancellationOutcome>
-        flight = engine.cancel(processName, attempt.externalId());
-    flight.whenComplete(
-        (outcome, error) -> {
-          try {
-            applyCancelOutcome(processName, submissionKey, outcome, error);
-          } finally {
-            flight.markDurablyHandled();
-          }
-        });
-    return Step.DISPATCHED;
-  }
-
-  void applyCancelOutcome(
-      String name,
-      String submissionKey,
-      org.apache.amoro.process.engine.EngineTypes.CancellationOutcome outcome,
-      Throwable error) {
-    try {
-      ProcessResource current = repository.get(name);
-      if (error != null) {
-        LOG.warn("Cancel of {} failed before classification.", name, error);
-        return;
-      }
-      if (outcome.kind()
-          == org.apache.amoro.process.engine.EngineTypes.CancellationOutcome.Kind.ACCEPTED) {
-        markCancelRequested(current); // later rounds observe instead of re-cancelling
-        return;
-      }
-      if (outcome.kind()
-          == org.apache.amoro.process.engine.EngineTypes.CancellationOutcome.Kind
-              .ALREADY_TERMINAL) {
-        EngineObservation observation = outcome.terminalObservation();
-        casWrite(
-            current,
-            terminal(
-                observation.remotePhase(),
-                current,
-                observation.failure() != null ? observation.failure().message() : null));
-      }
-      // NOT_FOUND/UNAVAILABLE/UNSUPPORTED: observe rounds and alerts carry it (first version)
-    } catch (RuntimeException e) {
-      LOG.warn("Applying cancel outcome of {} failed.", name, e);
-    }
-  }
-
-  private void markCancelRequested(ProcessResource current) {
-    ProcessResource.ProcessStatus status = current.status();
-    ProcessResource.ProcessAttempt attempt = status.attempt();
-    if (attempt == null) {
+    if (repairFinalityIfNeeded(resource)) {
       return;
     }
-    ProcessResource.ProcessAttempt marked =
-        new ProcessResource.ProcessAttempt(
+    if (ProcessFinality.isFinal(resource)) {
+      throw TerminalState.INSTANCE;
+    }
+    Duration remaining = remaining(resource.status().nextReconcileAt());
+    if (!remaining.isZero()) {
+      scheduler.schedule(this, remaining);
+      return;
+    }
+    if (ProcessConditions.isTrue(
+        resource.status().conditions(), ProcessConditions.EXECUTION_UNRESOLVED)) {
+      refreshExecutionUnresolvedReminder(resource);
+      scheduler.schedule(this, Duration.ofMillis(executionUnresolvedMillis));
+      return;
+    }
+    try {
+      Step step =
+          "CANCEL".equals(resource.spec().desiredState())
+              ? cancelStep(resource)
+              : runStep(resource);
+      if (step == Step.WAIT) {
+        scheduler.schedule(this, Duration.ofMillis(pollIntervalMillis));
+      }
+    } catch (ProcessEngineDispatcher.CommandInFlightException inFlight) {
+      scheduler.schedule(this, Duration.ofMillis(commandInFlightMillis));
+    }
+  }
+
+  private Step runStep(ProcessResource resource) {
+    String phase = resource.status().phase();
+    if ("PENDING".equals(phase) || "UNKNOWN".equals(phase)) {
+      return submissionStep(resource, false);
+    }
+    if ("SUBMITTED".equals(phase) || "RUNNING".equals(phase)) {
+      return observe(resource);
+    }
+    if ("CANCELING".equals(phase)) {
+      return canceling(resource);
+    }
+    if ("FAILED".equals(phase)) {
+      return retry(resource);
+    }
+    throw new IllegalStateException("unexpected RUN phase " + phase);
+  }
+
+  private Step cancelStep(ProcessResource resource) {
+    String phase = resource.status().phase();
+    if ("FAILED".equals(phase)) {
+      throw TerminalState.INSTANCE;
+    }
+    if ("PENDING".equals(phase) || "UNKNOWN".equals(phase)) {
+      ProcessResource.ProcessAttempt attempt = resource.status().attempt();
+      if (attempt == null
+          || "CREATED".equals(attempt.submitState())
+          || "UNAVAILABLE".equals(attempt.submitState())) {
+        directCancel(resource);
+        return Step.DONE;
+      }
+      if (attempt.externalId() != null) {
+        transitionPhase(resource, "CANCELING", clock.now());
+        return Step.DONE;
+      }
+      return resolve(resource, true);
+    }
+    if ("SUBMITTED".equals(phase) || "RUNNING".equals(phase)) {
+      transitionPhase(resource, "CANCELING", clock.now());
+      return Step.DONE;
+    }
+    if ("CANCELING".equals(phase)) {
+      return canceling(resource);
+    }
+    throw new IllegalStateException("unexpected CANCEL phase " + phase);
+  }
+
+  private Step submissionStep(ProcessResource resource, boolean cancelDesired) {
+    ProcessResource.ProcessAttempt attempt = resource.status().attempt();
+    if (attempt == null) {
+      persistInitialAttempt(resource);
+      return Step.DONE;
+    }
+    if (attempt.externalId() != null || "ACKNOWLEDGED".equals(attempt.submitState())) {
+      transitionPhase(resource, cancelDesired ? "CANCELING" : "SUBMITTED", clock.now());
+      return Step.DONE;
+    }
+    switch (attempt.submitState()) {
+      case "CREATED":
+      case "UNAVAILABLE":
+        if (cancelDesired) {
+          directCancel(resource);
+          return Step.DONE;
+        }
+        return stageAndSubmit(resource);
+      case "DISPATCHING":
+      case "UNKNOWN":
+      case "CONFLICT":
+        return resolve(resource, cancelDesired);
+      case "REJECTED":
+        return Step.WAIT;
+      default:
+        throw new IllegalStateException("unexpected submitState " + attempt.submitState());
+    }
+  }
+
+  private Step stageAndSubmit(ProcessResource resource) {
+    ProcessEngineDispatcher engine = engineOf(resource);
+    if (engine == null) {
+      return Step.WAIT;
+    }
+    ProcessResultPersistenceRetryer.Lease resultLease = reserveResultSlot();
+    if (resultRetryer != null && resultLease == null) {
+      return Step.WAIT;
+    }
+    ProcessResource.ProcessStatus status = resource.status();
+    ProcessResource.ProcessAttempt current = status.attempt();
+    String timestamp = clock.now();
+    ProcessResource.ProcessAttempt dispatching =
+        copyAttempt(
+            current, "DISPATCHING", null, timestamp, null, current.retryDisposition(), null);
+    ProcessResource.ProcessStatus staged =
+        copyStatus(
+            status,
+            status.phase(),
+            status.retryNumber(),
+            dispatching,
+            status.attemptHistory(),
+            status.lastObservedAt(),
+            status.lastCancelAttemptAt(),
+            plusMillis(timestamp, submissionUnresolvedMillis),
+            status.engineBackoffAttempts(),
+            status.conditions(),
+            status.summary(),
+            null,
+            status.submittedAt(),
+            status.startedAt(),
+            null);
+    ProcessResource durable;
+    try {
+      durable =
+          repository.modify(
+              resource.name(),
+              resource.resourceVersion(),
+              currentResource -> currentResource.withStatus(staged));
+    } catch (PreconditionFailedException raced) {
+      closeLease(resultLease);
+      return Step.DONE;
+    } catch (RuntimeException failure) {
+      closeLease(resultLease);
+      throw failure;
+    }
+    return submit(durable, engine, resultLease);
+  }
+
+  private Step submit(
+      ProcessResource durableDispatching,
+      ProcessEngineDispatcher engine,
+      ProcessResultPersistenceRetryer.Lease resultLease) {
+    ProcessResource.ProcessAttempt attempt = durableDispatching.status().attempt();
+    final CommandFlight<SubmissionOutcome> flight;
+    try {
+      flight =
+          engine.submit(
+              processName,
+              durableDispatching.spec().action(),
+              attempt.submissionKey(),
+              attempt.requestHash(),
+              payloadOf(durableDispatching));
+    } catch (RuntimeException dispatchFailure) {
+      closeLease(resultLease);
+      throw dispatchFailure;
+    }
+    flight.whenComplete(
+        (outcome, error) -> {
+          persistResult(
+              "submit|" + attempt.submissionKey() + "|" + attempt.requestHash(),
+              flight,
+              () ->
+                  resultApplier.applySubmit(
+                      processName, attempt.submissionKey(), attempt.requestHash(), outcome, error),
+              resultLease);
+        });
+    return Step.DISPATCHED;
+  }
+
+  private Step resolve(ProcessResource resource, boolean cancelDesired) {
+    ProcessEngineDispatcher engine = engineOf(resource);
+    if (engine == null) {
+      return Step.WAIT;
+    }
+    ProcessResource.ProcessAttempt attempt = resource.status().attempt();
+    String capabilityVersion = engine.capabilities().capabilityVersion();
+    java.util.Optional<ProcessResource.Condition> unresolved =
+        ProcessConditions.find(
+            resource.status().conditions(), ProcessConditions.SUBMISSION_UNRESOLVED);
+    boolean sameUnsupportedCapability =
+        unresolved.isPresent()
+            && "ResolutionUnsupported".equals(unresolved.get().reason())
+            && capabilityVersion.equals(unresolved.get().observedCapabilityVersion());
+    if (!engine.capabilities().supportsSubmissionResolution() || sameUnsupportedCapability) {
+      persistUnsupportedResolution(resource, capabilityVersion);
+      return Step.WAIT;
+    }
+    ProcessResultPersistenceRetryer.Lease resultLease = reserveResultSlot();
+    if (resultRetryer != null && resultLease == null) {
+      return Step.WAIT;
+    }
+    final CommandFlight<SubmissionResolution> flight;
+    try {
+      flight =
+          engine.resolveSubmission(processName, attempt.submissionKey(), attempt.requestHash());
+    } catch (RuntimeException dispatchFailure) {
+      closeLease(resultLease);
+      throw dispatchFailure;
+    }
+    flight.whenComplete(
+        (resolution, error) -> {
+          persistResult(
+              "resolve|" + attempt.submissionKey() + "|" + attempt.requestHash(),
+              flight,
+              () ->
+                  resultApplier.applyResolution(
+                      processName,
+                      attempt.submissionKey(),
+                      attempt.requestHash(),
+                      resolution,
+                      error,
+                      capabilityVersion),
+              resultLease);
+        });
+    return Step.DISPATCHED;
+  }
+
+  private Step observe(ProcessResource resource) {
+    ProcessResource.ProcessAttempt attempt = resource.status().attempt();
+    if (attempt == null || attempt.externalId() == null) {
+      return submissionStep(resource, "CANCEL".equals(resource.spec().desiredState()));
+    }
+    ProcessEngineDispatcher engine = engineOf(resource);
+    if (engine == null) {
+      return Step.WAIT;
+    }
+    ProcessResultPersistenceRetryer.Lease resultLease = reserveResultSlot();
+    if (resultRetryer != null && resultLease == null) {
+      return Step.WAIT;
+    }
+    final CommandFlight<ProcessObservation> flight;
+    try {
+      flight = engine.observe(processName, attempt.externalId());
+    } catch (RuntimeException dispatchFailure) {
+      closeLease(resultLease);
+      throw dispatchFailure;
+    }
+    flight.whenComplete(
+        (observation, error) -> {
+          persistResult(
+              "observe|" + attempt.externalId(),
+              flight,
+              () ->
+                  resultApplier.applyObservation(
+                      processName,
+                      attempt.submissionKey(),
+                      attempt.requestHash(),
+                      attempt.externalId(),
+                      observation,
+                      error),
+              resultLease);
+        });
+    return Step.DISPATCHED;
+  }
+
+  private Step canceling(ProcessResource resource) {
+    ProcessResource.ProcessAttempt attempt = resource.status().attempt();
+    if (attempt == null || attempt.externalId() == null) {
+      return resolve(resource, true);
+    }
+    ProcessEngineDispatcher engine = engineOf(resource);
+    if (engine == null) {
+      return Step.WAIT;
+    }
+    String capabilityVersion = engine.capabilities().capabilityVersion();
+    java.util.Optional<ProcessResource.Condition> unsupported =
+        ProcessConditions.find(
+            resource.status().conditions(), ProcessConditions.CANCELLATION_UNSUPPORTED);
+    if (!engine.capabilities().supportsCancellation()
+        || (unsupported.isPresent()
+            && capabilityVersion.equals(unsupported.get().observedCapabilityVersion()))) {
+      if (unsupported.isEmpty()
+          || !capabilityVersion.equals(unsupported.get().observedCapabilityVersion())) {
+        persistCancellationUnsupported(resource, capabilityVersion);
+        return Step.DONE;
+      }
+      return observe(resource);
+    }
+    if (unsupported.isPresent()) {
+      removeCondition(resource, ProcessConditions.CANCELLATION_UNSUPPORTED);
+      return Step.DONE;
+    }
+    if (cancelDue(resource.status().lastCancelAttemptAt())) {
+      ProcessResultPersistenceRetryer.Lease resultLease = reserveResultSlot();
+      if (resultRetryer != null && resultLease == null) {
+        return Step.WAIT;
+      }
+      ProcessResource staged = stageCancelAttempt(resource);
+      if (staged == null) {
+        closeLease(resultLease);
+        return Step.DONE;
+      }
+      return dispatchCancel(staged, engine, capabilityVersion, resultLease);
+    }
+    return observe(resource);
+  }
+
+  private Step dispatchCancel(
+      ProcessResource resource,
+      ProcessEngineDispatcher engine,
+      String capabilityVersion,
+      ProcessResultPersistenceRetryer.Lease resultLease) {
+    ProcessResource.ProcessAttempt attempt = resource.status().attempt();
+    final CommandFlight<CancellationOutcome> flight;
+    try {
+      flight = engine.cancel(processName, attempt.externalId());
+    } catch (RuntimeException dispatchFailure) {
+      closeLease(resultLease);
+      throw dispatchFailure;
+    }
+    flight.whenComplete(
+        (outcome, error) -> {
+          persistResult(
+              "cancel|" + attempt.externalId(),
+              flight,
+              () ->
+                  resultApplier.applyCancellation(
+                      processName,
+                      attempt.submissionKey(),
+                      attempt.requestHash(),
+                      attempt.externalId(),
+                      outcome,
+                      error,
+                      capabilityVersion),
+              resultLease);
+        });
+    return Step.DISPATCHED;
+  }
+
+  private Step retry(ProcessResource resource) {
+    ProcessResource.ProcessStatus status = resource.status();
+    ProcessResource.ProcessAttempt attempt = status.attempt();
+    List<ProcessResource.AttemptSummary> history = new ArrayList<>(status.attemptHistory());
+    history.add(
+        new ProcessResource.AttemptSummary(
+            status.retryNumber(),
             attempt.dispatchGeneration(),
             attempt.submissionKey(),
             attempt.requestHash(),
-            "CANCEL_REQUESTED",
+            "FAILED",
             attempt.externalId(),
-            attempt.dispatchedAt(),
             attempt.retryDisposition(),
-            attempt.finishedAt(),
             attempt.submissionHistory(),
-            attempt.manualResolutions());
-    casWrite(
-        current,
-        new ProcessResource.ProcessStatus(
-            status.phase(),
-            status.retryNumber(),
-            marked,
-            status.attemptHistory(),
+            attempt.manualResolutions(),
+            attempt.finishedAt(),
+            attempt.lastError()));
+    int retryNumber = status.retryNumber() + 1;
+    ProcessResource.ProcessAttempt next =
+        new ProcessResource.ProcessAttempt(
+            0,
+            processName + ":" + retryNumber + ":0",
+            ProcessRequestHashes.actionAttempt(processName, retryNumber, resource.spec()),
+            "CREATED",
+            null,
+            null,
+            null,
+            "AUTO",
+            null,
+            new ArrayList<>(),
+            new ProcessResource.ManualResolutions(null, null));
+    String timestamp = clock.now();
+    ProcessResource.ProcessStatus opened =
+        copyStatus(
+            status,
+            "PENDING",
+            retryNumber,
+            next,
+            history,
             status.lastObservedAt(),
             null,
+            timestamp,
+            new ProcessResource.EngineBackoff(0, 0, 0, 0),
+            ProcessConditions.remove(
+                status.conditions(),
+                ProcessConditions.SUBMISSION_UNRESOLVED,
+                ProcessConditions.EXECUTION_UNRESOLVED,
+                ProcessConditions.ENGINE_UNREACHABLE,
+                ProcessConditions.CANCELLATION_UNSUPPORTED),
+            status.summary(),
+            null,
+            status.submittedAt(),
+            status.startedAt(),
+            null);
+    casWrite(resource, opened);
+    return Step.WAIT;
+  }
+
+  private void persistInitialAttempt(ProcessResource resource) {
+    ProcessResource.ProcessStatus status = resource.status();
+    ProcessResource.ProcessAttempt attempt =
+        new ProcessResource.ProcessAttempt(
+            0,
+            processName + ":" + status.retryNumber() + ":0",
+            ProcessRequestHashes.actionAttempt(processName, status.retryNumber(), resource.spec()),
+            "CREATED",
+            null,
+            null,
+            null,
+            "AUTO",
+            null,
+            new ArrayList<>(),
+            new ProcessResource.ManualResolutions(null, null));
+    casWrite(
+        resource,
+        copyStatus(
+            status,
+            status.phase(),
+            status.retryNumber(),
+            attempt,
+            status.attemptHistory(),
+            status.lastObservedAt(),
+            status.lastCancelAttemptAt(),
+            clock.now(),
+            status.engineBackoffAttempts(),
+            status.conditions(),
+            status.summary(),
+            null,
+            status.submittedAt(),
+            status.startedAt(),
+            null));
+  }
+
+  private void directCancel(ProcessResource resource) {
+    ProcessResource.ProcessStatus status = resource.status();
+    ProcessResource.ProcessAttempt source = status.attempt();
+    if (source == null) {
+      source =
+          new ProcessResource.ProcessAttempt(
+              0,
+              processName + ":" + status.retryNumber() + ":0",
+              ProcessRequestHashes.actionAttempt(
+                  processName, status.retryNumber(), resource.spec()),
+              "CREATED",
+              null,
+              null,
+              null,
+              "AUTO",
+              null,
+              new ArrayList<>(),
+              new ProcessResource.ManualResolutions(null, null));
+    }
+    String timestamp = clock.now();
+    ProcessResource.ProcessAttempt closed =
+        copyAttempt(
+            source, source.submitState(), null, source.dispatchedAt(), null, "FINAL", timestamp);
+    casWrite(
+        resource,
+        copyStatus(
+            status,
+            "CANCELED",
+            status.retryNumber(),
+            closed,
+            status.attemptHistory(),
+            status.lastObservedAt(),
+            status.lastCancelAttemptAt(),
+            null,
+            new ProcessResource.EngineBackoff(0, 0, 0, 0),
+            ProcessConditions.remove(
+                status.conditions(),
+                ProcessConditions.SUBMISSION_UNRESOLVED,
+                ProcessConditions.EXECUTION_UNRESOLVED,
+                ProcessConditions.ENGINE_UNREACHABLE,
+                ProcessConditions.CANCELLATION_UNSUPPORTED),
+            status.summary(),
+            null,
+            status.submittedAt(),
+            status.startedAt(),
+            timestamp));
+  }
+
+  private ProcessResource stageCancelAttempt(ProcessResource resource) {
+    ProcessResource.ProcessStatus status = resource.status();
+    String timestamp = clock.now();
+    ProcessResource.ProcessStatus staged =
+        copyStatus(
+            status,
+            "CANCELING",
+            status.retryNumber(),
+            status.attempt(),
+            status.attemptHistory(),
+            status.lastObservedAt(),
+            timestamp,
+            plusMillis(timestamp, pollIntervalMillis),
+            status.engineBackoffAttempts(),
+            status.conditions(),
+            status.summary(),
+            status.failure(),
+            status.submittedAt(),
+            status.startedAt(),
+            status.finishedAt());
+    try {
+      return repository.modify(
+          resource.name(), resource.resourceVersion(), current -> current.withStatus(staged));
+    } catch (PreconditionFailedException raced) {
+      return null;
+    }
+  }
+
+  private void transitionPhase(ProcessResource resource, String phase, String nextReconcileAt) {
+    ProcessResource.ProcessStatus status = resource.status();
+    casWrite(
+        resource,
+        copyStatus(
+            status,
+            phase,
+            status.retryNumber(),
+            status.attempt(),
+            status.attemptHistory(),
+            status.lastObservedAt(),
+            status.lastCancelAttemptAt(),
+            nextReconcileAt,
             status.engineBackoffAttempts(),
             status.conditions(),
             status.summary(),
@@ -403,364 +756,364 @@ public final class ProcessReconciler implements Controller {
             status.finishedAt()));
   }
 
-  private Step retryStep(ProcessResource resource) {
-    // archive the failed attempt and open a fresh one after the retry delay
+  private void persistUnsupportedResolution(ProcessResource resource, String capabilityVersion) {
     ProcessResource.ProcessStatus status = resource.status();
-    ProcessResource.ProcessAttempt attempt = status.attempt();
-    List<ProcessResource.AttemptSummary> history =
-        new ArrayList<ProcessResource.AttemptSummary>(status.attemptHistory());
-    if (attempt != null) {
-      history.add(
-          new ProcessResource.AttemptSummary(
-              status.retryNumber(),
-              attempt.dispatchGeneration(),
-              attempt.submissionKey(),
-              attempt.requestHash(),
-              "FAILED",
-              attempt.externalId(),
-              attempt.retryDisposition(),
-              attempt.submissionHistory(),
-              attempt.manualResolutions() != null ? attempt.manualResolutions().execution() : null,
-              attempt.finishedAt() != null ? attempt.finishedAt() : clock.now(),
-              "retry"));
-    }
-    ProcessResource.ProcessStatus next =
-        new ProcessResource.ProcessStatus(
-            "PENDING",
-            status.retryNumber() + 1,
-            null,
-            history,
+    String timestamp = clock.now();
+    ProcessResource.EngineBackoff backoff =
+        new ProcessResource.EngineBackoff(
+            status.engineBackoffAttempts().submit(),
+            0,
+            status.engineBackoffAttempts().observe(),
+            status.engineBackoffAttempts().cancel());
+    List<ProcessResource.Condition> conditions =
+        clearEngineCondition(
+            ProcessConditions.set(
+                status.conditions(),
+                ProcessConditions.SUBMISSION_UNRESOLVED,
+                "ResolutionUnsupported",
+                "submission resolution is not supported",
+                timestamp,
+                capabilityVersion),
+            backoff);
+    casWrite(
+        resource,
+        copyStatus(
+            status,
+            status.phase(),
+            status.retryNumber(),
+            status.attempt(),
+            status.attemptHistory(),
             status.lastObservedAt(),
-            null,
-            new ProcessResource.EngineBackoff(0, 0, 0, 0),
-            new ArrayList<ProcessResource.Condition>(),
+            status.lastCancelAttemptAt(),
+            plusMillis(timestamp, submissionUnresolvedMillis),
+            backoff,
+            conditions,
             status.summary(),
             status.failure(),
             status.submittedAt(),
             status.startedAt(),
-            status.finishedAt());
-    casWrite(resource, next);
-    return Step.WAIT; // retryDelay gates the next attempt
+            status.finishedAt()));
   }
 
-  // ------------------------------------------------------------------ result application
-
-  void applySubmitOutcome(
-      String name,
-      String submissionKey,
-      String requestHash,
-      SubmissionOutcome outcome,
-      Throwable error,
-      boolean cancelling) {
-    try {
-      ProcessResource current = repository.get(name);
-      ProcessResource.ProcessAttempt attempt = current.status().attempt();
-      if (attempt == null || !submissionKey.equals(attempt.submissionKey())) {
-        LOG.debug("Late submit result for {} ignored: attempt rotated.", name);
-        return;
-      }
-      if (error != null) {
-        LOG.warn("Submit of {} failed before classification.", name, error);
-        return; // the next reconcile round retries with backoff semantics
-      }
-      switch (outcome.kind()) {
-        case ACKNOWLEDGED:
-          if (cancelling) {
-            casTransition(current, "CANCELING", outcome.externalId());
-          } else {
-            casTransition(current, "SUBMITTED", outcome.externalId());
-          }
-          return;
-        case REJECTED:
-          casWrite(current, terminal("FAILED", current, "REJECTED: " + outcome.reason()));
-          return;
-        case UNKNOWN:
-        case CONFLICT:
-          // persist the unresolved state: later rounds never blind-resubmit this key and
-          // the manual submission-resolution endpoint (or a resolve round) owns it
-          casWrite(
-              current,
-              withSubmitState(
-                  current,
-                  outcome.kind() == SubmissionOutcome.Kind.UNKNOWN ? "UNKNOWN" : "CONFLICT"));
-          return;
-        case UNAVAILABLE:
-        default:
-          // provably never sent: the same key is retried on the next round
-          LOG.info(
-              "Submit of {} classified {}; retrying same key next round.", name, outcome.kind());
-      }
-    } catch (RuntimeException e) {
-      LOG.warn("Applying submit result of {} failed.", name, e);
-    }
-  }
-
-  void applyObservation(
-      String name, String submissionKey, ProcessObservation observation, Throwable error) {
-    try {
-      ProcessResource current = repository.get(name);
-      if (error != null) {
-        LOG.warn("Observe of {} failed before classification.", name, error);
-        return;
-      }
-      if (observation.kind() != ProcessObservation.Kind.KNOWN) {
-        LOG.info("Observe of {} returned {}; awaiting next round.", name, observation.kind());
-        return;
-      }
-      EngineObservation engineObservation = observation.observation();
-      String phase = engineObservation.remotePhase();
-      if ("SUBMITTED".equals(phase) || "RUNNING".equals(phase)) {
-        casTransition(
-            current,
-            "RUNNING".equals(phase) ? "RUNNING" : current.status().phase(),
-            current.status().attempt() != null ? current.status().attempt().externalId() : null);
-        return;
-      }
-      String finishedAt = clock.now();
-      ProcessResource.ProcessStatus status = current.status();
-      ProcessResource.ProcessAttempt attempt = status.attempt();
-      ProcessResource.ProcessAttempt closedAttempt =
-          attempt == null
-              ? null
-              : new ProcessResource.ProcessAttempt(
-                  attempt.dispatchGeneration(),
-                  attempt.submissionKey(),
-                  attempt.requestHash(),
-                  attempt.submitState(),
-                  attempt.externalId(),
-                  attempt.dispatchedAt(),
-                  engineObservation.failure() != null && !engineObservation.failure().retryable()
-                      ? "FINAL"
-                      : "ALLOW",
-                  finishedAt,
-                  attempt.submissionHistory(),
-                  attempt.manualResolutions());
-      ProcessResource.ProcessStatus next =
-          new ProcessResource.ProcessStatus(
-              phase,
-              status.retryNumber(),
-              closedAttempt,
-              status.attemptHistory(),
-              status.lastObservedAt(),
-              null,
-              status.engineBackoffAttempts(),
-              status.conditions(),
-              new ProcessResource.Summary(
-                  engineObservation.trackUri(), engineObservation.summaryDelta()),
-              "FAILED".equals(phase) && engineObservation.failure() != null
-                  ? engineObservation.failure().message()
-                  : null,
-              status.submittedAt(),
-              status.startedAt(),
-              finishedAt);
-      boolean written = casWrite(current, next);
-      if (written) {
-        // the terminal result is durable: the engine handle may be cleaned up now
-        String externalId = attempt != null ? attempt.externalId() : null;
-        ProcessEngineDispatcher engine = engineOf(current);
-        if (externalId != null && engine != null) {
-          handleRegistry.track(name, externalId);
-          org.apache.amoro.process.engine.ProcessEngineDispatcher.CommandFlight<Void>
-              releaseFlight =
-                  engine.release(current.spec().executionEngine(), externalId);
-          releaseFlight.whenComplete(
-              (ignored, releaseError) -> {
-                try {
-                  if (releaseError == null) {
-                    handleRegistry.release(name);
-                  }
-                } finally {
-                  releaseFlight.markDurablyHandled();
-                }
-              });
-        }
-      }
-    } catch (RuntimeException e) {
-      LOG.warn("Applying observation of {} failed.", name, e);
-    }
-  }
-
-  // ------------------------------------------------------------------ helpers
-
-  /** direct CANCELED for a provably-never-dispatched attempt (spec §7.4 first row). */
-  private ProcessResource.ProcessStatus directCanceled(ProcessResource resource) {
+  private void persistCancellationUnsupported(ProcessResource resource, String capabilityVersion) {
     ProcessResource.ProcessStatus status = resource.status();
-    String now = clock.now();
-    return new ProcessResource.ProcessStatus(
-        "CANCELED",
-        status.retryNumber(),
-        closeForCancel(status.attempt(), now),
-        status.attemptHistory(),
-        status.lastObservedAt(),
-        now,
-        status.engineBackoffAttempts(),
-        status.conditions(),
-        status.summary(),
-        null,
-        status.submittedAt(),
-        status.startedAt(),
-        now);
-  }
-
-  private ProcessResource.ProcessAttempt closeForCancel(
-      ProcessResource.ProcessAttempt attempt, String now) {
-    if (attempt == null) {
-      return null;
-    }
-    return new ProcessResource.ProcessAttempt(
-        attempt.dispatchGeneration(),
-        attempt.submissionKey(),
-        attempt.requestHash(),
-        attempt.submitState(),
-        attempt.externalId(),
-        attempt.dispatchedAt(),
-        "FINAL",
-        now,
-        attempt.submissionHistory(),
-        attempt.manualResolutions());
-  }
-
-  private ProcessResource.ProcessStatus withSubmitState(ProcessResource current, String state) {
-    ProcessResource.ProcessStatus status = current.status();
-    ProcessResource.ProcessAttempt attempt = status.attempt();
-    if (attempt == null) {
-      return status;
-    }
-    ProcessResource.ProcessAttempt marked =
-        new ProcessResource.ProcessAttempt(
-            attempt.dispatchGeneration(),
-            attempt.submissionKey(),
-            attempt.requestHash(),
-            state,
-            attempt.externalId(),
-            attempt.dispatchedAt(),
-            attempt.retryDisposition(),
-            attempt.finishedAt(),
-            attempt.submissionHistory(),
-            attempt.manualResolutions());
-    return new ProcessResource.ProcessStatus(
-        status.phase(),
-        status.retryNumber(),
-        marked,
-        status.attemptHistory(),
-        status.lastObservedAt(),
-        null,
-        status.engineBackoffAttempts(),
-        status.conditions(),
-        status.summary(),
-        status.failure(),
-        status.submittedAt(),
-        status.startedAt(),
-        status.finishedAt());
-  }
-
-  /**
-   * The dispatcher serving this process's {@code spec.executionEngine}; empty when the engine is
-   * not deployed in this installation (e.g. remote Spark not yet wired). The caller waits — the
-   * resource stays durable and the next round retries the lookup.
-   */
-  private org.apache.amoro.process.engine.ProcessEngineDispatcher engineOf(
-      ProcessResource resource) {
-    return engines.dispatcherFor(resource.spec().executionEngine()).orElse(null);
-  }
-
-  private ProcessResource.ProcessAttempt ensureAttempt(ProcessResource resource) {
-    ProcessResource.ProcessAttempt attempt = resource.status().attempt();
-    if (attempt != null) {
-      return attempt;
-    }
-    int retryNumber = resource.status().retryNumber();
-    String submissionKey = processName + ":" + retryNumber + ":0";
-    return new ProcessResource.ProcessAttempt(
-        0,
-        submissionKey,
-        "sha256:" + resource.spec().request().requestHash(),
-        "CREATED",
-        null,
-        null,
-        "AUTO",
-        null,
-        new ArrayList<ProcessResource.SubmissionSummary>(),
-        new ProcessResource.ManualResolutions(null, null));
-  }
-
-  private byte[] payloadOf(ProcessResource resource) {
-    // the frozen spec IS the submission payload for the fake/remote adapter contract
-    return (resource.name() + "|" + resource.spec().action() + "|" + resource.spec().parameters())
-        .getBytes(java.nio.charset.StandardCharsets.UTF_8);
-  }
-
-  private ProcessResource.ProcessStatus terminal(
-      String phase, ProcessResource current, String failure) {
-    ProcessResource.ProcessStatus status = current.status();
-    String finishedAt = clock.now();
-    return new ProcessResource.ProcessStatus(
-        phase,
-        status.retryNumber(),
-        status.attempt(),
-        status.attemptHistory(),
-        status.lastObservedAt(),
-        null,
-        status.engineBackoffAttempts(),
-        status.conditions(),
-        status.summary(),
-        failure != null ? failure : status.failure(),
-        status.submittedAt(),
-        status.startedAt(),
-        finishedAt);
-  }
-
-  private Step casTransition(ProcessResource resource, String newPhase) {
-    return casTransition(resource, newPhase, null);
-  }
-
-  private Step casTransition(ProcessResource resource, String newPhase, String externalId) {
-    ProcessResource.ProcessStatus status = resource.status();
-    ProcessResource.ProcessAttempt attempt = status.attempt();
-    ProcessResource.ProcessAttempt withId =
-        attempt == null
-            ? null
-            : externalId == null || externalId.equals(attempt.externalId())
-                ? attempt
-                : new ProcessResource.ProcessAttempt(
-                    attempt.dispatchGeneration(),
-                    attempt.submissionKey(),
-                    attempt.requestHash(),
-                    "ACKNOWLEDGED",
-                    externalId,
-                    clock.now(),
-                    attempt.retryDisposition(),
-                    attempt.finishedAt(),
-                    attempt.submissionHistory(),
-                    attempt.manualResolutions());
-    ProcessResource.ProcessStatus next =
-        new ProcessResource.ProcessStatus(
-            newPhase,
+    String timestamp = clock.now();
+    ProcessResource.EngineBackoff backoff =
+        new ProcessResource.EngineBackoff(
+            status.engineBackoffAttempts().submit(),
+            status.engineBackoffAttempts().resolve(),
+            status.engineBackoffAttempts().observe(),
+            0);
+    List<ProcessResource.Condition> conditions =
+        clearEngineCondition(
+            ProcessConditions.set(
+                status.conditions(),
+                ProcessConditions.CANCELLATION_UNSUPPORTED,
+                "CancellationUnsupported",
+                "engine cancellation is not supported; observe only",
+                timestamp,
+                capabilityVersion),
+            backoff);
+    casWrite(
+        resource,
+        copyStatus(
+            status,
+            "CANCELING",
             status.retryNumber(),
-            withId != null ? withId : attempt,
+            status.attempt(),
             status.attemptHistory(),
+            status.lastObservedAt(),
+            status.lastCancelAttemptAt(),
+            timestamp,
+            backoff,
+            conditions,
+            status.summary(),
+            status.failure(),
+            status.submittedAt(),
+            status.startedAt(),
+            status.finishedAt()));
+  }
+
+  private void removeCondition(ProcessResource resource, String type) {
+    ProcessResource.ProcessStatus status = resource.status();
+    casWrite(
+        resource,
+        copyStatus(
+            status,
+            status.phase(),
+            status.retryNumber(),
+            status.attempt(),
+            status.attemptHistory(),
+            status.lastObservedAt(),
+            status.lastCancelAttemptAt(),
             clock.now(),
-            null,
+            status.engineBackoffAttempts(),
+            ProcessConditions.remove(status.conditions(), type),
+            status.summary(),
+            status.failure(),
+            status.submittedAt(),
+            status.startedAt(),
+            status.finishedAt()));
+  }
+
+  private void refreshExecutionUnresolvedReminder(ProcessResource resource) {
+    ProcessResource.ProcessStatus status = resource.status();
+    casWrite(
+        resource,
+        copyStatus(
+            status,
+            status.phase(),
+            status.retryNumber(),
+            status.attempt(),
+            status.attemptHistory(),
+            status.lastObservedAt(),
+            status.lastCancelAttemptAt(),
+            plusMillis(clock.now(), executionUnresolvedMillis),
             status.engineBackoffAttempts(),
             status.conditions(),
             status.summary(),
             status.failure(),
             status.submittedAt(),
-            "RUNNING".equals(newPhase) && status.startedAt() == null
-                ? clock.now()
-                : status.startedAt(),
-            status.finishedAt());
-    return casWrite(resource, next) ? Step.DONE : Step.DONE;
+            status.startedAt(),
+            status.finishedAt()));
+  }
+
+  private boolean repairFinalityIfNeeded(ProcessResource resource) {
+    if (!ProcessFinality.isFinal(resource)) {
+      return false;
+    }
+    ProcessResource.ProcessStatus status = resource.status();
+    ProcessResource.ProcessAttempt attempt = status.attempt();
+    boolean needsRepair =
+        attempt == null
+            || attempt.finishedAt() == null
+            || status.finishedAt() == null
+            || ("FAILED".equals(status.phase())
+                && (status.failure() == null || attempt.lastError() == null));
+    if (!needsRepair) {
+      return false;
+    }
+    String timestamp =
+        status.finishedAt() != null
+            ? status.finishedAt()
+            : attempt != null && attempt.finishedAt() != null ? attempt.finishedAt() : clock.now();
+    String attemptFinishedAt =
+        attempt != null && attempt.finishedAt() != null
+            ? attempt.finishedAt()
+            : status.finishedAt() != null ? status.finishedAt() : timestamp;
+    String statusFinishedAt = status.finishedAt() != null ? status.finishedAt() : attemptFinishedAt;
+    if (attempt == null) {
+      attempt =
+          new ProcessResource.ProcessAttempt(
+              0,
+              processName + ":" + status.retryNumber() + ":0",
+              ProcessRequestHashes.actionAttempt(
+                  processName, status.retryNumber(), resource.spec()),
+              "CREATED",
+              null,
+              null,
+              "FAILED".equals(status.phase()) ? "FAILED" : null,
+              "FINAL",
+              attemptFinishedAt,
+              new ArrayList<>(),
+              new ProcessResource.ManualResolutions(null, null));
+    } else {
+      attempt =
+          copyAttempt(
+              attempt,
+              attempt.submitState(),
+              attempt.externalId(),
+              attempt.dispatchedAt(),
+              "FAILED".equals(status.phase()) && attempt.lastError() == null
+                  ? status.failure() != null ? status.failure() : "FAILED"
+                  : attempt.lastError(),
+              attempt.retryDisposition(),
+              attemptFinishedAt);
+    }
+    List<ProcessResource.Condition> repaired =
+        ProcessConditions.set(
+            status.conditions(),
+            ProcessConditions.DATA_REPAIRED,
+            "FinalityMarkersRepaired",
+            "missing finality markers were reconstructed",
+            timestamp,
+            null);
+    casWrite(
+        resource,
+        copyStatus(
+            status,
+            status.phase(),
+            status.retryNumber(),
+            attempt,
+            status.attemptHistory(),
+            status.lastObservedAt(),
+            status.lastCancelAttemptAt(),
+            null,
+            status.engineBackoffAttempts(),
+            repaired,
+            status.summary(),
+            "FAILED".equals(status.phase())
+                ? (status.failure() != null
+                    ? status.failure()
+                    : attempt.lastError() != null ? attempt.lastError() : "FAILED")
+                : null,
+            status.submittedAt(),
+            status.startedAt(),
+            statusFinishedAt));
+    return true;
+  }
+
+  private ProcessEngineDispatcher engineOf(ProcessResource resource) {
+    return engines.dispatcherFor(resource.spec().executionEngine()).orElse(null);
+  }
+
+  private Duration remaining(String deadline) {
+    if (deadline == null) {
+      return Duration.ZERO;
+    }
+    try {
+      Duration duration = Duration.between(Instant.parse(clock.now()), Instant.parse(deadline));
+      return duration.isNegative() || duration.isZero() ? Duration.ZERO : duration;
+    } catch (RuntimeException malformedImportedDeadline) {
+      LOG.warn(
+          "Process {} has malformed nextReconcileAt {}; treating it as due.",
+          processName,
+          deadline);
+      return Duration.ZERO;
+    }
+  }
+
+  private boolean cancelDue(String lastCancelAttemptAt) {
+    if (lastCancelAttemptAt == null) {
+      return true;
+    }
+    return !Instant.parse(clock.now())
+        .isBefore(Instant.parse(lastCancelAttemptAt).plusMillis(cancelRetryMillis));
+  }
+
+  private void wake() {
+    try {
+      scheduler.schedule(this);
+    } catch (java.util.concurrent.RejectedExecutionException shuttingDown) {
+      LOG.debug("Scheduler stopped before Process {} callback wake-up.", processName);
+    }
+  }
+
+  private void persistResult(
+      String operationIdentity,
+      CommandFlight<?> flight,
+      java.util.function.BooleanSupplier durableApply,
+      ProcessResultPersistenceRetryer.Lease resultLease) {
+    String identity = processName + "|" + operationIdentity;
+    if (resultRetryer != null) {
+      resultRetryer.handle(identity, flight, durableApply, this::wake, resultLease);
+      return;
+    }
+    // Lightweight/test assembly has no background lifecycle. It still releases only a result that
+    // was durably handled; a failed write deliberately holds the flight until restart.
+    try {
+      if (durableApply.getAsBoolean()) {
+        flight.markDurablyHandled();
+        wake();
+      }
+    } catch (RuntimeException unavailable) {
+      LOG.warn(
+          "Engine result {} could not be applied; retaining its command flight.",
+          identity,
+          unavailable);
+    }
+  }
+
+  private ProcessResultPersistenceRetryer.Lease reserveResultSlot() {
+    return resultRetryer == null ? null : resultRetryer.tryReserve();
+  }
+
+  private static void closeLease(ProcessResultPersistenceRetryer.Lease lease) {
+    if (lease != null) {
+      lease.close();
+    }
   }
 
   private boolean casWrite(ProcessResource current, ProcessResource.ProcessStatus next) {
     try {
-      repository.modify(current.name(), current.resourceVersion(), r -> r.withStatus(next));
+      repository.modify(
+          current.name(), current.resourceVersion(), resource -> resource.withStatus(next));
       return true;
-    } catch (org.apache.amoro.persistence.exception.PreconditionFailedException raced) {
-      // another writer won; the next reconcile round reads the fresh state (level-triggered)
-      LOG.debug("CAS for {} lost a race; next round converges.", current.name());
+    } catch (PreconditionFailedException raced) {
       return false;
     }
+  }
+
+  private byte[] payloadOf(ProcessResource resource) {
+    return submissionBuilder.build(resource);
+  }
+
+  private static String plusMillis(String timestamp, long millis) {
+    return Instant.parse(timestamp).plusMillis(millis).toString();
+  }
+
+  private static List<ProcessResource.Condition> clearEngineCondition(
+      List<ProcessResource.Condition> conditions, ProcessResource.EngineBackoff backoff) {
+    return backoff.submit() == 0
+            && backoff.resolve() == 0
+            && backoff.observe() == 0
+            && backoff.cancel() == 0
+        ? ProcessConditions.remove(conditions, ProcessConditions.ENGINE_UNREACHABLE)
+        : conditions;
+  }
+
+  private static ProcessResource.ProcessAttempt copyAttempt(
+      ProcessResource.ProcessAttempt source,
+      String submitState,
+      String externalId,
+      String dispatchedAt,
+      String lastError,
+      String retryDisposition,
+      String finishedAt) {
+    return new ProcessResource.ProcessAttempt(
+        source.dispatchGeneration(),
+        source.submissionKey(),
+        source.requestHash(),
+        submitState,
+        externalId,
+        dispatchedAt,
+        lastError,
+        retryDisposition,
+        finishedAt,
+        source.submissionHistory(),
+        source.manualResolutions());
+  }
+
+  private static ProcessResource.ProcessStatus copyStatus(
+      ProcessResource.ProcessStatus source,
+      String phase,
+      int retryNumber,
+      ProcessResource.ProcessAttempt attempt,
+      List<ProcessResource.AttemptSummary> history,
+      String lastObservedAt,
+      String lastCancelAttemptAt,
+      String nextReconcileAt,
+      ProcessResource.EngineBackoff backoff,
+      List<ProcessResource.Condition> conditions,
+      ProcessResource.Summary summary,
+      String failure,
+      String submittedAt,
+      String startedAt,
+      String finishedAt) {
+    return new ProcessResource.ProcessStatus(
+        phase,
+        retryNumber,
+        attempt,
+        history,
+        lastObservedAt,
+        lastCancelAttemptAt,
+        nextReconcileAt,
+        backoff,
+        conditions,
+        summary,
+        failure,
+        submittedAt,
+        startedAt,
+        finishedAt);
   }
 }

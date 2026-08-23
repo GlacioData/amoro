@@ -159,7 +159,7 @@ public final class ProcessResource implements ControlledResource {
   public static final class ProcessSpec {
 
     private final TableRef table;
-    private final String action; // lower-kebab wire value, e.g. expire-snapshots
+    private final String action; // lower-kebab wire value, e.g. dummy-maintenance
     private final String executionEngine; // remote-spark | local
     private final String triggerSource; // MANUAL | SCHEDULED
     private final String createdAt; // RFC 3339 UTC
@@ -186,9 +186,7 @@ public final class ProcessResource implements ControlledResource {
       this.createdAt = Objects.requireNonNull(createdAt, "createdAt");
       this.desiredState = Objects.requireNonNull(desiredState, "desiredState");
       this.request = Objects.requireNonNull(request, "request");
-      this.parameters =
-          Collections.unmodifiableMap(
-              new java.util.LinkedHashMap<>(Objects.requireNonNull(parameters, "parameters")));
+      this.parameters = immutableJsonMap(Objects.requireNonNull(parameters, "parameters"));
       this.retryPolicy = Objects.requireNonNull(retryPolicy, "retryPolicy");
     }
 
@@ -286,13 +284,16 @@ public final class ProcessResource implements ControlledResource {
     private final String database;
     private final String table;
     private final String tableId;
+    private final String tableFormat;
 
     @JsonCreator
-    public TableRef(String catalog, String database, String table, String tableId) {
+    public TableRef(
+        String catalog, String database, String table, String tableId, String tableFormat) {
       this.catalog = Objects.requireNonNull(catalog, "catalog");
       this.database = Objects.requireNonNull(database, "database");
       this.table = Objects.requireNonNull(table, "table");
       this.tableId = Objects.requireNonNull(tableId, "tableId");
+      this.tableFormat = Objects.requireNonNull(tableFormat, "tableFormat");
     }
 
     public String catalog() {
@@ -311,6 +312,10 @@ public final class ProcessResource implements ControlledResource {
       return tableId;
     }
 
+    public String tableFormat() {
+      return tableFormat;
+    }
+
     @Override
     public boolean equals(Object o) {
       if (this == o) {
@@ -323,12 +328,13 @@ public final class ProcessResource implements ControlledResource {
       return catalog.equals(that.catalog)
           && database.equals(that.database)
           && table.equals(that.table)
-          && tableId.equals(that.tableId);
+          && tableId.equals(that.tableId)
+          && tableFormat.equals(that.tableFormat);
     }
 
     @Override
     public int hashCode() {
-      return Objects.hash(catalog, database, table, tableId);
+      return Objects.hash(catalog, database, table, tableId, tableFormat);
     }
   }
 
@@ -436,6 +442,7 @@ public final class ProcessResource implements ControlledResource {
     private final ProcessAttempt attempt; // current action attempt (latest, complete)
     private final List<AttemptSummary> attemptHistory; // bounded by maxRetries
     private final String lastObservedAt;
+    private final String lastCancelAttemptAt;
     private final String nextReconcileAt; // persisted business gating
     private final EngineBackoff engineBackoffAttempts; // per-operation, restart-persistent
     private final List<Condition> conditions; // ≤ 8, unique by type
@@ -452,6 +459,7 @@ public final class ProcessResource implements ControlledResource {
         ProcessAttempt attempt,
         List<AttemptSummary> attemptHistory,
         String lastObservedAt,
+        String lastCancelAttemptAt,
         String nextReconcileAt,
         EngineBackoff engineBackoffAttempts,
         List<Condition> conditions,
@@ -468,6 +476,7 @@ public final class ProcessResource implements ControlledResource {
               ? Collections.emptyList()
               : Collections.unmodifiableList(new ArrayList<>(attemptHistory));
       this.lastObservedAt = lastObservedAt;
+      this.lastCancelAttemptAt = lastCancelAttemptAt;
       this.nextReconcileAt = nextReconcileAt;
       this.engineBackoffAttempts =
           engineBackoffAttempts == null ? new EngineBackoff(0, 0, 0, 0) : engineBackoffAttempts;
@@ -480,6 +489,38 @@ public final class ProcessResource implements ControlledResource {
       this.submittedAt = submittedAt;
       this.startedAt = startedAt;
       this.finishedAt = finishedAt;
+    }
+
+    /** Backward-compatible construction shape used by existing callers and imported resources. */
+    public ProcessStatus(
+        String phase,
+        int retryNumber,
+        ProcessAttempt attempt,
+        List<AttemptSummary> attemptHistory,
+        String lastObservedAt,
+        String nextReconcileAt,
+        EngineBackoff engineBackoffAttempts,
+        List<Condition> conditions,
+        Summary summary,
+        String failure,
+        String submittedAt,
+        String startedAt,
+        String finishedAt) {
+      this(
+          phase,
+          retryNumber,
+          attempt,
+          attemptHistory,
+          lastObservedAt,
+          null,
+          nextReconcileAt,
+          engineBackoffAttempts,
+          conditions,
+          summary,
+          failure,
+          submittedAt,
+          startedAt,
+          finishedAt);
     }
 
     public String phase() {
@@ -500,6 +541,10 @@ public final class ProcessResource implements ControlledResource {
 
     public String lastObservedAt() {
       return lastObservedAt;
+    }
+
+    public String lastCancelAttemptAt() {
+      return lastCancelAttemptAt;
     }
 
     public String nextReconcileAt() {
@@ -541,6 +586,7 @@ public final class ProcessResource implements ControlledResource {
           attempt,
           attemptHistory,
           lastObservedAt,
+          lastCancelAttemptAt,
           nextReconcileAt,
           engineBackoffAttempts,
           conditions,
@@ -565,6 +611,7 @@ public final class ProcessResource implements ControlledResource {
           && Objects.equals(attempt, that.attempt)
           && attemptHistory.equals(that.attemptHistory)
           && Objects.equals(lastObservedAt, that.lastObservedAt)
+          && Objects.equals(lastCancelAttemptAt, that.lastCancelAttemptAt)
           && Objects.equals(nextReconcileAt, that.nextReconcileAt)
           && engineBackoffAttempts.equals(that.engineBackoffAttempts)
           && conditions.equals(that.conditions)
@@ -583,6 +630,7 @@ public final class ProcessResource implements ControlledResource {
           attempt,
           attemptHistory,
           lastObservedAt,
+          lastCancelAttemptAt,
           nextReconcileAt,
           engineBackoffAttempts,
           conditions,
@@ -606,6 +654,7 @@ public final class ProcessResource implements ControlledResource {
     private final String submitState; // CREATED..UNAVAILABLE
     private final String externalId;
     private final String dispatchedAt;
+    private final String lastError;
     private final String retryDisposition; // AUTO | ALLOW | FINAL
     private final String finishedAt; // attempt-scoped terminal time
     private final List<SubmissionSummary> submissionHistory; // bounded generations
@@ -619,6 +668,7 @@ public final class ProcessResource implements ControlledResource {
         String submitState,
         String externalId,
         String dispatchedAt,
+        String lastError,
         String retryDisposition,
         String finishedAt,
         List<SubmissionSummary> submissionHistory,
@@ -629,6 +679,7 @@ public final class ProcessResource implements ControlledResource {
       this.submitState = submitState;
       this.externalId = externalId;
       this.dispatchedAt = dispatchedAt;
+      this.lastError = lastError;
       this.retryDisposition = retryDisposition;
       this.finishedAt = finishedAt;
       this.submissionHistory =
@@ -636,6 +687,32 @@ public final class ProcessResource implements ControlledResource {
               ? Collections.emptyList()
               : Collections.unmodifiableList(new ArrayList<>(submissionHistory));
       this.manualResolutions = manualResolutions;
+    }
+
+    /** Backward-compatible shape; new transition code writes the structured lastError slot. */
+    public ProcessAttempt(
+        int dispatchGeneration,
+        String submissionKey,
+        String requestHash,
+        String submitState,
+        String externalId,
+        String dispatchedAt,
+        String retryDisposition,
+        String finishedAt,
+        List<SubmissionSummary> submissionHistory,
+        ManualResolutions manualResolutions) {
+      this(
+          dispatchGeneration,
+          submissionKey,
+          requestHash,
+          submitState,
+          externalId,
+          dispatchedAt,
+          null,
+          retryDisposition,
+          finishedAt,
+          submissionHistory,
+          manualResolutions);
     }
 
     public int dispatchGeneration() {
@@ -660,6 +737,10 @@ public final class ProcessResource implements ControlledResource {
 
     public String dispatchedAt() {
       return dispatchedAt;
+    }
+
+    public String lastError() {
+      return lastError;
     }
 
     public String retryDisposition() {
@@ -693,6 +774,7 @@ public final class ProcessResource implements ControlledResource {
           && Objects.equals(submitState, that.submitState)
           && Objects.equals(externalId, that.externalId)
           && Objects.equals(dispatchedAt, that.dispatchedAt)
+          && Objects.equals(lastError, that.lastError)
           && Objects.equals(retryDisposition, that.retryDisposition)
           && Objects.equals(finishedAt, that.finishedAt)
           && submissionHistory.equals(that.submissionHistory)
@@ -708,6 +790,7 @@ public final class ProcessResource implements ControlledResource {
           submitState,
           externalId,
           dispatchedAt,
+          lastError,
           retryDisposition,
           finishedAt,
           submissionHistory,
@@ -725,7 +808,7 @@ public final class ProcessResource implements ControlledResource {
     private final String submissionKey;
     private final String requestHash;
     private final String outcome;
-    private final String manualResolution;
+    private final ManualResolution manualResolution;
     private final String finishedAt;
 
     @JsonCreator
@@ -734,7 +817,7 @@ public final class ProcessResource implements ControlledResource {
         String submissionKey,
         String requestHash,
         String outcome,
-        String manualResolution,
+        ManualResolution manualResolution,
         String finishedAt) {
       this.dispatchGeneration = dispatchGeneration;
       this.submissionKey = submissionKey;
@@ -742,6 +825,30 @@ public final class ProcessResource implements ControlledResource {
       this.outcome = outcome;
       this.manualResolution = manualResolution;
       this.finishedAt = finishedAt;
+    }
+
+    public int dispatchGeneration() {
+      return dispatchGeneration;
+    }
+
+    public String submissionKey() {
+      return submissionKey;
+    }
+
+    public String requestHash() {
+      return requestHash;
+    }
+
+    public String outcome() {
+      return outcome;
+    }
+
+    public ManualResolution manualResolution() {
+      return manualResolution;
+    }
+
+    public String finishedAt() {
+      return finishedAt;
     }
 
     @Override
@@ -768,26 +875,144 @@ public final class ProcessResource implements ControlledResource {
     }
   }
 
-  /** Attempt-bound manual resolution audit (null when none). */
+  /** A bounded, attempt-bound manual conclusion audit. Raw idempotency keys are never stored. */
+  @JsonAutoDetect(
+      fieldVisibility = JsonAutoDetect.Visibility.ANY,
+      getterVisibility = JsonAutoDetect.Visibility.NONE,
+      isGetterVisibility = JsonAutoDetect.Visibility.NONE)
+  public static final class ManualResolution {
+    private final String idempotencyKeyHash;
+    private final String commandHash;
+    private final String submissionKey;
+    private final String requestHash;
+    private final String outcome;
+    private final String externalId;
+    private final Boolean retryAllowed;
+    private final String reason;
+    private final String operatorContext;
+    private final String resolvedAt;
+
+    @JsonCreator
+    public ManualResolution(
+        String idempotencyKeyHash,
+        String commandHash,
+        String submissionKey,
+        String requestHash,
+        String outcome,
+        String externalId,
+        Boolean retryAllowed,
+        String reason,
+        String operatorContext,
+        String resolvedAt) {
+      this.idempotencyKeyHash = Objects.requireNonNull(idempotencyKeyHash, "idempotencyKeyHash");
+      this.commandHash = Objects.requireNonNull(commandHash, "commandHash");
+      this.submissionKey = Objects.requireNonNull(submissionKey, "submissionKey");
+      this.requestHash = Objects.requireNonNull(requestHash, "requestHash");
+      this.outcome = Objects.requireNonNull(outcome, "outcome");
+      this.externalId = externalId;
+      this.retryAllowed = retryAllowed;
+      this.reason = Objects.requireNonNull(reason, "reason");
+      this.operatorContext = Objects.requireNonNull(operatorContext, "operatorContext");
+      this.resolvedAt = Objects.requireNonNull(resolvedAt, "resolvedAt");
+    }
+
+    public String idempotencyKeyHash() {
+      return idempotencyKeyHash;
+    }
+
+    public String commandHash() {
+      return commandHash;
+    }
+
+    public String submissionKey() {
+      return submissionKey;
+    }
+
+    public String requestHash() {
+      return requestHash;
+    }
+
+    public String outcome() {
+      return outcome;
+    }
+
+    public String externalId() {
+      return externalId;
+    }
+
+    public Boolean retryAllowed() {
+      return retryAllowed;
+    }
+
+    public String reason() {
+      return reason;
+    }
+
+    public String operatorContext() {
+      return operatorContext;
+    }
+
+    public String resolvedAt() {
+      return resolvedAt;
+    }
+
+    @Override
+    public boolean equals(Object o) {
+      if (this == o) {
+        return true;
+      }
+      if (o == null || getClass() != o.getClass()) {
+        return false;
+      }
+      ManualResolution that = (ManualResolution) o;
+      return idempotencyKeyHash.equals(that.idempotencyKeyHash)
+          && commandHash.equals(that.commandHash)
+          && submissionKey.equals(that.submissionKey)
+          && requestHash.equals(that.requestHash)
+          && outcome.equals(that.outcome)
+          && Objects.equals(externalId, that.externalId)
+          && Objects.equals(retryAllowed, that.retryAllowed)
+          && reason.equals(that.reason)
+          && operatorContext.equals(that.operatorContext)
+          && resolvedAt.equals(that.resolvedAt);
+    }
+
+    @Override
+    public int hashCode() {
+      return Objects.hash(
+          idempotencyKeyHash,
+          commandHash,
+          submissionKey,
+          requestHash,
+          outcome,
+          externalId,
+          retryAllowed,
+          reason,
+          operatorContext,
+          resolvedAt);
+    }
+  }
+
+  /** Attempt-bound manual resolution audit slots (null when no conclusion exists). */
   @JsonAutoDetect(
       fieldVisibility = JsonAutoDetect.Visibility.ANY,
       getterVisibility = JsonAutoDetect.Visibility.NONE,
       isGetterVisibility = JsonAutoDetect.Visibility.NONE)
   public static final class ManualResolutions {
-    private final String submission; // JSON audit record or null
-    private final String execution;
+    private final ManualResolution submission;
+    private final ManualResolution execution;
 
     @JsonCreator
-    public ManualResolutions(String submission, String execution) {
+    public ManualResolutions(ManualResolution submission, ManualResolution execution) {
       this.submission = submission;
       this.execution = execution;
     }
 
-    public String submission() {
+    public ManualResolution submission() {
       return submission;
     }
 
-    public String execution() {
+    public ManualResolution execution() {
       return execution;
     }
 
@@ -878,6 +1103,7 @@ public final class ProcessResource implements ControlledResource {
     private final String message;
     private final String lastTransitionTime;
     private final String lastUpdateTime;
+    private final String observedCapabilityVersion;
 
     @JsonCreator
     public Condition(
@@ -886,13 +1112,25 @@ public final class ProcessResource implements ControlledResource {
         String reason,
         String message,
         String lastTransitionTime,
-        String lastUpdateTime) {
+        String lastUpdateTime,
+        String observedCapabilityVersion) {
       this.type = Objects.requireNonNull(type, "type");
       this.status = Objects.requireNonNull(status, "status");
       this.reason = reason;
       this.message = message;
       this.lastTransitionTime = lastTransitionTime;
       this.lastUpdateTime = lastUpdateTime;
+      this.observedCapabilityVersion = observedCapabilityVersion;
+    }
+
+    public Condition(
+        String type,
+        String status,
+        String reason,
+        String message,
+        String lastTransitionTime,
+        String lastUpdateTime) {
+      this(type, status, reason, message, lastTransitionTime, lastUpdateTime, null);
     }
 
     public String type() {
@@ -919,6 +1157,10 @@ public final class ProcessResource implements ControlledResource {
       return lastUpdateTime;
     }
 
+    public String observedCapabilityVersion() {
+      return observedCapabilityVersion;
+    }
+
     @Override
     public boolean equals(Object o) {
       if (this == o) {
@@ -933,12 +1175,20 @@ public final class ProcessResource implements ControlledResource {
           && Objects.equals(reason, that.reason)
           && Objects.equals(message, that.message)
           && Objects.equals(lastTransitionTime, that.lastTransitionTime)
-          && Objects.equals(lastUpdateTime, that.lastUpdateTime);
+          && Objects.equals(lastUpdateTime, that.lastUpdateTime)
+          && Objects.equals(observedCapabilityVersion, that.observedCapabilityVersion);
     }
 
     @Override
     public int hashCode() {
-      return Objects.hash(type, status, reason, message, lastTransitionTime, lastUpdateTime);
+      return Objects.hash(
+          type,
+          status,
+          reason,
+          message,
+          lastTransitionTime,
+          lastUpdateTime,
+          observedCapabilityVersion);
     }
   }
 
@@ -954,10 +1204,7 @@ public final class ProcessResource implements ControlledResource {
     @JsonCreator
     public Summary(String trackUri, java.util.Map<String, Object> result) {
       this.trackUri = trackUri;
-      this.result =
-          result == null
-              ? Collections.emptyMap()
-              : Collections.unmodifiableMap(new java.util.LinkedHashMap<>(result));
+      this.result = result == null ? Collections.emptyMap() : immutableJsonMap(result);
     }
 
     public String trackUri() {
@@ -1000,7 +1247,7 @@ public final class ProcessResource implements ControlledResource {
     private final String externalId; // kept for idempotent handle release
     private final String retryDisposition;
     private final List<SubmissionSummary> submissionHistory;
-    private final String manualResolution;
+    private final ManualResolutions manualResolutions;
     private final String finishedAt;
     private final String reason;
 
@@ -1014,7 +1261,7 @@ public final class ProcessResource implements ControlledResource {
         String externalId,
         String retryDisposition,
         List<SubmissionSummary> submissionHistory,
-        String manualResolution,
+        ManualResolutions manualResolutions,
         String finishedAt,
         String reason) {
       this.retryNumber = retryNumber;
@@ -1028,9 +1275,53 @@ public final class ProcessResource implements ControlledResource {
           submissionHistory == null
               ? Collections.emptyList()
               : Collections.unmodifiableList(new ArrayList<>(submissionHistory));
-      this.manualResolution = manualResolution;
+      this.manualResolutions = manualResolutions;
       this.finishedAt = finishedAt;
       this.reason = reason;
+    }
+
+    public int retryNumber() {
+      return retryNumber;
+    }
+
+    public int dispatchGeneration() {
+      return dispatchGeneration;
+    }
+
+    public String submissionKey() {
+      return submissionKey;
+    }
+
+    public String requestHash() {
+      return requestHash;
+    }
+
+    public String outcome() {
+      return outcome;
+    }
+
+    public String externalId() {
+      return externalId;
+    }
+
+    public String retryDisposition() {
+      return retryDisposition;
+    }
+
+    public List<SubmissionSummary> submissionHistory() {
+      return submissionHistory;
+    }
+
+    public ManualResolutions manualResolutions() {
+      return manualResolutions;
+    }
+
+    public String finishedAt() {
+      return finishedAt;
+    }
+
+    public String reason() {
+      return reason;
     }
 
     @Override
@@ -1050,7 +1341,7 @@ public final class ProcessResource implements ControlledResource {
           && Objects.equals(externalId, that.externalId)
           && Objects.equals(retryDisposition, that.retryDisposition)
           && submissionHistory.equals(that.submissionHistory)
-          && Objects.equals(manualResolution, that.manualResolution)
+          && Objects.equals(manualResolutions, that.manualResolutions)
           && Objects.equals(finishedAt, that.finishedAt)
           && Objects.equals(reason, that.reason);
     }
@@ -1066,9 +1357,47 @@ public final class ProcessResource implements ControlledResource {
           externalId,
           retryDisposition,
           submissionHistory,
-          manualResolution,
+          manualResolutions,
           finishedAt,
           reason);
     }
+  }
+
+  static java.util.Map<String, Object> immutableJsonMap(java.util.Map<String, Object> source) {
+    java.util.Map<String, Object> copy = new java.util.LinkedHashMap<>();
+    for (java.util.Map.Entry<String, Object> entry : source.entrySet()) {
+      if (entry.getKey() == null) {
+        throw new IllegalArgumentException("JSON object keys must not be null");
+      }
+      copy.put(entry.getKey(), immutableJsonValue(entry.getValue()));
+    }
+    return Collections.unmodifiableMap(copy);
+  }
+
+  private static Object immutableJsonValue(Object value) {
+    if (value == null
+        || value instanceof String
+        || value instanceof Number
+        || value instanceof Boolean) {
+      return value;
+    }
+    if (value instanceof java.util.Map) {
+      java.util.Map<String, Object> map = new java.util.LinkedHashMap<>();
+      for (java.util.Map.Entry<?, ?> entry : ((java.util.Map<?, ?>) value).entrySet()) {
+        if (!(entry.getKey() instanceof String)) {
+          throw new IllegalArgumentException("JSON object keys must be strings");
+        }
+        map.put((String) entry.getKey(), immutableJsonValue(entry.getValue()));
+      }
+      return Collections.unmodifiableMap(map);
+    }
+    if (value instanceof java.util.List) {
+      java.util.List<Object> list = new ArrayList<>();
+      for (Object item : (java.util.List<?>) value) {
+        list.add(immutableJsonValue(item));
+      }
+      return Collections.unmodifiableList(list);
+    }
+    throw new IllegalArgumentException("unsupported JSON value type " + value.getClass().getName());
   }
 }

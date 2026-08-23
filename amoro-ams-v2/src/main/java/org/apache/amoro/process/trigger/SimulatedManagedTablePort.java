@@ -27,7 +27,7 @@ import java.util.stream.Collectors;
 
 /**
  * Deterministic in-memory table-fact provider for explicit simulation and tests. It never loads an
- * Iceberg/Paimon table and has no adapter to the v1 AMS metadata/runtime stores.
+ * format table and has no adapter to the v1 AMS metadata/runtime stores.
  */
 public final class SimulatedManagedTablePort implements ManagedTablePort {
 
@@ -38,7 +38,8 @@ public final class SimulatedManagedTablePort implements ManagedTablePort {
     this.ordered.sort(Comparator.comparing(TableSnapshot::tableId));
     for (int i = 1; i < ordered.size(); i++) {
       if (ordered.get(i - 1).tableId().equals(ordered.get(i).tableId())) {
-        throw new IllegalArgumentException("duplicate simulated tableId " + ordered.get(i).tableId());
+        throw new IllegalArgumentException(
+            "duplicate simulated tableId " + ordered.get(i).tableId());
       }
     }
   }

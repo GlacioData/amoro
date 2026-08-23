@@ -22,6 +22,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.Collections;
 import java.util.HexFormat;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -30,6 +31,9 @@ import java.util.TreeMap;
 
 /** Canonical, already-authorized creation intent shared by manual and scheduled entry points. */
 public final class ProcessCreateIntent {
+
+  public static final int MAX_PARAMETERS_BYTES = 16 * 1024;
+  private static final int MAX_JSON_DEPTH = 64;
 
   private final ProcessResource.TableRef table;
   private final String action;
@@ -51,12 +55,9 @@ public final class ProcessCreateIntent {
     this.action = Objects.requireNonNull(action, "action");
     this.executionEngine = Objects.requireNonNull(executionEngine, "executionEngine");
     this.triggerSource = Objects.requireNonNull(triggerSource, "triggerSource");
-    this.idempotencyKeyHash =
-        Objects.requireNonNull(idempotencyKeyHash, "idempotencyKeyHash");
+    this.idempotencyKeyHash = Objects.requireNonNull(idempotencyKeyHash, "idempotencyKeyHash");
     this.requestHash = Objects.requireNonNull(requestHash, "requestHash");
-    this.parameters =
-        Collections.unmodifiableMap(
-            new LinkedHashMap<>(Objects.requireNonNull(parameters, "parameters")));
+    this.parameters = freezeParameters(Objects.requireNonNull(parameters, "parameters"));
   }
 
   /**
@@ -72,7 +73,7 @@ public final class ProcessCreateIntent {
       Map<String, Object> parameters) {
     Objects.requireNonNull(rawIdempotencyKey, "rawIdempotencyKey");
     Map<String, Object> frozen =
-        parameters == null ? Collections.emptyMap() : new LinkedHashMap<>(parameters);
+        parameters == null ? Collections.emptyMap() : freezeParameters(parameters);
     String requestHash =
         sha256(
             table.catalog()
@@ -80,6 +81,8 @@ public final class ProcessCreateIntent {
                 + table.database()
                 + "|"
                 + table.table()
+                + "|"
+                + table.tableFormat()
                 + "|"
                 + action
                 + "|"
@@ -128,6 +131,94 @@ public final class ProcessCreateIntent {
     return table.tableId() + "|" + action;
   }
 
+  /**
+   * Validates a format-neutral JSON object, rejects cycles/non-finite numbers and returns a deep
+   * immutable copy. The cap is measured on the deterministic canonical UTF-8 representation.
+   */
+  public static Map<String, Object> freezeParameters(Map<String, Object> parameters) {
+    Objects.requireNonNull(parameters, "parameters");
+    @SuppressWarnings("unchecked")
+    Map<String, Object> frozen =
+        (Map<String, Object>) freezeJson(parameters, new IdentityHashMap<Object, Boolean>(), 0);
+    int encodedBytes = canonical(frozen).getBytes(StandardCharsets.UTF_8).length;
+    if (encodedBytes > MAX_PARAMETERS_BYTES) {
+      throw new IllegalArgumentException(
+          "canonical parameters exceed " + MAX_PARAMETERS_BYTES + " UTF-8 bytes");
+    }
+    return frozen;
+  }
+
+  /** Deterministic JSON encoding used by dummy submission builders and request hashing. */
+  public static String canonicalParameters(Map<String, Object> parameters) {
+    return canonical(freezeParameters(parameters));
+  }
+
+  private static Object freezeJson(
+      Object value, IdentityHashMap<Object, Boolean> ancestors, int depth) {
+    if (depth > MAX_JSON_DEPTH) {
+      throw new IllegalArgumentException(
+          "parameters exceed the maximum JSON depth of " + MAX_JSON_DEPTH);
+    }
+    if (value == null || value instanceof String || value instanceof Boolean) {
+      return value;
+    }
+    if (value instanceof Double) {
+      if (!Double.isFinite((Double) value)) {
+        throw new IllegalArgumentException("parameters contain a non-finite number");
+      }
+      return value;
+    }
+    if (value instanceof Float) {
+      if (!Float.isFinite((Float) value)) {
+        throw new IllegalArgumentException("parameters contain a non-finite number");
+      }
+      return value;
+    }
+    if (value instanceof Byte
+        || value instanceof Short
+        || value instanceof Integer
+        || value instanceof Long
+        || value instanceof java.math.BigInteger
+        || value instanceof java.math.BigDecimal) {
+      return value;
+    }
+    if (value instanceof Map) {
+      enter(value, ancestors);
+      try {
+        Map<String, Object> copy = new LinkedHashMap<>();
+        for (Map.Entry<?, ?> entry : ((Map<?, ?>) value).entrySet()) {
+          if (!(entry.getKey() instanceof String)) {
+            throw new IllegalArgumentException("parameter object keys must be strings");
+          }
+          copy.put((String) entry.getKey(), freezeJson(entry.getValue(), ancestors, depth + 1));
+        }
+        return Collections.unmodifiableMap(copy);
+      } finally {
+        ancestors.remove(value);
+      }
+    }
+    if (value instanceof List) {
+      enter(value, ancestors);
+      try {
+        java.util.ArrayList<Object> copy = new java.util.ArrayList<>();
+        for (Object item : (List<?>) value) {
+          copy.add(freezeJson(item, ancestors, depth + 1));
+        }
+        return Collections.unmodifiableList(copy);
+      } finally {
+        ancestors.remove(value);
+      }
+    }
+    throw new IllegalArgumentException(
+        "parameters contain a non-JSON value of type " + value.getClass().getName());
+  }
+
+  private static void enter(Object value, IdentityHashMap<Object, Boolean> ancestors) {
+    if (ancestors.put(value, Boolean.TRUE) != null) {
+      throw new IllegalArgumentException("parameters contain a cyclic JSON structure");
+    }
+  }
+
   private static String canonical(Object value) {
     StringBuilder builder = new StringBuilder();
     appendCanonical(value, builder);
@@ -138,10 +229,7 @@ public final class ProcessCreateIntent {
     if (value == null) {
       builder.append("null");
     } else if (value instanceof String) {
-      builder
-          .append('"')
-          .append(((String) value).replace("\\", "\\\\").replace("\"", "\\\""))
-          .append('"');
+      appendJsonString((String) value, builder);
     } else if (value instanceof Number || value instanceof Boolean) {
       builder.append(value);
     } else if (value instanceof Map) {
@@ -177,10 +265,48 @@ public final class ProcessCreateIntent {
     }
   }
 
+  private static void appendJsonString(String value, StringBuilder builder) {
+    builder.append('"');
+    for (int index = 0; index < value.length(); index++) {
+      char character = value.charAt(index);
+      switch (character) {
+        case '"':
+          builder.append("\\\"");
+          break;
+        case '\\':
+          builder.append("\\\\");
+          break;
+        case '\b':
+          builder.append("\\b");
+          break;
+        case '\f':
+          builder.append("\\f");
+          break;
+        case '\n':
+          builder.append("\\n");
+          break;
+        case '\r':
+          builder.append("\\r");
+          break;
+        case '\t':
+          builder.append("\\t");
+          break;
+        default:
+          if (character < 0x20) {
+            builder.append(String.format("\\u%04x", (int) character));
+          } else {
+            builder.append(character);
+          }
+      }
+    }
+    builder.append('"');
+  }
+
   private static String sha256(String input) {
     try {
       MessageDigest digest = MessageDigest.getInstance("SHA-256");
-      return HexFormat.of().formatHex(digest.digest(input.getBytes(StandardCharsets.UTF_8)));
+      return "sha256:"
+          + HexFormat.of().formatHex(digest.digest(input.getBytes(StandardCharsets.UTF_8)));
     } catch (Exception e) {
       throw new IllegalStateException("SHA-256 is unavailable", e);
     }

@@ -24,7 +24,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 import java.util.Map;
 
-/** Skeleton smoke endpoint; real v2 endpoints land with the Process control plane spec. */
+/** Lightweight health endpoint for the standalone v2 application. */
 @RestController
 @RequestMapping("/api/ams/v2")
 public class HealthController {

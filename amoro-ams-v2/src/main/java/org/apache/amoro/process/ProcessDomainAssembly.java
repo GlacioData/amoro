@@ -49,6 +49,7 @@ public final class ProcessDomainAssembly {
   private final ProcessInvariantValidator invariantValidator;
   private final ProcessIndexProjection indexProjection;
   private final org.apache.amoro.process.engine.ExecutionHandleRegistry handleRegistry;
+  private final org.apache.amoro.process.engine.ExecutionHandleReleaseIndex releaseIndex;
 
   public ProcessDomainAssembly(
       BlobStore blobStore,
@@ -78,6 +79,7 @@ public final class ProcessDomainAssembly {
     this.invariantValidator = new ProcessInvariantValidator();
     this.indexProjection = new ProcessIndexProjection();
     this.handleRegistry = handleRegistry;
+    this.releaseIndex = new org.apache.amoro.process.engine.ExecutionHandleReleaseIndex();
     ResourceSerde<ProcessResource> serde =
         new VersionAwareJacksonSerde<ProcessResource>(
             ProcessResource.class,
@@ -103,12 +105,18 @@ public final class ProcessDomainAssembly {
     return handleRegistry;
   }
 
+  /** Durable-publish projection used by the sole execution-handle reaper. */
+  public org.apache.amoro.process.engine.ExecutionHandleReleaseIndex releaseIndex() {
+    return releaseIndex;
+  }
+
   private List<org.apache.amoro.persistence.DurableStateProjection<ProcessResource>>
       domainProjections() {
     List<org.apache.amoro.persistence.DurableStateProjection<ProcessResource>> projections =
         new ArrayList<org.apache.amoro.persistence.DurableStateProjection<ProcessResource>>();
     projections.add(invariantValidator);
     projections.add(indexProjection);
+    projections.add(releaseIndex);
     return projections;
   }
 

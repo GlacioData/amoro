@@ -84,6 +84,9 @@ public class ProcessApiController {
       @PathVariable("table") String table,
       @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
       @RequestBody CreateRequest request) {
+    if (request == null) {
+      throw ApiError.of("VALIDATION_FAILED", "request body is required");
+    }
     ProcessRestSupport.CreateResult result =
         support.create(
             catalog,
@@ -130,36 +133,50 @@ public class ProcessApiController {
       throw ApiError.of(
           "VALIDATION_FAILED", "PATCH accepts only {\"desiredState\":\"CANCEL\"} in this version");
     }
-    return support.cancel(name);
+    return support.cancel(name, request.reason);
   }
 
   @PostMapping("/processes/{name}/submission-resolutions")
-  public ProcessResource submissionResolution(
+  public ResponseEntity<ProcessResource> submissionResolution(
       @PathVariable("name") String name,
       @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
       @RequestBody SubmissionResolutionRequest request) {
-    return support.submissionResolution(
-        name,
-        idempotencyKey,
-        request.submissionKey,
-        request.requestHash,
-        request.resolution,
-        request.externalId,
-        request.reason);
+    if (request == null) {
+      throw ApiError.of("VALIDATION_FAILED", "request body is required");
+    }
+    ProcessRestSupport.ResolutionResult result =
+        support.submissionResolutionResult(
+            name,
+            idempotencyKey,
+            request.submissionKey,
+            request.requestHash,
+            request.resolution,
+            request.externalId,
+            request.reason);
+    return ResponseEntity.ok()
+        .header("Idempotency-Replayed", String.valueOf(result.replay))
+        .body(result.resource);
   }
 
   @PostMapping("/processes/{name}/execution-resolutions")
-  public ProcessResource executionResolution(
+  public ResponseEntity<ProcessResource> executionResolution(
       @PathVariable("name") String name,
       @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
       @RequestBody ExecutionResolutionRequest request) {
-    return support.executionResolution(
-        name,
-        idempotencyKey,
-        request.submissionKey,
-        request.requestHash,
-        request.resolution,
-        request.retryAllowed,
-        request.reason);
+    if (request == null) {
+      throw ApiError.of("VALIDATION_FAILED", "request body is required");
+    }
+    ProcessRestSupport.ResolutionResult result =
+        support.executionResolutionResult(
+            name,
+            idempotencyKey,
+            request.submissionKey,
+            request.requestHash,
+            request.resolution,
+            request.retryAllowed,
+            request.reason);
+    return ResponseEntity.ok()
+        .header("Idempotency-Replayed", String.valueOf(result.replay))
+        .body(result.resource);
   }
 }

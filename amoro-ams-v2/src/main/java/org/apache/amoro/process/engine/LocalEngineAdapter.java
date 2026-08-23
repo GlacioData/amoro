@@ -18,6 +18,7 @@
 
 package org.apache.amoro.process.engine;
 
+import org.apache.amoro.process.BoundedExecutorShutdown;
 import org.apache.amoro.process.engine.EngineTypes.CancellationOutcome;
 import org.apache.amoro.process.engine.EngineTypes.EngineCapabilities;
 import org.apache.amoro.process.engine.EngineTypes.EngineFailure;
@@ -25,6 +26,10 @@ import org.apache.amoro.process.engine.EngineTypes.EngineObservation;
 import org.apache.amoro.process.engine.EngineTypes.ProcessObservation;
 import org.apache.amoro.process.engine.EngineTypes.SubmissionOutcome;
 import org.apache.amoro.process.engine.EngineTypes.SubmissionResolution;
+import org.apache.amoro.process.engine.local.LocalActionCommand;
+import org.apache.amoro.process.engine.local.LocalActionRegistry;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -35,6 +40,7 @@ import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 
@@ -44,9 +50,11 @@ import java.util.function.Consumer;
  * the result). The queue-full rejection is an authoritative "nothing ran"
  * (REJECTED/CAPACITY_EXHAUSTED), never UNKNOWN. Cancellation marks the handle; a running action
  * observes the flag cooperatively. The action body is pluggable — the first version ships a no-op
- * simulator (the real Iceberg/Paimon maintenance calls land with the format adapters).
+ * simulator. Future format Actions require their own reviewed Spec and provider.
  */
-public final class LocalEngineAdapter implements ProcessEnginePort {
+public final class LocalEngineAdapter implements ProcessEnginePort, ProcessEngineLifecycle {
+
+  private static final Logger LOG = LoggerFactory.getLogger(LocalEngineAdapter.class);
 
   /** The action body: receives the payload and a cancel-flag; writes its summary. */
   public interface LocalAction {
@@ -59,6 +67,10 @@ public final class LocalEngineAdapter implements ProcessEnginePort {
 
   private final java.util.concurrent.ThreadPoolExecutor actionPool;
   private final LocalAction action;
+  private final LocalActionRegistry actionRegistry;
+  private final long terminalRetentionMillis;
+  private final java.util.concurrent.ScheduledThreadPoolExecutor retentionExecutor;
+  private final AtomicBoolean closed = new AtomicBoolean();
   private static final int SUBMISSION_LOCK_STRIPES = 256;
 
   private final LocalSubmissionLedger submissionLedger = new LocalSubmissionLedger();
@@ -69,6 +81,7 @@ public final class LocalEngineAdapter implements ProcessEnginePort {
   private static final class LocalExecution {
     volatile EngineObservation observation;
     volatile boolean cancelRequested;
+    volatile long terminalAtMillis;
   }
 
   /** A no-op action body for wiring tests and demos: succeeds after a short delay. */
@@ -87,11 +100,46 @@ public final class LocalEngineAdapter implements ProcessEnginePort {
    *     rejection (spec §6.1), unlike the unbounded v1 work queue
    */
   public LocalEngineAdapter(int poolSize, int queueCapacity, LocalAction action) {
+    this(poolSize, queueCapacity, Objects.requireNonNull(action, "action"), null);
+  }
+
+  /** Action-aware constructor used by SPI-selected Local providers. */
+  public LocalEngineAdapter(int poolSize, int queueCapacity, LocalActionRegistry actionRegistry) {
+    this(poolSize, queueCapacity, actionRegistry, 7);
+  }
+
+  public LocalEngineAdapter(
+      int poolSize,
+      int queueCapacity,
+      LocalActionRegistry actionRegistry,
+      int terminalResultRetentionDays) {
+    this(
+        poolSize,
+        queueCapacity,
+        null,
+        Objects.requireNonNull(actionRegistry, "actionRegistry"),
+        terminalResultRetentionDays);
+  }
+
+  private LocalEngineAdapter(
+      int poolSize, int queueCapacity, LocalAction action, LocalActionRegistry actionRegistry) {
+    this(poolSize, queueCapacity, action, actionRegistry, 7);
+  }
+
+  private LocalEngineAdapter(
+      int poolSize,
+      int queueCapacity,
+      LocalAction action,
+      LocalActionRegistry actionRegistry,
+      int terminalResultRetentionDays) {
     if (poolSize <= 0) {
       throw new IllegalArgumentException("poolSize must be > 0");
     }
     if (queueCapacity <= 0) {
       throw new IllegalArgumentException("queueCapacity must be > 0");
+    }
+    if (terminalResultRetentionDays < 1) {
+      throw new IllegalArgumentException("terminalResultRetentionDays must be >= 1");
     }
     this.actionPool =
         new java.util.concurrent.ThreadPoolExecutor(
@@ -107,7 +155,20 @@ public final class LocalEngineAdapter implements ProcessEnginePort {
               thread.setDaemon(true);
               return thread;
             });
-    this.action = Objects.requireNonNull(action, "action");
+    this.action = action;
+    this.actionRegistry = actionRegistry;
+    this.terminalRetentionMillis = TimeUnit.DAYS.toMillis(terminalResultRetentionDays);
+    this.retentionExecutor =
+        new java.util.concurrent.ScheduledThreadPoolExecutor(
+            1,
+            runnable -> {
+              Thread thread = new Thread(runnable, "amoro-process-local-retention");
+              thread.setDaemon(true);
+              return thread;
+            });
+    retentionExecutor.setRemoveOnCancelPolicy(true);
+    retentionExecutor.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
+    retentionExecutor.scheduleWithFixedDelay(this::safeSweepTerminal, 1L, 1L, TimeUnit.HOURS);
     for (int i = 0; i < submissionLocks.length; i++) {
       submissionLocks[i] = new Object();
     }
@@ -124,6 +185,47 @@ public final class LocalEngineAdapter implements ProcessEnginePort {
   @Override
   public CompletionStage<SubmissionOutcome> submit(
       String submissionKey, String requestHash, byte[] submissionPayload) {
+    if (action == null) {
+      return CompletableFuture.completedFuture(SubmissionOutcome.rejected("ACTION_REQUIRED"));
+    }
+    return submitLegacy(submissionKey, requestHash, submissionPayload, action);
+  }
+
+  @Override
+  public CompletionStage<SubmissionOutcome> submit(SubmissionCommand command) {
+    if (actionRegistry == null) {
+      return submit(command.submissionKey(), command.requestHash(), command.payload());
+    }
+    java.util.Optional<org.apache.amoro.process.engine.local.LocalAction> selected =
+        actionRegistry.action(command.action());
+    if (selected.isEmpty()) {
+      return CompletableFuture.completedFuture(SubmissionOutcome.rejected("ACTION_NOT_DEPLOYED"));
+    }
+    org.apache.amoro.process.engine.local.LocalAction localAction = selected.get();
+    LocalAction bridged =
+        (payload, summarySink, cancelRequested) ->
+            localAction.execute(
+                new LocalActionCommand(
+                    command.action(), command.submissionKey(), command.requestHash(), payload),
+                new org.apache.amoro.process.engine.local.LocalExecutionContext() {
+                  @Override
+                  public boolean isCancellationRequested() {
+                    return cancelRequested.getAsBoolean();
+                  }
+
+                  @Override
+                  public void publishSummary(Map<String, Object> summary) {
+                    summarySink.accept(summary);
+                  }
+                });
+    return submitLegacy(command.submissionKey(), command.requestHash(), command.payload(), bridged);
+  }
+
+  private CompletionStage<SubmissionOutcome> submitLegacy(
+      String submissionKey,
+      String requestHash,
+      byte[] submissionPayload,
+      LocalAction selectedAction) {
     Objects.requireNonNull(submissionKey, "submissionKey");
     Objects.requireNonNull(requestHash, "requestHash");
     byte[] frozenPayload =
@@ -146,11 +248,10 @@ public final class LocalEngineAdapter implements ProcessEnginePort {
       LocalExecution execution = new LocalExecution();
       execution.observation = new EngineObservation("SUBMITTED", null, null, null);
       try {
-        actionPool.execute(() -> runAction(externalId, execution, frozenPayload));
+        actionPool.execute(() -> runAction(externalId, execution, frozenPayload, selectedAction));
       } catch (RejectedExecutionException capacityExhausted) {
         // provably nothing ran: an authoritative rejection, not UNKNOWN
-        return CompletableFuture.completedFuture(
-            SubmissionOutcome.rejected("CAPACITY_EXHAUSTED"));
+        return CompletableFuture.completedFuture(SubmissionOutcome.rejected("CAPACITY_EXHAUSTED"));
       }
       submissionLedger.record(submissionKey, requestHash, externalId);
       executionsByExternalId.put(externalId, execution);
@@ -158,16 +259,19 @@ public final class LocalEngineAdapter implements ProcessEnginePort {
     }
   }
 
-  private void runAction(String externalId, LocalExecution execution, byte[] payload) {
+  private void runAction(
+      String externalId, LocalExecution execution, byte[] payload, LocalAction selectedAction) {
     execution.observation = new EngineObservation("RUNNING", null, null, null);
     try {
       Map<String, Object> summary = new LinkedHashMap<String, Object>();
-      action.run(payload, summary::putAll, () -> execution.cancelRequested);
+      selectedAction.run(payload, summary::putAll, () -> execution.cancelRequested);
       if (execution.cancelRequested) {
         execution.observation = new EngineObservation("CANCELED", null, summary, null);
+        execution.terminalAtMillis = System.currentTimeMillis();
         return;
       }
       execution.observation = new EngineObservation("SUCCESS", null, summary, null);
+      execution.terminalAtMillis = System.currentTimeMillis();
     } catch (Exception failure) {
       execution.observation =
           new EngineObservation(
@@ -175,6 +279,7 @@ public final class LocalEngineAdapter implements ProcessEnginePort {
               null,
               null,
               new EngineFailure("E_LOCAL", String.valueOf(failure.getMessage()), true));
+      execution.terminalAtMillis = System.currentTimeMillis();
     }
   }
 
@@ -235,16 +340,47 @@ public final class LocalEngineAdapter implements ProcessEnginePort {
     shutdown(5_000L);
   }
 
+  @Override
+  public void close() {
+    shutdown();
+  }
+
   /** Bounded shutdown of the action pool. */
   public void shutdown(long timeoutMillis) {
-    actionPool.shutdown();
+    if (!closed.compareAndSet(false, true)) {
+      return;
+    }
+    long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis);
+    BoundedExecutorShutdown.shutdown(
+        retentionExecutor, remainingMillis(deadline), "Local Engine retention");
+    BoundedExecutorShutdown.shutdown(actionPool, remainingMillis(deadline), "Local Engine actions");
+  }
+
+  private static long remainingMillis(long deadlineNanos) {
+    return Math.max(1L, TimeUnit.NANOSECONDS.toMillis(deadlineNanos - System.nanoTime()));
+  }
+
+  private void safeSweepTerminal() {
     try {
-      if (!actionPool.awaitTermination(timeoutMillis, TimeUnit.MILLISECONDS)) {
-        actionPool.shutdownNow();
+      sweepTerminal(System.currentTimeMillis());
+    } catch (RuntimeException failure) {
+      LOG.warn("Local terminal-result retention sweep failed.", failure);
+    }
+  }
+
+  private void sweepTerminal(long nowMillis) {
+    for (Map.Entry<String, LocalExecution> entry : executionsByExternalId.entrySet()) {
+      LocalExecution execution = entry.getValue();
+      long terminalAt = execution.terminalAtMillis;
+      if (terminalAt > 0L
+          && nowMillis - terminalAt >= terminalRetentionMillis
+          && executionsByExternalId.remove(entry.getKey(), execution)) {
+        submissionLedger.removeExternalId(entry.getKey());
+        LOG.warn(
+            "Hard-retention removed unreleased local terminal execution {} after {} ms.",
+            entry.getKey(),
+            terminalRetentionMillis);
       }
-    } catch (InterruptedException e) {
-      Thread.currentThread().interrupt();
-      actionPool.shutdownNow();
     }
   }
 }

@@ -50,6 +50,11 @@ public interface ProcessEnginePort {
   CompletionStage<SubmissionOutcome> submit(
       String submissionKey, String requestHash, byte[] submissionPayload);
 
+  /** Typed action-aware entry point; legacy adapters may continue implementing the old method. */
+  default CompletionStage<SubmissionOutcome> submit(SubmissionCommand command) {
+    return submit(command.submissionKey(), command.requestHash(), command.payload());
+  }
+
   CompletionStage<SubmissionResolution> resolveSubmission(String submissionKey, String requestHash);
 
   CompletionStage<ProcessObservation> observe(String externalId);

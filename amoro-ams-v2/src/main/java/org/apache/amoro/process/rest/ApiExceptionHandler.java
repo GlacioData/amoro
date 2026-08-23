@@ -42,6 +42,11 @@ public class ApiExceptionHandler {
 
   @ExceptionHandler(ApiError.class)
   public ResponseEntity<Map<String, Object>> apiError(ApiError error) {
+    if ("IDEMPOTENCY_IN_PROGRESS".equals(error.code())) {
+      return ResponseEntity.status(error.httpStatus())
+          .header("Retry-After", "1")
+          .body(errorBody(error.code(), error.getMessage(), UUID.randomUUID().toString()));
+    }
     return respond(HttpStatus.valueOf(error.httpStatus()), error.code(), error.getMessage());
   }
 
@@ -86,10 +91,13 @@ public class ApiExceptionHandler {
 
   @ExceptionHandler(Exception.class)
   public ResponseEntity<Map<String, Object>> internal(Exception e) {
+    String traceId = UUID.randomUUID().toString();
+    LOG.error("Unhandled /api/ams/v2 failure; traceId={}", traceId, e);
     return respond(
         HttpStatus.INTERNAL_SERVER_ERROR,
         "INTERNAL_ERROR",
-        "internal error (no stack or SQL details are exposed)");
+        "internal error (no stack or SQL details are exposed)",
+        traceId);
   }
 
   private static ResponseEntity<Map<String, Object>> respond(
@@ -99,11 +107,15 @@ public class ApiExceptionHandler {
 
   private static ResponseEntity<Map<String, Object>> respond(
       HttpStatus status, String code, String message, String traceId) {
+    return ResponseEntity.status(status).body(errorBody(code, message, traceId));
+  }
+
+  private static Map<String, Object> errorBody(String code, String message, String traceId) {
     Map<String, Object> body = new LinkedHashMap<String, Object>();
     body.put("code", code);
     body.put("message", message);
     body.put("timestamp", Instant.now().toString());
     body.put("traceId", traceId);
-    return ResponseEntity.status(status).body(body);
+    return body;
   }
 }

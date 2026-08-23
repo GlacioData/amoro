@@ -30,8 +30,8 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 
 /**
- * The sole Process creation transaction for manual, scheduled and future internal entry points.
- * A single-instance admission lease covers one aggregate snapshot read through durable create
+ * The sole Process creation transaction for manual, scheduled and future internal entry points. A
+ * single-instance admission lease covers one aggregate snapshot read through durable create
  * completion. Unknown outcomes retain an in-memory scope reservation until explicit repair.
  */
 public final class ProcessCreationService {
@@ -42,9 +42,20 @@ public final class ProcessCreationService {
   private final Clock clock;
   private final Supplier<String> nameSupplier;
   private final ProcessAdmissionRegistry admissions;
+  private final ProcessResource.RetryPolicy retryPolicy;
 
   public ProcessCreationService(ProcessDomainAssembly assembly) {
-    this(assembly, Clock.systemUTC(), ProcessCreationService::nextName, Duration.ofSeconds(10));
+    this(assembly, new ProcessResource.RetryPolicy(3, 2, 30));
+  }
+
+  public ProcessCreationService(
+      ProcessDomainAssembly assembly, ProcessResource.RetryPolicy retryPolicy) {
+    this(
+        assembly,
+        Clock.systemUTC(),
+        ProcessCreationService::nextName,
+        Duration.ofSeconds(10),
+        retryPolicy);
   }
 
   public ProcessCreationService(
@@ -52,10 +63,31 @@ public final class ProcessCreationService {
       Clock clock,
       Supplier<String> nameSupplier,
       Duration lockTimeout) {
+    this(assembly, clock, nameSupplier, lockTimeout, new ProcessResource.RetryPolicy(3, 2, 30));
+  }
+
+  public ProcessCreationService(
+      ProcessDomainAssembly assembly,
+      Clock clock,
+      Supplier<String> nameSupplier,
+      Duration lockTimeout,
+      ProcessResource.RetryPolicy retryPolicy) {
     this.assembly = Objects.requireNonNull(assembly, "assembly");
     this.clock = Objects.requireNonNull(clock, "clock");
     this.nameSupplier = Objects.requireNonNull(nameSupplier, "nameSupplier");
     this.admissions = new ProcessAdmissionRegistry(lockTimeout);
+    ProcessResource.RetryPolicy policy = Objects.requireNonNull(retryPolicy, "retryPolicy");
+    if (policy.maxRetries() < 0
+        || policy.maxRetries() > 3
+        || policy.maxSubmissionRetries() < 0
+        || policy.maxSubmissionRetries() > 2
+        || policy.retryDelaySeconds() < 1
+        || policy.retryDelaySeconds() > 86_400) {
+      throw new IllegalArgumentException("retryPolicy is outside the server-supported bounds");
+    }
+    this.retryPolicy =
+        new ProcessResource.RetryPolicy(
+            policy.maxRetries(), policy.maxSubmissionRetries(), policy.retryDelaySeconds());
   }
 
   public ProcessCreationResult create(ProcessCreateIntent intent) {
@@ -93,8 +125,7 @@ public final class ProcessCreationService {
             "the idempotency key was already used for a different Process intent");
       }
 
-      Optional<String> active =
-          snapshot.activeProcessOf(intent.table().tableId(), intent.action());
+      Optional<String> active = snapshot.activeProcessOf(intent.table().tableId(), intent.action());
       if (active.isPresent()) {
         throw new ProcessAdmissionException(
             ProcessAdmissionException.Code.ACTIVE_PROCESS_EXISTS,
@@ -106,8 +137,7 @@ public final class ProcessCreationService {
       try {
         return new ProcessCreationResult(assembly.repository().create(candidate), false);
       } catch (PersistenceOutcomeUnknownException unknown) {
-        admissions.reserve(
-            scope, name, intent.idempotencyKeyHash(), intent.requestHash());
+        admissions.reserve(scope, name, intent.idempotencyKeyHash(), intent.requestHash());
         throw unknown;
       } catch (ProcessIndexConflictException conflict) {
         ProcessAdmissionException.Code code =
@@ -135,11 +165,22 @@ public final class ProcessCreationService {
   }
 
   private ProcessResource newResource(String name, ProcessCreateIntent intent) {
+    ProcessResource.ProcessSpec spec =
+        new ProcessResource.ProcessSpec(
+            intent.table(),
+            intent.action(),
+            intent.executionEngine(),
+            intent.triggerSource(),
+            Instant.now(clock).toString(),
+            "RUN",
+            new ProcessResource.RequestIdentity(intent.idempotencyKeyHash(), intent.requestHash()),
+            intent.parameters(),
+            retryPolicy);
     ProcessResource.ProcessAttempt attempt =
         new ProcessResource.ProcessAttempt(
             0,
             name + ":0:0",
-            "sha256:initial",
+            ProcessRequestHashes.actionAttempt(name, 0, spec),
             "CREATED",
             null,
             null,
@@ -162,20 +203,7 @@ public final class ProcessCreationService {
             null,
             null,
             null);
-    return new ProcessResource(
-        name,
-        new ProcessResource.ProcessSpec(
-            intent.table(),
-            intent.action(),
-            intent.executionEngine(),
-            intent.triggerSource(),
-            Instant.now(clock).toString(),
-            "RUN",
-            new ProcessResource.RequestIdentity(
-                intent.idempotencyKeyHash(), intent.requestHash()),
-            intent.parameters(),
-            new ProcessResource.RetryPolicy(3, 2, 30)),
-        status);
+    return new ProcessResource(name, spec, status);
   }
 
   private static String nextName() {

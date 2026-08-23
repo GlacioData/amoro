@@ -82,7 +82,8 @@ final class ProcessAdmissionRegistry {
 
   void clear(String scope, String processName) {
     reservationsByScope.computeIfPresent(
-        scope, (ignored, reservation) -> reservation.processName.equals(processName) ? null : reservation);
+        scope,
+        (ignored, reservation) -> reservation.processName.equals(processName) ? null : reservation);
     scopeByProcessName.remove(processName, scope);
   }
 

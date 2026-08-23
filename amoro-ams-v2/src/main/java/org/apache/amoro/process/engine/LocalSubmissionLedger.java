@@ -33,9 +33,7 @@ final class LocalSubmissionLedger {
   }
 
   void record(String submissionKey, String requestHash, String externalId) {
-    Entry prior =
-        bySubmissionKey.putIfAbsent(
-            submissionKey, new Entry(requestHash, externalId));
+    Entry prior = bySubmissionKey.putIfAbsent(submissionKey, new Entry(requestHash, externalId));
     if (prior != null) {
       throw new IllegalStateException("submission was concurrently recorded: " + submissionKey);
     }

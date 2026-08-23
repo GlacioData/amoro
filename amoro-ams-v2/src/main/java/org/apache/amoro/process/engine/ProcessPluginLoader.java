@@ -18,6 +18,7 @@
 
 package org.apache.amoro.process.engine;
 
+import org.apache.amoro.process.engine.local.LocalActionFactory;
 import org.apache.amoro.process.trigger.ProcessActionPluginFactory;
 
 import java.util.ArrayList;
@@ -36,6 +37,10 @@ public final class ProcessPluginLoader {
 
   public static List<ProcessActionPluginFactory> loadActionFactories(ClassLoader classLoader) {
     return load(ProcessActionPluginFactory.class, classLoader);
+  }
+
+  public static List<LocalActionFactory> loadLocalActionFactories(ClassLoader classLoader) {
+    return load(LocalActionFactory.class, classLoader);
   }
 
   private static <T> List<T> load(Class<T> type, ClassLoader classLoader) {

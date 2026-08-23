@@ -18,6 +18,7 @@
 
 package org.apache.amoro.process.engine;
 
+import org.apache.amoro.process.BoundedExecutorShutdown;
 import org.apache.amoro.process.engine.EngineCommandIdentity.ExecutionIdentity;
 import org.apache.amoro.process.engine.EngineCommandIdentity.ReleaseIdentity;
 import org.apache.amoro.process.engine.EngineCommandIdentity.SubmissionIdentity;
@@ -32,6 +33,11 @@ import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
@@ -43,8 +49,8 @@ import java.util.function.Supplier;
 /**
  * Typed cross-operation single-flight boundary over one {@link ProcessEnginePort}. Business
  * identities remain claimed after the adapter future completes and are released only when the
- * caller confirms that the classified result was durably handled. Release duplicates merge into
- * the same cleanup flight.
+ * caller confirms that the classified result was durably handled. Release duplicates merge into the
+ * same cleanup flight.
  */
 public final class ProcessEngineDispatcher implements AutoCloseable {
 
@@ -103,6 +109,7 @@ public final class ProcessEngineDispatcher implements AutoCloseable {
       new ConcurrentHashMap<>();
   private final ScheduledExecutorService timeoutExecutor;
   private final AtomicInteger commandSequence = new AtomicInteger();
+  private final AtomicBoolean closed = new AtomicBoolean();
 
   public ProcessEngineDispatcher(ProcessEnginePort adapter, long commandTimeoutMillis) {
     this.adapter = Objects.requireNonNull(adapter, "adapter");
@@ -123,6 +130,7 @@ public final class ProcessEngineDispatcher implements AutoCloseable {
               return thread;
             });
     executor.setRemoveOnCancelPolicy(true);
+    executor.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
     this.timeoutExecutor = executor;
   }
 
@@ -132,19 +140,25 @@ public final class ProcessEngineDispatcher implements AutoCloseable {
 
   public CommandFlight<SubmissionOutcome> submit(
       String processName, String submissionKey, String requestHash, byte[] payload) {
-    SubmissionIdentity identity =
-        new SubmissionIdentity(processName, submissionKey, requestHash);
+    return submit(processName, "legacy-action", submissionKey, requestHash, payload);
+  }
+
+  public CommandFlight<SubmissionOutcome> submit(
+      String processName, String action, String submissionKey, String requestHash, byte[] payload) {
+    ensureOpen();
+    SubmissionIdentity identity = new SubmissionIdentity(processName, submissionKey, requestHash);
+    SubmissionCommand command = new SubmissionCommand(action, submissionKey, requestHash, payload);
     return dispatchBusiness(
         identity,
-        () -> adapter.submit(submissionKey, requestHash, payload),
+        () -> adapter.submit(command),
         SubmissionOutcome.unknown(),
         EngineBoundaryValidator::submission);
   }
 
   public CommandFlight<SubmissionResolution> resolveSubmission(
       String processName, String submissionKey, String requestHash) {
-    SubmissionIdentity identity =
-        new SubmissionIdentity(processName, submissionKey, requestHash);
+    ensureOpen();
+    SubmissionIdentity identity = new SubmissionIdentity(processName, submissionKey, requestHash);
     return dispatchBusiness(
         identity,
         () -> adapter.resolveSubmission(submissionKey, requestHash),
@@ -153,6 +167,7 @@ public final class ProcessEngineDispatcher implements AutoCloseable {
   }
 
   public CommandFlight<ProcessObservation> observe(String processName, String externalId) {
+    ensureOpen();
     ExecutionIdentity identity = new ExecutionIdentity(processName, externalId);
     return dispatchBusiness(
         identity,
@@ -162,6 +177,7 @@ public final class ProcessEngineDispatcher implements AutoCloseable {
   }
 
   public CommandFlight<CancellationOutcome> cancel(String processName, String externalId) {
+    ensureOpen();
     ExecutionIdentity identity = new ExecutionIdentity(processName, externalId);
     return dispatchBusiness(
         identity,
@@ -171,6 +187,7 @@ public final class ProcessEngineDispatcher implements AutoCloseable {
   }
 
   public CommandFlight<Void> release(String executionEngine, String externalId) {
+    ensureOpen();
     ReleaseIdentity identity = new ReleaseIdentity(executionEngine, externalId);
     while (true) {
       CommandFlight<?> existing = inFlight.get(identity);
@@ -310,6 +327,74 @@ public final class ProcessEngineDispatcher implements AutoCloseable {
 
   @Override
   public void close() {
-    timeoutExecutor.shutdownNow();
+    shutdown(5_000L);
+  }
+
+  /** Stops command guards and the adapter within one caller-supplied lifecycle budget. */
+  public void shutdown(long timeoutMillis) {
+    if (timeoutMillis <= 0) {
+      throw new IllegalArgumentException("timeoutMillis must be > 0");
+    }
+    if (!closed.compareAndSet(false, true)) {
+      return;
+    }
+    long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis);
+    BoundedExecutorShutdown.shutdown(
+        timeoutExecutor, remainingMillis(deadline), "Process Engine timeout guards");
+    closeAdapter(remainingMillis(deadline));
+  }
+
+  private void closeAdapter(long timeoutMillis) {
+    if (!(adapter instanceof AutoCloseable)) {
+      return;
+    }
+    ExecutorService closer =
+        Executors.newSingleThreadExecutor(
+            runnable -> {
+              Thread thread = new Thread(runnable, "amoro-process-engine-close");
+              thread.setDaemon(true);
+              return thread;
+            });
+    Future<?> closeResult =
+        closer.submit(
+            () -> {
+              try {
+                if (adapter instanceof ProcessEngineLifecycle) {
+                  ((ProcessEngineLifecycle) adapter).shutdown(timeoutMillis);
+                } else {
+                  ((AutoCloseable) adapter).close();
+                }
+              } catch (RuntimeException runtimeFailure) {
+                throw runtimeFailure;
+              } catch (Exception closeFailure) {
+                throw new IllegalStateException(
+                    "failed to close Process engine adapter", closeFailure);
+              }
+            });
+    boolean terminated =
+        BoundedExecutorShutdown.shutdown(closer, timeoutMillis, "Process Engine adapter close");
+    if (terminated && closeResult.isDone() && !closeResult.isCancelled()) {
+      try {
+        closeResult.get();
+      } catch (InterruptedException interrupted) {
+        Thread.currentThread().interrupt();
+      } catch (ExecutionException closeFailure) {
+        Throwable cause = closeFailure.getCause();
+        if (cause instanceof RuntimeException) {
+          throw (RuntimeException) cause;
+        }
+        throw new IllegalStateException("failed to close Process engine adapter", cause);
+      }
+    }
+  }
+
+  private void ensureOpen() {
+    if (closed.get()) {
+      throw new RejectedExecutionException("Process Engine dispatcher is closed");
+    }
+  }
+
+  private static long remainingMillis(long deadlineNanos) {
+    return Math.max(1L, TimeUnit.NANOSECONDS.toMillis(deadlineNanos - System.nanoTime()));
   }
 }

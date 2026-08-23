@@ -36,8 +36,8 @@ import java.util.Set;
  * The scheduled trigger (process spec §6.3): scans the managed tables, asks each action plugin
  * whether the table is due, and routes eligible tables through the SAME admission path as the REST
  * create (idempotent key, single-active slot). The scanner owns no admission lock: all manual and
- * scheduled callers share the singleton creation service. Table failures are isolated so one
- * broken simulated fact never aborts the round.
+ * scheduled callers share the singleton creation service. Table failures are isolated so one broken
+ * simulated fact never aborts the round.
  */
 public final class ProcessTriggerScanner {
 
@@ -49,6 +49,9 @@ public final class ProcessTriggerScanner {
   private final String scanIdentity;
   private final Clock clock;
   private final int batchSize;
+  private final Set<String> batchVisitedCursors = new HashSet<>();
+  private String batchCursor;
+  private Instant batchFireTime;
 
   public ProcessTriggerScanner(
       ProcessCreationService creationService,
@@ -69,30 +72,48 @@ public final class ProcessTriggerScanner {
   }
 
   /** One trigger round: scan → gate → idempotent create for each eligible table. */
-  public void scanOnce() {
-    Instant fireTime = Instant.now(clock);
-    String cursor = null;
-    Set<String> visitedCursors = new HashSet<>();
+  public synchronized void scanOnce() {
     do {
-      ManagedTablePort.TablePage page = tables.scanAfter(cursor, batchSize);
-      for (ManagedTablePort.TableSnapshot table : page.tables()) {
-        try {
-          evaluateAndMaybeCreate(table, fireTime);
-        } catch (RuntimeException isolated) {
-          LOG.warn(
-              "Trigger for {}.{}.{} isolated and skipped this round.",
-              table.catalog(),
-              table.database(),
-              table.table(),
-              isolated);
-        }
+      scanBatchOnce();
+    } while (batchCursor != null);
+  }
+
+  /** Processes at most one configured page and retains its cursor for the next bounded round. */
+  public synchronized int scanBatchOnce() {
+    if (batchFireTime == null) {
+      batchFireTime = Instant.now(clock);
+    }
+    String currentCursor = batchCursor;
+    ManagedTablePort.TablePage page = tables.scanAfter(currentCursor, batchSize);
+    for (ManagedTablePort.TableSnapshot table : page.tables()) {
+      try {
+        evaluateAndMaybeCreate(table, batchFireTime);
+      } catch (RuntimeException isolated) {
+        LOG.warn(
+            "Trigger for {}.{}.{} isolated and skipped this round.",
+            table.catalog(),
+            table.database(),
+            table.table(),
+            isolated);
       }
-      String next = page.nextCursor();
-      if (next != null && (!visitedCursors.add(next) || next.equals(cursor))) {
-        throw new IllegalStateException("ManagedTablePort returned a repeated cursor: " + next);
-      }
-      cursor = next;
-    } while (cursor != null);
+    }
+    String next = page.nextCursor();
+    if (next != null && (next.equals(currentCursor) || !batchVisitedCursors.add(next))) {
+      resetBatchTraversal();
+      throw new IllegalStateException("ManagedTablePort returned a repeated cursor: " + next);
+    }
+    if (next == null) {
+      resetBatchTraversal();
+    } else {
+      batchCursor = next;
+    }
+    return page.tables().size();
+  }
+
+  private void resetBatchTraversal() {
+    batchCursor = null;
+    batchFireTime = null;
+    batchVisitedCursors.clear();
   }
 
   private void evaluateAndMaybeCreate(ManagedTablePort.TableSnapshot table, Instant fireTime) {
@@ -119,7 +140,8 @@ public final class ProcessTriggerScanner {
                       table.catalog(),
                       table.database(),
                       table.table(),
-                      table.tableId()),
+                      table.tableId(),
+                      table.tableFormat()),
                   plugin.action(),
                   engine,
                   "SCHEDULED",

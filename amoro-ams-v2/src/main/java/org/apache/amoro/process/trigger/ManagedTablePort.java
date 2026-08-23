@@ -18,15 +18,15 @@
 
 package org.apache.amoro.process.trigger;
 
-import java.util.List;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.List;
 import java.util.Objects;
 
 /**
- * The v2-scoped read-only view of managed tables (process spec §6.3). The production adapter reads
- * {@code table_identifier INNER JOIN table_metadata}; credentials and raw table objects never cross
- * this port.
+ * The v2-scoped read-only view of managed-table scheduling facts (process spec §6.3). This Spec
+ * provides only simulated facts; any real catalog adapter requires a separate reviewed Spec.
+ * Credentials and raw table objects must never cross this port.
  */
 public interface ManagedTablePort {
 
@@ -40,8 +40,7 @@ public interface ManagedTablePort {
 
     public TablePage(List<TableSnapshot> tables, String nextCursor) {
       this.tables =
-          Collections.unmodifiableList(
-              new ArrayList<>(Objects.requireNonNull(tables, "tables")));
+          Collections.unmodifiableList(new ArrayList<>(Objects.requireNonNull(tables, "tables")));
       this.nextCursor = nextCursor;
       if (tables.isEmpty() && nextCursor != null) {
         throw new IllegalArgumentException("an empty table page cannot advance the cursor");
@@ -60,17 +59,15 @@ public interface ManagedTablePort {
   /**
    * Canonical coordinates plus the allowlisted maintenance stamps the gates consume.
    *
-   * <p>Deviation note: the spec's ManagedTableSnapshot also carries an allowlisted config view, and
-   * the port is cursor-paged and asynchronous; the first version ships the synchronous minimal
-   * snapshot the interval gates need. The production adapter over {@code table_identifier ⋈
-   * table_metadata} lands with the real format integrations.
+   * <p>The first version is a synchronous, cursor-paged minimal snapshot for the dummy interval
+   * gate. It does not read v1 metadata tables or any format table.
    */
   final class TableSnapshot {
     private final String catalog;
     private final String database;
     private final String table;
     private final String tableId;
-    private final String tableFormat; // iceberg | paimon | ...
+    private final String tableFormat; // canonical format-neutral wire value
     private final String lastMaintenanceAt; // RFC 3339; epoch when never maintained
 
     public TableSnapshot(

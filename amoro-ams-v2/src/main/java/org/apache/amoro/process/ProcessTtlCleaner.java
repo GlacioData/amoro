@@ -36,6 +36,8 @@ public final class ProcessTtlCleaner {
 
   private final ProcessDomainAssembly assembly;
   private final org.apache.amoro.process.engine.ExecutionHandleRegistry handleRegistry;
+  private final org.apache.amoro.process.engine.ExecutionHandleReleaseIndex releaseIndex;
+  private ProcessIndexSnapshot.ExpiryEntry cursor;
 
   public ProcessTtlCleaner(ProcessDomainAssembly assembly) {
     this(assembly, new org.apache.amoro.process.engine.ExecutionHandleRegistry());
@@ -46,46 +48,71 @@ public final class ProcessTtlCleaner {
       org.apache.amoro.process.engine.ExecutionHandleRegistry handleRegistry) {
     this.assembly = assembly;
     this.handleRegistry = handleRegistry;
+    this.releaseIndex = assembly.releaseIndex();
   }
 
   /** One bounded cleaning round; returns the number of durable deletes issued. */
   public int cleanOnce(Instant now, int retentionDays, int batchSize) {
-    String cutoff = now.minusSeconds((long) retentionDays * 24L * 3600L).toString();
-    List<String> expiryOrder = assembly.indexProjection().current().expiryOrder();
+    if (retentionDays < 7 || batchSize <= 0 || batchSize > 1000) {
+      throw new IllegalArgumentException(
+          "retentionDays must be >= 7 and batchSize must be in [1, 1000]");
+    }
+    Instant cutoff = now.minusSeconds((long) retentionDays * 24L * 3600L);
+    ProcessIndexSnapshot snapshot = assembly.indexProjection().current();
+    List<ProcessIndexSnapshot.ExpiryEntry> expiryOrder = snapshot.expiryAfter(cursor, batchSize);
+    if (expiryOrder.isEmpty()) {
+      cursor = null;
+      return 0;
+    }
     int deleted = 0;
-    for (String entry : expiryOrder) {
-      if (deleted >= batchSize) {
+    boolean blocked = false;
+    for (ProcessIndexSnapshot.ExpiryEntry entry : expiryOrder) {
+      if (Instant.parse(entry.finishedAt()).isAfter(cutoff)) {
+        cursor = null;
+        blocked = true;
         break;
       }
-      // entries are "finishedAt|name", lexicographic = chronological for RFC 3339
-      String finishedAt = entry.substring(0, entry.indexOf('|'));
-      String name = entry.substring(entry.indexOf('|') + 1);
-      if (finishedAt.compareTo(cutoff) > 0) {
-        break; // ordered: everything after this is younger than the cutoff
+      ProcessResource resource;
+      try {
+        resource = assembly.repository().get(entry.name());
+      } catch (org.apache.amoro.persistence.exception.ResourceDoesNotExist deletedAlready) {
+        cursor = entry;
+        continue;
       }
-      ProcessResource resource = assembly.repository().get(name);
-      if (!ProcessFinality.isFinal(resource) || resource.status().finishedAt() == null) {
-        continue; // raced back to life or never stamped: skip, the index will drop it
+      if (resource.resourceVersion() != entry.resourceVersion()
+          || !ProcessFinality.isFinal(resource)
+          || !entry.finishedAt().equals(resource.status().finishedAt())
+          || Instant.parse(resource.status().finishedAt()).isAfter(cutoff)) {
+        cursor = entry;
+        continue;
       }
-      if (handleRegistry.hasPendingHandle(name)) {
+      if (handleRegistry.hasPendingHandle(entry.name())
+          || releaseIndex.hasPendingForProcess(entry.name())) {
         // spec §9.1: a row may not disappear while its local engine handle is pending
         // release — otherwise the handle leaks forever with no durable trace
-        continue;
+        blocked = true;
+        break;
       }
       try {
         assembly
             .persistence()
-            .delete(name, resource.resourceVersion())
+            .delete(entry.name(), entry.resourceVersion())
             .toCompletableFuture()
             .join();
         deleted++;
-        LOG.info("TTL deleted final process {} (finishedAt {}).", name, finishedAt);
+        cursor = entry;
+        LOG.info("TTL deleted final process {} (finishedAt {}).", entry.name(), entry.finishedAt());
       } catch (org.apache.amoro.persistence.exception.PreconditionFailedException raced) {
-        // version moved under us: next round re-reads the fresh state
+        blocked = true;
+        break; // inclusive retry: do not advance the cursor past this candidate
       } catch (RuntimeException durableFailure) {
-        LOG.warn("TTL delete of {} failed this round.", name, durableFailure);
-        break; // stop the batch; later rounds retry
+        LOG.warn("TTL delete of {} failed this round.", entry.name(), durableFailure);
+        blocked = true;
+        break;
       }
+    }
+    if (!blocked && expiryOrder.size() < batchSize) {
+      cursor = null;
     }
     return deleted;
   }

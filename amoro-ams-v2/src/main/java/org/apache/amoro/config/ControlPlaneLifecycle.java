@@ -29,16 +29,18 @@ import java.util.Objects;
 
 /**
  * Startup/shutdown ordering of the control plane (framework spec §7): workers start with the
- * scheduler lifecycle; shutdown stops the scheduler first (no new reconciliations, in-flight
- * finish), then the listener dispatcher (reject handoffs, bounded drain), then every domain's
- * mutation lane (bounded drain). Each stage consumes the same {@code lifecycle.shutdown-timeout-ms}
- * budget. Stages are plain {@link Runnable}s so the ordering is unit-testable without the real
- * components.
+ * scheduler lifecycle; shutdown first drains the trigger/rescheduler/reaper/TTL maintenance loops,
+ * then stops the scheduler, engines, listener dispatcher and every domain's mutation lane. Each
+ * stage consumes the same {@code lifecycle.shutdown-timeout-ms} budget. Stages are plain {@link
+ * Runnable}s so the ordering is unit-testable without the real components.
  */
 public final class ControlPlaneLifecycle implements SmartLifecycle {
 
   private final Runnable startActions;
+  private final Runnable startMaintenance;
+  private final Runnable maintenanceStop;
   private final Runnable schedulerStop;
+  private final Runnable engineStop;
   private final Runnable dispatcherStop;
   private final Runnable lanesStop;
 
@@ -46,13 +48,27 @@ public final class ControlPlaneLifecycle implements SmartLifecycle {
 
   public ControlPlaneLifecycle(
       Runnable schedulerStop, Runnable dispatcherStop, Runnable lanesStop) {
-    this(() -> {}, schedulerStop, dispatcherStop, lanesStop);
+    this(() -> {}, () -> {}, () -> {}, schedulerStop, () -> {}, dispatcherStop, lanesStop);
   }
 
   public ControlPlaneLifecycle(
       Runnable startActions, Runnable schedulerStop, Runnable dispatcherStop, Runnable lanesStop) {
+    this(startActions, () -> {}, () -> {}, schedulerStop, () -> {}, dispatcherStop, lanesStop);
+  }
+
+  public ControlPlaneLifecycle(
+      Runnable startActions,
+      Runnable startMaintenance,
+      Runnable maintenanceStop,
+      Runnable schedulerStop,
+      Runnable engineStop,
+      Runnable dispatcherStop,
+      Runnable lanesStop) {
     this.startActions = Objects.requireNonNull(startActions, "startActions");
+    this.startMaintenance = Objects.requireNonNull(startMaintenance, "startMaintenance");
+    this.maintenanceStop = Objects.requireNonNull(maintenanceStop, "maintenanceStop");
     this.schedulerStop = Objects.requireNonNull(schedulerStop, "schedulerStop");
+    this.engineStop = Objects.requireNonNull(engineStop, "engineStop");
     this.dispatcherStop = Objects.requireNonNull(dispatcherStop, "dispatcherStop");
     this.lanesStop = Objects.requireNonNull(lanesStop, "lanesStop");
   }
@@ -78,16 +94,55 @@ public final class ControlPlaneLifecycle implements SmartLifecycle {
   public void start() {
     // workers boot here: by now every domain has registered its replay via postStart, so the
     // controllers enqueued by listeners find workers waiting
-    startActions.run();
-    running = true;
+    try {
+      startActions.run();
+      startMaintenance.run();
+      running = true;
+    } catch (RuntimeException | Error startFailure) {
+      Throwable rollbackFailure = stopAllStages();
+      if (rollbackFailure != null) {
+        startFailure.addSuppressed(rollbackFailure);
+      }
+      throw startFailure;
+    }
   }
 
   @Override
   public void stop() {
-    schedulerStop.run();
-    dispatcherStop.run();
-    lanesStop.run();
+    Throwable failure = stopAllStages();
+    if (failure instanceof RuntimeException) {
+      throw (RuntimeException) failure;
+    }
+    if (failure instanceof Error) {
+      throw (Error) failure;
+    }
+  }
+
+  private Throwable stopAllStages() {
+    Throwable failure = null;
+    try {
+      maintenanceStop.run();
+    } catch (RuntimeException | Error stageFailure) {
+      failure = stageFailure;
+    }
+    failure = runStopStage(schedulerStop, failure);
+    failure = runStopStage(engineStop, failure);
+    failure = runStopStage(dispatcherStop, failure);
+    failure = runStopStage(lanesStop, failure);
     running = false;
+    return failure;
+  }
+
+  private static Throwable runStopStage(Runnable stage, Throwable previous) {
+    try {
+      stage.run();
+    } catch (RuntimeException | Error stageFailure) {
+      if (previous == null) {
+        return stageFailure;
+      }
+      previous.addSuppressed(stageFailure);
+    }
+    return previous;
   }
 
   @Override

@@ -19,23 +19,28 @@
 package org.apache.amoro.process.rest;
 
 import org.apache.amoro.process.engine.ProcessEngineRegistry;
+import org.apache.amoro.process.trigger.ProcessActionPlugin;
+import org.apache.amoro.process.trigger.ProcessActionPluginFactory;
 import org.apache.amoro.process.trigger.ProcessActionRegistry;
+import org.apache.amoro.process.trigger.simulated.SimulatedDummyMaintenanceActionFactory;
 
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
-/** Immutable create-admission catalog derived from deployed Engine and Action providers. */
+/** Immutable create-admission catalog derived only from selected Engine and Action providers. */
 public final class ProcessActionCatalog {
 
-  private final Set<Pair> pairs;
+  private final Map<Pair, ProcessActionPlugin> plugins;
   private final Set<String> actions;
 
-  private ProcessActionCatalog(Set<Pair> pairs) {
-    this.pairs = Collections.unmodifiableSet(new LinkedHashSet<>(pairs));
+  private ProcessActionCatalog(Map<Pair, ProcessActionPlugin> plugins) {
+    this.plugins = Collections.unmodifiableMap(new LinkedHashMap<>(plugins));
     Set<String> known = new LinkedHashSet<>();
-    for (Pair pair : pairs) {
+    for (Pair pair : plugins.keySet()) {
       known.add(pair.action);
     }
     this.actions = Collections.unmodifiableSet(known);
@@ -45,12 +50,12 @@ public final class ProcessActionCatalog {
       ProcessEngineRegistry engines, ProcessActionRegistry actions) {
     Objects.requireNonNull(engines, "engines");
     Objects.requireNonNull(actions, "actions");
-    Set<Pair> deployed = new LinkedHashSet<>();
+    Map<Pair, ProcessActionPlugin> deployed = new LinkedHashMap<>();
     for (ProcessActionRegistry.Entry entry : actions.entries()) {
       for (String format : entry.tableFormats()) {
         for (String engine : engines.engines().keySet()) {
           if (entry.plugin().supports(format, engine)) {
-            deployed.add(new Pair(format, entry.action(), engine));
+            deployed.put(new Pair(format, entry.action(), engine), entry.plugin());
           }
         }
       }
@@ -58,19 +63,19 @@ public final class ProcessActionCatalog {
     return new ProcessActionCatalog(deployed);
   }
 
-  /** Explicit routing fixtures retained only for isolated framework tests until Spring SPI wiring. */
+  /** Explicit pure-simulation routing fixture for isolated framework tests. */
   public static ProcessActionCatalog simulatedRoutingFixtures() {
-    Set<Pair> fixtures = new LinkedHashSet<>();
-    fixtures.add(new Pair("iceberg", "expire-snapshots", "local"));
-    fixtures.add(new Pair("iceberg", "expire-snapshots", "remote-spark"));
-    fixtures.add(new Pair("iceberg", "clean-orphans", "local"));
-    fixtures.add(new Pair("iceberg", "clean-orphans", "remote-spark"));
-    fixtures.add(new Pair("paimon", "sync-table-meta", "local"));
+    SimulatedDummyMaintenanceActionFactory factory = new SimulatedDummyMaintenanceActionFactory();
+    ProcessActionPlugin plugin =
+        factory.create(new ProcessActionPluginFactory.Context("test-simulation"));
+    Map<Pair, ProcessActionPlugin> fixtures = new LinkedHashMap<>();
+    fixtures.put(new Pair("simulated", "dummy-maintenance", "local"), plugin);
+    fixtures.put(new Pair("simulated", "dummy-maintenance", "remote-spark"), plugin);
     return new ProcessActionCatalog(fixtures);
   }
 
   public static ProcessActionCatalog empty() {
-    return new ProcessActionCatalog(Collections.emptySet());
+    return new ProcessActionCatalog(Collections.emptyMap());
   }
 
   public boolean isKnownAction(String action) {
@@ -78,7 +83,39 @@ public final class ProcessActionCatalog {
   }
 
   public boolean supports(String tableFormat, String action, String engine) {
-    return pairs.contains(new Pair(tableFormat, action, engine));
+    return plugins.containsKey(new Pair(tableFormat, action, engine));
+  }
+
+  public Map<String, Object> freezeManual(
+      String tableFormat, String action, String engine, Map<String, Object> parameters) {
+    ProcessActionPlugin plugin = plugins.get(new Pair(tableFormat, action, engine));
+    if (plugin == null) {
+      throw new IllegalArgumentException(
+          "no deployed action plugin for " + tableFormat + "/" + action + "/" + engine);
+    }
+    return plugin.validateAndFreezeManual(parameters);
+  }
+
+  /** Selects the exact deployed format/action/engine plugin without resolving a table. */
+  public byte[] buildSubmission(
+      org.apache.amoro.process.ProcessResource.ProcessSpec frozenSpec,
+      Map<String, Object> simulationProfile) {
+    ProcessActionPlugin selected =
+        plugins.get(
+            new Pair(
+                frozenSpec.table().tableFormat(),
+                frozenSpec.action(),
+                frozenSpec.executionEngine()));
+    if (selected == null) {
+      throw new IllegalStateException(
+          "no deployed submission builder for action "
+              + frozenSpec.action()
+              + ", table format "
+              + frozenSpec.table().tableFormat()
+              + " and engine "
+              + frozenSpec.executionEngine());
+    }
+    return selected.buildSubmission(frozenSpec, simulationProfile);
   }
 
   public Set<String> actions() {

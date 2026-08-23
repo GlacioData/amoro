@@ -45,20 +45,24 @@ import java.util.List;
  * #6) and conflict/chain checks run at registry construction.
  */
 @Configuration
-@EnableConfigurationProperties(AmoroControlProperties.class)
+@EnableConfigurationProperties({AmoroControlProperties.class, AmoroProcessProperties.class})
 public class ControlPlaneAutoConfiguration {
 
   private static final Logger LOG = LoggerFactory.getLogger(ControlPlaneAutoConfiguration.class);
 
   private final AmoroControlProperties properties;
+  private final AmoroProcessProperties processProperties;
 
-  public ControlPlaneAutoConfiguration(AmoroControlProperties properties) {
+  public ControlPlaneAutoConfiguration(
+      AmoroControlProperties properties, AmoroProcessProperties processProperties) {
     this.properties = properties;
+    this.processProperties = processProperties;
   }
 
   @PostConstruct
   public void validate() {
     properties.validate(); // fail-fast on illegal amoro.control.* values
+    processProperties.validate();
   }
 
   @Bean
@@ -133,45 +137,134 @@ public class ControlPlaneAutoConfiguration {
   @Bean
   public org.apache.amoro.process.ProcessCreationService processCreationService(
       org.apache.amoro.process.ProcessDomainAssembly assembly) {
-    return new org.apache.amoro.process.ProcessCreationService(assembly);
+    AmoroProcessProperties.Creation creation = processProperties.getCreation();
+    return new org.apache.amoro.process.ProcessCreationService(
+        assembly,
+        new org.apache.amoro.process.ProcessResource.RetryPolicy(
+            creation.getMaxRetries(),
+            creation.getMaxSubmissionRetries(),
+            creation.getRetryDelaySeconds()));
   }
 
   @Bean
   public org.apache.amoro.process.rest.ProcessRestSupport processRestSupport(
       org.apache.amoro.process.ProcessDomainAssembly assembly,
-      org.apache.amoro.process.ProcessCreationService creationService) {
+      org.apache.amoro.process.ProcessCreationService creationService,
+      org.apache.amoro.process.rest.ProcessRestSupport.TableCatalogPort tableCatalog,
+      org.apache.amoro.process.rest.ProcessActionCatalog actionCatalog) {
     return new org.apache.amoro.process.rest.ProcessRestSupport(
-        assembly, creationService);
+        assembly, tableCatalog, creationService, actionCatalog);
   }
 
   // ------------------------------------------------------------------ process runtime (engines +
   // scheduling)
 
-  /**
-   * The local execution engine: a bounded action pool. Pool sizing reuses the scheduler worker
-   * budget and the actor mailbox capacity — dedicated {@code amoro.process.*} keys can be added
-   * when the tuning needs diverge.
-   */
-  @Bean(destroyMethod = "shutdown")
-  public org.apache.amoro.process.engine.LocalEngineAdapter localEngineAdapter() throws Exception {
-    return new org.apache.amoro.process.engine.LocalEngineAdapter(
-        Math.max(2, properties.getScheduler().getWorkers() / 2),
-        properties.getActor().getQueueCapacity(),
-        org.apache.amoro.process.engine.LocalEngineAdapter.simulatedAction());
+  @Bean
+  public org.apache.amoro.process.ProcessResultPersistenceRetryer
+      processResultPersistenceRetryer() {
+    AmoroProcessProperties.ResultPersistence result = processProperties.getResultPersistence();
+    return new org.apache.amoro.process.ProcessResultPersistenceRetryer(
+        result.getMaxPending(), result.getBatchSize(), result.getRetryIntervalMs());
   }
 
-  /**
-   * Engine registry keyed by {@code spec.executionEngine}. "local" is deployed out of the box; a
-   * remote-Spark engine plugs in by registering another {@link
-   * org.apache.amoro.process.engine.ProcessEnginePort} here — the reconciler looks the engine up
-   * per process and waits (Step.WAIT) for engines that are not deployed.
-   */
+  @Bean
+  public org.apache.amoro.process.engine.ProviderMode processProviderMode() {
+    return processProperties.getSimulation().isEnabled()
+        ? org.apache.amoro.process.engine.ProviderMode.SIMULATED
+        : org.apache.amoro.process.engine.ProviderMode.REAL;
+  }
+
+  @Bean
+  public org.apache.amoro.process.engine.local.LocalActionRegistry localActionRegistry(
+      org.apache.amoro.process.engine.ProviderMode mode) {
+    ClassLoader loader = Thread.currentThread().getContextClassLoader();
+    return org.apache.amoro.process.engine.local.LocalActionRegistry.fromFactories(
+        org.apache.amoro.process.engine.ProcessPluginLoader.loadLocalActionFactories(loader), mode);
+  }
+
   @Bean
   public org.apache.amoro.process.engine.ProcessEngineRegistry processEngineRegistry(
-      org.apache.amoro.process.engine.LocalEngineAdapter localEngineAdapter) {
-    return org.apache.amoro.process.engine.ProcessEngineRegistry.builder()
-        .registerPort("local", localEngineAdapter, properties.getRepository().getTimeoutMs())
-        .build();
+      org.apache.amoro.process.engine.ProviderMode mode,
+      org.apache.amoro.process.engine.local.LocalActionRegistry localActions) {
+    ClassLoader loader = Thread.currentThread().getContextClassLoader();
+    AmoroProcessProperties.Simulation simulation = processProperties.getSimulation();
+    return org.apache.amoro.process.engine.ProcessEngineRegistry.fromFactories(
+        org.apache.amoro.process.engine.ProcessPluginLoader.loadEngineFactories(loader),
+        mode,
+        new org.apache.amoro.process.engine.ProcessEngineFactory.Context(
+            "spring",
+            simulation.getWorkerThreads(),
+            simulation.getQueueCapacity(),
+            localActions,
+            processProperties.getLocal().getTerminalResultRetentionDays()),
+        processProperties.getEngine().getCommandTimeoutMs());
+  }
+
+  @Bean
+  public org.apache.amoro.process.trigger.ProcessActionRegistry processActionRegistry(
+      org.apache.amoro.process.engine.ProviderMode mode) {
+    ClassLoader loader = Thread.currentThread().getContextClassLoader();
+    return org.apache.amoro.process.trigger.ProcessActionRegistry.fromFactories(
+        org.apache.amoro.process.engine.ProcessPluginLoader.loadActionFactories(loader),
+        mode,
+        new org.apache.amoro.process.trigger.ProcessActionPluginFactory.Context("spring"));
+  }
+
+  @Bean
+  public org.apache.amoro.process.rest.ProcessActionCatalog processActionCatalog(
+      org.apache.amoro.process.engine.ProcessEngineRegistry engines,
+      org.apache.amoro.process.trigger.ProcessActionRegistry actions) {
+    return org.apache.amoro.process.rest.ProcessActionCatalog.from(engines, actions);
+  }
+
+  @Bean
+  public org.apache.amoro.process.ProcessSubmissionBuilder processSubmissionBuilder(
+      org.apache.amoro.process.rest.ProcessActionCatalog actions) {
+    return resource ->
+        actions.buildSubmission(
+            resource.spec(), java.util.Collections.singletonMap("processName", resource.name()));
+  }
+
+  @Bean
+  public org.apache.amoro.process.rest.ProcessRestSupport.TableCatalogPort processTableCatalog() {
+    if (!processProperties.getSimulation().isEnabled()) {
+      return emptyProcessTableCatalog();
+    }
+    return new org.apache.amoro.process.rest.ProcessRestSupport.TableCatalogPort() {
+      @Override
+      public org.apache.amoro.process.rest.ProcessRestSupport.TableIdentity resolve(
+          String catalog, String database, String table) {
+        if (!org.apache.amoro.process.trigger.simulated.SimulatedProcessFixture.matches(
+            catalog, database, table)) {
+          return null;
+        }
+        return new org.apache.amoro.process.rest.ProcessRestSupport.TableIdentity(
+            org.apache.amoro.process.trigger.simulated.SimulatedProcessFixture.TABLE_ID,
+            org.apache.amoro.process.trigger.simulated.SimulatedProcessFixture.TABLE_FORMAT);
+      }
+    };
+  }
+
+  private static org.apache.amoro.process.rest.ProcessRestSupport.TableCatalogPort
+      emptyProcessTableCatalog() {
+    return new org.apache.amoro.process.rest.ProcessRestSupport.TableCatalogPort() {
+      @Override
+      public org.apache.amoro.process.rest.ProcessRestSupport.TableIdentity resolve(
+          String catalog, String database, String table) {
+        return null;
+      }
+    };
+  }
+
+  @Bean
+  public org.apache.amoro.process.trigger.ManagedTablePort processManagedTables() {
+    java.util.List<org.apache.amoro.process.trigger.ManagedTablePort.TableSnapshot> tables =
+        new java.util.ArrayList<>();
+    if (processProperties.getSimulation().isEnabled()) {
+      tables.add(
+          org.apache.amoro.process.trigger.simulated.SimulatedProcessFixture.tableSnapshot());
+    }
+    return new org.apache.amoro.process.trigger.SimulatedManagedTablePort(tables);
   }
 
   /**
@@ -184,7 +277,9 @@ public class ControlPlaneAutoConfiguration {
       processSchedulingListener(
           org.apache.amoro.process.ProcessDomainAssembly assembly,
           org.apache.amoro.process.engine.ProcessEngineRegistry engines,
-          DefaultScheduler scheduler) {
+          DefaultScheduler scheduler,
+          org.apache.amoro.process.ProcessResultPersistenceRetryer resultRetryer,
+          org.apache.amoro.process.ProcessSubmissionBuilder submissionBuilder) {
     org.apache.amoro.persistence.PersistenceListener<org.apache.amoro.process.ProcessResource>
         listener =
             new org.apache.amoro.persistence.PersistenceListener<
@@ -217,8 +312,13 @@ public class ControlPlaneAutoConfiguration {
                         engines,
                         scheduler,
                         org.apache.amoro.process.ProcessReconciler.Clock.systemUtc(),
-                        1_000L,
-                        assembly.handleRegistry()));
+                        processProperties.getReconcile().getPollIntervalMs(),
+                        processProperties.getReconcile().getSubmissionUnresolvedIntervalMs(),
+                        processProperties.getReconcile().getCancelRetryIntervalMs(),
+                        processProperties.getReconcile().getCommandInFlightDelayMs(),
+                        processProperties.getReconcile().getExecutionUnresolvedReminderIntervalMs(),
+                        resultRetryer,
+                        submissionBuilder));
               }
             };
     assembly.persistence().addListener(listener);
@@ -229,10 +329,85 @@ public class ControlPlaneAutoConfiguration {
   }
 
   @Bean
+  public org.apache.amoro.process.ActiveProcessRescheduler activeProcessRescheduler(
+      org.apache.amoro.process.ProcessDomainAssembly assembly,
+      org.apache.amoro.process.engine.ProcessEngineRegistry engines,
+      DefaultScheduler scheduler,
+      org.apache.amoro.process.ProcessResultPersistenceRetryer resultRetryer,
+      org.apache.amoro.process.ProcessSubmissionBuilder submissionBuilder,
+      org.apache.amoro.persistence.PersistenceListener<org.apache.amoro.process.ProcessResource>
+          processSchedulingListener) {
+    AmoroProcessProperties.Reconcile reconcile = processProperties.getReconcile();
+    AmoroProcessProperties.Rescheduler rescheduler = processProperties.getRescheduler();
+    return new org.apache.amoro.process.ActiveProcessRescheduler(
+        assembly.indexProjection(),
+        scheduler,
+        name ->
+            new org.apache.amoro.process.ProcessReconciler(
+                name,
+                assembly.repository(),
+                engines,
+                scheduler,
+                org.apache.amoro.process.ProcessReconciler.Clock.systemUtc(),
+                reconcile.getPollIntervalMs(),
+                reconcile.getSubmissionUnresolvedIntervalMs(),
+                reconcile.getCancelRetryIntervalMs(),
+                reconcile.getCommandInFlightDelayMs(),
+                reconcile.getExecutionUnresolvedReminderIntervalMs(),
+                resultRetryer,
+                submissionBuilder),
+        rescheduler.getBatchSize(),
+        rescheduler.getMaxRuntimeMs(),
+        rescheduler.getIntervalMs());
+  }
+
+  @Bean
+  public org.apache.amoro.process.engine.ExecutionHandleReaper executionHandleReaper(
+      org.apache.amoro.process.ProcessDomainAssembly assembly,
+      org.apache.amoro.process.engine.ProcessEngineRegistry engines,
+      org.apache.amoro.persistence.PersistenceListener<org.apache.amoro.process.ProcessResource>
+          processSchedulingListener) {
+    AmoroProcessProperties.ExecutionReaper reaper = processProperties.getExecutionReaper();
+    return new org.apache.amoro.process.engine.ExecutionHandleReaper(
+        assembly.releaseIndex(), engines, reaper.getBatchSize(), reaper.getIntervalMs());
+  }
+
+  @Bean
+  public org.apache.amoro.process.ProcessTtlRuntime processTtlRuntime(
+      org.apache.amoro.process.ProcessDomainAssembly assembly,
+      org.apache.amoro.persistence.PersistenceListener<org.apache.amoro.process.ProcessResource>
+          processSchedulingListener) {
+    AmoroProcessProperties.Ttl ttl = processProperties.getTtl();
+    return new org.apache.amoro.process.ProcessTtlRuntime(
+        new org.apache.amoro.process.ProcessTtlCleaner(assembly, assembly.handleRegistry()),
+        ttl.getRetentionDays(),
+        ttl.getBatchSize(),
+        ttl.getIntervalMs());
+  }
+
+  @Bean
+  public org.apache.amoro.process.trigger.ProcessTriggerCoordinator processTriggerCoordinator(
+      org.apache.amoro.process.ProcessCreationService creationService,
+      org.apache.amoro.process.trigger.ManagedTablePort tables,
+      org.apache.amoro.process.trigger.ProcessActionRegistry actions,
+      org.apache.amoro.persistence.PersistenceListener<org.apache.amoro.process.ProcessResource>
+          processSchedulingListener) {
+    AmoroProcessProperties.Trigger trigger = processProperties.getTrigger();
+    return new org.apache.amoro.process.trigger.ProcessTriggerCoordinator(
+        creationService, tables, actions, trigger.getIntervalMs(), trigger.getBatchSize());
+  }
+
+  @Bean
   public ControlPlaneLifecycle controlPlaneLifecycle(
       DefaultScheduler scheduler,
       ListenerDispatcher<ControlledResource> dispatcher,
       org.apache.amoro.process.ProcessDomainAssembly processDomain,
+      org.apache.amoro.process.trigger.ProcessTriggerCoordinator trigger,
+      org.apache.amoro.process.ActiveProcessRescheduler rescheduler,
+      org.apache.amoro.process.engine.ExecutionHandleReaper reaper,
+      org.apache.amoro.process.ProcessTtlRuntime ttl,
+      org.apache.amoro.process.engine.ProcessEngineRegistry engines,
+      org.apache.amoro.process.ProcessResultPersistenceRetryer resultRetryer,
       org.springframework.context.ApplicationContext context) {
     List<InMemoryPersistence<?>> domains = new ArrayList<InMemoryPersistence<?>>();
     for (InMemoryPersistence<?> untyped :
@@ -240,9 +415,33 @@ public class ControlPlaneAutoConfiguration {
       domains.add(untyped);
     }
     domains.add(processDomain.persistence());
-    ControlPlaneLifecycle lifecycle =
-        ControlPlaneLifecycle.from(
-            scheduler, dispatcher, domains, properties.getLifecycle().getShutdownTimeoutMs());
-    return lifecycle;
+    java.time.Duration timeout =
+        java.time.Duration.ofMillis(properties.getLifecycle().getShutdownTimeoutMs());
+    long timeoutMillis = timeout.toMillis();
+    return new ControlPlaneLifecycle(
+        scheduler::start,
+        () -> {
+          rescheduler.start();
+          reaper.start();
+          ttl.start();
+          trigger.start();
+        },
+        () -> {
+          trigger.shutdown(timeoutMillis);
+          rescheduler.shutdown(timeoutMillis);
+          reaper.shutdown(timeoutMillis);
+          ttl.shutdown(timeoutMillis);
+        },
+        () -> scheduler.shutdown(timeout),
+        () -> {
+          engines.shutdown(timeoutMillis);
+          resultRetryer.shutdown(timeoutMillis);
+        },
+        () -> dispatcher.shutdown(timeout),
+        () -> {
+          for (InMemoryPersistence<?> persistence : domains) {
+            persistence.shutdown(timeout);
+          }
+        });
   }
 }
