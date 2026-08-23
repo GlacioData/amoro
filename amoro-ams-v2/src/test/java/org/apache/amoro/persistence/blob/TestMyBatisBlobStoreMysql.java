@@ -27,131 +27,65 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import org.apache.amoro.persistence.PersistenceDomain;
 import org.apache.amoro.persistence.PersistenceDomain.SerdeFormat;
 import org.apache.amoro.persistence.exception.ResourceAlreadyExists;
-import org.apache.ibatis.mapping.Environment;
-import org.apache.ibatis.session.Configuration;
+import org.apache.amoro.test.IsolatedMysql;
+import org.apache.ibatis.session.SqlSession;
 import org.apache.ibatis.session.SqlSessionFactory;
-import org.apache.ibatis.session.SqlSessionFactoryBuilder;
-import org.apache.ibatis.transaction.jdbc.JdbcTransactionFactory;
 import org.junit.jupiter.api.AfterAll;
-import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.extension.ExtendWith;
 
 import java.nio.charset.StandardCharsets;
-import java.sql.Connection;
-import java.sql.DriverManager;
-import java.sql.SQLException;
-import java.sql.Statement;
+import java.util.ArrayList;
 import java.util.Base64;
+import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Real-MySQL integration (framework spec §8/§9, tag {@code docker-mysql}, activated by {@code
- * -Pdocker-it}). Runs against a reachable MySQL 5.7 instance — by default the local Docker
- * container on localhost:3306, database {@code amoro_v2}; override with the {@code
- * AMORO_V2_MYSQL_*} environment variables. The port probe is the second safety net: without a
- * reachable database the whole group skips explicitly (never silently green).
+ * -Pdocker-it}). The class owns an isolated database inside the suite's disposable MySQL 5.7
+ * container and never connects to or cleans a fixed host database.
  */
 @Tag("docker-mysql")
+@ExtendWith(IsolatedMysql.class)
 @Timeout(120)
 public class TestMyBatisBlobStoreMysql {
 
-  private static final String JDBC_URL =
-      System.getenv()
-          .getOrDefault(
-              "AMORO_V2_MYSQL_URL",
-              "jdbc:mysql://localhost:3306/amoro_v2"
-                  + "?useSSL=false&characterEncoding=utf8&allowPublicKeyRetrieval=true");
-  private static final String JDBC_USER =
-      System.getenv().getOrDefault("AMORO_V2_MYSQL_USER", "root");
-  private static final String JDBC_PASSWORD =
-      System.getenv().getOrDefault("AMORO_V2_MYSQL_PASSWORD", "");
+  private static final String MYSQL_DATABASE = "amoro_blob_store_e2e";
 
-  private static Connection connection;
+  private static final List<SqlSession> SESSIONS = new ArrayList<>();
+  private static SqlSessionFactory sqlFactory;
   private static MyBatisBlobStore resourceStore;
   private static MyBatisBlobStore processStore;
 
   @BeforeAll
-  public static void probeAndSetUp() throws Exception {
-    try {
-      connection = DriverManager.getConnection(JDBC_URL, JDBC_USER, JDBC_PASSWORD);
-    } catch (SQLException unreachable) {
-      Assumptions.assumeTrue(
-          false, "no reachable MySQL at " + JDBC_URL + " — docker-mysql group skips explicitly");
-      return;
-    }
-    runMysqlSchema(connection); // IF NOT EXISTS: idempotent on every rerun
-    SqlSessionFactory factory = sqlSessionFactory();
+  public static void initializeIsolatedSchema() {
+    IsolatedMysql.initializeControlPlane(MYSQL_DATABASE);
+    IsolatedMysql.initializeGenericResourceDomain(MYSQL_DATABASE);
+    sqlFactory = IsolatedMysql.sqlSessionFactory(MYSQL_DATABASE, "blob-store-testcontainer");
     resourceStore =
-        new MyBatisBlobStore(
+        store(
             new PersistenceDomain(
                 "resource",
                 PersistenceDomain.Table.AMORO_RESOURCE.physicalName(),
-                SerdeFormat.JSON),
-            factory.openSession(true).getMapper(ResourceBlobMapper.class));
-    processStore =
-        new MyBatisBlobStore(
-            new PersistenceDomain("process", "amoro_process_v2", SerdeFormat.YAML),
-            factory.openSession(true).getMapper(ResourceBlobMapper.class));
-    clearTables();
+                SerdeFormat.JSON));
+    processStore = store(new PersistenceDomain("process", "amoro_process_v2", SerdeFormat.YAML));
   }
 
   @AfterAll
-  public static void tearDown() throws Exception {
-    if (connection != null) {
-      clearTables();
-      connection.close();
+  public static void closeSessions() {
+    for (SqlSession session : SESSIONS) {
+      session.close();
     }
   }
 
-  private static void clearTables() throws SQLException {
-    try (Statement statement = connection.createStatement()) {
-      for (String table : new String[] {"amoro_process_v2"}) {
-        statement.execute("DELETE FROM " + table);
-      }
-    }
-  }
-
-  /** amoro_resource is not shipped: the dual-domain test creates it inline. */
-  private static void ensureResourceTable(Connection connection) throws Exception {
-    try (Statement statement = connection.createStatement()) {
-      statement.execute(
-          "CREATE TABLE IF NOT EXISTS amoro_resource (name VARCHAR(256) NOT NULL, "
-              + "collection CHAR(50) NOT NULL, value MEDIUMTEXT NOT NULL, "
-              + "last_updated DATETIME NOT NULL, PRIMARY KEY (name)) "
-              + "ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
-    }
-  }
-
-  static void runMysqlSchema(Connection connection) throws Exception {
-    // classpath load: main resources sit on the test classpath, so IDE runs work too
-    String script =
-        new String(
-            TestMyBatisBlobStoreMysql.class.getResourceAsStream("/schema-mysql.sql").readAllBytes(),
-            StandardCharsets.UTF_8);
-    // strip line comments BEFORE splitting: the license header contains ';' inside quotes
-    String withoutComments = script.replaceAll("--[^\n]*", "");
-    try (Statement statement = connection.createStatement()) {
-      for (String sqlPiece : withoutComments.split(";")) {
-        String sql = sqlPiece.trim();
-        if (!sql.isEmpty()) {
-          statement.execute(sql);
-        }
-      }
-    }
-  }
-
-  private static SqlSessionFactory sqlSessionFactory() {
-    org.apache.ibatis.datasource.unpooled.UnpooledDataSource dataSource =
-        new org.apache.ibatis.datasource.unpooled.UnpooledDataSource(
-            "com.mysql.cj.jdbc.Driver", JDBC_URL, JDBC_USER, JDBC_PASSWORD);
-    Environment environment = new Environment("mysql-it", new JdbcTransactionFactory(), dataSource);
-    Configuration configuration = new Configuration(environment);
-    configuration.addMapper(ResourceBlobMapper.class);
-    return new SqlSessionFactoryBuilder().build(configuration);
+  private static MyBatisBlobStore store(PersistenceDomain domain) {
+    SqlSession session = sqlFactory.openSession(true);
+    SESSIONS.add(session);
+    return new MyBatisBlobStore(domain, session.getMapper(ResourceBlobMapper.class));
   }
 
   private static byte[] bytes(String text) {
@@ -209,12 +143,11 @@ public class TestMyBatisBlobStoreMysql {
     assertEquals(1, seen.get());
 
     MyBatisBlobStore restarted =
-        new MyBatisBlobStore(
+        store(
             new PersistenceDomain(
                 "resource",
                 PersistenceDomain.Table.AMORO_RESOURCE.physicalName(),
-                SerdeFormat.JSON),
-            sqlSessionFactory().openSession(true).getMapper(ResourceBlobMapper.class));
+                SerdeFormat.JSON));
     assertArrayEquals(bytes("{\"v\":7}"), restarted.find(collection, "reload").orElse(null));
   }
 
@@ -231,8 +164,9 @@ public class TestMyBatisBlobStoreMysql {
   }
 
   @Test
-  public void schemaInitializationIsIdempotent() throws Exception {
-    runMysqlSchema(connection); // CREATE TABLE IF NOT EXISTS: rerunning must not fail
+  public void schemaInitializationIsIdempotent() {
+    IsolatedMysql.initializeControlPlane(MYSQL_DATABASE);
+    IsolatedMysql.initializeGenericResourceDomain(MYSQL_DATABASE);
     resourceStore.insert("fake", "after-rerun", bytes("ok"));
     assertArrayEquals(bytes("ok"), resourceStore.find("fake", "after-rerun").orElse(null));
   }

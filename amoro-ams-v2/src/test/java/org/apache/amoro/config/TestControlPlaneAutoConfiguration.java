@@ -79,6 +79,17 @@ public class TestControlPlaneAutoConfiguration {
     assertEquals(1000L, properties.getListener().getRetryDelayMs());
     assertEquals(10000L, properties.getRepository().getTimeoutMs());
     assertEquals(10000L, properties.getLifecycle().getShutdownTimeoutMs());
+
+    AmoroProcessProperties process = new AmoroProcessProperties();
+    assertTrue(!process.getSimulation().isEnabled());
+    assertEquals(30_000L, process.getEngine().getCommandTimeoutMs());
+    assertEquals(3_000L, process.getReconcile().getPollIntervalMs());
+    assertEquals(30_000L, process.getRescheduler().getIntervalMs());
+    assertEquals(256, process.getRescheduler().getBatchSize());
+    assertEquals(1_000L, process.getRescheduler().getMaxRuntimeMs());
+    assertEquals(60_000L, process.getExecutionReaper().getIntervalMs());
+    assertEquals(100, process.getExecutionReaper().getBatchSize());
+    assertEquals(7, process.getLocal().getTerminalResultRetentionDays());
   }
 
   @Test
@@ -132,15 +143,76 @@ public class TestControlPlaneAutoConfiguration {
     List<String> order = new ArrayList<String>();
     ControlPlaneLifecycle lifecycle =
         new ControlPlaneLifecycle(
-            () -> order.add("scheduler"), () -> order.add("dispatcher"), () -> order.add("lanes"));
+            () -> order.add("scheduler-start"),
+            () -> order.add("maintenance-start"),
+            () -> order.add("maintenance-stop"),
+            () -> order.add("scheduler-stop"),
+            () -> order.add("engine-stop"),
+            () -> order.add("dispatcher-stop"),
+            () -> order.add("lanes-stop"));
     lifecycle.start();
     assertTrue(lifecycle.isRunning());
     lifecycle.stop();
-    assertEquals(3, order.size());
-    assertEquals("scheduler", order.get(0), "scheduler stops first");
-    assertEquals("dispatcher", order.get(1), "dispatcher drains second");
-    assertEquals("lanes", order.get(2), "mutation lanes drain last");
+    assertEquals(
+        List.of(
+            "scheduler-start",
+            "maintenance-start",
+            "maintenance-stop",
+            "scheduler-stop",
+            "engine-stop",
+            "dispatcher-stop",
+            "lanes-stop"),
+        order);
     assertTrue(!lifecycle.isRunning());
+  }
+
+  @Test
+  public void lifecycleRollsBackFailedStartAndContinuesEveryFailingStopStage() {
+    List<String> startRollback = new ArrayList<>();
+    ControlPlaneLifecycle failedStart =
+        new ControlPlaneLifecycle(
+            () -> startRollback.add("scheduler-start"),
+            () -> {
+              startRollback.add("maintenance-start");
+              throw new IllegalStateException("start failure");
+            },
+            () -> startRollback.add("maintenance-stop"),
+            () -> startRollback.add("scheduler-stop"),
+            () -> startRollback.add("engine-stop"),
+            () -> startRollback.add("dispatcher-stop"),
+            () -> startRollback.add("lanes-stop"));
+    assertThrows(IllegalStateException.class, failedStart::start);
+    assertEquals(
+        List.of(
+            "scheduler-start",
+            "maintenance-start",
+            "maintenance-stop",
+            "scheduler-stop",
+            "engine-stop",
+            "dispatcher-stop",
+            "lanes-stop"),
+        startRollback);
+
+    List<String> stopOrder = new ArrayList<>();
+    ControlPlaneLifecycle failingStops =
+        new ControlPlaneLifecycle(
+            () -> {},
+            () -> {},
+            () -> failAfter(stopOrder, "maintenance"),
+            () -> failAfter(stopOrder, "scheduler"),
+            () -> failAfter(stopOrder, "engine"),
+            () -> failAfter(stopOrder, "dispatcher"),
+            () -> failAfter(stopOrder, "lanes"));
+    failingStops.start();
+    IllegalStateException aggregate = assertThrows(IllegalStateException.class, failingStops::stop);
+    assertEquals(List.of("maintenance", "scheduler", "engine", "dispatcher", "lanes"), stopOrder);
+    assertEquals(4, aggregate.getSuppressed().length);
+    assertTrue(!failingStops.isRunning());
+  }
+
+  private static void failAfter(List<String> order, String stage) {
+    order.add(stage);
+    throw new IllegalStateException(stage);
   }
 
   @Test

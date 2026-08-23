@@ -71,7 +71,7 @@ public class TestAutoSchedulingWiring {
             10_000L,
             65536,
             new ExecutionHandleRegistry());
-    rest = new ProcessRestSupport(assembly);
+    rest = ProcessTestFixtures.simulatedRestSupport(assembly);
     registerSchedulingListener();
   }
 
@@ -123,7 +123,7 @@ public class TestAutoSchedulingWiring {
   @Test
   public void restCreatedProcessAutoSchedulesToSuccess() {
     ProcessResource created =
-        rest.create("prod", "db", "orders", "wire-1", "expire-snapshots", "local", null).resource;
+        rest.create("prod", "db", "orders", "wire-1", "dummy-maintenance", "local", null).resource;
 
     await()
         .atMost(30, TimeUnit.SECONDS)
@@ -141,7 +141,7 @@ public class TestAutoSchedulingWiring {
   @Test
   public void pendingProcessIsRescheduledAfterRebuild() {
     ProcessResource created =
-        rest.create("prod", "db", "orders", "wire-2", "expire-snapshots", "local", null).resource;
+        rest.create("prod", "db", "orders", "wire-2", "dummy-maintenance", "local", null).resource;
     await()
         .atMost(30, TimeUnit.SECONDS)
         .until(
@@ -166,7 +166,7 @@ public class TestAutoSchedulingWiring {
             10_000L,
             65536,
             new ExecutionHandleRegistry());
-    rest = new ProcessRestSupport(assembly);
+    rest = ProcessTestFixtures.simulatedRestSupport(assembly);
     registerSchedulingListener();
     assembly.persistence().postStart();
 

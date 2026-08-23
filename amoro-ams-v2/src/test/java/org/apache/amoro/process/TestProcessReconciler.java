@@ -32,6 +32,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
 import java.time.Duration;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
@@ -104,15 +105,16 @@ public class TestProcessReconciler {
         new ProcessResource(
             name,
             new ProcessResource.ProcessSpec(
-                new ProcessResource.TableRef("prod", "db", "t", "42"),
-                "expire-snapshots",
+                new ProcessResource.TableRef("prod", "db", "t", "42", "simulated"),
+                "dummy-maintenance",
                 "local",
                 "MANUAL",
                 "2026-08-22T10:00:00Z",
                 "RUN",
                 new ProcessResource.RequestIdentity("sha256:key", "sha256:req"),
                 parameters,
-                new ProcessResource.RetryPolicy(3, 2, 30)),
+                new ProcessResource.RetryPolicy(
+                    3, 2, Math.max(1, (int) Math.ceil(retryDelayMillis / 1000.0)))),
             new ProcessResource.ProcessStatus(
                 "PENDING",
                 0,
@@ -214,8 +216,8 @@ public class TestProcessReconciler {
                 new ProcessResource(
                     "cancel-3",
                     new ProcessResource.ProcessSpec(
-                        new ProcessResource.TableRef("prod", "db", "t", "42"),
-                        "expire-snapshots",
+                        new ProcessResource.TableRef("prod", "db", "t", "42", "simulated"),
+                        "dummy-maintenance",
                         "local",
                         "MANUAL",
                         "2026-08-22T10:00:00Z",
@@ -284,6 +286,71 @@ public class TestProcessReconciler {
         submitsAtUnresolved,
         submitCalls.get(),
         "an unresolved submission is never blind-resubmitted with the same key");
+  }
+
+  @Test
+  public void legacyFinalRepairPreservesExistingAttemptAndStatusTimes() {
+    String attemptFinishedAt = "2026-08-22T10:00:02Z";
+    String statusFinishedAt = "2026-08-22T10:00:03Z";
+    ProcessResource.ProcessAttempt attempt =
+        new ProcessResource.ProcessAttempt(
+            0,
+            "repair-final:0:0",
+            "sha256:req",
+            "ACKNOWLEDGED",
+            "dummy-execution-repair",
+            "2026-08-22T10:00:01Z",
+            null,
+            "FINAL",
+            attemptFinishedAt,
+            Collections.emptyList(),
+            new ProcessResource.ManualResolutions(null, null));
+    ProcessResource legacy =
+        new ProcessResource(
+            "repair-final",
+            new ProcessResource.ProcessSpec(
+                new ProcessResource.TableRef("prod", "db", "repair", "repair-table", "simulated"),
+                "dummy-maintenance",
+                "local",
+                "MANUAL",
+                "2026-08-22T10:00:00Z",
+                "RUN",
+                new ProcessResource.RequestIdentity("sha256:key-repair", "sha256:req"),
+                Collections.singletonMap("simulated", true),
+                new ProcessResource.RetryPolicy(3, 2, 30)),
+            new ProcessResource.ProcessStatus(
+                "FAILED",
+                0,
+                attempt,
+                Collections.emptyList(),
+                null,
+                null,
+                null,
+                new ProcessResource.EngineBackoff(0, 0, 0, 0),
+                Collections.emptyList(),
+                null,
+                "durable remote failure",
+                "2026-08-22T10:00:01Z",
+                null,
+                statusFinishedAt));
+    assembly.repository().create(legacy);
+
+    new ProcessReconciler(
+            legacy.name(),
+            assembly.repository(),
+            dispatcher,
+            scheduler,
+            () -> "2026-08-22T10:00:09Z",
+            100L)
+        .invoke();
+
+    ProcessResource repaired = assembly.repository().get(legacy.name());
+    assertEquals("durable remote failure", repaired.status().attempt().lastError());
+    assertEquals(attemptFinishedAt, repaired.status().attempt().finishedAt());
+    assertEquals(statusFinishedAt, repaired.status().finishedAt());
+    assertTrue(
+        ProcessConditions.isTrue(repaired.status().conditions(), ProcessConditions.DATA_REPAIRED));
+    assertEquals(0L, submitCalls.get(), "repair must never call an Engine");
   }
 
   private String phaseOf(String name) {

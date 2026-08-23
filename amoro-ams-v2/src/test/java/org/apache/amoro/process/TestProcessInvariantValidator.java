@@ -41,8 +41,7 @@ public class TestProcessInvariantValidator {
     ProcessResource canceled = created.withSpec(spec("CANCEL"));
 
     assertDoesNotThrow(() -> validator.prepare(PersistenceChange.created(created)));
-    assertDoesNotThrow(
-        () -> validator.prepare(PersistenceChange.modified(created, canceled)));
+    assertDoesNotThrow(() -> validator.prepare(PersistenceChange.modified(created, canceled)));
   }
 
   @Test
@@ -51,7 +50,7 @@ public class TestProcessInvariantValidator {
     ProcessResource.ProcessSpec changedAction =
         new ProcessResource.ProcessSpec(
             created.spec().table(),
-            "clean-orphans",
+            "dummy-secondary",
             created.spec().executionEngine(),
             created.spec().triggerSource(),
             created.spec().createdAt(),
@@ -161,6 +160,298 @@ public class TestProcessInvariantValidator {
     assertInvalid(statusWithConditions(java.util.Collections.singletonList(malformed)));
   }
 
+  @Test
+  public void rejectsInconsistentAttemptAndTopLevelFinalityMarkers() {
+    ProcessResource.ProcessAttempt open =
+        new ProcessResource.ProcessAttempt(
+            0,
+            "p1:0:0",
+            "sha256:attempt",
+            "ACKNOWLEDGED",
+            "external-1",
+            "2026-08-22T10:00:01Z",
+            "ALLOW",
+            null,
+            null,
+            new ProcessResource.ManualResolutions(null, null));
+    ProcessResource partiallyMarkedLegacyTerminal =
+        resource(
+            "p1",
+            spec("RUN"),
+            new ProcessResource.ProcessStatus(
+                "SUCCESS",
+                0,
+                open,
+                null,
+                null,
+                null,
+                new ProcessResource.EngineBackoff(0, 0, 0, 0),
+                null,
+                null,
+                null,
+                null,
+                null,
+                "2026-08-22T10:00:02Z"));
+    assertDoesNotThrow(
+        () -> validator.prepare(PersistenceChange.created(partiallyMarkedLegacyTerminal)),
+        "postStart must load a terminal row whose only defect is a missing finality marker");
+
+    ProcessResource.ProcessAttempt retryableFailed =
+        new ProcessResource.ProcessAttempt(
+            0,
+            "p1:0:0",
+            "sha256:attempt",
+            "ACKNOWLEDGED",
+            "external-1",
+            "2026-08-22T10:00:01Z",
+            "simulated failure",
+            "ALLOW",
+            "2026-08-22T10:00:02Z",
+            null,
+            new ProcessResource.ManualResolutions(null, null));
+    assertInvalid(
+        new ProcessResource.ProcessStatus(
+            "FAILED",
+            0,
+            retryableFailed,
+            null,
+            null,
+            null,
+            new ProcessResource.EngineBackoff(0, 0, 0, 0),
+            null,
+            null,
+            "must-not-be-top-level-yet",
+            null,
+            null,
+            "2026-08-22T10:00:02Z"));
+  }
+
+  @Test
+  public void legacyTerminalAllowsOnlyExactFinalityMarkerRepair() {
+    ProcessResource legacy = resource("p1", spec("RUN"), status("SUCCESS", 0, null, null));
+    ProcessResource repaired = exactLegacyRepair(legacy, "2026-08-22T10:00:03Z");
+
+    assertDoesNotThrow(
+        () -> validator.prepare(PersistenceChange.created(legacy)),
+        "postStart must admit the narrowly repairable legacy terminal shape");
+    assertDoesNotThrow(
+        () -> validator.prepare(PersistenceChange.modified(legacy, repaired)),
+        "the controller may fill only the missing finality markers and DataRepaired audit");
+
+    ProcessResource legacyWithStaleRepairAudit =
+        legacy.withStatus(
+            new ProcessResource.ProcessStatus(
+                "SUCCESS",
+                0,
+                null,
+                null,
+                null,
+                null,
+                null,
+                new ProcessResource.EngineBackoff(0, 0, 0, 0),
+                java.util.Collections.singletonList(
+                    new ProcessResource.Condition(
+                        "DataRepaired",
+                        "False",
+                        "LegacyImport",
+                        "repair is still pending",
+                        "2026-08-22T10:00:01Z",
+                        "2026-08-22T10:00:01Z",
+                        null)),
+                null,
+                null,
+                null,
+                null,
+                null));
+    assertDoesNotThrow(
+        () -> validator.prepare(PersistenceChange.created(legacyWithStaleRepairAudit)));
+    assertDoesNotThrow(
+        () -> validator.prepare(PersistenceChange.modified(legacyWithStaleRepairAudit, repaired)),
+        "an incomplete legacy terminal may canonically update its DataRepaired condition");
+
+    ProcessResource.ProcessStatus repairedStatus = repaired.status();
+    Map<String, Object> forgedResult = new LinkedHashMap<>();
+    forgedResult.put("simulated", false);
+    ProcessResource forged =
+        repaired.withStatus(
+            new ProcessResource.ProcessStatus(
+                repairedStatus.phase(),
+                repairedStatus.retryNumber(),
+                repairedStatus.attempt(),
+                repairedStatus.attemptHistory(),
+                repairedStatus.lastObservedAt(),
+                repairedStatus.lastCancelAttemptAt(),
+                repairedStatus.nextReconcileAt(),
+                repairedStatus.engineBackoffAttempts(),
+                repairedStatus.conditions(),
+                new ProcessResource.Summary(null, forgedResult),
+                repairedStatus.failure(),
+                repairedStatus.submittedAt(),
+                repairedStatus.startedAt(),
+                repairedStatus.finishedAt()));
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> validator.prepare(PersistenceChange.modified(legacy, forged)),
+        "DataRepaired must not authorize a simultaneous business-result mutation");
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> validator.prepare(PersistenceChange.modified(repaired, forged)),
+        "a fully valid final Process is immutable");
+    ProcessResource finalSpecMutation =
+        repaired.withSpec(repaired.spec().withDesiredState("CANCEL"));
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> validator.prepare(PersistenceChange.modified(repaired, finalSpecMutation)),
+        "final immutability also covers desiredState and the complete spec");
+  }
+
+  @Test
+  public void dataRepairedCannotHideAttemptHistoryRewrite() {
+    ProcessResource.AttemptSummary originalSummary = archivedFailure("original failure");
+    ProcessResource previous =
+        resource(
+            "p1",
+            spec("RUN"),
+            retriedStatus(java.util.Collections.singletonList(originalSummary), null));
+    ProcessResource.AttemptSummary rewrittenSummary = archivedFailure("rewritten failure");
+    List<ProcessResource.Condition> forgedAudit =
+        java.util.Collections.singletonList(
+            new ProcessResource.Condition(
+                "DataRepaired",
+                "True",
+                "FinalityMarkersRepaired",
+                "missing finality markers were reconstructed",
+                "2026-08-22T10:00:03Z",
+                "2026-08-22T10:00:03Z",
+                null));
+    ProcessResource current =
+        resource(
+            "p1",
+            spec("RUN"),
+            retriedStatus(java.util.Collections.singletonList(rewrittenSummary), forgedAudit));
+
+    assertDoesNotThrow(() -> validator.prepare(PersistenceChange.created(previous)));
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> validator.prepare(PersistenceChange.modified(previous, current)),
+        "history is append-only and DataRepaired is not a general repair capability");
+
+    ProcessResource.AttemptSummary wrongIdentity =
+        new ProcessResource.AttemptSummary(
+            0,
+            0,
+            "another-process:0:0",
+            "sha256:attempt-0",
+            "FAILED",
+            null,
+            "ALLOW",
+            java.util.Collections.emptyList(),
+            null,
+            "2026-08-22T10:00:01Z",
+            "original failure");
+    assertInvalid(retriedStatus(java.util.Collections.singletonList(wrongIdentity), null));
+
+    assertInvalid(
+        statusWithConditions(
+            java.util.Collections.singletonList(
+                new ProcessResource.Condition(
+                    "DataRepaired",
+                    "True",
+                    "FinalityMarkersRepaired",
+                    "missing finality markers were reconstructed",
+                    "2026-08-22T10:00:03Z",
+                    "2026-08-22T10:00:03Z",
+                    null))));
+  }
+
+  private static ProcessResource exactLegacyRepair(ProcessResource legacy, String repairedAt) {
+    ProcessResource.ProcessAttempt attempt =
+        new ProcessResource.ProcessAttempt(
+            0,
+            legacy.name() + ":0:0",
+            ProcessRequestHashes.actionAttempt(legacy.name(), 0, legacy.spec()),
+            "CREATED",
+            null,
+            null,
+            null,
+            "FINAL",
+            repairedAt,
+            java.util.Collections.emptyList(),
+            new ProcessResource.ManualResolutions(null, null));
+    ProcessResource.Condition dataRepaired =
+        new ProcessResource.Condition(
+            "DataRepaired",
+            "True",
+            "FinalityMarkersRepaired",
+            "missing finality markers were reconstructed",
+            repairedAt,
+            repairedAt,
+            null);
+    return legacy.withStatus(
+        new ProcessResource.ProcessStatus(
+            "SUCCESS",
+            0,
+            attempt,
+            java.util.Collections.emptyList(),
+            null,
+            null,
+            null,
+            new ProcessResource.EngineBackoff(0, 0, 0, 0),
+            java.util.Collections.singletonList(dataRepaired),
+            null,
+            null,
+            null,
+            null,
+            repairedAt));
+  }
+
+  private static ProcessResource.ProcessStatus retriedStatus(
+      List<ProcessResource.AttemptSummary> history, List<ProcessResource.Condition> conditions) {
+    ProcessResource.ProcessAttempt currentAttempt =
+        new ProcessResource.ProcessAttempt(
+            0,
+            "p1:1:0",
+            "sha256:attempt-1",
+            "CREATED",
+            null,
+            null,
+            null,
+            "AUTO",
+            null,
+            java.util.Collections.emptyList(),
+            new ProcessResource.ManualResolutions(null, null));
+    return new ProcessResource.ProcessStatus(
+        "PENDING",
+        1,
+        currentAttempt,
+        history,
+        null,
+        null,
+        "2026-08-22T10:00:02Z",
+        new ProcessResource.EngineBackoff(0, 0, 0, 0),
+        conditions,
+        null,
+        null,
+        null,
+        null,
+        null);
+  }
+
+  private static ProcessResource.AttemptSummary archivedFailure(String reason) {
+    return new ProcessResource.AttemptSummary(
+        0,
+        0,
+        "p1:0:0",
+        "sha256:attempt-0",
+        "FAILED",
+        null,
+        "ALLOW",
+        java.util.Collections.emptyList(),
+        null,
+        "2026-08-22T10:00:01Z",
+        reason);
+  }
+
   private void assertInvalid(ProcessResource.ProcessStatus invalidStatus) {
     ProcessResource invalid = resource("p1", spec("RUN"), invalidStatus);
     assertThrows(
@@ -169,9 +460,7 @@ public class TestProcessInvariantValidator {
   }
 
   private static ProcessResource resource(
-      String name,
-      ProcessResource.ProcessSpec spec,
-      ProcessResource.ProcessStatus status) {
+      String name, ProcessResource.ProcessSpec spec, ProcessResource.ProcessStatus status) {
     return new ProcessResource(name, spec, status);
   }
 
@@ -179,8 +468,8 @@ public class TestProcessInvariantValidator {
     Map<String, Object> parameters = new LinkedHashMap<>();
     parameters.put("simulated", true);
     return new ProcessResource.ProcessSpec(
-        new ProcessResource.TableRef("prod", "db", "table", "42"),
-        "expire-snapshots",
+        new ProcessResource.TableRef("prod", "db", "table", "42", "simulated"),
+        "dummy-maintenance",
         "local",
         "MANUAL",
         "2026-08-22T10:00:00Z",

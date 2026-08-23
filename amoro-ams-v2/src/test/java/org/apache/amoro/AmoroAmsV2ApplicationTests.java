@@ -20,6 +20,8 @@ package org.apache.amoro;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import org.apache.amoro.process.engine.ProcessEngineRegistry;
+import org.apache.amoro.process.rest.ProcessActionCatalog;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -42,9 +44,19 @@ class AmoroAmsV2ApplicationTests {
 
   @Autowired private TestRestTemplate restTemplate;
 
+  @Autowired private ProcessEngineRegistry engines;
+
+  @Autowired private ProcessActionCatalog actions;
+
   @Test
   void contextLoadsAndHealthEndpointResponds() {
     String body = restTemplate.getForObject("/api/ams/v2/health", String.class);
     assertThat(body).contains("\"status\":\"UP\"").contains("amoro-ams-v2");
+  }
+
+  @Test
+  void defaultContextPublishesNoProcessEngineOrAction() {
+    assertThat(engines.engines()).isEmpty();
+    assertThat(actions.actions()).isEmpty();
   }
 }

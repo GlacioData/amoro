@@ -21,216 +21,269 @@ package org.apache.amoro.process.e2e;
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.apache.amoro.control.DefaultScheduler;
 import org.apache.amoro.persistence.HandoffResult;
 import org.apache.amoro.persistence.blob.MyBatisBlobStore;
 import org.apache.amoro.persistence.blob.ResourceBlobMapper;
+import org.apache.amoro.process.ProcessCreationService;
 import org.apache.amoro.process.ProcessDomainAssembly;
 import org.apache.amoro.process.ProcessFinality;
 import org.apache.amoro.process.ProcessReconciler;
+import org.apache.amoro.process.ProcessResource;
 import org.apache.amoro.process.ProcessTtlCleaner;
+import org.apache.amoro.process.engine.ExecutionHandleReaper;
 import org.apache.amoro.process.engine.LocalEngineAdapter;
 import org.apache.amoro.process.engine.ProcessEngineDispatcher;
+import org.apache.amoro.process.engine.ProcessEngineRegistry;
+import org.apache.amoro.process.engine.ProviderMode;
+import org.apache.amoro.process.rest.ApiError;
+import org.apache.amoro.process.rest.ProcessActionCatalog;
 import org.apache.amoro.process.rest.ProcessRestSupport;
-import org.apache.ibatis.mapping.Environment;
-import org.apache.ibatis.session.Configuration;
+import org.apache.amoro.process.trigger.ManagedTablePort;
+import org.apache.amoro.process.trigger.ProcessActionPlugin;
+import org.apache.amoro.process.trigger.ProcessActionPluginFactory;
+import org.apache.amoro.process.trigger.ProcessActionRegistry;
+import org.apache.amoro.test.IsolatedMysql;
+import org.apache.ibatis.session.SqlSession;
 import org.apache.ibatis.session.SqlSessionFactory;
-import org.apache.ibatis.session.SqlSessionFactoryBuilder;
-import org.apache.ibatis.transaction.jdbc.JdbcTransactionFactory;
-import org.junit.jupiter.api.AfterAll;
-import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.extension.ExtendWith;
 
-import java.sql.Connection;
-import java.sql.DriverManager;
-import java.sql.SQLException;
-import java.sql.Statement;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
 /**
- * P8 end-to-end over REAL MySQL 5.7 (tag docker-mysql, -Pdocker-it): REST create → local engine
- * execution through the reconciler → terminal → TTL cleaning → full context rebuild → postStart
- * replay. The database is the source of truth at every step.
+ * MySQL release gate over one Testcontainers-owned database: simulated REST create → dummy local
+ * execution → durable terminal result → full context rebuild/postStart → release-gated TTL. No
+ * format action, real table access, Spark submission, fixed host database or destructive cleanup is
+ * involved.
  */
 @Tag("docker-mysql")
+@ExtendWith(IsolatedMysql.class)
 @Timeout(180)
 public class TestProcessE2EMysql {
 
-  private static final String JDBC_URL =
-      System.getenv()
-          .getOrDefault(
-              "AMORO_V2_MYSQL_URL",
-              "jdbc:mysql://localhost:3306/amoro_v2"
-                  + "?useSSL=false&characterEncoding=utf8&allowPublicKeyRetrieval=true");
-  private static final String JDBC_USER =
-      System.getenv().getOrDefault("AMORO_V2_MYSQL_USER", "root");
-  private static final String JDBC_PASSWORD =
-      System.getenv().getOrDefault("AMORO_V2_MYSQL_PASSWORD", "");
+  private static final String MYSQL_DATABASE = "amoro_process_e2e";
+  private static final String ACTION = "dummy-maintenance";
+  private static final String FORMAT = "simulated";
+  private static final String ENGINE = "dummy-local";
+  private static final String CATALOG = "simulated";
+  private static final String DATABASE = "dummy_db";
+  private static final String TABLE = "dummy_table";
+  private static final String TABLE_ID = "dummy-table-42";
 
-  private static Connection admin;
   private static SqlSessionFactory sqlFactory;
 
-  /** One full control-plane context over the durable store. */
-  private static final class Stack implements AutoCloseable {
-    final DefaultScheduler scheduler = DefaultScheduler.create(2, 50L);
-    final LocalEngineAdapter engine =
-        new LocalEngineAdapter(2, 64, LocalEngineAdapter.simulatedAction());
-    final ProcessEngineDispatcher dispatcher = new ProcessEngineDispatcher(engine, 5_000L);
-    final ProcessDomainAssembly assembly;
-    final ProcessRestSupport rest;
-    final ProcessTtlCleaner cleaner;
+  @BeforeAll
+  public static void initializeIsolatedSchema() {
+    IsolatedMysql.initializeControlPlane(MYSQL_DATABASE);
+    sqlFactory = IsolatedMysql.sqlSessionFactory(MYSQL_DATABASE, "process-testcontainer");
+  }
 
-    Stack() {
-      scheduler.start();
+  /** One complete control-plane context over the container-owned durable store. */
+  private static final class Stack implements AutoCloseable {
+    private final DefaultScheduler scheduler = DefaultScheduler.create(2, 50L);
+    private final LocalEngineAdapter engine =
+        new LocalEngineAdapter(2, 64, LocalEngineAdapter.simulatedAction());
+    private final ProcessEngineDispatcher dispatcher = new ProcessEngineDispatcher(engine, 5_000L);
+    private final ProcessEngineRegistry engines = ProcessEngineRegistry.single(ENGINE, dispatcher);
+    private final SqlSession blobSession = sqlFactory.openSession(true);
+    private final ProcessDomainAssembly assembly;
+    private final ProcessRestSupport rest;
+    private final ProcessTtlCleaner cleaner;
+    private final ExecutionHandleReaper reaper;
+
+    private Stack() {
       assembly =
           new ProcessDomainAssembly(
               new MyBatisBlobStore(
-                  ProcessDomainAssembly.DOMAIN,
-                  sqlFactory.openSession(true).getMapper(ResourceBlobMapper.class)),
+                  ProcessDomainAssembly.DOMAIN, blobSession.getMapper(ResourceBlobMapper.class)),
               event -> HandoffResult.ACCEPTED,
               scheduler,
               128,
               10_000L,
-              65536);
-      rest = new ProcessRestSupport(assembly);
-      cleaner = new ProcessTtlCleaner(assembly);
+              65_536);
+      ProcessActionRegistry actions =
+          ProcessActionRegistry.fromFactories(
+              List.of(new DummyActionFactory()),
+              ProviderMode.SIMULATED,
+              new ProcessActionPluginFactory.Context("mysql-e2e"));
+      rest =
+          new ProcessRestSupport(
+              assembly,
+              new DummyTableCatalog(),
+              new ProcessCreationService(assembly),
+              ProcessActionCatalog.from(engines, actions));
+      cleaner = new ProcessTtlCleaner(assembly, assembly.handleRegistry());
+      reaper = new ExecutionHandleReaper(assembly.releaseIndex(), engines, 8, 1_000L);
+
+      // Rebuild all projections before any worker is allowed to run.
+      assembly.persistence().postStart();
+      scheduler.start();
     }
 
-    void replayAndSchedule(String name) {
-      assembly.persistence().postStart();
-      ProcessReconciler reconciler =
+    private ProcessResource create(String idempotencyKey) {
+      return rest.create(
+              CATALOG,
+              DATABASE,
+              TABLE,
+              idempotencyKey,
+              ACTION,
+              ENGINE,
+              Collections.singletonMap("simulated", true),
+              "MANUAL")
+          .resource;
+    }
+
+    private void schedule(String processName) {
+      scheduler.schedule(
           new ProcessReconciler(
-              name,
+              processName,
               assembly.repository(),
-              dispatcher,
+              engines,
               scheduler,
               ProcessReconciler.Clock.systemUtc(),
-              100L);
-      scheduler.schedule(reconciler);
+              50L,
+              assembly.handleRegistry()));
+    }
+
+    private int durableProcessCount() {
+      return blobSession
+          .getMapper(ResourceBlobMapper.class)
+          .selectAll(ProcessDomainAssembly.DOMAIN.table(), ProcessResource.COLLECTION)
+          .size();
     }
 
     @Override
     public void close() {
+      reaper.close();
       scheduler.shutdown(Duration.ofSeconds(5));
       assembly.persistence().shutdown(Duration.ofSeconds(5));
+      dispatcher.close();
       engine.shutdown(5_000L);
-    }
-  }
-
-  @BeforeAll
-  public static void probeAndSetUp() throws Exception {
-    try {
-      admin = DriverManager.getConnection(JDBC_URL, JDBC_USER, JDBC_PASSWORD);
-    } catch (SQLException unreachable) {
-      Assumptions.assumeTrue(
-          false, "no reachable MySQL at " + JDBC_URL + " — docker-mysql group skips explicitly");
-    }
-    try (Statement statement = admin.createStatement()) {
-      // the process E2E owns its table exclusively for a clean lifecycle from scratch
-      statement.execute("DROP TABLE IF EXISTS amoro_process_v2");
-    }
-    org.apache.ibatis.datasource.unpooled.UnpooledDataSource dataSource =
-        new org.apache.ibatis.datasource.unpooled.UnpooledDataSource(
-            "com.mysql.cj.jdbc.Driver", JDBC_URL, JDBC_USER, JDBC_PASSWORD);
-    Environment environment =
-        new Environment("process-e2e", new JdbcTransactionFactory(), dataSource);
-    Configuration configuration = new Configuration(environment);
-    configuration.addMapper(ResourceBlobMapper.class);
-    sqlFactory = new SqlSessionFactoryBuilder().build(configuration);
-    // recreate the process table from the shipped MySQL dialect DDL
-    String script =
-        new String(
-                java.util.Objects.requireNonNull(
-                        TestProcessE2EMysql.class.getResourceAsStream("/schema-mysql.sql"))
-                    .readAllBytes(),
-                java.nio.charset.StandardCharsets.UTF_8)
-            .replaceAll("--[^\n]*", "");
-    try (Statement statement = admin.createStatement()) {
-      for (String piece : script.split(";")) {
-        String sql = piece.trim();
-        if (sql.toUpperCase().contains("AMORO_PROCESS_V2")) {
-          statement.execute(sql);
-        }
-      }
-    }
-  }
-
-  @AfterAll
-  public static void tearDown() throws Exception {
-    if (admin != null) {
-      try (Statement statement = admin.createStatement()) {
-        statement.execute("DROP TABLE IF EXISTS amoro_process_v2");
-      }
-      admin.close();
+      blobSession.close();
     }
   }
 
   @Test
-  public void fullLifecycleOnRealMysqlWithRestartReplay() throws Exception {
-    String createdName;
+  public void dummyLifecycleSurvivesRestartAndTtlWaitsForRelease() {
+    String processName;
+    String finishedAt;
     try (Stack stack = new Stack()) {
-      // 1. REST create with idempotency (durable amoro_process row)
-      org.apache.amoro.process.ProcessResource created =
-          stack.rest.create("prod", "db1", "orders", "e2e-key-1", "expire-snapshots", "local", null)
-              .resource;
-      createdName = created.name();
-      assertEquals(1, created.resourceVersion());
+      ProcessResource created = stack.create("mysql-dummy-e2e-1");
+      processName = created.name();
+      assertEquals(ACTION, created.spec().action());
+      assertEquals(ENGINE, created.spec().executionEngine());
       assertEquals("PENDING", created.status().phase());
 
-      // same key replays to the same resource (no duplicate row)
-      org.apache.amoro.process.ProcessResource replayed =
-          stack.rest.create("prod", "db1", "orders", "e2e-key-1", "expire-snapshots", "local", null)
-              .resource;
-      assertEquals(createdName, replayed.name());
+      // Same request replays, while another key cannot create a second active durable row.
+      assertEquals(processName, stack.create("mysql-dummy-e2e-1").name());
+      ApiError conflict =
+          assertThrows(ApiError.class, () -> stack.create("mysql-dummy-e2e-conflict"));
+      assertEquals("ACTIVE_PROCESS_EXISTS", conflict.code());
+      assertEquals(1, stack.durableProcessCount());
 
-      // 2. schedule the reconciler: local engine ACK → observe → SUCCESS, all durable
-      ProcessReconciler reconciler =
-          new ProcessReconciler(
-              createdName,
-              stack.assembly.repository(),
-              stack.dispatcher,
-              stack.scheduler,
-              ProcessReconciler.Clock.systemUtc(),
-              100L);
-      stack.scheduler.schedule(reconciler);
+      stack.schedule(processName);
       await()
           .atMost(30, TimeUnit.SECONDS)
           .until(
               () ->
                   ProcessFinality.isFixedTerminal(
-                      stack.assembly.repository().get(createdName).status().phase()));
-      assertEquals("SUCCESS", stack.assembly.repository().get(createdName).status().phase());
-      assertTrue(stack.assembly.repository().get(createdName).status().finishedAt() != null);
+                      stack.assembly.repository().get(processName).status().phase()));
+      ProcessResource terminal = stack.assembly.repository().get(processName);
+      assertEquals("SUCCESS", terminal.status().phase());
+      assertEquals(Boolean.TRUE, terminal.status().summary().result().get("simulated"));
+      assertTrue(terminal.status().finishedAt() != null);
+      finishedAt = terminal.status().finishedAt();
       await().atMost(10, TimeUnit.SECONDS).until(() -> stack.scheduler.registrySize() == 0);
-    } // full context destruction
+      assertTrue(stack.assembly.releaseIndex().hasPendingForProcess(processName));
+    }
 
-    // 3. rebuild over the same MySQL: postStart replays the durable row
+    // A wholly new context rebuilds canonical/read/release indexes only from the durable row.
     try (Stack rebuilt = new Stack()) {
-      rebuilt.assembly.persistence().postStart();
-      org.apache.amoro.process.ProcessResource reloaded =
-          rebuilt.assembly.repository().get(createdName);
+      ProcessResource reloaded = rebuilt.assembly.repository().get(processName);
       assertEquals("SUCCESS", reloaded.status().phase());
-      assertTrue(
-          rebuilt.assembly.indexProjection().current().find(createdName).isPresent(),
-          "the restart rebuilt the index from the durable row");
+      assertEquals(finishedAt, reloaded.status().finishedAt());
+      assertTrue(rebuilt.assembly.indexProjection().current().find(processName).isPresent());
+      assertTrue(rebuilt.assembly.releaseIndex().hasPendingForProcess(processName));
+      assertEquals(1, rebuilt.durableProcessCount());
 
-      // 4. TTL: at clock+40d the terminal row is deleted; the active-slot is free again
-      int deleted = rebuilt.cleaner.cleanOnce(Instant.now().plus(Duration.ofDays(40)), 30, 10);
-      assertEquals(1, deleted);
-      assertFalse(rebuilt.assembly.indexProjection().current().find(createdName).isPresent());
-      // and the table admits a fresh process for the same table/action
-      org.apache.amoro.process.ProcessResource fresh =
-          rebuilt.rest.create(
-                  "prod", "db1", "orders", "e2e-key-2", "expire-snapshots", "local", null)
-              .resource;
+      Instant ttlNow = Instant.parse(finishedAt).plus(Duration.ofDays(40));
+      assertEquals(0, rebuilt.cleaner.cleanOnce(ttlNow, 30, 10));
+      assertTrue(rebuilt.assembly.indexProjection().current().find(processName).isPresent());
+
+      assertEquals(1, rebuilt.reaper.runOnce(ttlNow));
+      await()
+          .atMost(10, TimeUnit.SECONDS)
+          .until(() -> !rebuilt.assembly.releaseIndex().hasPendingForProcess(processName));
+      assertEquals(0, rebuilt.engine.submissionCount());
+
+      assertEquals(1, rebuilt.cleaner.cleanOnce(ttlNow, 30, 10));
+      assertFalse(rebuilt.assembly.indexProjection().current().find(processName).isPresent());
+      assertEquals(0, rebuilt.durableProcessCount());
+
+      ProcessResource fresh = rebuilt.create("mysql-dummy-e2e-2");
       assertEquals("PENDING", fresh.status().phase());
+      assertEquals(ACTION, fresh.spec().action());
+    }
+  }
+
+  private static final class DummyTableCatalog implements ProcessRestSupport.TableCatalogPort {
+    @Override
+    public ProcessRestSupport.TableIdentity resolve(String catalog, String database, String table) {
+      return CATALOG.equals(catalog) && DATABASE.equals(database) && TABLE.equals(table)
+          ? new ProcessRestSupport.TableIdentity(TABLE_ID, FORMAT)
+          : null;
+    }
+  }
+
+  private static final class DummyActionFactory implements ProcessActionPluginFactory {
+    @Override
+    public String action() {
+      return ACTION;
+    }
+
+    @Override
+    public ProviderMode mode() {
+      return ProviderMode.SIMULATED;
+    }
+
+    @Override
+    public Set<String> tableFormats() {
+      return Set.of(FORMAT);
+    }
+
+    @Override
+    public ProcessActionPlugin create(Context context) {
+      return new ProcessActionPlugin() {
+        @Override
+        public String action() {
+          return ACTION;
+        }
+
+        @Override
+        public boolean supports(String tableFormat, String executionEngine) {
+          return FORMAT.equals(tableFormat) && ENGINE.equals(executionEngine);
+        }
+
+        @Override
+        public ScheduledEvaluation evaluateScheduled(
+            ManagedTablePort.TableSnapshot table, Instant logicalFireTime) {
+          return ScheduledEvaluation.create(
+              ENGINE, Map.of("simulated", true, "logicalFireTime", logicalFireTime.toString()));
+        }
+      };
     }
   }
 }

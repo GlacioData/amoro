@@ -40,22 +40,16 @@ import org.apache.amoro.serde.ResourceSerde;
 import org.apache.amoro.serde.SerdeRegistry;
 import org.apache.amoro.serde.VersionAwareJacksonSerde;
 import org.apache.amoro.serde.VersionedResourceConverter;
-import org.apache.ibatis.mapping.Environment;
-import org.apache.ibatis.session.Configuration;
+import org.apache.amoro.test.IsolatedMysql;
+import org.apache.ibatis.session.SqlSession;
 import org.apache.ibatis.session.SqlSessionFactory;
-import org.apache.ibatis.session.SqlSessionFactoryBuilder;
-import org.apache.ibatis.transaction.jdbc.JdbcTransactionFactory;
 import org.junit.jupiter.api.AfterAll;
-import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.extension.ExtendWith;
 
-import java.sql.Connection;
-import java.sql.DriverManager;
-import java.sql.SQLException;
-import java.sql.Statement;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -73,57 +67,26 @@ import java.util.concurrent.atomic.AtomicInteger;
  * zero framework changes.
  */
 @Tag("docker-mysql")
+@ExtendWith(IsolatedMysql.class)
 @Timeout(180)
 public class TestFrameworkE2E {
 
-  private static final String JDBC_URL =
-      System.getenv()
-          .getOrDefault(
-              "AMORO_V2_MYSQL_URL",
-              "jdbc:mysql://localhost:3306/amoro_v2"
-                  + "?useSSL=false&characterEncoding=utf8&allowPublicKeyRetrieval=true");
-  private static final String JDBC_USER =
-      System.getenv().getOrDefault("AMORO_V2_MYSQL_USER", "root");
-  private static final String JDBC_PASSWORD =
-      System.getenv().getOrDefault("AMORO_V2_MYSQL_PASSWORD", "");
+  private static final String MYSQL_DATABASE = "amoro_framework_e2e";
 
-  private static Connection adminConnection;
+  private static final List<SqlSession> SESSIONS = new ArrayList<>();
+  private static SqlSessionFactory sqlFactory;
 
   @BeforeAll
-  public static void probe() throws Exception {
-    try {
-      adminConnection = DriverManager.getConnection(JDBC_URL, JDBC_USER, JDBC_PASSWORD);
-    } catch (SQLException unreachable) {
-      Assumptions.assumeTrue(
-          false, "no reachable MySQL at " + JDBC_URL + " — docker-mysql group skips explicitly");
-    }
-    try (Statement statement = adminConnection.createStatement()) {
-      // the schema is already created by T9's IF NOT EXISTS script through the initializer; the
-      // E2E tables must start empty so every run asserts a full lifecycle from scratch. The
-      // process E2E drops its own table; tolerate its absence here (it recreates it itself).
-      for (String table : new String[] {"amoro_process_v2", "amoro_resource"}) {
-        try {
-          statement.execute("DELETE FROM " + table);
-        } catch (SQLException absent) {
-          // not created yet or dropped by the sibling E2E; nothing to clean
-        }
-      }
-    }
+  public static void initializeIsolatedSchema() {
+    IsolatedMysql.initializeControlPlane(MYSQL_DATABASE);
+    IsolatedMysql.initializeGenericResourceDomain(MYSQL_DATABASE);
+    sqlFactory = IsolatedMysql.sqlSessionFactory(MYSQL_DATABASE, "framework-testcontainer");
   }
 
   @AfterAll
-  public static void tearDown() throws Exception {
-    if (adminConnection != null) {
-      try (Statement statement = adminConnection.createStatement()) {
-        for (String table : new String[] {"amoro_process_v2", "amoro_resource"}) {
-          try {
-            statement.execute("DELETE FROM " + table);
-          } catch (SQLException absent) {
-            // not created yet or dropped by the sibling E2E; nothing to clean
-          }
-        }
-      }
-      adminConnection.close();
+  public static void closeSessions() {
+    for (SqlSession session : SESSIONS) {
+      session.close();
     }
   }
 
@@ -348,19 +311,19 @@ public class TestFrameworkE2E {
   }
 
   private static SqlSessionFactory sqlSessionFactory() {
-    org.apache.ibatis.datasource.unpooled.UnpooledDataSource dataSource =
-        new org.apache.ibatis.datasource.unpooled.UnpooledDataSource(
-            "com.mysql.cj.jdbc.Driver", JDBC_URL, JDBC_USER, JDBC_PASSWORD);
-    Environment environment = new Environment("e2e", new JdbcTransactionFactory(), dataSource);
-    Configuration configuration = new Configuration(environment);
-    configuration.addMapper(ResourceBlobMapper.class);
-    return new SqlSessionFactoryBuilder().build(configuration);
+    return sqlFactory;
+  }
+
+  private static ResourceBlobMapper newMapper(SqlSessionFactory factory) {
+    SqlSession session = factory.openSession(true);
+    SESSIONS.add(session);
+    return session.getMapper(ResourceBlobMapper.class);
   }
 
   /** Boots a full control-plane assembly over the durable store. */
   private static Assembly boot(String resourceName) {
     SqlSessionFactory factory = sqlSessionFactory();
-    ResourceBlobMapper mapper = factory.openSession(true).getMapper(ResourceBlobMapper.class);
+    ResourceBlobMapper mapper = newMapper(factory);
     ResourceSerde<FakeResource> serde =
         new VersionAwareJacksonSerde<FakeResource>(
             FakeResource.class,
@@ -438,7 +401,7 @@ public class TestFrameworkE2E {
   public void secondFakeResourceProvesResourceAgnosticism() throws Exception {
     // a different collection/entity/controller on the SAME framework: no framework change
     SqlSessionFactory factory = sqlSessionFactory();
-    ResourceBlobMapper mapper = factory.openSession(true).getMapper(ResourceBlobMapper.class);
+    ResourceBlobMapper mapper = newMapper(factory);
     ResourceSerde<OtherResource> serde =
         new VersionAwareJacksonSerde<OtherResource>(
             OtherResource.class,

@@ -31,6 +31,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.amoro.control.DefaultScheduler;
 import org.apache.amoro.persistence.HandoffResult;
 import org.apache.amoro.process.ProcessDomainAssembly;
+import org.apache.amoro.process.ProcessTestFixtures;
 import org.apache.amoro.process.TestProcessDomain;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -40,7 +41,13 @@ import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 
+import java.time.Clock;
 import java.time.Duration;
+import java.util.Collections;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /** P5: REST contract of /api/ams/v2 — create/idempotency, point read, list, cancel, resolutions. */
 @Timeout(60)
@@ -65,7 +72,7 @@ public class TestProcessRestApi {
             128,
             10_000L,
             65536);
-    support = new ProcessRestSupport(assembly);
+    support = org.apache.amoro.process.ProcessTestFixtures.simulatedRestSupport(assembly);
     // mirror the production MVC contract: unknown request fields are rejected (spec §8.1)
     com.fasterxml.jackson.databind.ObjectMapper strict =
         new com.fasterxml.jackson.databind.ObjectMapper();
@@ -104,12 +111,12 @@ public class TestProcessRestApi {
                 post(CREATE)
                     .header("Idempotency-Key", "key-1")
                     .contentType("application/json")
-                    .content(body("expire-snapshots", "local")))
+                    .content(body("dummy-maintenance", "local")))
             .andExpect(status().isCreated())
             .andExpect(jsonPath("$.resourceVersion").value(1))
             .andExpect(jsonPath("$.status.phase").value("PENDING"))
             .andExpect(jsonPath("$.spec.desiredState").value("RUN"))
-            .andExpect(jsonPath("$.spec.action").value("expire-snapshots"))
+            .andExpect(jsonPath("$.spec.action").value("dummy-maintenance"))
             .andReturn();
     JsonNode node = mapper.readTree(result.getResponse().getContentAsString());
     assertTrue(node.get("name").asText().length() > 0, "server-generated string name");
@@ -122,7 +129,7 @@ public class TestProcessRestApi {
                 post(CREATE)
                     .header("Idempotency-Key", "key-1")
                     .contentType("application/json")
-                    .content(body("expire-snapshots", "local")))
+                    .content(body("dummy-maintenance", "local")))
             .andExpect(status().isCreated())
             .andReturn();
     String name = mapper.readTree(first.getResponse().getContentAsString()).get("name").asText();
@@ -131,7 +138,7 @@ public class TestProcessRestApi {
             post(CREATE)
                 .header("Idempotency-Key", "key-1")
                 .contentType("application/json")
-                .content(body("expire-snapshots", "local")))
+                .content(body("dummy-maintenance", "local")))
         .andExpect(status().isOk())
         .andExpect(jsonPath("$.name").value(name));
   }
@@ -142,7 +149,7 @@ public class TestProcessRestApi {
             post(CREATE)
                 .header("Idempotency-Key", "key-1")
                 .contentType("application/json")
-                .content(body("expire-snapshots", "local")))
+                .content(body("dummy-maintenance", "local")))
         .andExpect(status().isCreated());
 
     mvc.perform(
@@ -150,7 +157,7 @@ public class TestProcessRestApi {
                 .header("Idempotency-Key", "key-1")
                 .contentType("application/json")
                 .content(
-                    body("expire-snapshots", "local")
+                    body("dummy-maintenance", "local")
                         .replace("\"retainLast\":1", "\"retainLast\":2")))
         .andExpect(status().isConflict())
         .andExpect(jsonPath("$.code").value("IDEMPOTENCY_KEY_REUSED"));
@@ -159,7 +166,9 @@ public class TestProcessRestApi {
   @Test
   public void createWithoutKeyFails() throws Exception {
     mvc.perform(
-            post(CREATE).contentType("application/json").content(body("expire-snapshots", "local")))
+            post(CREATE)
+                .contentType("application/json")
+                .content(body("dummy-maintenance", "local")))
         .andExpect(status().isBadRequest())
         .andExpect(jsonPath("$.code").value("IDEMPOTENCY_KEY_REQUIRED"));
   }
@@ -178,9 +187,127 @@ public class TestProcessRestApi {
             post(CREATE)
                 .header("Idempotency-Key", "k2")
                 .contentType("application/json")
-                .content(body("expire-snapshots", "teleport")))
+                .content(body("dummy-maintenance", "teleport")))
         .andExpect(status().isBadRequest())
         .andExpect(jsonPath("$.code").value("INVALID_ENGINE"));
+  }
+
+  @Test
+  public void createWithoutExecutionEngineFailsAsValidationError() throws Exception {
+    mvc.perform(
+            post(CREATE)
+                .header("Idempotency-Key", "missing-engine")
+                .contentType("application/json")
+                .content("{\"action\":\"dummy-maintenance\",\"parameters\":{}}"))
+        .andExpect(status().isBadRequest())
+        .andExpect(jsonPath("$.code").value("VALIDATION_FAILED"));
+  }
+
+  @Test
+  public void createMissingActionNullOrEmptyBodyFailsAsValidationError() throws Exception {
+    mvc.perform(
+            post(CREATE)
+                .header("Idempotency-Key", "missing-action")
+                .contentType("application/json")
+                .content("{\"executionEngine\":\"local\",\"parameters\":{}}"))
+        .andExpect(status().isBadRequest())
+        .andExpect(jsonPath("$.code").value("VALIDATION_FAILED"));
+
+    mvc.perform(
+            post(CREATE)
+                .header("Idempotency-Key", "null-body")
+                .contentType("application/json")
+                .content("null"))
+        .andExpect(status().isBadRequest())
+        .andExpect(jsonPath("$.code").value("VALIDATION_FAILED"));
+
+    mvc.perform(
+            post(CREATE).header("Idempotency-Key", "empty-body").contentType("application/json"))
+        .andExpect(status().isBadRequest())
+        .andExpect(jsonPath("$.code").value("VALIDATION_FAILED"));
+  }
+
+  @Test
+  public void inProgressCreateCarriesRetryAfter() throws Exception {
+    CountDownLatch nameGenerationEntered = new CountDownLatch(1);
+    CountDownLatch releaseNameGeneration = new CountDownLatch(1);
+    org.apache.amoro.process.ProcessCreationService blockingCreation =
+        new org.apache.amoro.process.ProcessCreationService(
+            assembly,
+            Clock.systemUTC(),
+            () -> {
+              nameGenerationEntered.countDown();
+              try {
+                releaseNameGeneration.await(2, TimeUnit.SECONDS);
+              } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+              }
+              return "blocked-create";
+            },
+            Duration.ofMillis(25));
+    ProcessRestSupport blockingSupport =
+        ProcessTestFixtures.simulatedRestSupport(assembly, blockingCreation);
+    MockMvc blockingMvc =
+        MockMvcBuilders.standaloneSetup(new ProcessApiController(blockingSupport))
+            .setControllerAdvice(new ApiExceptionHandler())
+            .build();
+    CompletableFuture<ProcessRestSupport.CreateResult> first =
+        CompletableFuture.supplyAsync(
+            () ->
+                blockingSupport.create(
+                    "prod",
+                    "db1",
+                    "orders",
+                    "first",
+                    "dummy-maintenance",
+                    "local",
+                    Collections.emptyMap()));
+    assertTrue(nameGenerationEntered.await(1, TimeUnit.SECONDS));
+
+    blockingMvc
+        .perform(
+            post(CREATE)
+                .header("Idempotency-Key", "second")
+                .contentType("application/json")
+                .content(body("dummy-maintenance", "local")))
+        .andExpect(status().isConflict())
+        .andExpect(jsonPath("$.code").value("IDEMPOTENCY_IN_PROGRESS"))
+        .andExpect(
+            org.springframework.test.web.servlet.result.MockMvcResultMatchers.header()
+                .string("Retry-After", "1"));
+
+    releaseNameGeneration.countDown();
+    first.get(1, TimeUnit.SECONDS);
+  }
+
+  @Test
+  public void createUsesOneAtomicTableIdentitySnapshot() {
+    AtomicInteger resolves = new AtomicInteger();
+    ProcessRestSupport atomicSupport =
+        new ProcessRestSupport(
+            assembly,
+            (catalog, database, table) -> {
+              if (resolves.incrementAndGet() > 1) {
+                throw new AssertionError("table identity was resolved more than once");
+              }
+              return new ProcessRestSupport.TableIdentity("stable-table-id", "simulated");
+            },
+            new org.apache.amoro.process.ProcessCreationService(assembly),
+            ProcessActionCatalog.simulatedRoutingFixtures());
+
+    ProcessRestSupport.CreateResult created =
+        atomicSupport.create(
+            "prod",
+            "db1",
+            "orders",
+            "atomic-table",
+            "dummy-maintenance",
+            "local",
+            Collections.emptyMap());
+
+    assertEquals(1, resolves.get());
+    assertEquals("stable-table-id", created.resource.spec().table().tableId());
+    assertEquals("simulated", created.resource.spec().table().tableFormat());
   }
 
   @Test
@@ -189,7 +316,7 @@ public class TestProcessRestApi {
             post("/api/ams/v2/tables/prod/db1/ghost-table/processes")
                 .header("Idempotency-Key", "k")
                 .contentType("application/json")
-                .content(body("expire-snapshots", "local")))
+                .content(body("dummy-maintenance", "local")))
         .andExpect(status().isNotFound())
         .andExpect(jsonPath("$.code").value("TABLE_NOT_FOUND"));
   }
@@ -200,14 +327,14 @@ public class TestProcessRestApi {
             post(CREATE)
                 .header("Idempotency-Key", "key-1")
                 .contentType("application/json")
-                .content(body("expire-snapshots", "local")))
+                .content(body("dummy-maintenance", "local")))
         .andExpect(status().isCreated());
 
     mvc.perform(
             post(CREATE)
                 .header("Idempotency-Key", "key-2")
                 .contentType("application/json")
-                .content(body("expire-snapshots", "local")))
+                .content(body("dummy-maintenance", "local")))
         .andExpect(status().isConflict())
         .andExpect(jsonPath("$.code").value("ACTIVE_PROCESS_EXISTS"));
   }
@@ -221,7 +348,7 @@ public class TestProcessRestApi {
                 post(CREATE)
                     .header("Idempotency-Key", "key-1")
                     .contentType("application/json")
-                    .content(body("expire-snapshots", "local")))
+                    .content(body("dummy-maintenance", "local")))
             .andReturn();
     String name = mapper.readTree(created.getResponse().getContentAsString()).get("name").asText();
 
@@ -240,19 +367,19 @@ public class TestProcessRestApi {
             post(CREATE)
                 .header("Idempotency-Key", "k1")
                 .contentType("application/json")
-                .content(body("expire-snapshots", "local")))
+                .content(body("dummy-maintenance", "local")))
         .andExpect(status().isCreated());
     mvc.perform(
             post("/api/ams/v2/tables/prod/db1/orders2/processes")
                 .header("Idempotency-Key", "k2")
                 .contentType("application/json")
-                .content(body("clean-orphans", "local")))
+                .content(body("dummy-maintenance", "local")))
         .andExpect(status().isCreated());
 
-    mvc.perform(get(CREATE).param("action", "expire-snapshots"))
+    mvc.perform(get(CREATE).param("action", "dummy-maintenance"))
         .andExpect(status().isOk())
         .andExpect(jsonPath("$.total").value(1))
-        .andExpect(jsonPath("$.items[0].spec.action").value("expire-snapshots"));
+        .andExpect(jsonPath("$.items[0].spec.action").value("dummy-maintenance"));
 
     mvc.perform(get(CREATE).param("status", "PENDING"))
         .andExpect(status().isOk())
@@ -280,7 +407,7 @@ public class TestProcessRestApi {
                 post(CREATE)
                     .header("Idempotency-Key", "key-1")
                     .contentType("application/json")
-                    .content(body("expire-snapshots", "local")))
+                    .content(body("dummy-maintenance", "local")))
             .andReturn();
     String name = mapper.readTree(created.getResponse().getContentAsString()).get("name").asText();
 
@@ -295,7 +422,7 @@ public class TestProcessRestApi {
     mvc.perform(
             patch("/api/ams/v2/processes/" + name)
                 .contentType("application/json")
-                .content("{\"desiredState\":\"CANCEL\"}"))
+                .content("{\"desiredState\":\"CANCEL\",\"reason\":\"repeat\"}"))
         .andExpect(status().isOk())
         .andExpect(jsonPath("$.spec.desiredState").value("CANCEL"));
 
@@ -308,21 +435,40 @@ public class TestProcessRestApi {
   }
 
   @Test
+  public void cancelWithoutReasonFailsAsValidationError() throws Exception {
+    MvcResult created =
+        mvc.perform(
+                post(CREATE)
+                    .header("Idempotency-Key", "cancel-no-reason")
+                    .contentType("application/json")
+                    .content(body("dummy-maintenance", "local")))
+            .andReturn();
+    String name = mapper.readTree(created.getResponse().getContentAsString()).get("name").asText();
+
+    mvc.perform(
+            patch("/api/ams/v2/processes/" + name)
+                .contentType("application/json")
+                .content("{\"desiredState\":\"CANCEL\"}"))
+        .andExpect(status().isBadRequest())
+        .andExpect(jsonPath("$.code").value("VALIDATION_FAILED"));
+  }
+
+  @Test
   public void cancelOnFinalProcessReturnsCurrentState() throws Exception {
     MvcResult created =
         mvc.perform(
                 post(CREATE)
                     .header("Idempotency-Key", "key-1")
                     .contentType("application/json")
-                    .content(body("expire-snapshots", "local")))
+                    .content(body("dummy-maintenance", "local")))
             .andReturn();
     String name = mapper.readTree(created.getResponse().getContentAsString()).get("name").asText();
-    support.forceTerminal(name, "SUCCESS"); // test helper: drive the resource final
+    ProcessTestFixtures.forceTerminal(assembly, name, "SUCCESS");
 
     mvc.perform(
             patch("/api/ams/v2/processes/" + name)
                 .contentType("application/json")
-                .content("{\"desiredState\":\"CANCEL\"}"))
+                .content("{\"desiredState\":\"CANCEL\",\"reason\":\"already final\"}"))
         .andExpect(status().isOk())
         .andExpect(jsonPath("$.status.phase").value("SUCCESS"));
   }
@@ -332,7 +478,8 @@ public class TestProcessRestApi {
   @Test
   public void submissionResolutionAckMovesToSubmitted() throws Exception {
     String name = createDispatchingProcess();
-    String attemptKey = assembly.repository().get(name).status().attempt().submissionKey();
+    org.apache.amoro.process.ProcessResource current = assembly.repository().get(name);
+    String attemptKey = current.status().attempt().submissionKey();
 
     mvc.perform(
             post("/api/ams/v2/processes/" + name + "/submission-resolutions")
@@ -341,6 +488,8 @@ public class TestProcessRestApi {
                 .content(
                     "{\"submissionKey\":\""
                         + attemptKey
+                        + "\",\"requestHash\":\""
+                        + current.status().attempt().requestHash()
                         + "\","
                         + "\"resolution\":\"ACKNOWLEDGED\",\"externalId\":\"app_77\","
                         + "\"reason\":\"verified\"}"))
@@ -354,7 +503,7 @@ public class TestProcessRestApi {
                 .header("Idempotency-Key", "res-2")
                 .contentType("application/json")
                 .content(
-                    "{\"submissionKey\":\"bogus:0:9\","
+                    "{\"submissionKey\":\"bogus:0:9\",\"requestHash\":\"sha256:bogus\","
                         + "\"resolution\":\"NOT_FOUND\",\"reason\":\"nope\"}"))
         .andExpect(status().isConflict());
   }
@@ -362,7 +511,9 @@ public class TestProcessRestApi {
   @Test
   public void executionResolutionFinalFailedTerminates() throws Exception {
     String name = createDispatchingProcess();
-    String attemptKey = assembly.repository().get(name).status().attempt().submissionKey();
+    ProcessTestFixtures.forceExecutionUnresolved(assembly, name);
+    org.apache.amoro.process.ProcessResource current = assembly.repository().get(name);
+    String attemptKey = current.status().attempt().submissionKey();
 
     mvc.perform(
             post("/api/ams/v2/processes/" + name + "/execution-resolutions")
@@ -371,6 +522,8 @@ public class TestProcessRestApi {
                 .content(
                     "{\"submissionKey\":\""
                         + attemptKey
+                        + "\",\"requestHash\":\""
+                        + current.status().attempt().requestHash()
                         + "\","
                         + "\"resolution\":\"FAILED\",\"retryAllowed\":false,"
                         + "\"reason\":\"handle lost\"}"))
@@ -385,10 +538,10 @@ public class TestProcessRestApi {
                 post(CREATE)
                     .header("Idempotency-Key", "dispatch-1")
                     .contentType("application/json")
-                    .content(body("expire-snapshots", "local")))
+                    .content(body("dummy-maintenance", "local")))
             .andReturn();
     String name = mapper.readTree(created.getResponse().getContentAsString()).get("name").asText();
-    support.forceDispatching(name); // test helper: stage a DISPATCHING attempt
+    ProcessTestFixtures.forceSubmissionUnresolved(assembly, name);
     return name;
   }
 
@@ -399,17 +552,17 @@ public class TestProcessRestApi {
                 post(CREATE)
                     .header("Idempotency-Key", "final-key")
                     .contentType("application/json")
-                    .content(body("expire-snapshots", "local")))
+                    .content(body("dummy-maintenance", "local")))
             .andReturn();
     String name = mapper.readTree(created.getResponse().getContentAsString()).get("name").asText();
-    support.forceTerminal(name, "SUCCESS");
+    ProcessTestFixtures.forceTerminal(assembly, name, "SUCCESS");
 
     // a completed create still replays to its original resource (spec §8.3)
     mvc.perform(
             post(CREATE)
                 .header("Idempotency-Key", "final-key")
                 .contentType("application/json")
-                .content(body("expire-snapshots", "local")))
+                .content(body("dummy-maintenance", "local")))
         .andExpect(status().isOk())
         .andExpect(jsonPath("$.name").value(name))
         .andExpect(jsonPath("$.status.phase").value("SUCCESS"));
@@ -444,15 +597,17 @@ public class TestProcessRestApi {
                 .header("Idempotency-Key", "res-2")
                 .contentType("application/json")
                 .content(
-                    "{\"submissionKey\":\"x:0:0\",\"resolution\":\"NOT_FOUND\","
+                    "{\"submissionKey\":\"x:0:0\",\"requestHash\":\"sha256:bogus\","
+                        + "\"resolution\":\"NOT_FOUND\","
                         + "\"reason\":\"bad\"}"))
         .andExpect(status().isConflict())
         .andExpect(jsonPath("$.code").value("PROCESS_ATTEMPT_STALE"));
 
     // the CURRENT key with NOT_FOUND + externalId breaks the field rule (400); stage the
     // rotated generation back to DISPATCHING so the field rule is what fires
-    support.forceDispatching(name);
-    String rotatedKey = assembly.repository().get(name).status().attempt().submissionKey();
+    ProcessTestFixtures.forceSubmissionUnresolved(assembly, name);
+    org.apache.amoro.process.ProcessResource rotated = assembly.repository().get(name);
+    String rotatedKey = rotated.status().attempt().submissionKey();
     mvc.perform(
             post("/api/ams/v2/processes/" + name + "/submission-resolutions")
                 .header("Idempotency-Key", "res-3")
@@ -460,6 +615,8 @@ public class TestProcessRestApi {
                 .content(
                     "{\"submissionKey\":\""
                         + rotatedKey
+                        + "\",\"requestHash\":\""
+                        + rotated.status().attempt().requestHash()
                         + "\","
                         + "\"resolution\":\"NOT_FOUND\",\"externalId\":\"app\","
                         + "\"reason\":\"bad\"}"))
@@ -469,7 +626,8 @@ public class TestProcessRestApi {
   @Test
   public void submissionAckUnderCancelDesiredGoesCanceling() throws Exception {
     String name = createDispatchingProcess();
-    String attemptKey = assembly.repository().get(name).status().attempt().submissionKey();
+    org.apache.amoro.process.ProcessResource staged = assembly.repository().get(name);
+    String attemptKey = staged.status().attempt().submissionKey();
     ProcessRestSupport support2 = support;
     org.apache.amoro.process.ProcessResource current = support2.get(name);
     assembly
@@ -484,6 +642,8 @@ public class TestProcessRestApi {
                 .content(
                     "{\"submissionKey\":\""
                         + attemptKey
+                        + "\",\"requestHash\":\""
+                        + staged.status().attempt().requestHash()
                         + "\","
                         + "\"resolution\":\"ACKNOWLEDGED\",\"externalId\":\"app_9\","
                         + "\"reason\":\"found\"}"))
@@ -494,7 +654,9 @@ public class TestProcessRestApi {
   @Test
   public void executionFailedWithoutRetryAllowedIsRejected() throws Exception {
     String name = createDispatchingProcess();
-    String attemptKey = assembly.repository().get(name).status().attempt().submissionKey();
+    ProcessTestFixtures.forceExecutionUnresolved(assembly, name);
+    org.apache.amoro.process.ProcessResource current = assembly.repository().get(name);
+    String attemptKey = current.status().attempt().submissionKey();
     mvc.perform(
             post("/api/ams/v2/processes/" + name + "/execution-resolutions")
                 .header("Idempotency-Key", "res-1")
@@ -502,9 +664,59 @@ public class TestProcessRestApi {
                 .content(
                     "{\"submissionKey\":\""
                         + attemptKey
+                        + "\",\"requestHash\":\""
+                        + current.status().attempt().requestHash()
                         + "\","
                         + "\"resolution\":\"FAILED\",\"reason\":\"no flag\"}"))
         .andExpect(status().isBadRequest());
+  }
+
+  @Test
+  public void submissionResolutionMissingRequiredFieldsNeverReturns500() throws Exception {
+    String name = createDispatchingProcess();
+    org.apache.amoro.process.ProcessResource current = assembly.repository().get(name);
+    String key = current.status().attempt().submissionKey();
+    String hash = current.status().attempt().requestHash();
+    String endpoint = "/api/ams/v2/processes/" + name + "/submission-resolutions";
+    String[] invalidBodies = {
+      "{\"requestHash\":\"" + hash + "\",\"resolution\":\"NOT_FOUND\",\"reason\":\"x\"}",
+      "{\"submissionKey\":\"" + key + "\",\"resolution\":\"NOT_FOUND\",\"reason\":\"x\"}",
+      "{\"submissionKey\":\"" + key + "\",\"requestHash\":\"" + hash + "\",\"reason\":\"x\"}",
+      "{\"submissionKey\":\""
+          + key
+          + "\",\"requestHash\":\""
+          + hash
+          + "\",\"resolution\":\"NOT_FOUND\"}"
+    };
+    for (int index = 0; index < invalidBodies.length; index++) {
+      mvc.perform(
+              post(endpoint)
+                  .header("Idempotency-Key", "missing-field-" + index)
+                  .contentType("application/json")
+                  .content(invalidBodies[index]))
+          .andExpect(status().isBadRequest())
+          .andExpect(jsonPath("$.code").value("VALIDATION_FAILED"));
+    }
+  }
+
+  @Test
+  public void executionResolutionMissingReasonNeverReturns500() throws Exception {
+    String name = createDispatchingProcess();
+    ProcessTestFixtures.forceExecutionUnresolved(assembly, name);
+    org.apache.amoro.process.ProcessResource current = assembly.repository().get(name);
+
+    mvc.perform(
+            post("/api/ams/v2/processes/" + name + "/execution-resolutions")
+                .header("Idempotency-Key", "missing-reason")
+                .contentType("application/json")
+                .content(
+                    "{\"submissionKey\":\""
+                        + current.status().attempt().submissionKey()
+                        + "\",\"requestHash\":\""
+                        + current.status().attempt().requestHash()
+                        + "\",\"resolution\":\"FAILED\",\"retryAllowed\":false}"))
+        .andExpect(status().isBadRequest())
+        .andExpect(jsonPath("$.code").value("VALIDATION_FAILED"));
   }
 
   @Test
@@ -514,7 +726,7 @@ public class TestProcessRestApi {
                 .header("Idempotency-Key", "k")
                 .contentType("application/json")
                 .content(
-                    body("expire-snapshots", "local")
+                    body("dummy-maintenance", "local")
                         .replaceFirst("\\}$", ",\"retryPolicy\":{\"maxRetries\":9}}")))
         .andExpect(status().isBadRequest());
   }
@@ -525,14 +737,14 @@ public class TestProcessRestApi {
             post(CREATE)
                 .header("Idempotency-Key", "older")
                 .contentType("application/json")
-                .content(body("expire-snapshots", "local")))
+                .content(body("dummy-maintenance", "local")))
         .andExpect(status().isCreated());
     Thread.sleep(50L); // distinct createdAt
     mvc.perform(
             post("/api/ams/v2/tables/prod/db1/orders2/processes")
                 .header("Idempotency-Key", "newer")
                 .contentType("application/json")
-                .content(body("expire-snapshots", "local")))
+                .content(body("dummy-maintenance", "local")))
         .andExpect(status().isCreated());
 
     // both under one table for ordering: second create targeted orders2; use orders only
@@ -542,13 +754,16 @@ public class TestProcessRestApi {
   @Test
   public void resolutionWithoutIdempotencyKeyIsRejected() throws Exception {
     String name = createDispatchingProcess();
-    String attemptKey = assembly.repository().get(name).status().attempt().submissionKey();
+    org.apache.amoro.process.ProcessResource current = assembly.repository().get(name);
+    String attemptKey = current.status().attempt().submissionKey();
     mvc.perform(
             post("/api/ams/v2/processes/" + name + "/submission-resolutions")
                 .contentType("application/json")
                 .content(
                     "{\"submissionKey\":\""
                         + attemptKey
+                        + "\",\"requestHash\":\""
+                        + current.status().attempt().requestHash()
                         + "\","
                         + "\"resolution\":\"ACKNOWLEDGED\",\"externalId\":\"app\","
                         + "\"reason\":\"x\"}"))

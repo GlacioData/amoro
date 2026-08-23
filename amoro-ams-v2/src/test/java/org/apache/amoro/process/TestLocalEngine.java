@@ -80,8 +80,9 @@ public class TestLocalEngine {
             new org.apache.amoro.process.ProcessResource(
                 name,
                 new org.apache.amoro.process.ProcessResource.ProcessSpec(
-                    new org.apache.amoro.process.ProcessResource.TableRef("prod", "db", "t", "42"),
-                    "expire-snapshots",
+                    new org.apache.amoro.process.ProcessResource.TableRef(
+                        "prod", "db", "t", "42", "simulated"),
+                    "dummy-maintenance",
                     "local",
                     "MANUAL",
                     "2026-08-22T10:00:00Z",
@@ -190,8 +191,7 @@ public class TestLocalEngine {
     releaseFlight.markDurablyHandled();
     org.apache.amoro.process.engine.ProcessEngineDispatcher.CommandFlight<ProcessObservation>
         observeFlight = dispatcher.observe("p", externalId);
-    ProcessObservation afterRelease =
-        observeFlight.toCompletableFuture().get(5, TimeUnit.SECONDS);
+    ProcessObservation afterRelease = observeFlight.toCompletableFuture().get(5, TimeUnit.SECONDS);
     observeFlight.markDurablyHandled();
     assertEquals(ProcessObservation.Kind.LOST, afterRelease.kind());
   }

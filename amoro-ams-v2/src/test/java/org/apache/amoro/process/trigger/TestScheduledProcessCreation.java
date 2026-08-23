@@ -34,10 +34,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
-import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
-import java.time.ZoneOffset;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.concurrent.CountDownLatch;
@@ -74,35 +72,28 @@ public class TestScheduledProcessCreation {
   public void restAndScannerPersistExactlyOneActiveProcess() throws Exception {
     ProcessCreationService creationService = new ProcessCreationService(assembly);
     ProcessRestSupport rest =
-        new ProcessRestSupport(
-            assembly,
-            new ProcessRestSupport.TableCatalogPort() {
-              @Override
-              public boolean exists(String catalog, String database, String table) {
-                return true;
-              }
-
-              @Override
-              public String tableId(String catalog, String database, String table) {
-                return "42";
-              }
-            },
-            creationService);
+        org.apache.amoro.process.ProcessTestFixtures.simulatedRestSupport(
+            assembly, creationService);
     ManagedTablePort tables =
         new SimulatedManagedTablePort(
             Collections.singletonList(
                 new ManagedTablePort.TableSnapshot(
-                    "prod", "db1", "orders", "42", "iceberg", Instant.EPOCH.toString())));
+                    "prod",
+                    "db1",
+                    "orders",
+                    Integer.toUnsignedString(java.util.Objects.hash("prod", "db1", "orders"), 16),
+                    "simulated",
+                    Instant.EPOCH.toString())));
     ProcessActionPlugin dummy =
         new ProcessActionPlugin() {
           @Override
           public String action() {
-            return "expire-snapshots";
+            return "dummy-maintenance";
           }
 
           @Override
           public boolean supports(String tableFormat, String executionEngine) {
-            return "iceberg".equals(tableFormat) && "local".equals(executionEngine);
+            return "simulated".equals(tableFormat) && "local".equals(executionEngine);
           }
 
           @Override
@@ -111,14 +102,34 @@ public class TestScheduledProcessCreation {
             return ScheduledEvaluation.create("local", Collections.emptyMap());
           }
         };
-    ProcessTriggerScanner scanner =
-        new ProcessTriggerScanner(
-            creationService,
-            tables,
-            dummy,
-            "scheduled-race",
-            Clock.fixed(Instant.parse("2026-08-23T12:34:56Z"), ZoneOffset.UTC),
-            10);
+    ProcessActionRegistry actions =
+        ProcessActionRegistry.fromFactories(
+            Collections.singletonList(
+                new ProcessActionPluginFactory() {
+                  @Override
+                  public String action() {
+                    return "dummy-maintenance";
+                  }
+
+                  @Override
+                  public org.apache.amoro.process.engine.ProviderMode mode() {
+                    return org.apache.amoro.process.engine.ProviderMode.SIMULATED;
+                  }
+
+                  @Override
+                  public java.util.Set<String> tableFormats() {
+                    return Collections.singleton("simulated");
+                  }
+
+                  @Override
+                  public ProcessActionPlugin create(Context context) {
+                    return dummy;
+                  }
+                }),
+            org.apache.amoro.process.engine.ProviderMode.SIMULATED,
+            new ProcessActionPluginFactory.Context("scheduled-test"));
+    ProcessTriggerCoordinator coordinator =
+        new ProcessTriggerCoordinator(creationService, tables, actions, 60_000L, 10);
     CountDownLatch ready = new CountDownLatch(2);
     CountDownLatch start = new CountDownLatch(1);
     AtomicReference<Throwable> manualFailure = new AtomicReference<>();
@@ -126,7 +137,7 @@ public class TestScheduledProcessCreation {
         new Thread(
             () -> {
               awaitStart(ready, start);
-              scanner.scanOnce();
+              coordinator.runOnce();
             },
             "scheduled-create");
     Thread manual =
@@ -139,7 +150,7 @@ public class TestScheduledProcessCreation {
                     "db1",
                     "orders",
                     "manual-race",
-                    "expire-snapshots",
+                    "dummy-maintenance",
                     "local",
                     new LinkedHashMap<>());
               } catch (ApiError expectedRaceLoser) {
@@ -157,6 +168,7 @@ public class TestScheduledProcessCreation {
     start.countDown();
     scheduled.join(10_000L);
     manual.join(10_000L);
+    coordinator.close();
 
     assertNull(manualFailure.get());
     long active =

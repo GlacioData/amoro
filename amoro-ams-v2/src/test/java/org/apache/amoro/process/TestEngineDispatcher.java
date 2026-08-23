@@ -31,10 +31,13 @@ import org.apache.amoro.process.engine.EngineTypes.SubmissionResolution;
 import org.apache.amoro.process.engine.FakeEngineAdapter;
 import org.apache.amoro.process.engine.ProcessEngineDispatcher;
 import org.apache.amoro.process.engine.ProcessEngineDispatcher.CommandFlight;
+import org.apache.amoro.process.engine.ProcessEngineLifecycle;
 import org.junit.jupiter.api.Test;
 
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 
 /** P3: single-flight dispatcher semantics and the bounded-timeout degradations. */
@@ -88,10 +91,7 @@ public class TestEngineDispatcher {
 
     CommandFlight<SubmissionOutcome> first =
         dispatcher.submit("p", "p:0:0", "sha256:r", new byte[] {1});
-    first
-        .result()
-        .toCompletableFuture()
-        .get(5, TimeUnit.SECONDS);
+    first.result().toCompletableFuture().get(5, TimeUnit.SECONDS);
     assertEquals(1, dispatcher.inFlightCount());
     assertThrows(
         ProcessEngineDispatcher.CommandInFlightException.class,
@@ -201,7 +201,8 @@ public class TestEngineDispatcher {
     FakeEngineAdapter adapter =
         new FakeEngineAdapter() {
           @Override
-          public java.util.concurrent.CompletionStage<ProcessObservation> observe(String externalId) {
+          public java.util.concurrent.CompletionStage<ProcessObservation> observe(
+              String externalId) {
             return pending;
           }
         };
@@ -229,7 +230,8 @@ public class TestEngineDispatcher {
 
   @Test
   public void duplicateReleaseMergesAndTimeoutIsExceptional() {
-    java.util.concurrent.atomic.AtomicInteger releases = new java.util.concurrent.atomic.AtomicInteger();
+    java.util.concurrent.atomic.AtomicInteger releases =
+        new java.util.concurrent.atomic.AtomicInteger();
     FakeEngineAdapter adapter =
         new FakeEngineAdapter() {
           @Override
@@ -247,8 +249,7 @@ public class TestEngineDispatcher {
     assertEquals(1, releases.get());
     CompletionException timeout =
         assertThrows(CompletionException.class, () -> first.result().toCompletableFuture().join());
-    assertTrue(
-        timeout.getCause() instanceof ProcessEngineDispatcher.EngineCommandTimeoutException);
+    assertTrue(timeout.getCause() instanceof ProcessEngineDispatcher.EngineCommandTimeoutException);
     first.markDurablyHandled();
   }
 
@@ -257,7 +258,8 @@ public class TestEngineDispatcher {
     FakeEngineAdapter adapter =
         new FakeEngineAdapter() {
           @Override
-          public java.util.concurrent.CompletionStage<ProcessObservation> observe(String externalId) {
+          public java.util.concurrent.CompletionStage<ProcessObservation> observe(
+              String externalId) {
             return CompletableFuture.completedFuture(
                 ProcessObservation.known(
                     new org.apache.amoro.process.engine.EngineTypes.EngineObservation(
@@ -315,5 +317,58 @@ public class TestEngineDispatcher {
             .toCompletableFuture()
             .get(5, TimeUnit.SECONDS)
             .kind());
+  }
+
+  @Test
+  public void shutdownInterruptsBlockingAdapterCloseWithinBudget() {
+    CountDownLatch interrupted = new CountDownLatch(1);
+    class BlockingCloseAdapter extends FakeEngineAdapter implements AutoCloseable {
+      @Override
+      public void close() {
+        try {
+          new CountDownLatch(1).await();
+        } catch (InterruptedException expected) {
+          interrupted.countDown();
+          Thread.currentThread().interrupt();
+        }
+      }
+    }
+
+    FakeEngineAdapter adapter = new BlockingCloseAdapter();
+    ProcessEngineDispatcher dispatcher = new ProcessEngineDispatcher(adapter, 5_000L);
+
+    long started = System.nanoTime();
+    dispatcher.shutdown(100L);
+    long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
+
+    assertTrue(elapsedMillis < 1_000L);
+    assertEquals(0L, interrupted.getCount());
+    assertThrows(
+        RejectedExecutionException.class, () -> dispatcher.observe("closed", "dummy-external"));
+  }
+
+  @Test
+  public void delayedCommandGuardDoesNotConsumeAdapterShutdownBudget() {
+    java.util.concurrent.atomic.AtomicLong receivedBudget =
+        new java.util.concurrent.atomic.AtomicLong();
+    class BudgetEngine extends FakeEngineAdapter implements ProcessEngineLifecycle {
+      @Override
+      public java.util.concurrent.CompletionStage<SubmissionOutcome> submit(
+          String submissionKey, String requestHash, byte[] payload) {
+        return new CompletableFuture<>();
+      }
+
+      @Override
+      public void shutdown(long timeoutMillis) {
+        receivedBudget.set(timeoutMillis);
+      }
+    }
+
+    ProcessEngineDispatcher dispatcher = new ProcessEngineDispatcher(new BudgetEngine(), 30_000L);
+    dispatcher.submit("budget", "budget:0:0", "sha256:req", new byte[0]);
+
+    dispatcher.shutdown(500L);
+
+    assertTrue(receivedBudget.get() >= 250L, "adapter must retain most of the lifecycle budget");
   }
 }

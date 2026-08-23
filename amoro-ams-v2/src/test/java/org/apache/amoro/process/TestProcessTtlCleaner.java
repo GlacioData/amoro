@@ -25,7 +25,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.apache.amoro.control.DefaultScheduler;
 import org.apache.amoro.persistence.HandoffResult;
-import org.apache.amoro.process.rest.ProcessRestSupport;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -33,6 +32,7 @@ import org.junit.jupiter.api.Timeout;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Collections;
 import java.util.concurrent.TimeUnit;
 
 /** P8: the TTL cleaner — only old final resources leave, in bounded batches. */
@@ -41,7 +41,6 @@ public class TestProcessTtlCleaner {
 
   private DefaultScheduler scheduler;
   private ProcessDomainAssembly assembly;
-  private ProcessRestSupport rest;
   private ProcessTtlCleaner cleaner;
 
   @BeforeEach
@@ -55,7 +54,6 @@ public class TestProcessTtlCleaner {
             128,
             10_000L,
             65536);
-    rest = new ProcessRestSupport(assembly);
     cleaner = new ProcessTtlCleaner(assembly);
   }
 
@@ -66,10 +64,8 @@ public class TestProcessTtlCleaner {
   }
 
   private String createTerminal(String key, String phase) {
-    org.apache.amoro.process.ProcessResource created =
-        rest.create("prod", "db", "t-" + key, "ttl-" + key, "expire-snapshots", "local", null)
-            .resource;
-    rest.forceTerminal(created.name(), phase);
+    ProcessResource created = createActive(key);
+    ProcessTestFixtures.forceTerminal(assembly, created.name(), phase);
     return created.name();
   }
 
@@ -77,10 +73,7 @@ public class TestProcessTtlCleaner {
   public void deletesOnlyFinalResourcesPastRetention() {
     String old = createTerminal("old", "SUCCESS");
     String fresh = createTerminal("fresh", "SUCCESS");
-    String active =
-        rest.create("prod", "db", "t-live", "ttl-live", "expire-snapshots", "local", null)
-            .resource
-            .name(); // PENDING: never eligible
+    String active = createActive("live").name(); // PENDING: never eligible
 
     // force `old` past the retention window by faking the clock 40 days ahead
     int deleted = cleaner.cleanOnce(Instant.now().plus(Duration.ofDays(40)), 30, 100);
@@ -112,5 +105,168 @@ public class TestProcessTtlCleaner {
     await()
         .atMost(5, TimeUnit.SECONDS)
         .until(() -> assembly.indexProjection().current().expiryOrder().isEmpty());
+  }
+
+  @Test
+  public void ttlOrdersOffsetsAndFractionalInstantsByTimeRatherThanText() {
+    ProcessResource offset = createActive("offset");
+    forceTerminalAt(offset.name(), "2026-08-31T01:00:00+02:00");
+    ProcessResource cutoff = createActive("cutoff");
+    forceTerminalAt(cutoff.name(), "2026-08-31T00:00:00Z");
+    ProcessResource fractional = createActive("fractional");
+    forceTerminalAt(fractional.name(), "2026-08-31T00:00:00.001Z");
+
+    int deleted = cleaner.cleanOnce(Instant.parse("2026-09-30T00:00:00Z"), 30, 10);
+
+    assertEquals(2, deleted);
+    assertFalse(assembly.indexProjection().current().find(offset.name()).isPresent());
+    assertFalse(assembly.indexProjection().current().find(cutoff.name()).isPresent());
+    assertTrue(assembly.indexProjection().current().find(fractional.name()).isPresent());
+  }
+
+  @Test
+  public void pendingDurableHandleReleaseGatesTtlDeletion() {
+    ProcessResource created = createActive("release");
+    forceTerminalWithHandle(created.name(), "dummy-handle-1");
+    Instant future = Instant.now().plus(Duration.ofDays(40));
+
+    assertTrue(assembly.releaseIndex().hasPendingForProcess(created.name()));
+    assertEquals(0, cleaner.cleanOnce(future, 30, 10));
+    assertTrue(
+        assembly.indexProjection().current().find(created.name()).isPresent(),
+        "TTL must retain the durable Process while its engine handle still needs release");
+
+    java.util.List<org.apache.amoro.process.engine.ExecutionHandleReleaseIndex.ReleaseEntry>
+        claimed = assembly.releaseIndex().claimDue(future, 10);
+    assertEquals(1, claimed.size());
+    assembly.releaseIndex().releaseSucceeded(claimed.get(0));
+
+    assertFalse(assembly.releaseIndex().hasPendingForProcess(created.name()));
+    assertEquals(1, cleaner.cleanOnce(future, 30, 10));
+    assertFalse(assembly.indexProjection().current().find(created.name()).isPresent());
+  }
+
+  private void forceTerminalWithHandle(String processName, String externalId) {
+    ProcessResource current = assembly.repository().get(processName);
+    ProcessResource.ProcessStatus status = current.status();
+    ProcessResource.ProcessAttempt attempt = status.attempt();
+    String now = Instant.now().toString();
+    ProcessResource.ProcessAttempt closed =
+        new ProcessResource.ProcessAttempt(
+            attempt.dispatchGeneration(),
+            attempt.submissionKey(),
+            attempt.requestHash(),
+            "ACKNOWLEDGED",
+            externalId,
+            now,
+            null,
+            "FINAL",
+            now,
+            Collections.emptyList(),
+            new ProcessResource.ManualResolutions(null, null));
+    ProcessResource.ProcessStatus terminal =
+        new ProcessResource.ProcessStatus(
+            "SUCCESS",
+            status.retryNumber(),
+            closed,
+            status.attemptHistory(),
+            status.lastObservedAt(),
+            status.lastCancelAttemptAt(),
+            null,
+            new ProcessResource.EngineBackoff(0, 0, 0, 0),
+            status.conditions(),
+            status.summary(),
+            null,
+            now,
+            null,
+            now);
+    assembly
+        .repository()
+        .modify(processName, current.resourceVersion(), resource -> resource.withStatus(terminal));
+  }
+
+  private void forceTerminalAt(String processName, String finishedAt) {
+    ProcessResource current = assembly.repository().get(processName);
+    ProcessResource.ProcessStatus status = current.status();
+    ProcessResource.ProcessAttempt attempt = status.attempt();
+    ProcessResource.ProcessAttempt closed =
+        new ProcessResource.ProcessAttempt(
+            attempt.dispatchGeneration(),
+            attempt.submissionKey(),
+            attempt.requestHash(),
+            attempt.submitState(),
+            attempt.externalId(),
+            attempt.dispatchedAt(),
+            null,
+            "FINAL",
+            finishedAt,
+            attempt.submissionHistory(),
+            attempt.manualResolutions());
+    ProcessResource.ProcessStatus terminal =
+        new ProcessResource.ProcessStatus(
+            "SUCCESS",
+            status.retryNumber(),
+            closed,
+            status.attemptHistory(),
+            status.lastObservedAt(),
+            status.lastCancelAttemptAt(),
+            null,
+            new ProcessResource.EngineBackoff(0, 0, 0, 0),
+            status.conditions(),
+            status.summary(),
+            null,
+            status.submittedAt(),
+            status.startedAt(),
+            finishedAt);
+    assembly
+        .repository()
+        .modify(processName, current.resourceVersion(), resource -> resource.withStatus(terminal));
+  }
+
+  private ProcessResource createActive(String key) {
+    String name = "ttl-" + key;
+    String createdAt = Instant.now().toString();
+    String requestHash = "sha256:request-" + key;
+    ProcessResource.ProcessSpec spec =
+        new ProcessResource.ProcessSpec(
+            new ProcessResource.TableRef("prod", "db", "t-" + key, "table-" + key, "simulated"),
+            "dummy-maintenance",
+            "local",
+            "MANUAL",
+            createdAt,
+            "RUN",
+            new ProcessResource.RequestIdentity("sha256:idempotency-" + key, requestHash),
+            Collections.singletonMap("simulated", true),
+            new ProcessResource.RetryPolicy(3, 2, 30));
+    ProcessResource.ProcessAttempt attempt =
+        new ProcessResource.ProcessAttempt(
+            0,
+            name + ":0:0",
+            requestHash,
+            "CREATED",
+            null,
+            null,
+            null,
+            "AUTO",
+            null,
+            Collections.emptyList(),
+            new ProcessResource.ManualResolutions(null, null));
+    ProcessResource.ProcessStatus status =
+        new ProcessResource.ProcessStatus(
+            "PENDING",
+            0,
+            attempt,
+            Collections.emptyList(),
+            null,
+            null,
+            createdAt,
+            new ProcessResource.EngineBackoff(0, 0, 0, 0),
+            Collections.emptyList(),
+            null,
+            null,
+            null,
+            null,
+            null);
+    return assembly.repository().create(new ProcessResource(name, spec, status));
   }
 }

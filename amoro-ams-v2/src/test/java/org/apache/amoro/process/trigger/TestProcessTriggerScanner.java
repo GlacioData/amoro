@@ -24,8 +24,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.apache.amoro.control.DefaultScheduler;
 import org.apache.amoro.persistence.HandoffResult;
-import org.apache.amoro.process.ProcessDomainAssembly;
 import org.apache.amoro.process.ProcessCreationService;
+import org.apache.amoro.process.ProcessDomainAssembly;
+import org.apache.amoro.process.ProcessTestFixtures;
 import org.apache.amoro.process.TestProcessDomain;
 import org.apache.amoro.process.rest.ProcessRestSupport;
 import org.junit.jupiter.api.AfterEach;
@@ -33,8 +34,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
-import java.time.Duration;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.LinkedHashMap;
@@ -69,7 +70,9 @@ public class TestProcessTriggerScanner {
             10_000L,
             65536);
     creationService = new ProcessCreationService(assembly);
-    rest = new ProcessRestSupport(assembly, creationService);
+    rest =
+        org.apache.amoro.process.ProcessTestFixtures.simulatedRestSupport(
+            assembly, creationService);
     tables = new InMemoryManagedTables();
     tables.add("prod", "db1", "orders", "42");
     tables.add("prod", "db1", "events", "43");
@@ -78,7 +81,7 @@ public class TestProcessTriggerScanner {
             creationService,
             tables,
             new FixedIntervalActionPlugin(
-                "expire-snapshots", "local", 3600, tables.observedFireTimes),
+                "dummy-maintenance", "local", 3600, tables.observedFireTimes),
             "scan-1",
             Clock.fixed(Instant.parse("2026-08-23T12:34:56Z"), ZoneOffset.UTC),
             1);
@@ -99,7 +102,7 @@ public class TestProcessTriggerScanner {
             .filter(r -> "SCHEDULED".equals(r.spec().triggerSource()))
             .collect(java.util.stream.Collectors.toList());
     assertEquals(2, created.size(), "both eligible tables get a scheduled process");
-    assertTrue(created.stream().allMatch(r -> "expire-snapshots".equals(r.spec().action())));
+    assertTrue(created.stream().allMatch(r -> "dummy-maintenance".equals(r.spec().action())));
   }
 
   @Test
@@ -132,14 +135,23 @@ public class TestProcessTriggerScanner {
     tables.tables.put(
         "42",
         new ManagedTablePort.TableSnapshot(
-            "prod", "db1", "orders", "42", "iceberg", "not-an-instant"));
+            "prod", "db1", "orders", "42", "simulated", "not-an-instant"));
 
     scanner.scanOnce();
 
     assertEquals(1, assembly.indexProjection().current().resourcesByName().size());
     assertEquals(
         "events",
-        assembly.indexProjection().current().resourcesByName().values().iterator().next().spec().table().table());
+        assembly
+            .indexProjection()
+            .current()
+            .resourcesByName()
+            .values()
+            .iterator()
+            .next()
+            .spec()
+            .table()
+            .table());
   }
 
   @Test
@@ -152,7 +164,7 @@ public class TestProcessTriggerScanner {
             .findFirst()
             .get()
             .name();
-    rest.forceTerminal(orders, "SUCCESS");
+    ProcessTestFixtures.forceTerminal(assembly, orders, "SUCCESS");
 
     // same window: the idempotency key replays to the terminal original — no duplicate
     scanner.scanOnce();
@@ -168,7 +180,7 @@ public class TestProcessTriggerScanner {
         new ProcessTriggerScanner(
             creationService,
             tables,
-            new FixedIntervalActionPlugin("expire-snapshots", "local", 3600),
+            new FixedIntervalActionPlugin("dummy-maintenance", "local", 3600),
             "scan-2",
             Clock.fixed(Instant.parse("2026-08-23T12:35:56Z"), ZoneOffset.UTC),
             1);
@@ -220,7 +232,7 @@ public class TestProcessTriggerScanner {
         new ProcessTriggerScanner(
             creationService,
             tables,
-            new FixedIntervalActionPlugin("expire-snapshots", "local", 3600),
+            new FixedIntervalActionPlugin("dummy-maintenance", "local", 3600),
             "scan-2",
             Clock.fixed(Instant.parse("2026-08-23T12:35:56Z"), ZoneOffset.UTC),
             1);
@@ -240,7 +252,7 @@ public class TestProcessTriggerScanner {
         new ProcessTriggerScanner(
             creationService,
             tables,
-            new FixedIntervalActionPlugin("expire-snapshots", "not-deployed", 3600) {
+            new FixedIntervalActionPlugin("dummy-maintenance", "not-deployed", 3600) {
               @Override
               public boolean supports(String tableFormat, String executionEngine) {
                 return false;
@@ -267,6 +279,21 @@ public class TestProcessTriggerScanner {
         tables.observedFireTimes);
   }
 
+  @Test
+  public void boundedRoundsPersistCursorWithoutScanningAllPages() {
+    scanner.scanBatchOnce();
+    assertEquals(java.util.Collections.singletonList((String) null), tables.requestedCursors);
+    assertEquals(1, assembly.indexProjection().current().resourcesByName().size());
+
+    scanner.scanBatchOnce();
+    assertEquals(java.util.Arrays.asList(null, "42"), tables.requestedCursors);
+    assertEquals(2, assembly.indexProjection().current().resourcesByName().size());
+
+    scanner.scanBatchOnce();
+    assertEquals(java.util.Arrays.asList(null, "42", null), tables.requestedCursors);
+    assertEquals(2, assembly.indexProjection().current().resourcesByName().size());
+  }
+
   // ------------------------------------------------------------------ fakes
 
   /** In-memory ManagedTablePort: tables with a lastMaintenanceAt stamp. */
@@ -281,7 +308,7 @@ public class TestProcessTriggerScanner {
       tables.put(
           tableId,
           new TableSnapshot(
-              catalog, db, table, tableId, "iceberg", java.time.Instant.EPOCH.toString()));
+              catalog, db, table, tableId, "simulated", java.time.Instant.EPOCH.toString()));
     }
 
     void markFreshlyMaintained(String catalog, String db, String table) {

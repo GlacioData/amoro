@@ -99,12 +99,15 @@ public class TestProcessCreationService {
     ProcessCreationService service = service(new SequenceNames());
     CountDownLatch start = new CountDownLatch(1);
     Future<Object> first = callers.submit(() -> createAfter(start, service, intent("key-1", "r1")));
-    Future<Object> second = callers.submit(() -> createAfter(start, service, intent("key-2", "r2")));
+    Future<Object> second =
+        callers.submit(() -> createAfter(start, service, intent("key-2", "r2")));
     start.countDown();
 
     Object firstResult = first.get(10, TimeUnit.SECONDS);
     Object secondResult = second.get(10, TimeUnit.SECONDS);
-    int successes = countType(firstResult, ProcessCreationResult.class) + countType(secondResult, ProcessCreationResult.class);
+    int successes =
+        countType(firstResult, ProcessCreationResult.class)
+            + countType(secondResult, ProcessCreationResult.class);
     int activeConflicts =
         countAdmission(firstResult, ProcessAdmissionException.Code.ACTIVE_PROCESS_EXISTS)
             + countAdmission(secondResult, ProcessAdmissionException.Code.ACTIVE_PROCESS_EXISTS);
@@ -144,8 +147,7 @@ public class TestProcessCreationService {
   public void unknownCreateReservesScopeUntilRepairPublishesDurableFact() {
     blob.failNextCommittedInsertOutcome = true;
     ProcessCreationService service =
-        new ProcessCreationService(
-            assembly, fixedClock(), () -> "p1", Duration.ofSeconds(1));
+        new ProcessCreationService(assembly, fixedClock(), () -> "p1", Duration.ofSeconds(1));
 
     assertThrows(
         PersistenceOutcomeUnknownException.class,
@@ -157,13 +159,55 @@ public class TestProcessCreationService {
     assertEquals(Optional.empty(), assembly.indexProjection().current().find("p1"));
 
     service.repairUnknown("p1");
-    assertEquals(Optional.of("p1"), assembly.indexProjection().current().find("p1").map(ProcessResource::name));
+    assertEquals(
+        Optional.of("p1"),
+        assembly.indexProjection().current().find("p1").map(ProcessResource::name));
     ProcessCreationResult replay = service.create(intent("key-1", "request-1"));
     assertTrue(replay.replayed());
     assertAdmission(
         ProcessAdmissionException.Code.ACTIVE_PROCESS_EXISTS,
         () -> service.create(intent("key-2", "request-2")));
     assertEquals(1, blob.inserts.get());
+  }
+
+  @Test
+  public void serverPolicyIsFrozenAndInvalidJsonParametersAreRejected() {
+    ProcessCreationService service =
+        new ProcessCreationService(
+            assembly,
+            fixedClock(),
+            () -> "policy-process",
+            Duration.ofSeconds(1),
+            new ProcessResource.RetryPolicy(1, 0, 5));
+    ProcessResource created = service.create(intent("policy-key", "policy-request")).resource();
+    assertEquals(new ProcessResource.RetryPolicy(1, 0, 5), created.spec().retryPolicy());
+
+    Map<String, Object> cyclic = new LinkedHashMap<>();
+    cyclic.put("self", cyclic);
+    assertThrows(
+        IllegalArgumentException.class, () -> ProcessCreateIntent.freezeParameters(cyclic));
+
+    Map<String, Object> nonFinite = new LinkedHashMap<>();
+    nonFinite.put("value", Double.NaN);
+    assertThrows(
+        IllegalArgumentException.class, () -> ProcessCreateIntent.freezeParameters(nonFinite));
+    nonFinite.put("value", Double.POSITIVE_INFINITY);
+    assertThrows(
+        IllegalArgumentException.class, () -> ProcessCreateIntent.freezeParameters(nonFinite));
+
+    Map<String, Object> oversized = new LinkedHashMap<>();
+    oversized.put("value", "x".repeat(ProcessCreateIntent.MAX_PARAMETERS_BYTES));
+    assertThrows(
+        IllegalArgumentException.class, () -> ProcessCreateIntent.freezeParameters(oversized));
+
+    Object deeplyNested = "leaf";
+    for (int depth = 0; depth < 64; depth++) {
+      deeplyNested = java.util.List.of(deeplyNested);
+    }
+    Map<String, Object> excessiveDepth = new LinkedHashMap<>();
+    excessiveDepth.put("value", deeplyNested);
+    assertThrows(
+        IllegalArgumentException.class, () -> ProcessCreateIntent.freezeParameters(excessiveDepth));
   }
 
   private ProcessCreationService service(java.util.function.Supplier<String> names) {
@@ -174,8 +218,8 @@ public class TestProcessCreationService {
     Map<String, Object> parameters = new LinkedHashMap<>();
     parameters.put("simulated", true);
     return new ProcessCreateIntent(
-        new ProcessResource.TableRef("prod", "db", "table", "42"),
-        "expire-snapshots",
+        new ProcessResource.TableRef("prod", "db", "table", "42", "simulated"),
+        "dummy-maintenance",
         "local",
         "MANUAL",
         "sha256:" + key,
@@ -210,8 +254,7 @@ public class TestProcessCreationService {
 
   private static void assertAdmission(
       ProcessAdmissionException.Code code, org.junit.jupiter.api.function.Executable operation) {
-    ProcessAdmissionException failure =
-        assertThrows(ProcessAdmissionException.class, operation);
+    ProcessAdmissionException failure = assertThrows(ProcessAdmissionException.class, operation);
     assertEquals(code, failure.code());
   }
 

@@ -934,7 +934,10 @@ public class TestInMemoryPersistence {
     assertTrue(causeOf(unknown) instanceof PersistenceOutcomeUnknownException);
 
     blob.script = null;
-    hook.behavior = r -> { throw new IllegalStateException("repair hook failed"); };
+    hook.behavior =
+        r -> {
+          throw new IllegalStateException("repair hook failed");
+        };
     assertThrows(CompletionException.class, () -> persistence.repair("r1"));
     assertTrue(persistence.fencedNames().contains("r1"));
     assertEquals("p", join(persistence.get("r1")).payload());

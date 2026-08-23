@@ -55,8 +55,7 @@ public class TestLocalEngineIdentity {
     try {
       CountDownLatch ready = new CountDownLatch(16);
       CountDownLatch start = new CountDownLatch(1);
-      List<SubmissionOutcome> outcomes =
-          java.util.Collections.synchronizedList(new ArrayList<>());
+      List<SubmissionOutcome> outcomes = java.util.Collections.synchronizedList(new ArrayList<>());
       List<Thread> callers = new ArrayList<>();
       for (int i = 0; i < 16; i++) {
         Thread caller =
@@ -122,8 +121,7 @@ public class TestLocalEngineIdentity {
 
   @Test
   public void missingSubmissionLedgerIsLostRatherThanAuthoritativeNotFound() throws Exception {
-    LocalEngineAdapter restarted =
-        new LocalEngineAdapter(1, 4, (payload, summary, canceled) -> {});
+    LocalEngineAdapter restarted = new LocalEngineAdapter(1, 4, (payload, summary, canceled) -> {});
     try {
       SubmissionResolution resolution =
           restarted

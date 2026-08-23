@@ -44,8 +44,8 @@ import java.nio.file.Path;
 import java.time.Instant;
 import java.util.Arrays;
 import java.util.Collections;
-import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /** Java SPI loading and capability-derived action admission without any format implementation. */
 public class TestProcessPluginSpi {
@@ -58,12 +58,12 @@ public class TestProcessPluginSpi {
     writeService(ProcessActionPluginFactory.class, ExternalActionFactory.class);
     try (URLClassLoader loader =
         new URLClassLoader(new URL[] {servicesRoot.toUri().toURL()}, getClass().getClassLoader())) {
-      assertEquals(
-          ExternalEngineFactory.class,
-          ProcessPluginLoader.loadEngineFactories(loader).get(0).getClass());
-      assertEquals(
-          ExternalActionFactory.class,
-          ProcessPluginLoader.loadActionFactories(loader).get(0).getClass());
+      assertTrue(
+          ProcessPluginLoader.loadEngineFactories(loader).stream()
+              .anyMatch(factory -> factory.getClass() == ExternalEngineFactory.class));
+      assertTrue(
+          ProcessPluginLoader.loadActionFactories(loader).stream()
+              .anyMatch(factory -> factory.getClass() == ExternalActionFactory.class));
     }
   }
 
@@ -90,6 +90,34 @@ public class TestProcessPluginSpi {
   }
 
   @Test
+  public void submissionBuilderUsesDurableTableFormatForExactPluginSelection() {
+    ProcessEngineRegistry engines =
+        ProcessEngineRegistry.fromFactories(
+            Collections.singletonList(new ExternalEngineFactory()),
+            ProviderMode.SIMULATED,
+            new ProcessEngineFactory.Context("test-instance"),
+            5_000L);
+    ProcessActionRegistry actions =
+        ProcessActionRegistry.fromFactories(
+            Arrays.asList(new ExternalActionFactory(), new OtherFormatActionFactory()),
+            ProviderMode.SIMULATED,
+            new ProcessActionPluginFactory.Context("test-instance"));
+    ProcessActionCatalog catalog = ProcessActionCatalog.from(engines, actions);
+
+    assertEquals(
+        "test-format",
+        new String(
+            catalog.buildSubmission(spec("test-format"), Collections.emptyMap()),
+            java.nio.charset.StandardCharsets.UTF_8));
+    assertEquals(
+        "other-format",
+        new String(
+            catalog.buildSubmission(spec("other-format"), Collections.emptyMap()),
+            java.nio.charset.StandardCharsets.UTF_8));
+    engines.close();
+  }
+
+  @Test
   public void duplicateFactoryIdentityFailsFast() {
     IllegalArgumentException duplicateEngine =
         assertThrows(
@@ -111,6 +139,89 @@ public class TestProcessPluginSpi {
                     ProviderMode.SIMULATED,
                     new ProcessActionPluginFactory.Context("test-instance")));
     assertTrue(duplicateAction.getMessage().contains("dummy-maintenance"));
+  }
+
+  @Test
+  public void factoryStartupFailureClosesAlreadyCreatedEngines() {
+    AtomicInteger closes = new AtomicInteger();
+    ProcessEngineFactory created =
+        new ProcessEngineFactory() {
+          @Override
+          public String engineName() {
+            return "created-first";
+          }
+
+          @Override
+          public ProviderMode mode() {
+            return ProviderMode.SIMULATED;
+          }
+
+          @Override
+          public ProcessEnginePort create(Context context) {
+            return new ClosingEngine(closes);
+          }
+        };
+    ProcessEngineFactory failing =
+        new ProcessEngineFactory() {
+          @Override
+          public String engineName() {
+            return "fails-second";
+          }
+
+          @Override
+          public ProviderMode mode() {
+            return ProviderMode.SIMULATED;
+          }
+
+          @Override
+          public ProcessEnginePort create(Context context) {
+            throw new IllegalStateException("dummy startup failure");
+          }
+        };
+
+    assertThrows(
+        IllegalStateException.class,
+        () ->
+            ProcessEngineRegistry.fromFactories(
+                Arrays.asList(created, failing),
+                ProviderMode.SIMULATED,
+                new ProcessEngineFactory.Context("test-instance"),
+                100L));
+    assertEquals(1, closes.get());
+  }
+
+  @Test
+  public void freezesValidatedEngineNameBeforeProviderConstruction() {
+    AtomicInteger reads = new AtomicInteger();
+    ProcessEngineFactory unstable =
+        new ProcessEngineFactory() {
+          @Override
+          public String engineName() {
+            return reads.getAndIncrement() == 0 ? "validated-name" : "changed-name";
+          }
+
+          @Override
+          public ProviderMode mode() {
+            return ProviderMode.SIMULATED;
+          }
+
+          @Override
+          public ProcessEnginePort create(Context context) {
+            return new NoopEngine();
+          }
+        };
+
+    ProcessEngineRegistry engines =
+        ProcessEngineRegistry.fromFactories(
+            Collections.singletonList(unstable),
+            ProviderMode.SIMULATED,
+            new ProcessEngineFactory.Context("test-instance"),
+            100L);
+
+    assertTrue(engines.dispatcherFor("validated-name").isPresent());
+    assertFalse(engines.dispatcherFor("changed-name").isPresent());
+    assertEquals(1, reads.get());
+    engines.close();
   }
 
   private void writeService(Class<?> service, Class<?> implementation) throws Exception {
@@ -187,11 +298,76 @@ public class TestProcessPluginSpi {
             ManagedTablePort.TableSnapshot table, Instant logicalFireTime) {
           return ScheduledEvaluation.create("dummy-local", Collections.emptyMap());
         }
+
+        @Override
+        public byte[] buildSubmission(
+            ProcessResource.ProcessSpec frozenSpec,
+            java.util.Map<String, Object> simulationProfile) {
+          return "test-format".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        }
       };
     }
   }
 
-  private static final class NoopEngine implements ProcessEnginePort {
+  public static final class OtherFormatActionFactory implements ProcessActionPluginFactory {
+    @Override
+    public String action() {
+      return "dummy-maintenance";
+    }
+
+    @Override
+    public ProviderMode mode() {
+      return ProviderMode.SIMULATED;
+    }
+
+    @Override
+    public java.util.Set<String> tableFormats() {
+      return Collections.singleton("other-format");
+    }
+
+    @Override
+    public ProcessActionPlugin create(Context context) {
+      return new ProcessActionPlugin() {
+        @Override
+        public String action() {
+          return "dummy-maintenance";
+        }
+
+        @Override
+        public boolean supports(String tableFormat, String executionEngine) {
+          return "other-format".equals(tableFormat) && "dummy-local".equals(executionEngine);
+        }
+
+        @Override
+        public ScheduledEvaluation evaluateScheduled(
+            ManagedTablePort.TableSnapshot table, Instant logicalFireTime) {
+          return ScheduledEvaluation.skip();
+        }
+
+        @Override
+        public byte[] buildSubmission(
+            ProcessResource.ProcessSpec frozenSpec,
+            java.util.Map<String, Object> simulationProfile) {
+          return "other-format".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        }
+      };
+    }
+  }
+
+  private static ProcessResource.ProcessSpec spec(String tableFormat) {
+    return new ProcessResource.ProcessSpec(
+        new ProcessResource.TableRef("catalog", "database", "table", "42", tableFormat),
+        "dummy-maintenance",
+        "dummy-local",
+        "MANUAL",
+        "2026-08-22T10:00:00Z",
+        "RUN",
+        new ProcessResource.RequestIdentity("sha256:key", "sha256:request"),
+        Collections.emptyMap(),
+        new ProcessResource.RetryPolicy(0, 0, 1));
+  }
+
+  private static class NoopEngine implements ProcessEnginePort {
     @Override
     public EngineTypes.EngineCapabilities capabilities() {
       return new EngineTypes.EngineCapabilities(true, true, "noop-v1");
@@ -224,6 +400,19 @@ public class TestProcessPluginSpi {
     @Override
     public java.util.concurrent.CompletionStage<Void> release(String externalId) {
       return CompletableFuture.completedFuture(null);
+    }
+  }
+
+  private static final class ClosingEngine extends NoopEngine implements AutoCloseable {
+    private final AtomicInteger closes;
+
+    private ClosingEngine(AtomicInteger closes) {
+      this.closes = closes;
+    }
+
+    @Override
+    public void close() {
+      closes.incrementAndGet();
     }
   }
 }

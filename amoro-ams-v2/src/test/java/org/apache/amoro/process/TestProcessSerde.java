@@ -62,8 +62,8 @@ public class TestProcessSerde {
     return new ProcessResource(
         "1948372910284737281",
         new ProcessResource.ProcessSpec(
-            new ProcessResource.TableRef("prod", "db1", "orders", "42"),
-            "expire-snapshots",
+            new ProcessResource.TableRef("prod", "db1", "orders", "42", "simulated"),
+            "dummy-maintenance",
             "remote-spark",
             "MANUAL",
             "2026-08-22T10:00:00Z",
@@ -184,8 +184,8 @@ public class TestProcessSerde {
         new ProcessResource(
             "1948372910284737281",
             new ProcessResource.ProcessSpec(
-                new ProcessResource.TableRef("prod", "db1", "orders", "42"),
-                "expire-snapshots",
+                new ProcessResource.TableRef("prod", "db1", "orders", "42", "simulated"),
+                "dummy-maintenance",
                 "remote-spark",
                 "MANUAL",
                 "2026-08-22T10:00:00Z",
@@ -207,9 +207,17 @@ public class TestProcessSerde {
                     "2026-08-22T11:00:00Z",
                     fullSubmissionHistory,
                     new ProcessResource.ManualResolutions(
-                        "{\"idempotencyKeyHash\":\"sha256:x\",\"commandHash\":\"sha256:y\","
-                            + "\"submissionKey\":\"k\",\"requestHash\":\"sha256:z\","
-                            + "\"outcome\":\"NOT_FOUND\",\"resolvedAt\":\"2026-08-22T10:30:00Z\"}",
+                        new ProcessResource.ManualResolution(
+                            "sha256:x",
+                            "sha256:y",
+                            "k",
+                            "sha256:z",
+                            "NOT_FOUND",
+                            null,
+                            null,
+                            "verified",
+                            "test",
+                            "2026-08-22T10:30:00Z"),
                         null)),
                 fullHistory,
                 "2026-08-22T11:00:00Z",

@@ -47,8 +47,7 @@ public class TestProcessIndexProjection {
     assertEquals("p1", conflict.incumbentName());
     assertEquals("p2", conflict.contenderName());
     assertEquals(
-        Optional.of("p1"),
-        projection.current().activeProcessOf("42", "expire-snapshots"));
+        Optional.of("p1"), projection.current().activeProcessOf("42", "dummy-maintenance"));
     assertEquals(1, projection.current().resourcesByName().size());
   }
 
@@ -60,33 +59,43 @@ public class TestProcessIndexProjection {
 
     ProcessResource terminal = resource("p1", "same-key", "SUCCESS", "2026-08-22T11:00:00Z");
     projection.prepare(PersistenceChange.modified(active, terminal)).commit();
-    assertEquals(
-        Optional.empty(), projection.current().activeProcessOf("42", "expire-snapshots"));
+    assertEquals(Optional.empty(), projection.current().activeProcessOf("42", "dummy-maintenance"));
     assertEquals(
         Optional.of("p1"),
-        projection
-            .current()
-            .idempotentHolderOf("42", "expire-snapshots", "sha256:same-key"));
+        projection.current().idempotentHolderOf("42", "dummy-maintenance", "sha256:same-key"));
 
     ProcessIndexConflictException conflict =
         assertThrows(
             ProcessIndexConflictException.class,
             () ->
                 projection.prepare(
-                    PersistenceChange.created(
-                        resource("p2", "same-key", "PENDING", null))));
+                    PersistenceChange.created(resource("p2", "same-key", "PENDING", null))));
     assertEquals("IDEMPOTENCY_KEY", conflict.conflictType());
 
     projection.prepare(PersistenceChange.deleted(terminal)).commit();
     projection
-        .prepare(
-            PersistenceChange.created(resource("p2", "same-key", "PENDING", null)))
+        .prepare(PersistenceChange.created(resource("p2", "same-key", "PENDING", null)))
         .commit();
     assertEquals(
         Optional.of("p2"),
-        projection
-            .current()
-            .idempotentHolderOf("42", "expire-snapshots", "sha256:same-key"));
+        projection.current().idempotentHolderOf("42", "dummy-maintenance", "sha256:same-key"));
+  }
+
+  @Test
+  public void deletingOldTerminalDoesNotReleaseNewActiveHolder() {
+    ProcessIndexProjection projection = new ProcessIndexProjection();
+    ProcessResource first = resource("p1", "key-1", "PENDING", null);
+    projection.prepare(PersistenceChange.created(first)).commit();
+
+    ProcessResource firstTerminal = resource("p1", "key-1", "SUCCESS", "2026-08-22T11:00:00Z");
+    projection.prepare(PersistenceChange.modified(first, firstTerminal)).commit();
+    ProcessResource second = resource("p2", "key-2", "PENDING", null);
+    projection.prepare(PersistenceChange.created(second)).commit();
+
+    projection.prepare(PersistenceChange.deleted(firstTerminal)).commit();
+
+    assertEquals(
+        Optional.of("p2"), projection.current().activeProcessOf("42", "dummy-maintenance"));
   }
 
   private static ProcessResource resource(
@@ -96,8 +105,8 @@ public class TestProcessIndexProjection {
     return new ProcessResource(
         name,
         new ProcessResource.ProcessSpec(
-            new ProcessResource.TableRef("prod", "db", "table", "42"),
-            "expire-snapshots",
+            new ProcessResource.TableRef("prod", "db", "table", "42", "simulated"),
+            "dummy-maintenance",
             "local",
             "MANUAL",
             "2026-08-22T10:00:00Z",

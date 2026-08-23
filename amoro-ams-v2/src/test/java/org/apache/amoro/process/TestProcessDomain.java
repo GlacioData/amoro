@@ -68,8 +68,8 @@ public class TestProcessDomain {
     return new ProcessResource(
         name,
         new ProcessResource.ProcessSpec(
-            new ProcessResource.TableRef("prod", "db", "t", tableId),
-            "expire-snapshots",
+            new ProcessResource.TableRef("prod", "db", "t", tableId, "simulated"),
+            "dummy-maintenance",
             "local",
             "MANUAL",
             "2026-08-22T10:00:00Z",
@@ -98,13 +98,13 @@ public class TestProcessDomain {
     assembly.repository().create(newResource("p1", "42"));
     ProcessIndexSnapshot snapshot = assembly.indexProjection().current();
 
-    assertEquals(Optional.of("p1"), snapshot.activeProcessOf("42", "expire-snapshots"));
+    assertEquals(Optional.of("p1"), snapshot.activeProcessOf("42", "dummy-maintenance"));
     assertEquals(
-        Optional.of("p1"), snapshot.idempotentHolderOf("42", "expire-snapshots", "sha256:key-p1"));
+        Optional.of("p1"), snapshot.idempotentHolderOf("42", "dummy-maintenance", "sha256:key-p1"));
     assertTrue(snapshot.find("p1").isPresent());
 
     // a different table/action combination is independent
-    assertEquals(Optional.empty(), snapshot.activeProcessOf("43", "expire-snapshots"));
+    assertEquals(Optional.empty(), snapshot.activeProcessOf("43", "dummy-maintenance"));
   }
 
   @Test
@@ -121,7 +121,7 @@ public class TestProcessDomain {
     assertFalse(blob.rows.containsKey("p2"));
     assertEquals(
         Optional.of("p1"),
-        assembly.indexProjection().current().activeProcessOf("42", "expire-snapshots"));
+        assembly.indexProjection().current().activeProcessOf("42", "dummy-maintenance"));
   }
 
   @Test
@@ -162,7 +162,7 @@ public class TestProcessDomain {
     ProcessResource.ProcessSpec changedAction =
         new ProcessResource.ProcessSpec(
             spec.table(),
-            "clean-orphans",
+            "dummy-secondary",
             spec.executionEngine(),
             spec.triggerSource(),
             spec.createdAt(),
@@ -185,52 +185,33 @@ public class TestProcessDomain {
     assertEquals(created, assembly.repository().get("p1"));
     assertEquals(
         Optional.of("p1"),
-        assembly.indexProjection().current().activeProcessOf("42", "expire-snapshots"));
+        assembly.indexProjection().current().activeProcessOf("42", "dummy-maintenance"));
     assertEquals(
         Optional.empty(),
-        assembly.indexProjection().current().activeProcessOf("42", "clean-orphans"));
+        assembly.indexProjection().current().activeProcessOf("42", "dummy-secondary"));
 
     assertThrows(
         IllegalArgumentException.class,
         () ->
             assembly
                 .repository()
-                .create(newResource("p2", "43").withStatus(newResource("p2", "43").status().withPhase("BROKEN"))));
+                .create(
+                    newResource("p2", "43")
+                        .withStatus(newResource("p2", "43").status().withPhase("BROKEN"))));
     assertEquals(1, blob.rows.size(), "invalid create must fail before the durable insert");
   }
 
   @Test
   public void finalReleasesAdmissionAndExpiryTracksIt() {
-    assembly.repository().create(newResource("p1", "42"));
-    ProcessResource created = assembly.repository().get("p1");
-    ProcessResource terminal =
-        assembly
-            .repository()
-            .modify(
-                "p1",
-                created.resourceVersion(),
-                r ->
-                    r.withStatus(
-                        new ProcessResource.ProcessStatus(
-                            "SUCCESS",
-                            0,
-                            r.status().attempt(),
-                            r.status().attemptHistory(),
-                            "2026-08-22T10:01:00Z",
-                            null,
-                            r.status().engineBackoffAttempts(),
-                            r.status().conditions(),
-                            r.status().summary(),
-                            null,
-                            "2026-08-22T10:00:06Z",
-                            "2026-08-22T10:00:10Z",
-                            "2026-08-22T10:01:00Z")));
+    assembly.repository().create(submittedResource("p1", "42", 3));
+    ProcessTestFixtures.forceTerminal(assembly, "p1", "SUCCESS");
+    ProcessResource terminal = assembly.repository().get("p1");
 
     assertTrue(ProcessFinality.isFinal(terminal));
     ProcessIndexSnapshot snapshot = assembly.indexProjection().current();
     assertEquals(
         Optional.empty(),
-        snapshot.activeProcessOf("42", "expire-snapshots"),
+        snapshot.activeProcessOf("42", "dummy-maintenance"),
         "final resources release the admission slot");
     assertEquals(1, snapshot.expiryOrder().size());
     assertTrue(snapshot.expiryOrder().get(0).endsWith("|p1"));
@@ -239,7 +220,7 @@ public class TestProcessDomain {
     assembly.repository().create(newResource("p2", "42"));
     assertEquals(
         Optional.of("p2"),
-        assembly.indexProjection().current().activeProcessOf("42", "expire-snapshots"));
+        assembly.indexProjection().current().activeProcessOf("42", "dummy-maintenance"));
   }
 
   @Test
@@ -272,49 +253,94 @@ public class TestProcessDomain {
 
   @Test
   public void failedRetryableStaysActiveUntilBudgetExhausts() {
-    assembly.repository().create(newResource("p1", "42"));
-    ProcessResource created = assembly.repository().get("p1");
-    ProcessResource failed =
-        assembly
-            .repository()
-            .modify(
-                "p1", created.resourceVersion(), r -> r.withStatus(r.status().withPhase("FAILED")));
+    assembly.repository().create(submittedResource("p1", "42", 3));
+    ProcessResultApplier retryableApplier =
+        new ProcessResultApplier(
+            assembly.repository(), () -> "2026-08-22T10:01:00Z", 4, 1_000L, 60_000L, 300_000L);
+    retryableApplier.applyObservation(
+        "p1",
+        "p1:0:0",
+        "sha256:req-p1",
+        "dummy-p1",
+        org.apache.amoro.process.engine.EngineTypes.ProcessObservation.known(
+            new org.apache.amoro.process.engine.EngineTypes.EngineObservation(
+                "FAILED",
+                null,
+                java.util.Collections.singletonMap("simulated", true),
+                new org.apache.amoro.process.engine.EngineTypes.EngineFailure(
+                    "DUMMY", "boom", true))),
+        null);
+    ProcessResource failed = assembly.repository().get("p1");
     assertFalse(ProcessFinality.isFinal(failed), "budget remaining FAILED is retryable, not final");
     assertEquals(
         Optional.of("p1"),
-        assembly.indexProjection().current().activeProcessOf("42", "expire-snapshots"));
+        assembly.indexProjection().current().activeProcessOf("42", "dummy-maintenance"));
 
-    // drive retryNumber to the cap -> final, admission released
-    ProcessResource atCap = failed;
-    for (int v = (int) atCap.resourceVersion() + 1; v <= 5; v++) {
-      final long version = v - 1;
-      atCap =
-          assembly
-              .repository()
-              .modify(
-                  "p1",
-                  version,
-                  r ->
-                      r.withStatus(
-                          new ProcessResource.ProcessStatus(
-                              "FAILED",
-                              3,
-                              r.status().attempt(),
-                              r.status().attemptHistory(),
-                              null,
-                              null,
-                              r.status().engineBackoffAttempts(),
-                              r.status().conditions(),
-                              r.status().summary(),
-                              "boom",
-                              null,
-                              null,
-                              null)));
-    }
+    // With maxRetries=0, the same authoritative failure is final and releases admission.
+    assembly.repository().create(submittedResource("at-cap", "43", 0));
+    retryableApplier.applyObservation(
+        "at-cap",
+        "at-cap:0:0",
+        "sha256:req-at-cap",
+        "dummy-at-cap",
+        org.apache.amoro.process.engine.EngineTypes.ProcessObservation.known(
+            new org.apache.amoro.process.engine.EngineTypes.EngineObservation(
+                "FAILED",
+                null,
+                java.util.Collections.singletonMap("simulated", true),
+                new org.apache.amoro.process.engine.EngineTypes.EngineFailure(
+                    "DUMMY", "boom", true))),
+        null);
+    ProcessResource atCap = assembly.repository().get("at-cap");
     assertTrue(ProcessFinality.isFinal(atCap));
     assertEquals(
         Optional.empty(),
-        assembly.indexProjection().current().activeProcessOf("42", "expire-snapshots"));
+        assembly.indexProjection().current().activeProcessOf("43", "dummy-maintenance"));
+  }
+
+  private static ProcessResource submittedResource(String name, String tableId, int maxRetries) {
+    ProcessResource base = newResource(name, tableId);
+    ProcessResource.ProcessAttempt attempt =
+        new ProcessResource.ProcessAttempt(
+            0,
+            name + ":0:0",
+            "sha256:req-" + name,
+            "ACKNOWLEDGED",
+            "dummy-" + name,
+            "2026-08-22T10:00:05Z",
+            null,
+            "AUTO",
+            null,
+            java.util.Collections.emptyList(),
+            new ProcessResource.ManualResolutions(null, null));
+    ProcessResource.ProcessSpec spec =
+        new ProcessResource.ProcessSpec(
+            base.spec().table(),
+            base.spec().action(),
+            base.spec().executionEngine(),
+            base.spec().triggerSource(),
+            base.spec().createdAt(),
+            base.spec().desiredState(),
+            base.spec().request(),
+            base.spec().parameters(),
+            new ProcessResource.RetryPolicy(maxRetries, 2, 30));
+    ProcessResource.ProcessStatus status =
+        new ProcessResource.ProcessStatus(
+            "SUBMITTED",
+            0,
+            attempt,
+            java.util.Collections.emptyList(),
+            null,
+            null,
+            null,
+            new ProcessResource.EngineBackoff(0, 0, 0, 0),
+            java.util.Collections.emptyList(),
+            null,
+            null,
+            "2026-08-22T10:00:06Z",
+            null,
+            null);
+    return new ProcessResource(name, spec, status);
   }
 
   /** Minimal fake durable store (name -> YAML bytes). */
