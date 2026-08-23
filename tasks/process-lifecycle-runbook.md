@@ -17,6 +17,217 @@
 | 状态机 | `ProcessReconciler`（process） | level-triggered Controller：RUN/CANCEL 全路径 |
 | 引擎 | `ProcessEngineDispatcher` + `FakeEngineAdapter`（process/engine） | 命令单飞 + 强制超时（submit 超时→UNKNOWN）；远端 Spark 用 fake 模拟（用户决策） |
 
+
+## 0.5 图集（架构 / 状态机 / Controller 入口 / RUN·CANCEL 流程）
+
+> 以下四图均按**当前代码实际行为**绘制（含评审修复 190fda699：准入 mutex、durable
+> DISPATCHING 两步、UNKNOWN 不盲重投、取消零提交、handle release/TTL gate）。
+
+### 图 1：总体架构
+
+```mermaid
+flowchart TB
+    subgraph 入口["创建入口（两个，共用同一准入链）"]
+        REST["REST /api/ams/v2<br/>POST tables/{c}/{d}/{t}/processes<br/>Idempotency-Key"]
+        SCAN["ProcessTriggerScanner<br/>scan→gate→创建（分钟窗口幂等键）"]
+    end
+    SUPPORT["ProcessRestSupport<br/>per-(tableId,action) admission mutex<br/>幂等重放/单活跃/冻结 retryPolicy"]
+    ASM["ProcessDomainAssembly<br/>repository + indexProjection + 删除hook"]
+    PERSIST["InMemoryPersistence（L5）<br/>durable-first · resourceVersion CAS · fence/repair"]
+    LANE["BlobStoreActor（L6）<br/>每域单线程 mutation lane"]
+    BLOB["MyBatisBlobStore（L7）<br/>五种 SQL · 表名白名单"]
+    DB[("amoro_process<br/>Base64(YAML)")]
+    IDX["ProcessIndexProjection<br/>聚合快照：resourcesByName<br/>+ 准入/幂等/过期视图"]
+    LD["ListenerDispatcher<br/>pair 保序 · 有界重试"]
+    SCHED["DefaultScheduler<br/>single-flight · DelayQueue · 退避"]
+    CTRL["ProcessReconciler（Controller）<br/>每轮至多一步 · version-CAS"]
+    DISP["ProcessEngineDispatcher<br/>Submission/Execution 单飞<br/>command-timeout（submit 超时→UNKNOWN）"]
+    LOCAL["LocalEngineAdapter<br/>有界 action 池<br/>容量满=权威 REJECTED"]
+    FAKE["FakeEngineAdapter<br/>远端 Spark 单测模拟（用户决策）"]
+    TTL["ProcessTtlCleaner<br/>expiryOrder 有界批次<br/>handle gate → CAS delete"]
+    REG["ExecutionHandleRegistry<br/>终态 durable 后 release"]
+
+    REST --> SUPPORT
+    SCAN --> SUPPORT
+    SUPPORT -->|"keyed mutex 内: 幂等查索引→活跃查→create"| ASM
+    ASM --> PERSIST --> LANE --> BLOB --> DB
+    LANE -.->|"DB 成功后 same-lane publish"| IDX
+    LANE -.->|"durable 后 handoff 事件"| LD
+    LD -.->|"AFTER_CREATED / POST_START"| SCHED
+    SCHED -->|"(process,name) 单飞"| CTRL
+    CTRL -->|"submit/observe/cancel 异步"| DISP --> LOCAL
+    DISP -.-> FAKE
+    CTRL -.->|"终态 durable→release"| REG
+    TTL -->|"索引快照+gate+delete"| ASM
+    DB -.->|"postStart 重放重建"| IDX
+```
+
+### 图 2：状态机流转（phase × submitState × desired）
+
+```mermaid
+stateDiagram-v2
+    direction LR
+    [*] --> PENDING: durable create<br/>desired=RUN
+
+    state "RUN 路径（desired=RUN）" as run {
+        PENDING --> PENDING: 轮1 CAS attempt(CREATED)<br/>轮2 CAS→DISPATCHING
+        PENDING --> SUBMITTED: submit ACK<br/>(记 externalId)
+        PENDING --> Unresolved: submit UNKNOWN/CONFLICT<br/>submitState 持久化·停轮·不盲重投
+        Unresolved --> SUBMITTED: 人工 ACK<br/>POST /submission-resolutions
+        Unresolved --> PENDING: 人工 NOT_FOUND<br/>代次+1（预算内）/ 预算尽→FAILED
+        SUBMITTED --> RUNNING: observe RUNNING
+        SUBMITTED --> SUCCESS: observe 终态
+        RUNNING --> SUCCESS: observe 终态
+        SUBMITTED --> FAILED: observe FAILED
+        RUNNING --> FAILED: observe FAILED
+        FAILED --> PENDING: 预算内·disposition=ALLOW<br/>归档旧 attempt(含 externalId)·retryDelay 后
+        FAILED --> FinalFail: desired=CANCEL/预算尽/FINAL
+        state Unresolved {
+            [*] --> UNKNOWN
+            [*] --> CONFLICT
+        }
+    }
+
+    state "CANCEL 路径（desired=CANCEL）" as cancel {
+        PENDING --> CANCELED: submitState=CREATED<br/>零引擎调用直接终态
+        PENDING --> CANCELING: DISPATCHING/UNKNOWN<br/>保守转（消解路径收敛）
+        SUBMITTED --> CANCELING: CAS desired=CANCEL
+        RUNNING --> CANCELING: CAS desired=CANCEL
+        CANCELING --> CANCELING: cancel ACCEPTED→标记<br/>CANCEL_REQUESTED 后转 observe 轮
+        CANCELING --> CANCELED: observe/cancel 终态
+        CANCELING --> KILLED: observe/cancel 终态
+        CANCELING --> CLOSED: observe/cancel 终态
+        CANCELING --> FAILED: desired=CANCEL 即最终
+    }
+
+    SUCCESS --> [*]: TerminalState<br/>+两层 finishedAt
+    CANCELED --> [*]
+    KILLED --> [*]
+    CLOSED --> [*]
+    FinalFail --> [*]
+```
+
+> 迟到回调（observe/cancel/submit）统一按 `attempt.submissionKey` 身份守卫：attempt 已
+> 轮换（retry 或人工消解）则丢弃，绝不把旧结果写进新 attempt。
+
+### 图 3：Controller 入口/出口（调度接入全路径）
+
+```mermaid
+flowchart TB
+    subgraph 入调度["入口：谁会 schedule(ProcessReconciler)"]
+        A["durable create 成功<br/>→ AFTER_CREATED 事件"]
+        B["重启 postStart 全量重放<br/>→ POST_START 事件/资源"]
+        C["人工消解/取消等命令 CAS<br/>→ AFTER_MODIFIED 事件"]
+    end
+    LD["ListenerDispatcher<br/>(listener,domain,name) pair 保序"]
+    SCH["DefaultScheduler 登记表<br/>ConcurrentHashMap&lt;ControllerKey,ScheduledEntry&gt;"]
+    subgraph 合并["single-flight 合并规则"]
+        M1["无条目 → 入队新包装"]
+        M2["QUEUED → 只缩短 deadline<br/>（earliest 合并，绝不变晚）"]
+        M3["在飞(CLAIMED) → 收敛 rescheduleRequested<br/>worker 返回后按最早值重入队"]
+        M4["TERMINATED → 移除旧 identity<br/>putIfAbsent 新 generation"]
+    end
+    W["SchedulerWorker（N 个 daemon）<br/>signal-version 等待，到期 poll"]
+    INV["ProcessReconciler.invoke()<br/>每轮至多一个逻辑步骤"]
+    subgraph 出口["出口：谁停掉调度"]
+        O1["固定终态/最终 FAILED<br/>throw TerminalState → 登记表回收"]
+        O2["TTL/运维 delete<br/>→ DurableDeletionHook 同 lane<br/>key-only unschedule（先于同名 create）"]
+        O3["优雅停机 shutdown(timeout)<br/>scheduler→dispatcher→lane 定序"]
+    end
+
+    A --> LD
+    B --> LD
+    C --> LD
+    LD --> SCH
+    SCH --> 合并
+    合并 --> W --> INV
+    INV -->|"Step.DONE/WAIT/DISPATCHED"| W
+    INV --> O1
+    O2 -.-> SCH
+    O3 -.-> SCH
+```
+
+### 图 4a：RUN 全链路时序（含本地引擎）
+
+```mermaid
+sequenceDiagram
+    participant R as REST/Scanner
+    participant S as ProcessRestSupport
+    participant L as mutation lane(BlobStoreActor)
+    participant DB as amoro_process
+    participant E as ListenerDispatcher
+    participant K as DefaultScheduler
+    participant C as ProcessReconciler
+    participant D as EngineDispatcher
+    participant G as LocalEngineAdapter
+
+    R->>S: create(Idempotency-Key, action, engine, params)
+    Note over S: per-(tableId,action) mutex 内：<br/>幂等重放→活跃检查→冻结参数
+    S->>L: create(v0) → serialize(YAML) → projection prepare
+    L->>DB: INSERT Base64(YAML)（durable 界线）
+    L-->>S: v1, phase=PENDING, attempt=submissionKey name:0:0 (CREATED)
+    L->>E: handoff AFTER_CREATED（不阻塞 stage）
+    E->>K: schedule(Reconciler)（single-flight 合并）
+
+    Note over K,C: 周期轮（每轮至多一步）
+    K->>C: invoke #1：PENDING+attempt 在 → CAS submitState→DISPATCHING
+    K->>C: invoke #2：DISPATCHING → D.submit(key,hash,payload)
+    D->>G: 单飞派发（容量满=权威 REJECTED）
+    G-->>D: ACK(externalId)
+    D-->>C: 回调（attempt 身份守卫通过）
+    C->>L: CAS→SUBMITTED（externalId, submittedAt）版本+1
+
+    K->>C: invoke #n：SUBMITTED → D.observe(externalId)
+    G-->>D: KNOWN(RUNNING)
+    C->>L: CAS→RUNNING（startedAt）——相位不变则跳过写
+    K->>C: invoke #n+1：RUNNING → observe
+    G-->>D: KNOWN(SUCCESS)
+    C->>L: CAS→SUCCESS + attempt.finishedAt + 顶层 finishedAt
+    C->>D: release(externalId)（终态已 durable）
+    C->>K: throw TerminalState → 登记表回收
+```
+
+### 图 4b：CANCEL 全链路时序
+
+```mermaid
+sequenceDiagram
+    participant U as 运维/客户端
+    participant S as REST PATCH
+    participant L as mutation lane
+    participant K as DefaultScheduler
+    participant C as ProcessReconciler
+    participant D as EngineDispatcher
+    participant G as LocalEngineAdapter
+
+    alt 从未派发（submitState=CREATED）
+        U->>S: PATCH {desiredState: CANCEL}
+        S->>L: CAS desired=CANCEL（+nextReconcileAt=now）
+        K->>C: invoke：PENDING+CREATED
+        Note over C: spec §7.4：可证从未发送<br/>零引擎调用
+        C->>L: CAS→CANCELED + 两层 finishedAt
+        C->>K: TerminalState（回收）
+    else 已派发在跑（SUBMITTED/RUNNING）
+        U->>S: PATCH {desiredState: CANCEL}
+        S->>L: CAS desired=CANCEL + phase→CANCELING
+        K->>C: invoke：CANCELING → D.cancel(externalId)
+        G-->>D: ACCEPTED（协作标记）
+        C->>L: CAS attempt submitState→CANCEL_REQUESTED（后续轮不再重复 cancel）
+        K->>C: invoke：CANCEL_REQUESTED → D.observe(externalId)
+        G-->>D: KNOWN(CANCELED)（action 协作退出）
+        C->>L: CAS→CANCELED + finishedAt
+        C->>D: release(externalId)
+        C->>K: TerminalState
+    else 提交未决（UNKNOWN/CONFLICT）
+        U->>S: POST /submission-resolutions<br/>{ACK,externalId} 或 {NOT_FOUND}
+        alt ACK
+            S->>L: CAS→CANCELING（记 externalId+审计同 CAS）
+        else NOT_FOUND
+            S->>L: CAS→CANCELED + finishedAt（同 CAS 落审计）
+        end
+    end
+    Note over C: 全部回调带 attempt 身份守卫；<br/>desired=CANCEL 使 FAILED 即最终
+```
+
 ## 1. 一次 Process 的完整生命
 
 ### 1.1 创建（durable create）
@@ -58,17 +269,22 @@ invoke():
     PENDING/UNKNOWN:
       attempt 为空 → 先 CAS 持久化 attempt（submissionKey=name:retry:0, submitState=CREATED）
                     → 本轮结束，下轮才派发（spec §7.3：durable DISPATCHING 先于 dispatch）
-      attempt 已在  → dispatcher.submit(key, requestHash, payload)  # 异步单飞
+      attempt 已在且 submitState=CREATED → 先 CAS submitState→DISPATCHING（durable 先置，崩溃重启进消解）
+      attempt=DISPATCHING → dispatcher.submit(key, requestHash, payload)   # 异步单飞
                       └ ACCEPTED 回调: CAS→SUBMITTED（记 externalId, submittedAt）
                         REJECTED 回调: CAS→FAILED(终态判定)+failure
-                        UNKNOWN/CONFLICT/UNAVAILABLE: 本轮不动，下轮重派（engine backoff 节流）
+                        UNKNOWN/CONFLICT 回调: CAS submitState→UNKNOWN/CONFLICT 并停轮——
+                          绝不盲重投同 key，等待人工提交消解（POST /submission-resolutions）
+                        UNAVAILABLE 回调: 可证未发送，下轮同 key 重投
     SUBMITTED/RUNNING:
       dispatcher.observe(externalId)
         KNOWN(SUBMITTED) → 保持（仅刷新 lastObserved）
         KNOWN(RUNNING)   → CAS→RUNNING（startedAt）
         KNOWN(SUCCESS/CANCELED/KILLED/CLOSED) → CAS→终态 + attempt.finishedAt + 顶层 finishedAt
         KNOWN(FAILED)    → CAS→FAILED + lastError; retryable=false ⇒ disposition=FINAL
-        NOT_FOUND/LOST   → 首版：日志+下轮继续（spec 要求 ExecutionUnresolved 人工消解，P5 范畴）
+            NOT_FOUND/LOST   → 首版：日志+下轮继续；人工执行消解（POST /execution-resolutions）收敛
+        回调统一带 submissionKey 身份守卫：attempt 已轮换则丢弃，绝不覆盖新 attempt
+        终态写 durable 成功 → engine.release(externalId) + ExecutionHandleRegistry 释放（TTL gate 依赖）
     FAILED（预算内）:
       CAS 归档旧 attempt（含 externalId → attemptHistory，供幂等 release）
       retryNumber+1, 新 attempt=null, phase=PENDING
