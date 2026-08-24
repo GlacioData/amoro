@@ -71,6 +71,13 @@
             <artifactId>lombok</artifactId>
             <scope>provided</scope>
         </dependency>
+        <!-- OpenAPI 3 documentation for the REST layer (annotations + swagger-ui page);
+             2.8.x is the Spring Boot 3.5-compatible line (3.x targets Boot 4) -->
+        <dependency>
+            <groupId>org.springdoc</groupId>
+            <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+            <version>2.8.9</version>
+        </dependency>
         <!-- YAML persistence format for format-strategized domains (framework spec §5.4);
              version managed by the Spring Boot BOM imported in this module only -->
         <dependency>

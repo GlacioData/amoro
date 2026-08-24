@@ -29,12 +29,13 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.amoro.control.DefaultScheduler;
-import org.apache.amoro.controller.ProcessApiController;
+import org.apache.amoro.controller.ProcessController;
 import org.apache.amoro.persistence.HandoffResult;
 import org.apache.amoro.process.ProcessDomainAssembly;
 import org.apache.amoro.process.ProcessTestFixtures;
 import org.apache.amoro.process.TestProcessDomain;
 import org.apache.amoro.resources.ProcessResource;
+import org.apache.amoro.service.ProcessServiceImpl;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -81,7 +82,7 @@ public class TestProcessRestApi {
     strict.configure(
         com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, true);
     mvc =
-        MockMvcBuilders.standaloneSetup(new ProcessApiController(support))
+        MockMvcBuilders.standaloneSetup(new ProcessController(new ProcessServiceImpl(support)))
             .setControllerAdvice(new ApiExceptionHandler())
             .setMessageConverters(
                 new org.springframework.http.converter.json.MappingJackson2HttpMessageConverter(
@@ -250,7 +251,8 @@ public class TestProcessRestApi {
     ProcessRestSupport blockingSupport =
         ProcessTestFixtures.simulatedRestSupport(assembly, blockingCreation);
     MockMvc blockingMvc =
-        MockMvcBuilders.standaloneSetup(new ProcessApiController(blockingSupport))
+        MockMvcBuilders.standaloneSetup(
+                new ProcessController(new ProcessServiceImpl(blockingSupport)))
             .setControllerAdvice(new ApiExceptionHandler())
             .build();
     CompletableFuture<ProcessRestSupport.CreateResult> first =
@@ -380,12 +382,14 @@ public class TestProcessRestApi {
 
     mvc.perform(get(CREATE).param("action", "dummy-maintenance"))
         .andExpect(status().isOk())
-        .andExpect(jsonPath("$.total").value(1))
+        .andExpect(jsonPath("$.kind").value("ProcessResourceList"))
+        .andExpect(jsonPath("$.metadata.total").value(1))
+        .andExpect(jsonPath("$.metadata.page").value(1))
         .andExpect(jsonPath("$.items[0].spec.action").value("dummy-maintenance"));
 
     mvc.perform(get(CREATE).param("status", "PENDING"))
         .andExpect(status().isOk())
-        .andExpect(jsonPath("$.total").value(1));
+        .andExpect(jsonPath("$.metadata.total").value(1));
 
     mvc.perform(get(CREATE).param("page", "0"))
         .andExpect(status().isBadRequest())
@@ -750,7 +754,9 @@ public class TestProcessRestApi {
         .andExpect(status().isCreated());
 
     // both under one table for ordering: second create targeted orders2; use orders only
-    mvc.perform(get(CREATE)).andExpect(status().isOk()).andExpect(jsonPath("$.total").value(1));
+    mvc.perform(get(CREATE))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.metadata.total").value(1));
   }
 
   @Test
