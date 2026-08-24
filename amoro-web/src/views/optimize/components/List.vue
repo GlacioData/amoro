@@ -243,25 +243,27 @@ onMounted(async () => {
 
 <template>
   <div class="list-wrap">
-    <a-space class="filter-form" wrap>
+    <div class="filter-form" role="search" :aria-label="t('search')">
       <a-select
         v-model:value="optimizerGroup" allow-clear :placeholder="t('optimizerGroup')" :options="optimizerGroupList"
-        style="min-width: 150px;"
+        class="filter-control"
       />
 
       <a-input
         v-model:value="dbSearchInput"
         :placeholder="placeholder.filterDBPh"
+        class="filter-control"
       />
 
       <a-input
         v-model:value="tableSearchInput"
         :placeholder="placeholder.filterTablePh"
+        class="filter-control"
       />
 
       <a-select
         v-model:value="actions" allow-clear :placeholder="t('action')" :options="actionOptions" mode="multiple"
-        style="min-width: 150px;"
+        class="filter-control"
       />
 
       <a-input-number
@@ -271,7 +273,7 @@ onMounted(async () => {
         :precision="0"
         :placeholder="t('healthScoreMin')"
         :aria-label="t('healthScoreMin')"
-        class="number-filter"
+        class="filter-control"
       />
 
       <a-input-number
@@ -281,7 +283,7 @@ onMounted(async () => {
         :precision="0"
         :placeholder="t('healthScoreMax')"
         :aria-label="t('healthScoreMax')"
-        class="number-filter"
+        class="filter-control"
       />
 
       <a-input-number
@@ -290,16 +292,18 @@ onMounted(async () => {
         :precision="0"
         :placeholder="t('durationMinMinutes')"
         :aria-label="t('durationMinMinutes')"
-        class="duration-filter"
+        class="filter-control"
       />
 
-      <a-button type="primary" @click="refresh(true)">
-        {{ t('search') }}
-      </a-button>
-      <a-button @click="reset">
-        {{ t('reset') }}
-      </a-button>
-    </a-space>
+      <div class="filter-actions">
+        <a-button type="primary" @click="refresh(true)">
+          {{ t('search') }}
+        </a-button>
+        <a-button @click="reset">
+          {{ t('reset') }}
+        </a-button>
+      </div>
+    </div>
     <a-table
       :columns="columns"
       :data-source="dataSource"
@@ -356,16 +360,27 @@ onMounted(async () => {
 .list-wrap {
 
   .filter-form {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    align-items: start;
+    gap: 8px;
     width: 100%;
     margin-bottom: 16px;
   }
 
-  .number-filter {
-    width: 165px;
+  .filter-control {
+    width: 100%;
+    min-width: 0;
   }
 
-  .duration-filter {
-    width: 220px;
+  .filter-actions {
+    display: flex;
+    gap: 8px;
+
+    .ant-btn {
+      flex: 1;
+      min-width: 0;
+    }
   }
 
   .primary-link {
