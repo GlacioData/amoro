@@ -28,3 +28,94 @@ spring:
 server:
   # AMS (v1) serves HTTP on 1630; v2 takes an adjacent port during the migration.
   port: 1640
+
+amoro:
+  # ================================================== 控制面框架配置（amoro.control.*）
+  control:
+    # 调度相关配置：周期调谐器线程池（对应 appmanager config.controllers）
+    # 同键并发去重保证每个 ControllerKey 任一时刻至多一个在途执行
+    scheduler:
+      # 调度 worker 线程数（线程名 amoro-control-worker-N，执行全部 Controller.invoke）
+      workers: 10
+      # 基础调度周期（毫秒）：一轮 DONE 后的续轮间隔；
+      # 失败退避序列 {3,3,5,8,13,21,34,55}s + [0,250)ms 抖动为内建语义，不外置
+      delay-ms: 3000
+    # 持久化相关配置（对应 appmanager config.persistence）
+    storage:
+      # 单个资源序列化文档的字节上界（64KiB，超出即拒绝写入）
+      max-resource-bytes: 65536
+    actor:
+      # 每持久化域单写者线程的邮箱容量（有界队列；满则写入被拒绝）
+      queue-capacity: 1024
+    repository:
+      # 同步仓储门面的等待上界（毫秒）。注意：超时 ≠ 提交失败——
+      # 底层 stage 仍在单写者线程上执行且可能随后提交，调用方必须重读收敛
+      timeout-ms: 10000
+    listener:
+      # 事件监听分发（afterCreated/afterModified/postStart 的异步执行）
+      # 按 (listener, domain, name) 分键保序；失败重试期间同键事件排队等待
+      workers: 4
+      queue-capacity: 1024
+      max-retries: 3
+      retry-delay-ms: 1000
+    lifecycle:
+      # 优雅停机预算（毫秒）：调度器 → 监听分发 → 单写者线程三阶段共享该预算
+      shutdown-timeout-ms: 10000
+  # ================================================== Process 运行时配置（amoro.process.*）
+  process:
+    simulation:
+      # 模拟 Provider 总开关：true 时引擎/动作/托管表源全部加载模拟实现（ProviderMode.SIMULATED）
+      enabled: false
+      # 模拟引擎的动作线程池大小与有界队列容量（队列满 = 确定性拒绝）
+      worker-threads: 2
+      queue-capacity: 1024
+    engine:
+      # 引擎命令（submit/resolve/observe/cancel/release）的强制超时（毫秒）；
+      # 超时按保守分类降级：submit → UNKNOWN（副作用不确定，禁止盲重发），其余 → UNAVAILABLE
+      command-timeout-ms: 30000
+    reconcile:
+      # 调谐器（ProcessReconciler）节奏：每轮至多一个原子步骤（一次版本 CAS 写或一个异步引擎命令）
+      # 基础轮询间隔：一轮 DONE（发生持久写）后的续轮间隔
+      poll-interval-ms: 3000
+      # 提交未决（submitState = UNKNOWN/CONFLICT）的重查间隔，等待人工提交解析兜底
+      submission-unresolved-interval-ms: 60000
+      # 取消命令未达终态时的重试间隔
+      cancel-retry-interval-ms: 10000
+      # 命中在途命令合并（CommandInFlightException）后的短延迟续轮
+      command-in-flight-delay-ms: 250
+      # 执行长期未决时刷新提醒条件的间隔
+      execution-unresolved-reminder-interval-ms: 300000
+    result-persistence:
+      # 异步结果落库（回调 CAS 写）的有界待写队列、每轮批量与重试间隔
+      max-pending: 1024
+      batch-size: 64
+      retry-interval-ms: 250
+    rescheduler:
+      # 重启重放后活跃进程的重调度：每轮批次数、单轮运行时长上限与轮询间隔
+      batch-size: 256
+      max-runtime-ms: 1000
+      interval-ms: 30000
+    execution-reaper:
+      # 终态进程的引擎句柄释放回收器（ExecutionHandleReleaseIndex 驱动）
+      batch-size: 100
+      interval-ms: 60000
+    ttl:
+      # 终态进程的物理删除：保留天数（必须 >= 7）、每轮批次数与轮询间隔；
+      # 仅删除 SUCCESS/CANCELED/KILLED/CLOSED 且 finishedAt 早于阈值的行
+      retention-days: 30
+      batch-size: 100
+      interval-ms: 60000
+    local:
+      # 本地引擎终态执行记录的保留天数（必须 >= 1），超期由注册表清理
+      terminal-result-retention-days: 7
+    trigger:
+      # 定时触发扫描：轮询间隔与每轮处理的表数上限；
+      # 幂等键按 (tableId|action|扫描窗口) 生成，同窗口重扫不产生重复进程
+      interval-ms: 60000
+      batch-size: 100
+    creation:
+      # 服务端冻结的重试预算（写入每个 ProcessResource.spec.retryPolicy，创建后不可变）；
+      # 校验范围：max-retries ∈ [0,3]，max-submission-retries ∈ [0,2]，retry-delay-seconds ∈ [1,86400]
+      max-retries: 3
+      max-submission-retries: 2
+      retry-delay-seconds: 30
