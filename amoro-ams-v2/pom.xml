@@ -62,6 +62,15 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-web</artifactId>
         </dependency>
+        <!-- Boilerplate elimination for the value-object-heavy control plane (version managed by
+             the Boot BOM). The module-root lombok.config opts into fluent accessors to keep the
+             existing name()/spec() accessor convention; the config and persistence/blob packages
+             override back to JavaBeans naming for Spring binding and MyBatis row mapping. -->
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+            <scope>provided</scope>
+        </dependency>
         <!-- YAML persistence format for format-strategized domains (framework spec §5.4);
              version managed by the Spring Boot BOM imported in this module only -->
         <dependency>

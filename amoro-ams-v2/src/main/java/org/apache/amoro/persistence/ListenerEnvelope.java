@@ -18,13 +18,15 @@
 
 package org.apache.amoro.persistence;
 
-import java.util.Objects;
+import lombok.Getter;
+import lombok.NonNull;
 
 /**
  * Immutable, per-listener event envelope handed from the mutation lane to the async dispatcher
  * (framework spec §6). Fixed identity: {@code (listenerIdentity, domain, name, resourceVersion,
  * eventType)} plus a detached snapshot of the resource — never a canonical cache reference.
  */
+@Getter
 public final class ListenerEnvelope<R extends ControlledResource> {
 
   public enum EventType {
@@ -34,12 +36,12 @@ public final class ListenerEnvelope<R extends ControlledResource> {
     POST_START
   }
 
-  private final String listenerIdentity;
-  private final String domain;
-  private final String name;
+  @NonNull private final String listenerIdentity;
+  @NonNull private final String domain;
+  @NonNull private final String name;
   private final long resourceVersion;
-  private final EventType eventType;
-  private final R detachedResource;
+  @NonNull private final EventType eventType;
+  @NonNull private final R detachedResource;
   private final PersistenceListener<R> listener;
 
   public ListenerEnvelope(
@@ -53,50 +55,20 @@ public final class ListenerEnvelope<R extends ControlledResource> {
   }
 
   public ListenerEnvelope(
-      String listenerIdentity,
-      String domain,
-      String name,
+      @NonNull String listenerIdentity,
+      @NonNull String domain,
+      @NonNull String name,
       long resourceVersion,
-      EventType eventType,
-      R detachedResource,
+      @NonNull EventType eventType,
+      @NonNull R detachedResource,
       PersistenceListener<R> listener) {
-    this.listenerIdentity = Objects.requireNonNull(listenerIdentity, "listenerIdentity");
-    this.domain = Objects.requireNonNull(domain, "domain");
-    this.name = Objects.requireNonNull(name, "name");
+    this.listenerIdentity = listenerIdentity;
+    this.domain = domain;
+    this.name = name;
     this.resourceVersion = resourceVersion;
-    this.eventType = Objects.requireNonNull(eventType, "eventType");
-    this.detachedResource = Objects.requireNonNull(detachedResource, "detachedResource");
+    this.eventType = eventType;
+    this.detachedResource = detachedResource;
     this.listener = listener;
-  }
-
-  /** The listener this event targets; null only in tests that inspect the identity tuple. */
-  public PersistenceListener<R> listener() {
-    return listener;
-  }
-
-  public String listenerIdentity() {
-    return listenerIdentity;
-  }
-
-  public String domain() {
-    return domain;
-  }
-
-  public String name() {
-    return name;
-  }
-
-  public long resourceVersion() {
-    return resourceVersion;
-  }
-
-  public EventType eventType() {
-    return eventType;
-  }
-
-  /** Detached snapshot; mutating it cannot affect the canonical cache. */
-  public R detachedResource() {
-    return detachedResource;
   }
 
   @Override

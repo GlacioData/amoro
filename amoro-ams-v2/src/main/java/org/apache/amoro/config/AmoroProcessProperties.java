@@ -18,10 +18,13 @@
 
 package org.apache.amoro.config;
 
+import lombok.Getter;
+import lombok.Setter;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
 /** Process runtime configuration. Simulation providers are opt-in and disabled by default. */
 @ConfigurationProperties(prefix = "amoro.process")
+@Getter
 public class AmoroProcessProperties {
 
   private final Simulation simulation = new Simulation();
@@ -35,268 +38,80 @@ public class AmoroProcessProperties {
   private final Trigger trigger = new Trigger();
   private final Creation creation = new Creation();
 
+  @Getter
+  @Setter
   public static final class Simulation {
     private boolean enabled;
     private int workerThreads = 2;
     private int queueCapacity = 1024;
-
-    public boolean isEnabled() {
-      return enabled;
-    }
-
-    public void setEnabled(boolean enabled) {
-      this.enabled = enabled;
-    }
-
-    public int getWorkerThreads() {
-      return workerThreads;
-    }
-
-    public void setWorkerThreads(int workerThreads) {
-      this.workerThreads = workerThreads;
-    }
-
-    public int getQueueCapacity() {
-      return queueCapacity;
-    }
-
-    public void setQueueCapacity(int queueCapacity) {
-      this.queueCapacity = queueCapacity;
-    }
   }
 
+  @Getter
+  @Setter
   public static final class Engine {
     private long commandTimeoutMs = 30_000L;
-
-    public long getCommandTimeoutMs() {
-      return commandTimeoutMs;
-    }
-
-    public void setCommandTimeoutMs(long commandTimeoutMs) {
-      this.commandTimeoutMs = commandTimeoutMs;
-    }
   }
 
+  @Getter
+  @Setter
   public static final class Reconcile {
     private long pollIntervalMs = 3_000L;
     private long submissionUnresolvedIntervalMs = 60_000L;
     private long cancelRetryIntervalMs = 10_000L;
     private long commandInFlightDelayMs = 250L;
     private long executionUnresolvedReminderIntervalMs = 300_000L;
-
-    public long getPollIntervalMs() {
-      return pollIntervalMs;
-    }
-
-    public void setPollIntervalMs(long pollIntervalMs) {
-      this.pollIntervalMs = pollIntervalMs;
-    }
-
-    public long getSubmissionUnresolvedIntervalMs() {
-      return submissionUnresolvedIntervalMs;
-    }
-
-    public void setSubmissionUnresolvedIntervalMs(long value) {
-      this.submissionUnresolvedIntervalMs = value;
-    }
-
-    public long getCancelRetryIntervalMs() {
-      return cancelRetryIntervalMs;
-    }
-
-    public void setCancelRetryIntervalMs(long cancelRetryIntervalMs) {
-      this.cancelRetryIntervalMs = cancelRetryIntervalMs;
-    }
-
-    public long getCommandInFlightDelayMs() {
-      return commandInFlightDelayMs;
-    }
-
-    public void setCommandInFlightDelayMs(long commandInFlightDelayMs) {
-      this.commandInFlightDelayMs = commandInFlightDelayMs;
-    }
-
-    public long getExecutionUnresolvedReminderIntervalMs() {
-      return executionUnresolvedReminderIntervalMs;
-    }
-
-    public void setExecutionUnresolvedReminderIntervalMs(long value) {
-      this.executionUnresolvedReminderIntervalMs = value;
-    }
   }
 
+  @Getter
+  @Setter
   public static final class ResultPersistence {
     private int maxPending = 1024;
     private int batchSize = 64;
     private long retryIntervalMs = 250L;
-
-    public int getMaxPending() {
-      return maxPending;
-    }
-
-    public void setMaxPending(int maxPending) {
-      this.maxPending = maxPending;
-    }
-
-    public int getBatchSize() {
-      return batchSize;
-    }
-
-    public void setBatchSize(int batchSize) {
-      this.batchSize = batchSize;
-    }
-
-    public long getRetryIntervalMs() {
-      return retryIntervalMs;
-    }
-
-    public void setRetryIntervalMs(long retryIntervalMs) {
-      this.retryIntervalMs = retryIntervalMs;
-    }
   }
 
+  @Getter
+  @Setter
   public static final class Rescheduler {
     private int batchSize = 256;
     private long maxRuntimeMs = 1_000L;
     private long intervalMs = 30_000L;
-
-    public int getBatchSize() {
-      return batchSize;
-    }
-
-    public void setBatchSize(int batchSize) {
-      this.batchSize = batchSize;
-    }
-
-    public long getMaxRuntimeMs() {
-      return maxRuntimeMs;
-    }
-
-    public void setMaxRuntimeMs(long maxRuntimeMs) {
-      this.maxRuntimeMs = maxRuntimeMs;
-    }
-
-    public long getIntervalMs() {
-      return intervalMs;
-    }
-
-    public void setIntervalMs(long intervalMs) {
-      this.intervalMs = intervalMs;
-    }
   }
 
+  @Getter
+  @Setter
   public static final class ExecutionReaper {
     private int batchSize = 100;
     private long intervalMs = 60_000L;
-
-    public int getBatchSize() {
-      return batchSize;
-    }
-
-    public void setBatchSize(int batchSize) {
-      this.batchSize = batchSize;
-    }
-
-    public long getIntervalMs() {
-      return intervalMs;
-    }
-
-    public void setIntervalMs(long intervalMs) {
-      this.intervalMs = intervalMs;
-    }
   }
 
+  @Getter
+  @Setter
   public static final class Ttl {
     private int retentionDays = 30;
     private int batchSize = 100;
     private long intervalMs = 60_000L;
-
-    public int getRetentionDays() {
-      return retentionDays;
-    }
-
-    public void setRetentionDays(int retentionDays) {
-      this.retentionDays = retentionDays;
-    }
-
-    public int getBatchSize() {
-      return batchSize;
-    }
-
-    public void setBatchSize(int batchSize) {
-      this.batchSize = batchSize;
-    }
-
-    public long getIntervalMs() {
-      return intervalMs;
-    }
-
-    public void setIntervalMs(long intervalMs) {
-      this.intervalMs = intervalMs;
-    }
   }
 
+  @Getter
+  @Setter
   public static final class Local {
     private int terminalResultRetentionDays = 7;
-
-    public int getTerminalResultRetentionDays() {
-      return terminalResultRetentionDays;
-    }
-
-    public void setTerminalResultRetentionDays(int terminalResultRetentionDays) {
-      this.terminalResultRetentionDays = terminalResultRetentionDays;
-    }
   }
 
+  @Getter
+  @Setter
   public static final class Trigger {
     private long intervalMs = 60_000L;
     private int batchSize = 100;
-
-    public long getIntervalMs() {
-      return intervalMs;
-    }
-
-    public void setIntervalMs(long intervalMs) {
-      this.intervalMs = intervalMs;
-    }
-
-    public int getBatchSize() {
-      return batchSize;
-    }
-
-    public void setBatchSize(int batchSize) {
-      this.batchSize = batchSize;
-    }
   }
 
+  @Getter
+  @Setter
   public static final class Creation {
     private int maxRetries = 3;
     private int maxSubmissionRetries = 2;
     private int retryDelaySeconds = 30;
-
-    public int getMaxRetries() {
-      return maxRetries;
-    }
-
-    public void setMaxRetries(int maxRetries) {
-      this.maxRetries = maxRetries;
-    }
-
-    public int getMaxSubmissionRetries() {
-      return maxSubmissionRetries;
-    }
-
-    public void setMaxSubmissionRetries(int maxSubmissionRetries) {
-      this.maxSubmissionRetries = maxSubmissionRetries;
-    }
-
-    public int getRetryDelaySeconds() {
-      return retryDelaySeconds;
-    }
-
-    public void setRetryDelaySeconds(int retryDelaySeconds) {
-      this.retryDelaySeconds = retryDelaySeconds;
-    }
   }
 
   public void validate() {
@@ -341,46 +156,6 @@ public class AmoroProcessProperties {
         "amoro.process.creation.max-submission-retries", creation.maxSubmissionRetries, 0, 2);
     requireRange(
         "amoro.process.creation.retry-delay-seconds", creation.retryDelaySeconds, 1, 86_400);
-  }
-
-  public Simulation getSimulation() {
-    return simulation;
-  }
-
-  public Engine getEngine() {
-    return engine;
-  }
-
-  public Reconcile getReconcile() {
-    return reconcile;
-  }
-
-  public ResultPersistence getResultPersistence() {
-    return resultPersistence;
-  }
-
-  public Rescheduler getRescheduler() {
-    return rescheduler;
-  }
-
-  public ExecutionReaper getExecutionReaper() {
-    return executionReaper;
-  }
-
-  public Ttl getTtl() {
-    return ttl;
-  }
-
-  public Local getLocal() {
-    return local;
-  }
-
-  public Trigger getTrigger() {
-    return trigger;
-  }
-
-  public Creation getCreation() {
-    return creation;
   }
 
   private static void requireBatch(String key, int value) {

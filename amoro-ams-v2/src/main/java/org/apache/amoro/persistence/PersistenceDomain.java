@@ -18,6 +18,9 @@
 
 package org.apache.amoro.persistence;
 
+import lombok.Getter;
+import lombok.RequiredArgsConstructor;
+
 import java.util.Objects;
 
 /**
@@ -29,6 +32,7 @@ import java.util.Objects;
  * <p>Table names feed MyBatis SQL, so only the whitelisted enum constants below are accepted —
  * construction with anything else fails fast (injection defense).
  */
+@Getter
 public final class PersistenceDomain {
 
   /**
@@ -37,19 +41,13 @@ public final class PersistenceDomain {
    * amoro_resource} stays available for framework-generic domains that opt in, with their table
    * created by that domain's own setup rather than the shipped DDL.
    */
+  @Getter
+  @RequiredArgsConstructor
   public enum Table {
     AMORO_PROCESS_V2("amoro_process_v2"),
     AMORO_RESOURCE("amoro_resource");
 
     private final String physicalName;
-
-    Table(String physicalName) {
-      this.physicalName = physicalName;
-    }
-
-    public String physicalName() {
-      return physicalName;
-    }
   }
 
   /** Wire format of the serialized resource blob; Base64-encoded before storage either way. */
@@ -100,16 +98,9 @@ public final class PersistenceDomain {
     return new PersistenceDomain("resource", Table.AMORO_RESOURCE.physicalName(), SerdeFormat.JSON);
   }
 
-  public String domainName() {
-    return domainName;
-  }
-
+  /** The whitelisted physical table name feeding MyBatis SQL. */
   public String table() {
     return table.physicalName();
-  }
-
-  public SerdeFormat serdeFormat() {
-    return serdeFormat;
   }
 
   @Override

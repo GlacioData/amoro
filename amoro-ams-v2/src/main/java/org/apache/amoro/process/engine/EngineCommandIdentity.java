@@ -18,41 +18,20 @@
 
 package org.apache.amoro.process.engine;
 
-import java.util.Objects;
+import lombok.EqualsAndHashCode;
+import lombok.NonNull;
+import lombok.RequiredArgsConstructor;
 
 /** Strongly typed single-flight identities shared by related engine operations. */
 public interface EngineCommandIdentity {
 
   /** submit and resolveSubmission share this exact identity. */
+  @RequiredArgsConstructor
+  @EqualsAndHashCode
   final class SubmissionIdentity implements EngineCommandIdentity {
-    private final String processName;
-    private final String submissionKey;
-    private final String requestHash;
-
-    public SubmissionIdentity(String processName, String submissionKey, String requestHash) {
-      this.processName = Objects.requireNonNull(processName, "processName");
-      this.submissionKey = Objects.requireNonNull(submissionKey, "submissionKey");
-      this.requestHash = Objects.requireNonNull(requestHash, "requestHash");
-    }
-
-    @Override
-    public boolean equals(Object other) {
-      if (this == other) {
-        return true;
-      }
-      if (!(other instanceof SubmissionIdentity)) {
-        return false;
-      }
-      SubmissionIdentity that = (SubmissionIdentity) other;
-      return processName.equals(that.processName)
-          && submissionKey.equals(that.submissionKey)
-          && requestHash.equals(that.requestHash);
-    }
-
-    @Override
-    public int hashCode() {
-      return Objects.hash(processName, submissionKey, requestHash);
-    }
+    @NonNull private final String processName;
+    @NonNull private final String submissionKey;
+    @NonNull private final String requestHash;
 
     @Override
     public String toString() {
@@ -61,31 +40,11 @@ public interface EngineCommandIdentity {
   }
 
   /** observe and cancel share this exact identity. */
+  @RequiredArgsConstructor
+  @EqualsAndHashCode
   final class ExecutionIdentity implements EngineCommandIdentity {
-    private final String processName;
-    private final String externalId;
-
-    public ExecutionIdentity(String processName, String externalId) {
-      this.processName = Objects.requireNonNull(processName, "processName");
-      this.externalId = Objects.requireNonNull(externalId, "externalId");
-    }
-
-    @Override
-    public boolean equals(Object other) {
-      if (this == other) {
-        return true;
-      }
-      if (!(other instanceof ExecutionIdentity)) {
-        return false;
-      }
-      ExecutionIdentity that = (ExecutionIdentity) other;
-      return processName.equals(that.processName) && externalId.equals(that.externalId);
-    }
-
-    @Override
-    public int hashCode() {
-      return Objects.hash(processName, externalId);
-    }
+    @NonNull private final String processName;
+    @NonNull private final String externalId;
 
     @Override
     public String toString() {
@@ -94,31 +53,11 @@ public interface EngineCommandIdentity {
   }
 
   /** Cleanup identity is engine-scoped because external ids need not be globally unique. */
+  @RequiredArgsConstructor
+  @EqualsAndHashCode
   final class ReleaseIdentity implements EngineCommandIdentity {
-    private final String executionEngine;
-    private final String externalId;
-
-    public ReleaseIdentity(String executionEngine, String externalId) {
-      this.executionEngine = Objects.requireNonNull(executionEngine, "executionEngine");
-      this.externalId = Objects.requireNonNull(externalId, "externalId");
-    }
-
-    @Override
-    public boolean equals(Object other) {
-      if (this == other) {
-        return true;
-      }
-      if (!(other instanceof ReleaseIdentity)) {
-        return false;
-      }
-      ReleaseIdentity that = (ReleaseIdentity) other;
-      return executionEngine.equals(that.executionEngine) && externalId.equals(that.externalId);
-    }
-
-    @Override
-    public int hashCode() {
-      return Objects.hash(executionEngine, externalId);
-    }
+    @NonNull private final String executionEngine;
+    @NonNull private final String externalId;
 
     @Override
     public String toString() {

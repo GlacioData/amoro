@@ -18,6 +18,11 @@
 
 package org.apache.amoro.persistence;
 
+import lombok.AccessLevel;
+import lombok.AllArgsConstructor;
+import lombok.Getter;
+import lombok.NonNull;
+
 import java.util.Objects;
 
 /**
@@ -25,6 +30,8 @@ import java.util.Objects;
  * copies, never canonical cache references. CREATE: previous=null, current=new; MODIFY:
  * previous=old, current=new; DELETE: previous=old, current=null.
  */
+@Getter
+@AllArgsConstructor(access = AccessLevel.PRIVATE)
 public final class PersistenceChange<R extends ControlledResource> {
 
   public enum Type {
@@ -33,15 +40,9 @@ public final class PersistenceChange<R extends ControlledResource> {
     DELETE
   }
 
-  private final Type type;
+  @NonNull private final Type type;
   private final R previous;
   private final R current;
-
-  private PersistenceChange(Type type, R previous, R current) {
-    this.type = Objects.requireNonNull(type, "type");
-    this.previous = previous;
-    this.current = current;
-  }
 
   public static <R extends ControlledResource> PersistenceChange<R> created(R current) {
     return new PersistenceChange<R>(Type.CREATE, null, Objects.requireNonNull(current));
@@ -55,20 +56,6 @@ public final class PersistenceChange<R extends ControlledResource> {
 
   public static <R extends ControlledResource> PersistenceChange<R> deleted(R previous) {
     return new PersistenceChange<R>(Type.DELETE, Objects.requireNonNull(previous), null);
-  }
-
-  public Type type() {
-    return type;
-  }
-
-  /** Null iff {@link #type()} is CREATE. */
-  public R previous() {
-    return previous;
-  }
-
-  /** Null iff {@link #type()} is DELETE. */
-  public R current() {
-    return current;
   }
 
   @Override

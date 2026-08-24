@@ -18,25 +18,14 @@
 
 package org.apache.amoro.persistence.blob;
 
+import lombok.Getter;
+import lombok.Setter;
+
 /** Row projection of the {@code selectAll} scan; String typing makes CLOB reads portable. */
+@Getter
+@Setter
 public final class BlobRow {
 
   private String name;
   private String value;
-
-  public String getName() {
-    return name;
-  }
-
-  public void setName(String name) {
-    this.name = name;
-  }
-
-  public String getValue() {
-    return value;
-  }
-
-  public void setValue(String value) {
-    this.value = value;
-  }
 }

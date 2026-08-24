@@ -18,13 +18,12 @@
 
 package org.apache.amoro.config;
 
+import lombok.Getter;
+import lombok.Setter;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
-/**
- * {@code amoro.control.*} configuration keys (framework spec §7). Defaults mirror the spec table;
- * illegal values fail Spring context startup instead of degrading silently.
- */
 @ConfigurationProperties(prefix = "amoro.control")
+@Getter
 public class AmoroControlProperties {
 
   private final Scheduler scheduler = new Scheduler();
@@ -34,112 +33,44 @@ public class AmoroControlProperties {
   private final Repository repository = new Repository();
   private final Lifecycle lifecycle = new Lifecycle();
 
+  @Getter
+  @Setter
   public static class Scheduler {
     private int workers = 10;
     private long delayMs = 3_000L;
-
-    public int getWorkers() {
-      return workers;
-    }
-
-    public void setWorkers(int workers) {
-      this.workers = workers;
-    }
-
-    public long getDelayMs() {
-      return delayMs;
-    }
-
-    public void setDelayMs(long delayMs) {
-      this.delayMs = delayMs;
-    }
   }
 
+  @Getter
+  @Setter
   public static class Storage {
     private int maxResourceBytes = 65_536;
-
-    public int getMaxResourceBytes() {
-      return maxResourceBytes;
-    }
-
-    public void setMaxResourceBytes(int maxResourceBytes) {
-      this.maxResourceBytes = maxResourceBytes;
-    }
   }
 
+  @Getter
+  @Setter
   public static class Actor {
     private int queueCapacity = 1024;
-
-    public int getQueueCapacity() {
-      return queueCapacity;
-    }
-
-    public void setQueueCapacity(int queueCapacity) {
-      this.queueCapacity = queueCapacity;
-    }
   }
 
+  @Getter
+  @Setter
   public static class Listener {
     private int workers = 4;
     private int queueCapacity = 1024;
     private int maxRetries = 3;
     private long retryDelayMs = 1_000L;
-
-    public int getWorkers() {
-      return workers;
-    }
-
-    public void setWorkers(int workers) {
-      this.workers = workers;
-    }
-
-    public int getQueueCapacity() {
-      return queueCapacity;
-    }
-
-    public void setQueueCapacity(int queueCapacity) {
-      this.queueCapacity = queueCapacity;
-    }
-
-    public int getMaxRetries() {
-      return maxRetries;
-    }
-
-    public void setMaxRetries(int maxRetries) {
-      this.maxRetries = maxRetries;
-    }
-
-    public long getRetryDelayMs() {
-      return retryDelayMs;
-    }
-
-    public void setRetryDelayMs(long retryDelayMs) {
-      this.retryDelayMs = retryDelayMs;
-    }
   }
 
+  @Getter
+  @Setter
   public static class Repository {
     private long timeoutMs = 10_000L;
-
-    public long getTimeoutMs() {
-      return timeoutMs;
-    }
-
-    public void setTimeoutMs(long timeoutMs) {
-      this.timeoutMs = timeoutMs;
-    }
   }
 
+  @Getter
+  @Setter
   public static class Lifecycle {
     private long shutdownTimeoutMs = 10_000L;
-
-    public long getShutdownTimeoutMs() {
-      return shutdownTimeoutMs;
-    }
-
-    public void setShutdownTimeoutMs(long shutdownTimeoutMs) {
-      this.shutdownTimeoutMs = shutdownTimeoutMs;
-    }
   }
 
   /** Fails fast on illegal values (framework spec §7 validation column). */
@@ -163,29 +94,5 @@ public class AmoroControlProperties {
     if (value <= 0) {
       throw new IllegalArgumentException(key + " must be > 0, got " + value);
     }
-  }
-
-  public Scheduler getScheduler() {
-    return scheduler;
-  }
-
-  public Storage getStorage() {
-    return storage;
-  }
-
-  public Actor getActor() {
-    return actor;
-  }
-
-  public Listener getListener() {
-    return listener;
-  }
-
-  public Repository getRepository() {
-    return repository;
-  }
-
-  public Lifecycle getLifecycle() {
-    return lifecycle;
   }
 }

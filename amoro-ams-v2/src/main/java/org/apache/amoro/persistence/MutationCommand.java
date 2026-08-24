@@ -18,6 +18,11 @@
 
 package org.apache.amoro.persistence;
 
+import lombok.AccessLevel;
+import lombok.AllArgsConstructor;
+import lombok.Getter;
+import lombok.NonNull;
+
 import java.util.Objects;
 import java.util.function.Function;
 
@@ -30,6 +35,8 @@ import java.util.function.Function;
  *
  * <p>Internal framework plumbing between L5 and L6; not part of the domain-facing surface.
  */
+@Getter
+@AllArgsConstructor(access = AccessLevel.PRIVATE)
 public final class MutationCommand<R extends ControlledResource> {
 
   public enum Type {
@@ -38,24 +45,11 @@ public final class MutationCommand<R extends ControlledResource> {
     DELETE
   }
 
-  private final Type type;
-  private final String name;
+  @NonNull private final Type type;
+  @NonNull private final String name;
   private final Long expectedResourceVersion; // null = unconditional (lane-atomic ops only)
   private final Function<R, R> updateFn; // null for CREATE/DELETE
   private final R createResource; // detached copy; non-null only for CREATE
-
-  private MutationCommand(
-      Type type,
-      String name,
-      Long expectedResourceVersion,
-      Function<R, R> updateFn,
-      R createResource) {
-    this.type = Objects.requireNonNull(type, "type");
-    this.name = Objects.requireNonNull(name, "name");
-    this.expectedResourceVersion = expectedResourceVersion;
-    this.updateFn = updateFn;
-    this.createResource = createResource;
-  }
 
   public static <R extends ControlledResource> MutationCommand<R> create(R detachedResource) {
     return new MutationCommand<R>(
@@ -80,27 +74,5 @@ public final class MutationCommand<R extends ControlledResource> {
   public static <R extends ControlledResource> MutationCommand<R> delete(
       String name, long expectedResourceVersion) {
     return new MutationCommand<R>(Type.DELETE, name, expectedResourceVersion, null, null);
-  }
-
-  public Type type() {
-    return type;
-  }
-
-  public String name() {
-    return name;
-  }
-
-  /** Null means unconditional lane-atomic execution. */
-  public Long expectedResourceVersion() {
-    return expectedResourceVersion;
-  }
-
-  public Function<R, R> updateFn() {
-    return updateFn;
-  }
-
-  /** Only non-null for {@link Type#CREATE}. */
-  public R createResource() {
-    return createResource;
   }
 }

@@ -18,6 +18,10 @@
 
 package org.apache.amoro.process.rest;
 
+import lombok.AccessLevel;
+import lombok.EqualsAndHashCode;
+import lombok.NonNull;
+import lombok.RequiredArgsConstructor;
 import org.apache.amoro.process.engine.ProcessEngineRegistry;
 import org.apache.amoro.process.trigger.ProcessActionPlugin;
 import org.apache.amoro.process.trigger.ProcessActionPluginFactory;
@@ -122,34 +126,11 @@ public final class ProcessActionCatalog {
     return actions;
   }
 
+  @EqualsAndHashCode
+  @RequiredArgsConstructor(access = AccessLevel.PRIVATE)
   private static final class Pair {
-    private final String tableFormat;
-    private final String action;
-    private final String engine;
-
-    private Pair(String tableFormat, String action, String engine) {
-      this.tableFormat = Objects.requireNonNull(tableFormat, "tableFormat");
-      this.action = Objects.requireNonNull(action, "action");
-      this.engine = Objects.requireNonNull(engine, "engine");
-    }
-
-    @Override
-    public boolean equals(Object other) {
-      if (this == other) {
-        return true;
-      }
-      if (!(other instanceof Pair)) {
-        return false;
-      }
-      Pair that = (Pair) other;
-      return tableFormat.equals(that.tableFormat)
-          && action.equals(that.action)
-          && engine.equals(that.engine);
-    }
-
-    @Override
-    public int hashCode() {
-      return Objects.hash(tableFormat, action, engine);
-    }
+    @NonNull private final String tableFormat;
+    @NonNull private final String action;
+    @NonNull private final String engine;
   }
 }

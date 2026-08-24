@@ -22,6 +22,13 @@ import org.apache.amoro.persistence.DurableStateProjection;
 import org.apache.amoro.persistence.PersistenceChange;
 import org.apache.amoro.persistence.PreparedProjectionUpdate;
 import org.apache.amoro.resources.ProcessResource;
+import lombok.AccessLevel;
+import lombok.AllArgsConstructor;
+import lombok.EqualsAndHashCode;
+import lombok.Getter;
+import lombok.NonNull;
+import lombok.RequiredArgsConstructor;
+import lombok.With;
 
 import java.time.Instant;
 import java.util.ArrayList;
@@ -224,111 +231,42 @@ public final class ExecutionHandleReleaseIndex implements DurableStateProjection
     return seeds;
   }
 
+  @Getter
+  @RequiredArgsConstructor
+  @EqualsAndHashCode
   public static final class HandleKey {
-    private final String executionEngine;
-    private final String externalId;
-
-    public HandleKey(String executionEngine, String externalId) {
-      this.executionEngine = Objects.requireNonNull(executionEngine, "executionEngine");
-      this.externalId = Objects.requireNonNull(externalId, "externalId");
-    }
-
-    public String executionEngine() {
-      return executionEngine;
-    }
-
-    public String externalId() {
-      return externalId;
-    }
-
-    @Override
-    public boolean equals(Object other) {
-      if (this == other) {
-        return true;
-      }
-      if (!(other instanceof HandleKey)) {
-        return false;
-      }
-      HandleKey that = (HandleKey) other;
-      return executionEngine.equals(that.executionEngine) && externalId.equals(that.externalId);
-    }
-
-    @Override
-    public int hashCode() {
-      return Objects.hash(executionEngine, externalId);
-    }
+    @NonNull private final String executionEngine;
+    @NonNull private final String externalId;
   }
 
+  @Getter
+  @AllArgsConstructor(access = AccessLevel.PRIVATE)
   public static final class ReleaseEntry {
     private final HandleKey key;
     private final String processName;
     private final String finishedAt;
     private final String nextReleaseAt;
     private final int retryAttempt;
-    private final boolean inFlight;
-
-    private ReleaseEntry(
-        HandleKey key,
-        String processName,
-        String finishedAt,
-        String nextReleaseAt,
-        int retryAttempt,
-        boolean inFlight) {
-      this.key = key;
-      this.processName = processName;
-      this.finishedAt = finishedAt;
-      this.nextReleaseAt = nextReleaseAt;
-      this.retryAttempt = retryAttempt;
-      this.inFlight = inFlight;
-    }
-
-    public HandleKey key() {
-      return key;
-    }
-
-    public String processName() {
-      return processName;
-    }
-
-    public String nextReleaseAt() {
-      return nextReleaseAt;
-    }
-
-    public int retryAttempt() {
-      return retryAttempt;
-    }
+    @With private final boolean inFlight;
 
     private DueKey dueKey() {
       return new DueKey(nextReleaseAt, key.executionEngine, key.externalId);
     }
-
-    private ReleaseEntry withInFlight(boolean value) {
-      return new ReleaseEntry(key, processName, finishedAt, nextReleaseAt, retryAttempt, value);
-    }
   }
 
+  @AllArgsConstructor(access = AccessLevel.PRIVATE)
   private static final class ReleaseSeed {
     private final HandleKey key;
     private final String processName;
     private final String finishedAt;
-
-    private ReleaseSeed(HandleKey key, String processName, String finishedAt) {
-      this.key = key;
-      this.processName = processName;
-      this.finishedAt = finishedAt;
-    }
   }
 
+  @AllArgsConstructor(access = AccessLevel.PRIVATE)
+  @EqualsAndHashCode
   private static final class DueKey implements Comparable<DueKey> {
     private final String nextReleaseAt;
     private final String executionEngine;
     private final String externalId;
-
-    private DueKey(String nextReleaseAt, String executionEngine, String externalId) {
-      this.nextReleaseAt = nextReleaseAt;
-      this.executionEngine = executionEngine;
-      this.externalId = externalId;
-    }
 
     @Override
     public int compareTo(DueKey other) {
@@ -338,16 +276,6 @@ public final class ExecutionHandleReleaseIndex implements DurableStateProjection
       }
       int byEngine = executionEngine.compareTo(other.executionEngine);
       return byEngine != 0 ? byEngine : externalId.compareTo(other.externalId);
-    }
-
-    @Override
-    public boolean equals(Object other) {
-      return other instanceof DueKey && compareTo((DueKey) other) == 0;
-    }
-
-    @Override
-    public int hashCode() {
-      return Objects.hash(nextReleaseAt, executionEngine, externalId);
     }
   }
 }

@@ -18,54 +18,23 @@
 
 package org.apache.amoro.control;
 
-import java.util.Objects;
+import lombok.EqualsAndHashCode;
+import lombok.Getter;
+import lombok.NonNull;
+import lombok.RequiredArgsConstructor;
+import lombok.ToString;
 
 /**
  * Value object identifying a scheduled controller by resource domain plus resource id. A bare
  * resource id is not unique across domains, so the domain component is mandatory for the
  * single-flight registry: two domains may independently schedule the same resource id.
  */
+@Getter
+@RequiredArgsConstructor(staticName = "of")
+@EqualsAndHashCode
+@ToString
 public final class ControllerKey {
 
-  private final String domain;
-  private final String resourceId;
-
-  private ControllerKey(String domain, String resourceId) {
-    this.domain = Objects.requireNonNull(domain, "domain");
-    this.resourceId = Objects.requireNonNull(resourceId, "resourceId");
-  }
-
-  public static ControllerKey of(String domain, String resourceId) {
-    return new ControllerKey(domain, resourceId);
-  }
-
-  public String domain() {
-    return domain;
-  }
-
-  public String resourceId() {
-    return resourceId;
-  }
-
-  @Override
-  public boolean equals(Object o) {
-    if (this == o) {
-      return true;
-    }
-    if (o == null || getClass() != o.getClass()) {
-      return false;
-    }
-    ControllerKey that = (ControllerKey) o;
-    return domain.equals(that.domain) && resourceId.equals(that.resourceId);
-  }
-
-  @Override
-  public int hashCode() {
-    return Objects.hash(domain, resourceId);
-  }
-
-  @Override
-  public String toString() {
-    return "ControllerKey{domain='" + domain + "', resourceId='" + resourceId + "'}";
-  }
+  @NonNull private final String domain;
+  @NonNull private final String resourceId;
 }

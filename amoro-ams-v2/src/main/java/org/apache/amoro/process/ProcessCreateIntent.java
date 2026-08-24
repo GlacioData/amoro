@@ -18,6 +18,8 @@
 
 package org.apache.amoro.process;
 
+import lombok.Getter;
+import lombok.NonNull;
 import org.apache.amoro.resources.ProcessResource;
 
 import java.nio.charset.StandardCharsets;
@@ -32,6 +34,7 @@ import java.util.Objects;
 import java.util.TreeMap;
 
 /** Canonical, already-authorized creation intent shared by manual and scheduled entry points. */
+@Getter
 public final class ProcessCreateIntent {
 
   public static final int MAX_PARAMETERS_BYTES = 16 * 1024;
@@ -46,20 +49,20 @@ public final class ProcessCreateIntent {
   private final Map<String, Object> parameters;
 
   public ProcessCreateIntent(
-      ProcessResource.TableRef table,
-      String action,
-      String executionEngine,
-      String triggerSource,
-      String idempotencyKeyHash,
-      String requestHash,
-      Map<String, Object> parameters) {
-    this.table = Objects.requireNonNull(table, "table");
-    this.action = Objects.requireNonNull(action, "action");
-    this.executionEngine = Objects.requireNonNull(executionEngine, "executionEngine");
-    this.triggerSource = Objects.requireNonNull(triggerSource, "triggerSource");
-    this.idempotencyKeyHash = Objects.requireNonNull(idempotencyKeyHash, "idempotencyKeyHash");
-    this.requestHash = Objects.requireNonNull(requestHash, "requestHash");
-    this.parameters = freezeParameters(Objects.requireNonNull(parameters, "parameters"));
+      @NonNull ProcessResource.TableRef table,
+      @NonNull String action,
+      @NonNull String executionEngine,
+      @NonNull String triggerSource,
+      @NonNull String idempotencyKeyHash,
+      @NonNull String requestHash,
+      @NonNull Map<String, Object> parameters) {
+    this.table = table;
+    this.action = action;
+    this.executionEngine = executionEngine;
+    this.triggerSource = triggerSource;
+    this.idempotencyKeyHash = idempotencyKeyHash;
+    this.requestHash = requestHash;
+    this.parameters = freezeParameters(parameters);
   }
 
   /**
@@ -99,34 +102,6 @@ public final class ProcessCreateIntent {
         sha256(rawIdempotencyKey),
         requestHash,
         frozen);
-  }
-
-  public ProcessResource.TableRef table() {
-    return table;
-  }
-
-  public String action() {
-    return action;
-  }
-
-  public String executionEngine() {
-    return executionEngine;
-  }
-
-  public String triggerSource() {
-    return triggerSource;
-  }
-
-  public String idempotencyKeyHash() {
-    return idempotencyKeyHash;
-  }
-
-  public String requestHash() {
-    return requestHash;
-  }
-
-  public Map<String, Object> parameters() {
-    return parameters;
   }
 
   String admissionScope() {
