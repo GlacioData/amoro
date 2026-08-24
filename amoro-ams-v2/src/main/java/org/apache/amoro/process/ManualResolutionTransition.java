@@ -19,13 +19,14 @@
 package org.apache.amoro.process;
 
 import org.apache.amoro.process.ProcessCommandException.Code;
-import org.apache.amoro.process.ProcessResource.AttemptSummary;
-import org.apache.amoro.process.ProcessResource.EngineBackoff;
-import org.apache.amoro.process.ProcessResource.ManualResolution;
-import org.apache.amoro.process.ProcessResource.ManualResolutions;
-import org.apache.amoro.process.ProcessResource.ProcessAttempt;
-import org.apache.amoro.process.ProcessResource.ProcessStatus;
-import org.apache.amoro.process.ProcessResource.SubmissionSummary;
+import org.apache.amoro.resources.ProcessResource;
+import org.apache.amoro.resources.ProcessResource.AttemptSummary;
+import org.apache.amoro.resources.ProcessResource.EngineBackoff;
+import org.apache.amoro.resources.ProcessResource.ManualResolution;
+import org.apache.amoro.resources.ProcessResource.ManualResolutions;
+import org.apache.amoro.resources.ProcessResource.ProcessAttempt;
+import org.apache.amoro.resources.ProcessResource.ProcessStatus;
+import org.apache.amoro.resources.ProcessResource.SubmissionSummary;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;

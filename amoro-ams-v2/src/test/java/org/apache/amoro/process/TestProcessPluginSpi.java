@@ -34,6 +34,7 @@ import org.apache.amoro.process.trigger.ManagedTablePort;
 import org.apache.amoro.process.trigger.ProcessActionPlugin;
 import org.apache.amoro.process.trigger.ProcessActionPluginFactory;
 import org.apache.amoro.process.trigger.ProcessActionRegistry;
+import org.apache.amoro.resources.ProcessResource;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 

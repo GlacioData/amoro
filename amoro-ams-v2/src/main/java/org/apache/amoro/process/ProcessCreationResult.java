@@ -18,6 +18,8 @@
 
 package org.apache.amoro.process;
 
+import org.apache.amoro.resources.ProcessResource;
+
 import java.util.Objects;
 
 /** Durable Process creation result and whether the request replayed an existing intent. */

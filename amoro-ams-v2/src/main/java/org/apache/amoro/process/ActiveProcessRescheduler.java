@@ -21,6 +21,7 @@ package org.apache.amoro.process;
 import org.apache.amoro.control.Controller;
 import org.apache.amoro.control.Scheduler;
 import org.apache.amoro.process.ProcessIndexSnapshot.ActiveEntry;
+import org.apache.amoro.resources.ProcessResource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 

@@ -21,6 +21,7 @@ package org.apache.amoro.process;
 import org.apache.amoro.persistence.DurableStateProjection;
 import org.apache.amoro.persistence.PersistenceChange;
 import org.apache.amoro.persistence.PreparedProjectionUpdate;
+import org.apache.amoro.resources.ProcessResource;
 
 import java.util.concurrent.atomic.AtomicReference;
 

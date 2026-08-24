@@ -28,6 +28,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import org.apache.amoro.control.DefaultScheduler;
 import org.apache.amoro.persistence.HandoffResult;
 import org.apache.amoro.persistence.ListenerEventSink;
+import org.apache.amoro.resources.ProcessResource;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;

@@ -28,6 +28,7 @@ import org.apache.amoro.process.engine.EngineTypes.ProcessObservation;
 import org.apache.amoro.process.engine.EngineTypes.SubmissionOutcome;
 import org.apache.amoro.process.engine.LocalEngineAdapter;
 import org.apache.amoro.process.engine.ProcessEngineDispatcher;
+import org.apache.amoro.resources.ProcessResource;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -71,34 +72,32 @@ public class TestLocalEngine {
     engine.shutdown(5_000L);
   }
 
-  private org.apache.amoro.process.ProcessResource create(String name) {
+  private ProcessResource create(String name) {
     java.util.Map<String, Object> parameters = new java.util.LinkedHashMap<>();
     parameters.put("retainLast", 1);
     return assembly
         .repository()
         .create(
-            new org.apache.amoro.process.ProcessResource(
+            new ProcessResource(
                 name,
-                new org.apache.amoro.process.ProcessResource.ProcessSpec(
-                    new org.apache.amoro.process.ProcessResource.TableRef(
-                        "prod", "db", "t", "42", "simulated"),
+                new ProcessResource.ProcessSpec(
+                    new ProcessResource.TableRef("prod", "db", "t", "42", "simulated"),
                     "dummy-maintenance",
                     "local",
                     "MANUAL",
                     "2026-08-22T10:00:00Z",
                     "RUN",
-                    new org.apache.amoro.process.ProcessResource.RequestIdentity(
-                        "sha256:key-" + name, "sha256:req-" + name),
+                    new ProcessResource.RequestIdentity("sha256:key-" + name, "sha256:req-" + name),
                     parameters,
-                    new org.apache.amoro.process.ProcessResource.RetryPolicy(3, 2, 30)),
-                new org.apache.amoro.process.ProcessResource.ProcessStatus(
+                    new ProcessResource.RetryPolicy(3, 2, 30)),
+                new ProcessResource.ProcessStatus(
                     "PENDING",
                     0,
                     null,
                     null,
                     null,
                     null,
-                    new org.apache.amoro.process.ProcessResource.EngineBackoff(0, 0, 0, 0),
+                    new ProcessResource.EngineBackoff(0, 0, 0, 0),
                     null,
                     null,
                     null,
@@ -109,7 +108,7 @@ public class TestLocalEngine {
 
   @Test
   public void localProcessRunsToSuccessThroughTheReconciler() {
-    org.apache.amoro.process.ProcessResource created = create("local-1");
+    ProcessResource created = create("local-1");
     ProcessReconciler reconciler =
         new ProcessReconciler(
             "local-1",

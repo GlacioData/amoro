@@ -18,6 +18,8 @@
 
 package org.apache.amoro.process;
 
+import org.apache.amoro.resources.ProcessResource;
+
 import java.nio.charset.StandardCharsets;
 
 /** Builds an engine payload from an already frozen durable Process; it must never load a table. */

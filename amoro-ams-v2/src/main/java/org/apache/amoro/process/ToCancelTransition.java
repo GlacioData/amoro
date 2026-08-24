@@ -18,9 +18,10 @@
 
 package org.apache.amoro.process;
 
-import org.apache.amoro.process.ProcessResource.EngineBackoff;
-import org.apache.amoro.process.ProcessResource.ProcessAttempt;
-import org.apache.amoro.process.ProcessResource.ProcessStatus;
+import org.apache.amoro.resources.ProcessResource;
+import org.apache.amoro.resources.ProcessResource.EngineBackoff;
+import org.apache.amoro.resources.ProcessResource.ProcessAttempt;
+import org.apache.amoro.resources.ProcessResource.ProcessStatus;
 
 /** Pure transition for the monotonic operator intent {@code desiredState: RUN -> CANCEL}. */
 public final class ToCancelTransition {

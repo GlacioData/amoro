@@ -19,7 +19,7 @@
 package org.apache.amoro.process.trigger;
 
 import org.apache.amoro.process.ProcessCreateIntent;
-import org.apache.amoro.process.ProcessResource;
+import org.apache.amoro.resources.ProcessResource;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;

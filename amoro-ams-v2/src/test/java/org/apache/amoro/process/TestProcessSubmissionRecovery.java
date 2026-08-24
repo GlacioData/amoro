@@ -30,6 +30,7 @@ import org.apache.amoro.process.engine.EngineTypes.SubmissionOutcome;
 import org.apache.amoro.process.engine.EngineTypes.SubmissionResolution;
 import org.apache.amoro.process.engine.FakeEngineAdapter;
 import org.apache.amoro.process.engine.ProcessEngineDispatcher;
+import org.apache.amoro.resources.ProcessResource;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;

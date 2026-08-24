@@ -24,7 +24,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.apache.amoro.persistence.PersistenceChange;
 import org.apache.amoro.persistence.PreparedProjectionUpdate;
-import org.apache.amoro.process.ProcessResource;
+import org.apache.amoro.resources.ProcessResource;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;

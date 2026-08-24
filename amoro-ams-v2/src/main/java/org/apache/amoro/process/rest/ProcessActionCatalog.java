@@ -23,6 +23,7 @@ import org.apache.amoro.process.trigger.ProcessActionPlugin;
 import org.apache.amoro.process.trigger.ProcessActionPluginFactory;
 import org.apache.amoro.process.trigger.ProcessActionRegistry;
 import org.apache.amoro.process.trigger.simulated.SimulatedDummyMaintenanceActionFactory;
+import org.apache.amoro.resources.ProcessResource;
 
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -98,8 +99,7 @@ public final class ProcessActionCatalog {
 
   /** Selects the exact deployed format/action/engine plugin without resolving a table. */
   public byte[] buildSubmission(
-      org.apache.amoro.process.ProcessResource.ProcessSpec frozenSpec,
-      Map<String, Object> simulationProfile) {
+      ProcessResource.ProcessSpec frozenSpec, Map<String, Object> simulationProfile) {
     ProcessActionPlugin selected =
         plugins.get(
             new Pair(

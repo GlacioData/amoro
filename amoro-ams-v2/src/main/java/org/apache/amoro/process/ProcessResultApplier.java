@@ -26,6 +26,7 @@ import org.apache.amoro.process.engine.EngineTypes.EngineObservation;
 import org.apache.amoro.process.engine.EngineTypes.ProcessObservation;
 import org.apache.amoro.process.engine.EngineTypes.SubmissionOutcome;
 import org.apache.amoro.process.engine.EngineTypes.SubmissionResolution;
+import org.apache.amoro.resources.ProcessResource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 

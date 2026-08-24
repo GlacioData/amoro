@@ -24,6 +24,7 @@ import org.apache.amoro.persistence.ControlledResource;
 import org.apache.amoro.persistence.InMemoryPersistence;
 import org.apache.amoro.persistence.ListenerDispatcher;
 import org.apache.amoro.persistence.blob.ResourceBlobMapper;
+import org.apache.amoro.resources.ProcessResource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -116,11 +117,9 @@ public class ControlPlaneAutoConfiguration {
     // one dispatcher serves every domain: envelopes carry their typed listener reference,
     // so the cross-domain variance is bridged here (same rationale as the domain factory)
     @SuppressWarnings("unchecked")
-    org.apache.amoro.persistence.ListenerEventSink<org.apache.amoro.process.ProcessResource>
-        processSink =
-            (org.apache.amoro.persistence.ListenerEventSink<
-                    org.apache.amoro.process.ProcessResource>)
-                (org.apache.amoro.persistence.ListenerEventSink<?>) dispatcher;
+    org.apache.amoro.persistence.ListenerEventSink<ProcessResource> processSink =
+        (org.apache.amoro.persistence.ListenerEventSink<ProcessResource>)
+            (org.apache.amoro.persistence.ListenerEventSink<?>) dispatcher;
     org.apache.amoro.process.ProcessDomainAssembly assembly =
         new org.apache.amoro.process.ProcessDomainAssembly(
             processBlobStore,
@@ -140,7 +139,7 @@ public class ControlPlaneAutoConfiguration {
     AmoroProcessProperties.Creation creation = processProperties.getCreation();
     return new org.apache.amoro.process.ProcessCreationService(
         assembly,
-        new org.apache.amoro.process.ProcessResource.RetryPolicy(
+        new ProcessResource.RetryPolicy(
             creation.getMaxRetries(),
             creation.getMaxSubmissionRetries(),
             creation.getRetryDelaySeconds()));
@@ -273,54 +272,52 @@ public class ControlPlaneAutoConfiguration {
    * what makes a REST-created process actually run without any manual wiring.
    */
   @Bean
-  public org.apache.amoro.persistence.PersistenceListener<org.apache.amoro.process.ProcessResource>
+  public org.apache.amoro.persistence.PersistenceListener<ProcessResource>
       processSchedulingListener(
           org.apache.amoro.process.ProcessDomainAssembly assembly,
           org.apache.amoro.process.engine.ProcessEngineRegistry engines,
           DefaultScheduler scheduler,
           org.apache.amoro.process.ProcessResultPersistenceRetryer resultRetryer,
           org.apache.amoro.process.ProcessSubmissionBuilder submissionBuilder) {
-    org.apache.amoro.persistence.PersistenceListener<org.apache.amoro.process.ProcessResource>
-        listener =
-            new org.apache.amoro.persistence.PersistenceListener<
-                org.apache.amoro.process.ProcessResource>() {
-              @Override
-              public void afterCreated(org.apache.amoro.process.ProcessResource resource) {
-                schedule(resource);
-              }
+    org.apache.amoro.persistence.PersistenceListener<ProcessResource> listener =
+        new org.apache.amoro.persistence.PersistenceListener<ProcessResource>() {
+          @Override
+          public void afterCreated(ProcessResource resource) {
+            schedule(resource);
+          }
 
-              @Override
-              public void afterModified(org.apache.amoro.process.ProcessResource resource) {
-                schedule(resource);
-              }
+          @Override
+          public void afterModified(ProcessResource resource) {
+            schedule(resource);
+          }
 
-              @Override
-              public void afterDeleted(org.apache.amoro.process.ProcessResource resource) {
-                // the deletion hook already unscheduled the key in the mutation lane
-              }
+          @Override
+          public void afterDeleted(ProcessResource resource) {
+            // the deletion hook already unscheduled the key in the mutation lane
+          }
 
-              @Override
-              public void postStart(org.apache.amoro.process.ProcessResource existing) {
-                schedule(existing);
-              }
+          @Override
+          public void postStart(ProcessResource existing) {
+            schedule(existing);
+          }
 
-              private void schedule(org.apache.amoro.process.ProcessResource resource) {
-                scheduler.schedule(
-                    new org.apache.amoro.process.ProcessReconciler(
-                        resource.name(),
-                        assembly.repository(),
-                        engines,
-                        scheduler,
-                        org.apache.amoro.process.ProcessReconciler.Clock.systemUtc(),
-                        processProperties.getReconcile().getPollIntervalMs(),
-                        processProperties.getReconcile().getSubmissionUnresolvedIntervalMs(),
-                        processProperties.getReconcile().getCancelRetryIntervalMs(),
-                        processProperties.getReconcile().getCommandInFlightDelayMs(),
-                        processProperties.getReconcile().getExecutionUnresolvedReminderIntervalMs(),
-                        resultRetryer,
-                        submissionBuilder));
-              }
-            };
+          private void schedule(ProcessResource resource) {
+            scheduler.schedule(
+                new org.apache.amoro.process.ProcessReconciler(
+                    resource.name(),
+                    assembly.repository(),
+                    engines,
+                    scheduler,
+                    org.apache.amoro.process.ProcessReconciler.Clock.systemUtc(),
+                    processProperties.getReconcile().getPollIntervalMs(),
+                    processProperties.getReconcile().getSubmissionUnresolvedIntervalMs(),
+                    processProperties.getReconcile().getCancelRetryIntervalMs(),
+                    processProperties.getReconcile().getCommandInFlightDelayMs(),
+                    processProperties.getReconcile().getExecutionUnresolvedReminderIntervalMs(),
+                    resultRetryer,
+                    submissionBuilder));
+          }
+        };
     assembly.persistence().addListener(listener);
     // restart replay (spec §8.7) happens HERE, after the listener is registered: the read
     // model rebuilds from the durable rows and every live process is re-scheduled
@@ -335,8 +332,7 @@ public class ControlPlaneAutoConfiguration {
       DefaultScheduler scheduler,
       org.apache.amoro.process.ProcessResultPersistenceRetryer resultRetryer,
       org.apache.amoro.process.ProcessSubmissionBuilder submissionBuilder,
-      org.apache.amoro.persistence.PersistenceListener<org.apache.amoro.process.ProcessResource>
-          processSchedulingListener) {
+      org.apache.amoro.persistence.PersistenceListener<ProcessResource> processSchedulingListener) {
     AmoroProcessProperties.Reconcile reconcile = processProperties.getReconcile();
     AmoroProcessProperties.Rescheduler rescheduler = processProperties.getRescheduler();
     return new org.apache.amoro.process.ActiveProcessRescheduler(
@@ -365,8 +361,7 @@ public class ControlPlaneAutoConfiguration {
   public org.apache.amoro.process.engine.ExecutionHandleReaper executionHandleReaper(
       org.apache.amoro.process.ProcessDomainAssembly assembly,
       org.apache.amoro.process.engine.ProcessEngineRegistry engines,
-      org.apache.amoro.persistence.PersistenceListener<org.apache.amoro.process.ProcessResource>
-          processSchedulingListener) {
+      org.apache.amoro.persistence.PersistenceListener<ProcessResource> processSchedulingListener) {
     AmoroProcessProperties.ExecutionReaper reaper = processProperties.getExecutionReaper();
     return new org.apache.amoro.process.engine.ExecutionHandleReaper(
         assembly.releaseIndex(), engines, reaper.getBatchSize(), reaper.getIntervalMs());
@@ -375,8 +370,7 @@ public class ControlPlaneAutoConfiguration {
   @Bean
   public org.apache.amoro.process.ProcessTtlRuntime processTtlRuntime(
       org.apache.amoro.process.ProcessDomainAssembly assembly,
-      org.apache.amoro.persistence.PersistenceListener<org.apache.amoro.process.ProcessResource>
-          processSchedulingListener) {
+      org.apache.amoro.persistence.PersistenceListener<ProcessResource> processSchedulingListener) {
     AmoroProcessProperties.Ttl ttl = processProperties.getTtl();
     return new org.apache.amoro.process.ProcessTtlRuntime(
         new org.apache.amoro.process.ProcessTtlCleaner(assembly, assembly.handleRegistry()),
@@ -390,8 +384,7 @@ public class ControlPlaneAutoConfiguration {
       org.apache.amoro.process.ProcessCreationService creationService,
       org.apache.amoro.process.trigger.ManagedTablePort tables,
       org.apache.amoro.process.trigger.ProcessActionRegistry actions,
-      org.apache.amoro.persistence.PersistenceListener<org.apache.amoro.process.ProcessResource>
-          processSchedulingListener) {
+      org.apache.amoro.persistence.PersistenceListener<ProcessResource> processSchedulingListener) {
     AmoroProcessProperties.Trigger trigger = processProperties.getTrigger();
     return new org.apache.amoro.process.trigger.ProcessTriggerCoordinator(
         creationService, tables, actions, trigger.getIntervalMs(), trigger.getBatchSize());

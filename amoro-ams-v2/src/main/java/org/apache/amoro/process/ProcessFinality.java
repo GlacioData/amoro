@@ -18,6 +18,8 @@
 
 package org.apache.amoro.process;
 
+import org.apache.amoro.resources.ProcessResource;
+
 /**
  * The finality predicate of the Process domain (process spec §7.1): fixed terminal phases are
  * always final; FAILED is final only when the desired state is CANCEL, the retry budget is

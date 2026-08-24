@@ -29,10 +29,12 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.amoro.control.DefaultScheduler;
+import org.apache.amoro.controller.ProcessApiController;
 import org.apache.amoro.persistence.HandoffResult;
 import org.apache.amoro.process.ProcessDomainAssembly;
 import org.apache.amoro.process.ProcessTestFixtures;
 import org.apache.amoro.process.TestProcessDomain;
+import org.apache.amoro.resources.ProcessResource;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -478,7 +480,7 @@ public class TestProcessRestApi {
   @Test
   public void submissionResolutionAckMovesToSubmitted() throws Exception {
     String name = createDispatchingProcess();
-    org.apache.amoro.process.ProcessResource current = assembly.repository().get(name);
+    ProcessResource current = assembly.repository().get(name);
     String attemptKey = current.status().attempt().submissionKey();
 
     mvc.perform(
@@ -512,7 +514,7 @@ public class TestProcessRestApi {
   public void executionResolutionFinalFailedTerminates() throws Exception {
     String name = createDispatchingProcess();
     ProcessTestFixtures.forceExecutionUnresolved(assembly, name);
-    org.apache.amoro.process.ProcessResource current = assembly.repository().get(name);
+    ProcessResource current = assembly.repository().get(name);
     String attemptKey = current.status().attempt().submissionKey();
 
     mvc.perform(
@@ -571,7 +573,7 @@ public class TestProcessRestApi {
   @Test
   public void submissionNotFoundRotatesGeneration() throws Exception {
     String name = createDispatchingProcess();
-    org.apache.amoro.process.ProcessResource before = assembly.repository().get(name);
+    ProcessResource before = assembly.repository().get(name);
     String attemptKey = before.status().attempt().submissionKey();
 
     mvc.perform(
@@ -606,7 +608,7 @@ public class TestProcessRestApi {
     // the CURRENT key with NOT_FOUND + externalId breaks the field rule (400); stage the
     // rotated generation back to DISPATCHING so the field rule is what fires
     ProcessTestFixtures.forceSubmissionUnresolved(assembly, name);
-    org.apache.amoro.process.ProcessResource rotated = assembly.repository().get(name);
+    ProcessResource rotated = assembly.repository().get(name);
     String rotatedKey = rotated.status().attempt().submissionKey();
     mvc.perform(
             post("/api/ams/v2/processes/" + name + "/submission-resolutions")
@@ -626,10 +628,10 @@ public class TestProcessRestApi {
   @Test
   public void submissionAckUnderCancelDesiredGoesCanceling() throws Exception {
     String name = createDispatchingProcess();
-    org.apache.amoro.process.ProcessResource staged = assembly.repository().get(name);
+    ProcessResource staged = assembly.repository().get(name);
     String attemptKey = staged.status().attempt().submissionKey();
     ProcessRestSupport support2 = support;
-    org.apache.amoro.process.ProcessResource current = support2.get(name);
+    ProcessResource current = support2.get(name);
     assembly
         .repository()
         .modify(
@@ -655,7 +657,7 @@ public class TestProcessRestApi {
   public void executionFailedWithoutRetryAllowedIsRejected() throws Exception {
     String name = createDispatchingProcess();
     ProcessTestFixtures.forceExecutionUnresolved(assembly, name);
-    org.apache.amoro.process.ProcessResource current = assembly.repository().get(name);
+    ProcessResource current = assembly.repository().get(name);
     String attemptKey = current.status().attempt().submissionKey();
     mvc.perform(
             post("/api/ams/v2/processes/" + name + "/execution-resolutions")
@@ -674,7 +676,7 @@ public class TestProcessRestApi {
   @Test
   public void submissionResolutionMissingRequiredFieldsNeverReturns500() throws Exception {
     String name = createDispatchingProcess();
-    org.apache.amoro.process.ProcessResource current = assembly.repository().get(name);
+    ProcessResource current = assembly.repository().get(name);
     String key = current.status().attempt().submissionKey();
     String hash = current.status().attempt().requestHash();
     String endpoint = "/api/ams/v2/processes/" + name + "/submission-resolutions";
@@ -703,7 +705,7 @@ public class TestProcessRestApi {
   public void executionResolutionMissingReasonNeverReturns500() throws Exception {
     String name = createDispatchingProcess();
     ProcessTestFixtures.forceExecutionUnresolved(assembly, name);
-    org.apache.amoro.process.ProcessResource current = assembly.repository().get(name);
+    ProcessResource current = assembly.repository().get(name);
 
     mvc.perform(
             post("/api/ams/v2/processes/" + name + "/execution-resolutions")
@@ -754,7 +756,7 @@ public class TestProcessRestApi {
   @Test
   public void resolutionWithoutIdempotencyKeyIsRejected() throws Exception {
     String name = createDispatchingProcess();
-    org.apache.amoro.process.ProcessResource current = assembly.repository().get(name);
+    ProcessResource current = assembly.repository().get(name);
     String attemptKey = current.status().attempt().submissionKey();
     mvc.perform(
             post("/api/ams/v2/processes/" + name + "/submission-resolutions")

@@ -27,7 +27,7 @@ import org.apache.amoro.process.ProcessCreateIntent;
 import org.apache.amoro.process.ProcessCreationResult;
 import org.apache.amoro.process.ProcessCreationService;
 import org.apache.amoro.process.ProcessDomainAssembly;
-import org.apache.amoro.process.ProcessResource;
+import org.apache.amoro.resources.ProcessResource;
 
 import java.util.List;
 import java.util.Map;

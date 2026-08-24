@@ -26,6 +26,7 @@ import org.apache.amoro.persistence.PersistenceDomain;
 import org.apache.amoro.persistence.PersistenceDomain.SerdeFormat;
 import org.apache.amoro.persistence.blob.BlobStore;
 import org.apache.amoro.persistence.facade.RepositoryFacade;
+import org.apache.amoro.resources.ProcessResource;
 import org.apache.amoro.serde.ResourceSerde;
 import org.apache.amoro.serde.SerdeRegistry;
 import org.apache.amoro.serde.VersionAwareJacksonSerde;

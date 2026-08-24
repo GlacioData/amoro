@@ -16,9 +16,11 @@
  * limitations under the License.
  */
 
-package org.apache.amoro.process.rest;
+package org.apache.amoro.controller;
 
-import org.apache.amoro.process.ProcessResource;
+import org.apache.amoro.process.rest.ApiError;
+import org.apache.amoro.process.rest.ProcessRestSupport;
+import org.apache.amoro.resources.ProcessResource;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;

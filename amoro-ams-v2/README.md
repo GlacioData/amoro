@@ -73,8 +73,15 @@ JAVA_HOME=/path/to/jdk-11 ./mvnw clean package -DskipTests -Pskip-dashboard-buil
 # 2) Module build with the executable boot jar — Maven itself must run on JDK 17+
 JAVA_HOME=/path/to/jdk-17 ./mvnw -pl amoro-ams-v2 clean package
 
-# run locally (port 1640; v1 AMS keeps 1630 during the migration); defaults to an
-# embedded Derby datastore, override with AMORO_V2_DATASOURCE_* environment variables
+# one-time: local dev MySQL in Docker (utf8mb4, database amoro_v2 pre-created)
+docker run -d --name amoro-v2-mysql -p 3306:3306 \
+  -e MYSQL_ROOT_PASSWORD=amoro123456 -e MYSQL_DATABASE=amoro_v2 \
+  mysql:5.7.44 --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+
+# run locally (port 1640; v1 AMS keeps 1630 during the migration). The default profile
+# is `dev` (application-dev.yaml): it connects to the Docker MySQL above and the service
+# creates/validates amoro_process_v2 idempotently on every boot. The boot jar needs a
+# JDK 17+ runtime; activate another profile with --spring.profiles.active=<name>.
 java -jar amoro-ams-v2/target/amoro-ams-v2-*.jar
 curl http://localhost:1640/api/ams/v2/health
 ```
@@ -103,9 +110,13 @@ failure for this explicit profile, not a skipped green build.
 
 `amoro.control.*` (see `AmoroControlProperties`): scheduler workers/period, storage
 serialization bound, actor mailbox capacity, listener pool/retry, repository timeout and
-the unified lifecycle shutdown budget — all validated fail-fast at startup. The
-datasource comes from `spring.datasource.*` (defaults to embedded Derby, override with
-`AMORO_V2_DATASOURCE_*`).
+the unified lifecycle shutdown budget — all validated fail-fast at startup. The default
+profile `dev` supplies `spring.datasource.*` via `application-dev.yaml` (local Docker
+MySQL). With no datasource configured at all, Spring Boot falls back to an
+**in-memory Derby** (fresh random database on every boot — nothing survives a restart).
+For durable storage set `spring.datasource.url` explicitly (file-based Derby or MySQL);
+environment variables follow Spring's relaxed binding (`SPRING_DATASOURCE_URL`,
+`SPRING_DATASOURCE_USERNAME`, `SPRING_DATASOURCE_PASSWORD`), not a custom prefix.
 
 `amoro.process.*` controls creation policy, reconcile deadlines, Engine timeout, bounded result
 persistence, active rescheduling, execution release and TTL. All values fail fast at startup.

@@ -31,6 +31,7 @@ import org.apache.amoro.process.engine.EngineTypes.SubmissionResolution;
 import org.apache.amoro.process.engine.ProcessEngineDispatcher;
 import org.apache.amoro.process.engine.ProcessEngineDispatcher.CommandFlight;
 import org.apache.amoro.process.engine.ProcessEngineRegistry;
+import org.apache.amoro.resources.ProcessResource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 

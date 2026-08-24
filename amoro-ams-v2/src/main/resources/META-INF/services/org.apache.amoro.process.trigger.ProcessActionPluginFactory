@@ -1,0 +1,2 @@
+# Simulated action plugin (ProviderMode.SIMULATED only).
+org.apache.amoro.process.trigger.simulated.SimulatedDummyMaintenanceActionFactory

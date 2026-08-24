@@ -19,6 +19,7 @@
 package org.apache.amoro.process;
 
 import org.apache.amoro.persistence.exception.PersistenceOutcomeUnknownException;
+import org.apache.amoro.resources.ProcessResource;
 
 import java.time.Clock;
 import java.time.Duration;

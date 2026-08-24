@@ -23,11 +23,11 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import org.apache.amoro.process.ProcessDomainAssembly;
-import org.apache.amoro.process.ProcessResource;
 import org.apache.amoro.process.engine.ProcessEngineRegistry;
 import org.apache.amoro.process.rest.ApiError;
 import org.apache.amoro.process.rest.ProcessActionCatalog;
 import org.apache.amoro.process.rest.ProcessRestSupport;
+import org.apache.amoro.resources.ProcessResource;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;

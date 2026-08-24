@@ -29,6 +29,7 @@ import org.apache.amoro.process.ProcessDomainAssembly;
 import org.apache.amoro.process.ProcessTestFixtures;
 import org.apache.amoro.process.TestProcessDomain;
 import org.apache.amoro.process.rest.ProcessRestSupport;
+import org.apache.amoro.resources.ProcessResource;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -97,7 +98,7 @@ public class TestProcessTriggerScanner {
   public void scanCreatesProcessesForEligibleTables() {
     scanner.scanOnce();
 
-    List<org.apache.amoro.process.ProcessResource> created =
+    List<ProcessResource> created =
         assembly.indexProjection().current().resourcesByName().values().stream()
             .filter(r -> "SCHEDULED".equals(r.spec().triggerSource()))
             .collect(java.util.stream.Collectors.toList());

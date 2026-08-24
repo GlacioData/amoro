@@ -24,6 +24,7 @@ import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.apache.amoro.persistence.PersistenceDomain.SerdeFormat;
+import org.apache.amoro.resources.ProcessResource;
 import org.apache.amoro.serde.DeserializedResource;
 import org.apache.amoro.serde.SerdeRegistry;
 import org.apache.amoro.serde.VersionAwareJacksonSerde;

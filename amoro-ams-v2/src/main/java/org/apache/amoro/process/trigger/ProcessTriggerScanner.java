@@ -22,7 +22,7 @@ import org.apache.amoro.process.ProcessAdmissionException;
 import org.apache.amoro.process.ProcessCreateIntent;
 import org.apache.amoro.process.ProcessCreationResult;
 import org.apache.amoro.process.ProcessCreationService;
-import org.apache.amoro.process.ProcessResource;
+import org.apache.amoro.resources.ProcessResource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 

@@ -20,6 +20,7 @@ package org.apache.amoro.process;
 
 import org.apache.amoro.persistence.exception.PreconditionFailedException;
 import org.apache.amoro.persistence.facade.RepositoryFacade;
+import org.apache.amoro.resources.ProcessResource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 

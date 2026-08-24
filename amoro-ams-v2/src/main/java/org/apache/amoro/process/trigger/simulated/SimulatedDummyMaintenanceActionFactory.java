@@ -19,11 +19,11 @@
 package org.apache.amoro.process.trigger.simulated;
 
 import org.apache.amoro.process.ProcessCreateIntent;
-import org.apache.amoro.process.ProcessResource;
 import org.apache.amoro.process.engine.ProviderMode;
 import org.apache.amoro.process.trigger.ManagedTablePort;
 import org.apache.amoro.process.trigger.ProcessActionPlugin;
 import org.apache.amoro.process.trigger.ProcessActionPluginFactory;
+import org.apache.amoro.resources.ProcessResource;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;

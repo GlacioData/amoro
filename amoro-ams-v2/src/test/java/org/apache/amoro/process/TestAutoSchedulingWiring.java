@@ -28,6 +28,7 @@ import org.apache.amoro.process.engine.ExecutionHandleRegistry;
 import org.apache.amoro.process.engine.LocalEngineAdapter;
 import org.apache.amoro.process.engine.ProcessEngineRegistry;
 import org.apache.amoro.process.rest.ProcessRestSupport;
+import org.apache.amoro.resources.ProcessResource;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;

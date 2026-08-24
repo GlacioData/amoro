@@ -20,6 +20,7 @@ package org.apache.amoro.process;
 
 import org.apache.amoro.process.rest.ProcessActionCatalog;
 import org.apache.amoro.process.rest.ProcessRestSupport;
+import org.apache.amoro.resources.ProcessResource;
 
 import java.time.Instant;
 

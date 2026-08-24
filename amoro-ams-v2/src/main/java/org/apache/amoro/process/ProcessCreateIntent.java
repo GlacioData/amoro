@@ -18,6 +18,8 @@
 
 package org.apache.amoro.process;
 
+import org.apache.amoro.resources.ProcessResource;
+
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.Collections;

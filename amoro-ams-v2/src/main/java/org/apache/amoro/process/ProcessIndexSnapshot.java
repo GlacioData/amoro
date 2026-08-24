@@ -20,6 +20,7 @@ package org.apache.amoro.process;
 
 import org.apache.amoro.process.index.PersistentMap;
 import org.apache.amoro.process.index.PersistentRankTree;
+import org.apache.amoro.resources.ProcessResource;
 
 import java.time.Instant;
 import java.util.ArrayList;

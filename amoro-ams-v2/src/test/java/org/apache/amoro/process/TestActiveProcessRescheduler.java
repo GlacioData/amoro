@@ -24,6 +24,7 @@ import org.apache.amoro.control.Controller;
 import org.apache.amoro.control.ControllerKey;
 import org.apache.amoro.control.Scheduler;
 import org.apache.amoro.persistence.PersistenceChange;
+import org.apache.amoro.resources.ProcessResource;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;

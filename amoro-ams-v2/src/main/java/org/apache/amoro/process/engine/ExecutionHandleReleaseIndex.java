@@ -21,7 +21,7 @@ package org.apache.amoro.process.engine;
 import org.apache.amoro.persistence.DurableStateProjection;
 import org.apache.amoro.persistence.PersistenceChange;
 import org.apache.amoro.persistence.PreparedProjectionUpdate;
-import org.apache.amoro.process.ProcessResource;
+import org.apache.amoro.resources.ProcessResource;
 
 import java.time.Instant;
 import java.util.ArrayList;

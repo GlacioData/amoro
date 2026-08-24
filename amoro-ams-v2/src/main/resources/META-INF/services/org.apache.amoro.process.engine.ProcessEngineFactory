@@ -1,0 +1,4 @@
+# Simulated engine providers (ProviderMode.SIMULATED only; the default REAL mode
+# registers nothing until real engine implementations ship).
+org.apache.amoro.process.engine.simulated.SimulatedLocalEngineFactory
+org.apache.amoro.process.engine.simulated.SimulatedRemoteSparkEngineFactory

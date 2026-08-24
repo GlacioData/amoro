@@ -1,0 +1,2 @@
+# Simulated local action seam (ProviderMode.SIMULATED only).
+org.apache.amoro.process.engine.local.SimulatedDummyLocalActionFactory

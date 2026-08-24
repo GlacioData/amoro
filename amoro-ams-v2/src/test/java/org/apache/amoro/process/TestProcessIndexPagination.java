@@ -21,6 +21,7 @@ package org.apache.amoro.process;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import org.apache.amoro.resources.ProcessResource;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;

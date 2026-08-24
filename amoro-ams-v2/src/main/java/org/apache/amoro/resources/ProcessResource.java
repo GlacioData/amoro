@@ -16,7 +16,7 @@
  * limitations under the License.
  */
 
-package org.apache.amoro.process;
+package org.apache.amoro.resources;
 
 import com.fasterxml.jackson.annotation.JsonAutoDetect;
 import com.fasterxml.jackson.annotation.JsonCreator;
