@@ -37,6 +37,7 @@ import org.apache.amoro.server.resource.Containers;
 import org.apache.amoro.server.resource.OptimizerInstance;
 import org.apache.amoro.server.resource.OptimizerManager;
 import org.apache.amoro.server.table.TableManager;
+import org.apache.amoro.server.table.TableOptimizingQuery;
 import org.apache.amoro.shade.guava32.com.google.common.base.Preconditions;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.tuple.Pair;
@@ -85,8 +86,21 @@ public class OptimizerGroupController {
     String tableFilterStr = ctx.queryParam("tableSearchInput");
     Integer page = ctx.queryParamAsClass("page", Integer.class).getOrDefault(1);
     Integer pageSize = ctx.queryParamAsClass("pageSize", Integer.class).getOrDefault(20);
+    Integer healthScoreMin = optionalInteger(ctx, "healthScoreMin");
+    Integer healthScoreMax = optionalInteger(ctx, "healthScoreMax");
+    Long durationMinMinutes = optionalLong(ctx, "durationMinMinutes");
+    TableOptimizingQuery.SortField sortField = parseSortField(ctx.queryParam("sortBy"));
+    TableOptimizingQuery.SortOrder sortOrder = parseSortOrder(ctx.queryParam("sortOrder"));
     Set<String> actionFilter = new HashSet<>(ctx.queryParams("actions[]"));
-    int offset = (page - 1) * pageSize;
+    if (page < 1 || pageSize < 1) {
+      throw new BadRequestException("Page and page size must be greater than zero");
+    }
+    int offset;
+    try {
+      offset = Math.multiplyExact(page - 1, pageSize);
+    } catch (ArithmeticException e) {
+      throw new BadRequestException("Page offset is too large");
+    }
 
     String optimizerGroupUsedInDbFilter = ALL_GROUP.equals(optimizerGroup) ? null : optimizerGroup;
     // get all info from underlying table table_runtime
@@ -104,17 +118,60 @@ public class OptimizerGroupController {
     if (statusCodes.isEmpty()) {
       statusCodes = null;
     }
+    TableOptimizingQuery query;
+    try {
+      query =
+          TableOptimizingQuery.builder(pageSize, offset)
+              .optimizerGroup(optimizerGroupUsedInDbFilter)
+              .fuzzyDbName(dbFilterStr)
+              .fuzzyTableName(tableFilterStr)
+              .statusCodeFilters(statusCodes)
+              .healthScoreRange(healthScoreMin, healthScoreMax)
+              .durationMinMinutes(durationMinMinutes)
+              .sort(sortField, sortOrder)
+              .build();
+    } catch (IllegalArgumentException e) {
+      throw new BadRequestException(e.getMessage());
+    }
     Pair<List<TableOptimizingInfo>, Integer> tableRuntimeBeans =
-        tableManager.queryTableOptimizingInfo(
-            optimizerGroupUsedInDbFilter,
-            dbFilterStr,
-            tableFilterStr,
-            statusCodes,
-            pageSize,
-            offset);
+        tableManager.queryTableOptimizingInfo(query);
     PageResult<TableOptimizingInfo> amsPageResult =
         PageResult.of(tableRuntimeBeans.getLeft(), tableRuntimeBeans.getRight());
     ctx.json(OkResponse.of(amsPageResult));
+  }
+
+  private Integer optionalInteger(Context ctx, String name) {
+    return ctx.queryParam(name) == null ? null : ctx.queryParamAsClass(name, Integer.class).get();
+  }
+
+  private Long optionalLong(Context ctx, String name) {
+    return ctx.queryParam(name) == null ? null : ctx.queryParamAsClass(name, Long.class).get();
+  }
+
+  private TableOptimizingQuery.SortField parseSortField(String sortBy) {
+    if (StringUtils.isBlank(sortBy)) {
+      return null;
+    }
+    if ("duration".equalsIgnoreCase(sortBy)) {
+      return TableOptimizingQuery.SortField.DURATION;
+    }
+    if ("quota".equalsIgnoreCase(sortBy)) {
+      return TableOptimizingQuery.SortField.QUOTA;
+    }
+    throw new BadRequestException("Unsupported sort field: " + sortBy);
+  }
+
+  private TableOptimizingQuery.SortOrder parseSortOrder(String sortOrder) {
+    if (StringUtils.isBlank(sortOrder)) {
+      return null;
+    }
+    if ("asc".equalsIgnoreCase(sortOrder)) {
+      return TableOptimizingQuery.SortOrder.ASC;
+    }
+    if ("desc".equalsIgnoreCase(sortOrder)) {
+      return TableOptimizingQuery.SortOrder.DESC;
+    }
+    throw new BadRequestException("Unsupported sort order: " + sortOrder);
   }
 
   /** get optimizers. */

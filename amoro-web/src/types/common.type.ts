@@ -293,6 +293,8 @@ export interface ITableIdentifier {
 }
 export interface IOptimizeTableItem {
   tableName: string
+  groupName: string
+  healthScore: number
   optimizeStatus: string
   fileCount: number
   fileSize: number

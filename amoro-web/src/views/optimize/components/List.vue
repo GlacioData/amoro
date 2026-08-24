@@ -21,6 +21,7 @@ import { computed, onMounted, reactive, ref, shallowReactive } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 import { Modal } from 'ant-design-vue'
+import type { TableProps } from 'ant-design-vue'
 import type { IIOptimizeGroupItem, ILableAndValue, IOptimizeResourceTableItem, IOptimizeTableItem } from '@/types/common.type'
 import { getOptimizerAction, getOptimizerTableList, getResourceGroupsListAPI, releaseResource } from '@/services/optimize.service'
 import { usePagination } from '@/hooks/usePagination'
@@ -45,26 +46,61 @@ const loading = ref<boolean>(false)
 const releaseLoading = ref<boolean>(false)
 const optimizerGroupList = ref<ILableAndValue[]>([])
 
+type ServerSortField = 'duration' | 'quota'
+type ServerSortOrder = 'asc' | 'desc'
+
+const sortBy = ref<ServerSortField>()
+const sortOrder = ref<ServerSortOrder>()
+
+function columnSortOrder(field: ServerSortField) {
+  if (sortBy.value !== field) {
+    return null
+  }
+  return sortOrder.value === 'asc' ? 'ascend' : 'descend'
+}
+
 const columns = computed(() => [
   { dataIndex: 'tableName', title: t('table'), width: 300, scopedSlots: { customRender: 'tableName' } },
   { dataIndex: 'groupName', title: t('optimizerGroup'), width: 180, ellipsis: true },
+  { dataIndex: 'healthScore', title: t('healthScore'), width: 140, ellipsis: true },
   { dataIndex: 'optimizeStatus', title: t('optimizingStatus'), width: 150, ellipsis: true },
-  { dataIndex: 'duration', title: t('duration'), width: 150, ellipsis: true },
+  {
+    dataIndex: 'duration',
+    key: 'duration',
+    title: t('duration'),
+    width: 150,
+    ellipsis: true,
+    sorter: true,
+    sortDirections: ['descend', 'ascend'],
+    sortOrder: columnSortOrder('duration'),
+  },
   { dataIndex: 'fileCount', title: t('fileCount'), width: 150, ellipsis: true },
   { dataIndex: 'fileSizeDesc', title: t('fileSize'), width: 150, ellipsis: true },
-  { dataIndex: 'quota', title: t('quota'), width: 150, ellipsis: true },
+  {
+    dataIndex: 'quota',
+    key: 'quota',
+    title: t('quota'),
+    width: 150,
+    ellipsis: true,
+    sorter: true,
+    sortDirections: ['descend', 'ascend'],
+    sortOrder: columnSortOrder('quota'),
+  },
   { dataIndex: 'quotaOccupation', title: t('occupation'), width: 120, ellipsis: true },
 ])
 
 const pagination = reactive(usePagination())
 const dataSource = ref<IOptimizeTableItem[]>([])
-const optimizerGroup = ref<ILableAndValue>()
+const optimizerGroup = ref<string>()
 const actions = ref<string[]>()
-const dbSearchInput = ref<ILableAndValue>()
-const tableSearchInput = ref<ILableAndValue>()
+const dbSearchInput = ref<string>()
+const tableSearchInput = ref<string>()
+const healthScoreMin = ref<number>()
+const healthScoreMax = ref<number>()
+const durationMinMinutes = ref<number>()
 const placeholder = reactive(usePlaceholder())
 
-const actionOptions = ref<string[]>([])
+const actionOptions = ref<ILableAndValue[]>([])
 async function fetchOptimizerAction() {
   try {
     const res = await getOptimizerAction()
@@ -76,7 +112,7 @@ async function fetchOptimizerAction() {
 
 async function getOptimizerGroupList() {
   const res = await getResourceGroupsListAPI()
-  const list = (res || []).map((item: IIOptimizeGroupItem) => ({ lable: item.resourceGroup.name, value: item.resourceGroup.name }))
+  const list = (res || []).map((item: IIOptimizeGroupItem) => ({ label: item.resourceGroup.name, value: item.resourceGroup.name }))
   optimizerGroupList.value = list
 }
 
@@ -97,8 +133,13 @@ async function getTableList() {
       page: pagination.current,
       pageSize: pagination.pageSize,
       actions: actions.value,
+      healthScoreMin: healthScoreMin.value,
+      healthScoreMax: healthScoreMax.value,
+      durationMinMinutes: durationMinMinutes.value,
+      sortBy: sortBy.value,
+      sortOrder: sortOrder.value,
     }
-    const result = await getOptimizerTableList(params as any)
+    const result = await getOptimizerTableList(params)
     const { list, total } = result
     pagination.total = total
     dataSource.value = (list || []).map((p: IOptimizeTableItem) => {
@@ -141,12 +182,31 @@ async function releaseJob(record: IOptimizeResourceTableItem) {
     releaseLoading.value = false
   }
 }
-function changeTable({ current = pagination.current, pageSize = pagination.pageSize }) {
-  pagination.current = current
-  const resetPage = pageSize !== pagination.pageSize
-  pagination.pageSize = pageSize
+const changeTable: TableProps<IOptimizeTableItem>['onChange'] = (
+  { current = pagination.current, pageSize = pagination.pageSize },
+  _filters,
+  sorter,
+) => {
+  const activeSorter = Array.isArray(sorter) ? sorter[0] : sorter
+  const nextSortBy
+    = activeSorter?.columnKey === 'duration' || activeSorter?.columnKey === 'quota'
+      ? activeSorter.columnKey
+      : undefined
+  const nextSortOrder
+    = activeSorter?.order === 'ascend'
+      ? 'asc'
+      : activeSorter?.order === 'descend'
+        ? 'desc'
+        : undefined
+  const normalizedSortBy = nextSortOrder ? nextSortBy : undefined
+  const pageSizeChanged = pageSize !== pagination.pageSize
+  const sortChanged = normalizedSortBy !== sortBy.value || nextSortOrder !== sortOrder.value
 
-  refresh(resetPage)
+  sortBy.value = normalizedSortBy
+  sortOrder.value = nextSortOrder
+  pagination.pageSize = pageSize
+  pagination.current = pageSizeChanged || sortChanged ? 1 : current
+  getTableList()
 }
 
 function goTableDetail(record: IOptimizeTableItem) {
@@ -166,6 +226,11 @@ function reset() {
   dbSearchInput.value = undefined
   tableSearchInput.value = undefined
   actions.value = undefined
+  healthScoreMin.value = undefined
+  healthScoreMax.value = undefined
+  durationMinMinutes.value = undefined
+  sortBy.value = undefined
+  sortOrder.value = undefined
   refresh(true)
 }
 
@@ -178,7 +243,7 @@ onMounted(async () => {
 
 <template>
   <div class="list-wrap">
-    <a-space class="filter-form">
+    <a-space class="filter-form" wrap>
       <a-select
         v-model:value="optimizerGroup" allow-clear :placeholder="t('optimizerGroup')" :options="optimizerGroupList"
         style="min-width: 150px;"
@@ -199,7 +264,36 @@ onMounted(async () => {
         style="min-width: 150px;"
       />
 
-      <a-button type="primary" @click="refresh">
+      <a-input-number
+        v-model:value="healthScoreMin"
+        :min="0"
+        :max="100"
+        :precision="0"
+        :placeholder="t('healthScoreMin')"
+        :aria-label="t('healthScoreMin')"
+        class="number-filter"
+      />
+
+      <a-input-number
+        v-model:value="healthScoreMax"
+        :min="0"
+        :max="100"
+        :precision="0"
+        :placeholder="t('healthScoreMax')"
+        :aria-label="t('healthScoreMax')"
+        class="number-filter"
+      />
+
+      <a-input-number
+        v-model:value="durationMinMinutes"
+        :min="0"
+        :precision="0"
+        :placeholder="t('durationMinMinutes')"
+        :aria-label="t('durationMinMinutes')"
+        class="duration-filter"
+      />
+
+      <a-button type="primary" @click="refresh(true)">
         {{ t('search') }}
       </a-button>
       <a-button @click="reset">
@@ -232,6 +326,9 @@ onMounted(async () => {
             {{ formatMS2Time(record.duration || 0) }}
           </span>
         </template>
+        <template v-if="column.dataIndex === 'healthScore'">
+          {{ record.healthScore >= 0 ? record.healthScore : '-' }}
+        </template>
         <template v-if="column.dataIndex === 'quotaOccupation'">
           <span :title="record.quotaOccupationDesc">
             {{ record.quotaOccupationDesc }}
@@ -261,6 +358,14 @@ onMounted(async () => {
   .filter-form {
     width: 100%;
     margin-bottom: 16px;
+  }
+
+  .number-filter {
+    width: 165px;
+  }
+
+  .duration-filter {
+    width: 220px;
   }
 
   .primary-link {

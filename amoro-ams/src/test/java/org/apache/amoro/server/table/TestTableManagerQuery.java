@@ -54,6 +54,8 @@ import java.util.Map;
 @RunWith(Parameterized.class)
 public class TestTableManagerQuery extends AMSTableTestBase {
 
+  private static final long MINUTE_MILLIS = 60_000L;
+
   @Parameterized.Parameters(name = "{0}, {1}")
   public static Object[] parameters() {
     return new Object[][] {
@@ -290,6 +292,219 @@ public class TestTableManagerQuery extends AMSTableTestBase {
     Assert.assertTrue(res.getLeft().isEmpty());
   }
 
+  @Test
+  public void testDerivedFiltersAndSortAreAppliedBeforePaging() {
+    String catalog = "catalog";
+    String database = "db";
+    String optimizerGroup = "derived-query-group";
+    long now = System.currentTimeMillis();
+    Persistent persistent = new Persistent();
+
+    createRuntime(
+        persistent, catalog, database, "health29", optimizerGroup, 1, 29, now - 40 * MINUTE_MILLIS);
+    createRuntime(
+        persistent, catalog, database, "health30", optimizerGroup, 4, 30, now - 31 * MINUTE_MILLIS);
+    createRuntime(
+        persistent, catalog, database, "health60", optimizerGroup, 2, 60, now - 45 * MINUTE_MILLIS);
+    createRuntime(
+        persistent,
+        catalog,
+        database,
+        "healthUnknown",
+        optimizerGroup,
+        8,
+        -1,
+        now - 60 * MINUTE_MILLIS);
+
+    TableOptimizingQuery filteredQuery =
+        TableOptimizingQuery.builder(1, 0)
+            .optimizerGroup(optimizerGroup)
+            .healthScoreRange(30, 60)
+            .durationMinMinutes(30L)
+            .sort(TableOptimizingQuery.SortField.QUOTA, TableOptimizingQuery.SortOrder.DESC)
+            .build();
+    Pair<List<TableOptimizingInfo>, Integer> filtered =
+        tableManager().queryTableOptimizingInfo(filteredQuery);
+
+    Assert.assertEquals(2, (int) filtered.getRight());
+    Assert.assertEquals(1, filtered.getLeft().size());
+    Assert.assertEquals("catalog.db.health30", filtered.getLeft().get(0).getTableName());
+    Assert.assertEquals(30, filtered.getLeft().get(0).getHealthScore());
+    Assert.assertEquals(4.0, filtered.getLeft().get(0).getQuota(), 0.0);
+
+    TableOptimizingQuery secondPage =
+        TableOptimizingQuery.builder(1, 1)
+            .optimizerGroup(optimizerGroup)
+            .healthScoreRange(30, 60)
+            .durationMinMinutes(30L)
+            .sort(TableOptimizingQuery.SortField.QUOTA, TableOptimizingQuery.SortOrder.DESC)
+            .build();
+    Pair<List<TableOptimizingInfo>, Integer> secondPageResult =
+        tableManager().queryTableOptimizingInfo(secondPage);
+
+    Assert.assertEquals(2, (int) secondPageResult.getRight());
+    Assert.assertEquals("catalog.db.health60", secondPageResult.getLeft().get(0).getTableName());
+  }
+
+  @Test
+  public void testDefaultSortingRemainsStatusThenUpdateTimeDescending() {
+    String optimizerGroup = "default-sort-group";
+    long now = System.currentTimeMillis();
+    Persistent persistent = new Persistent();
+
+    createRuntime(
+        persistent,
+        "catalog",
+        "db",
+        "olderStatus",
+        optimizerGroup,
+        1,
+        80,
+        now - 60 * MINUTE_MILLIS);
+    createRuntime(
+        persistent,
+        "catalog",
+        "db",
+        "newerStatus",
+        optimizerGroup,
+        1,
+        80,
+        now - 30 * MINUTE_MILLIS);
+
+    Pair<List<TableOptimizingInfo>, Integer> result =
+        tableManager()
+            .queryTableOptimizingInfo(optimizerGroup, null, null, Collections.emptyList(), 10, 0);
+
+    Assert.assertEquals(2, (int) result.getRight());
+    Assert.assertEquals("catalog.db.newerStatus", result.getLeft().get(0).getTableName());
+    Assert.assertEquals("catalog.db.olderStatus", result.getLeft().get(1).getTableName());
+  }
+
+  @Test
+  public void testDurationAndQuotaSortingSupportBothDirections() {
+    String catalog = "catalog";
+    String database = "db";
+    String optimizerGroup = "derived-sort-group";
+    long now = System.currentTimeMillis();
+    Persistent persistent = new Persistent();
+
+    createRuntime(
+        persistent,
+        catalog,
+        database,
+        "shortHighQuota",
+        optimizerGroup,
+        8,
+        80,
+        now - 31 * MINUTE_MILLIS);
+    createRuntime(
+        persistent,
+        catalog,
+        database,
+        "longLowQuota",
+        optimizerGroup,
+        2,
+        80,
+        now - 60 * MINUTE_MILLIS);
+
+    Pair<List<TableOptimizingInfo>, Integer> durationDesc =
+        tableManager()
+            .queryTableOptimizingInfo(
+                TableOptimizingQuery.builder(10, 0)
+                    .optimizerGroup(optimizerGroup)
+                    .sort(
+                        TableOptimizingQuery.SortField.DURATION,
+                        TableOptimizingQuery.SortOrder.DESC)
+                    .build());
+    Pair<List<TableOptimizingInfo>, Integer> durationAsc =
+        tableManager()
+            .queryTableOptimizingInfo(
+                TableOptimizingQuery.builder(10, 0)
+                    .optimizerGroup(optimizerGroup)
+                    .sort(
+                        TableOptimizingQuery.SortField.DURATION, TableOptimizingQuery.SortOrder.ASC)
+                    .build());
+    Pair<List<TableOptimizingInfo>, Integer> quotaAsc =
+        tableManager()
+            .queryTableOptimizingInfo(
+                TableOptimizingQuery.builder(10, 0)
+                    .optimizerGroup(optimizerGroup)
+                    .sort(TableOptimizingQuery.SortField.QUOTA, TableOptimizingQuery.SortOrder.ASC)
+                    .build());
+
+    Assert.assertEquals("catalog.db.longLowQuota", durationDesc.getLeft().get(0).getTableName());
+    Assert.assertEquals("catalog.db.shortHighQuota", durationAsc.getLeft().get(0).getTableName());
+    Assert.assertEquals("catalog.db.longLowQuota", quotaAsc.getLeft().get(0).getTableName());
+  }
+
+  @Test
+  public void testHealthFilterExcludesUncalculatedScoresAndDurationIncludesIdle() {
+    String catalog = "catalog";
+    String database = "db";
+    String optimizerGroup = "derived-boundary-group";
+    long now = System.currentTimeMillis();
+    Persistent persistent = new Persistent();
+
+    createRuntime(
+        persistent,
+        catalog,
+        database,
+        "knownIdle",
+        optimizerGroup,
+        1,
+        30,
+        now - 31 * MINUTE_MILLIS);
+    createRuntime(
+        persistent,
+        catalog,
+        database,
+        "unknownIdle",
+        optimizerGroup,
+        1,
+        -1,
+        now - 60 * MINUTE_MILLIS);
+    createRuntime(
+        persistent,
+        catalog,
+        database,
+        "recentIdle",
+        optimizerGroup,
+        1,
+        30,
+        now - 29 * MINUTE_MILLIS);
+
+    Pair<List<TableOptimizingInfo>, Integer> result =
+        tableManager()
+            .queryTableOptimizingInfo(
+                TableOptimizingQuery.builder(10, 0)
+                    .optimizerGroup(optimizerGroup)
+                    .healthScoreRange(null, 60)
+                    .durationMinMinutes(30L)
+                    .build());
+
+    Assert.assertEquals(1, (int) result.getRight());
+    Assert.assertEquals("catalog.db.knownIdle", result.getLeft().get(0).getTableName());
+    Assert.assertEquals("idle", result.getLeft().get(0).getOptimizeStatus());
+  }
+
+  private DefaultTableRuntime createRuntime(
+      Persistent persistent,
+      String catalog,
+      String database,
+      String tableName,
+      String optimizerGroup,
+      int quota,
+      int healthScore,
+      long statusCodeUpdateTime) {
+    Map<String, String> properties = new HashMap<>();
+    properties.put(TableProperties.SELF_OPTIMIZING_GROUP, optimizerGroup);
+    properties.put(TableProperties.SELF_OPTIMIZING_QUOTA, String.valueOf(quota));
+    DefaultTableRuntime runtime =
+        persistent.newTableRuntime(catalog, database, tableName, TableFormat.ICEBERG, properties);
+    persistent.updateRuntime(runtime.getTableIdentifier(), healthScore, statusCodeUpdateTime);
+    return runtime;
+  }
+
   private class Persistent extends PersistentBase {
 
     public ServerTableIdentifier newIdentifier(
@@ -319,6 +534,15 @@ public class TestTableManagerQuery extends AMSTableTestBase {
           new DefaultTableRuntimeStore(
               identifier, meta, DefaultTableRuntime.REQUIRED_STATES, Collections.emptyList());
       return new DefaultTableRuntime(store, () -> null);
+    }
+
+    public void updateRuntime(
+        ServerTableIdentifier identifier, int healthScore, long statusCodeUpdateTime) {
+      TableRuntimeMeta meta =
+          getAs(TableRuntimeMapper.class, mapper -> mapper.selectRuntime(identifier.getId()));
+      meta.getTableSummary().setHealthScore(healthScore);
+      meta.setStatusCodeUpdateTime(statusCodeUpdateTime);
+      doAs(TableRuntimeMapper.class, mapper -> mapper.updateRuntime(meta));
     }
   }
 }
