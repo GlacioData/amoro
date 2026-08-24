@@ -10,9 +10,11 @@ This module does **not** connect or implement any Iceberg/Paimon Action—includ
 `expire-snapshots` / `clean-orphans` and Paimon `sync-table-meta`—does not load a real table, and
 does not submit a real Spark job. Simulation providers are disabled by default and require
 `amoro.process.simulation.enabled=true`; the default Engine/Action registries are empty. See
-[`ARCHITECTURE.md`](ARCHITECTURE.md) for the complete lifecycle, thread pools, component and
-sequence diagrams. Authoritative designs are `tasks/amoro-ams-v2-framework-spec.md` and
-`tasks/amoro-ams-v2-process-spec.md`.
+[`ARCHITECTURE.md`](ARCHITECTURE.md) for the scheduling architecture (wake sources, single-flight
+scheduler, maintenance loops), the two-layer Process state machine, thread pools, and the
+component and sequence diagrams; a plain-language Chinese companion covering the same scheduling
+flow and state machines is [`ARCHITECTURE.zh-CN.md`](ARCHITECTURE.zh-CN.md). Authoritative designs
+are `tasks/amoro-ams-v2-framework-spec.md` and `tasks/amoro-ams-v2-process-spec.md`.
 
 The rest of the reactor stays on the Java 8 baseline; this module compiles with
 **Java 17 via Maven toolchains**, so the usual JDK 8/11 reactor builds keep working.

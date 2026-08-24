@@ -1,5 +1,8 @@
 # Amoro AMS v2 Process Control Plane Architecture
 
+A plain-language Chinese companion describing the same scheduling flow, architecture diagrams,
+and state machines is [`ARCHITECTURE.zh-CN.md`](ARCHITECTURE.zh-CN.md).
+
 ## 1. Scope and delivery boundary
 
 This module delivers a single-node, Spring Boot 3 / Java 17 Process control plane. It proves the
@@ -314,40 +317,221 @@ ports.
 
 ## 8. Process state machine
 
-Fixed terminal phases are `SUCCESS`, `CANCELED`, `KILLED`, and `CLOSED`. `FAILED` is final only when
-the desired state is `CANCEL`, the action retry budget is exhausted, or retry disposition is
-`FINAL`. Otherwise it is an active retry decision point.
+Process state is a two-layer machine plus a condition set:
+
+- the **phase** (`status.phase`) is the business-level state;
+- the **attempt submit state** (`status.attempt.submitState`) tracks side-effect uncertainty for
+  one submission generation — `DISPATCHING` is a submit state, not a phase: the phase stays
+  `PENDING` while the attempt is staged durably;
+- **conditions** freeze specific operations when an outcome cannot be resolved automatically.
+
+Fixed terminal phases are `SUCCESS`, `CANCELED`, `KILLED`, and `CLOSED`. `FAILED` is final only
+when the desired state is `CANCEL`, the action retry budget is exhausted, or retry disposition is
+`FINAL`; otherwise it is an active retry decision point that the reconciler reopens as `PENDING`
+with a fresh attempt. `UNKNOWN` is a repair-only phase accepted for imported rows and handled
+exactly like `PENDING`.
+
+### 8.1 Phase transitions
 
 ```mermaid
 stateDiagram-v2
     [*] --> PENDING: durable create
     UNKNOWN --> PENDING: repair / authoritative NOT_FOUND
     PENDING --> SUBMITTED: submit or resolve ACK
-    PENDING --> FAILED: rejected / submission budget exhausted
+    PENDING --> FAILED: REJECTED / submission budget exhausted
+    PENDING --> CANCELED: desired=CANCEL before dispatch
     SUBMITTED --> RUNNING: observation
-    SUBMITTED --> SUCCESS: terminal observation/manual result
-    SUBMITTED --> FAILED: failed observation/manual result
+    SUBMITTED --> SUCCESS: terminal observation / manual result
+    SUBMITTED --> FAILED: failed observation / manual result
     SUBMITTED --> CANCELING: desired=CANCEL
-    RUNNING --> SUCCESS: terminal observation/manual result
-    RUNNING --> FAILED: failed observation/manual result
+    RUNNING --> SUCCESS: terminal observation / manual result
+    RUNNING --> FAILED: failed observation / manual result
     RUNNING --> CANCELING: desired=CANCEL
-    FAILED --> PENDING: retry allowed and budget remains
-    CANCELING --> CANCELED: observation/cancel terminal/manual result
-    CANCELING --> SUCCESS: action won cancel race
+    CANCELING --> CANCELED: observation / cancel / manual result
+    CANCELING --> SUCCESS: action won the cancel race
     CANCELING --> FAILED: terminal failure
+    FAILED --> PENDING: retry allowed and budget remains
+    FAILED --> [*]: finality predicate true
     SUCCESS --> [*]
     CANCELED --> [*]
     KILLED --> [*]
     CLOSED --> [*]
-    FAILED --> [*]: finality predicate true
+    note right of KILLED
+        KILLED and CLOSED are reachable only through an attempt-bound
+        manual execution result from any active phase carrying
+        ExecutionUnresolved
+    end note
 ```
 
-`SubmissionUnresolved` freezes generation rollover until an authoritative ACK or NOT_FOUND.
-`ExecutionUnresolved` freezes submit/resolve/observe/cancel for the current identity and requires an
-attempt-bound manual result. Unavailability only advances the persisted operation-specific backoff;
-it does not consume action retry budget.
+Every edge is a `resourceVersion` CAS on the durable row. Engine observations, engine cancellations,
+and manual results are applied asynchronously by `ProcessResultApplier`; intent transitions
+(`SUBMITTED`, `CANCELING`, retry reopen, direct cancel) are written by `ProcessReconciler`; manual
+resolutions are derived purely by `ManualResolutionTransition` and committed by
+`ProcessCommandService`.
 
-## 9. Reconciliation and Engine command sequence
+### 8.2 Attempt submit states
+
+```mermaid
+stateDiagram-v2
+    direction LR
+    [*] --> CREATED: attempt opened / retry / next generation
+    CREATED --> DISPATCHING: durable CAS before engine submit
+    DISPATCHING --> ACKNOWLEDGED: submit or resolve ACK persists externalId
+    DISPATCHING --> UNKNOWN: submit outcome unknown
+    DISPATCHING --> CONFLICT: engine identity conflict
+    DISPATCHING --> UNAVAILABLE: engine unreachable
+    DISPATCHING --> REJECTED: engine refused the payload
+    UNAVAILABLE --> DISPATCHING: same-generation resubmit after backoff
+    UNKNOWN --> ACKNOWLEDGED: resolution ACK
+    UNKNOWN --> CREATED: resolution NOT_FOUND, budget remains
+    CONFLICT --> ACKNOWLEDGED: resolution ACK
+    CONFLICT --> CREATED: resolution NOT_FOUND, budget remains
+    ACKNOWLEDGED --> [*]: observation lifecycle takes over
+    REJECTED --> [*]: phase FAILED
+```
+
+`stageAndSubmit` persists `DISPATCHING` before the engine call. Any later round or restart observing
+`DISPATCHING` never blindly submits again: it resolves the existing `(submissionKey, requestHash)`
+through `resolveSubmission` or, when the engine cannot resolve (or reports
+`ResolutionUnsupported`), through an attempt-bound manual submission resolution. `ACKNOWLEDGED`
+carries the externalId; `NOT_FOUND` either opens the next bounded submission generation or fails
+the attempt with `SUBMISSION_NOT_ACCEPTED` when the submission budget is exhausted.
+
+### 8.3 Conditions
+
+| Condition | Raised by | Effect while true | Cleared by |
+|---|---|---|---|
+| `SubmissionUnresolved` | submit outcome UNKNOWN/CONFLICT; engine reports `ResolutionUnsupported` | Generation rollover frozen; only submission resolution may advance the attempt | authoritative ACK / NOT_FOUND (engine or manual) |
+| `ExecutionUnresolved` | engine reports the execution LOST | Submit/resolve/observe/cancel frozen for the identity; the reconciler only refreshes a reminder | attempt-bound manual execution result |
+| `EngineUnreachable` | any engine command UNAVAILABLE | Only the persisted operation-specific backoff advances ({3,3,5,8,13,21,34,55}s + jitter); action retry budget is never consumed | first round with all backoff counters back to zero |
+| `CancellationUnsupported` | engine capability lacks cancellation (per capabilityVersion) | Cancel degrades to observe-only | capability-version change or recovery round |
+| `DataRepaired` | reconciler reconstructed missing finality markers | Audit marker only; no scheduling effect | never (audit) |
+
+## 9. Scheduling architecture
+
+Scheduling is level-triggered: an event is only a hint, the durable row is the truth, and every
+wake-up asks the shared scheduler to run one bounded, non-blocking reconcile step for exactly one
+Process. Four wake sources converge on the `DefaultScheduler`; overlap is harmless because
+registrations deduplicate by `ControllerKey` and always keep the earliest deadline.
+
+```mermaid
+flowchart TB
+    subgraph Wake["Wake sources"]
+      LD["PersistenceListener<br/>afterCreated / afterModified / postStart replay"]
+      SELF["ProcessReconciler self re-schedule"]
+      AR["ActiveProcessRescheduler<br/>active-index safety net"]
+      RP["Result persistence retryer<br/>durable-result wake"]
+    end
+
+    subgraph Sched["DefaultScheduler (shared, framework)"]
+      REG["Registry: ControllerKey to ScheduledEntry<br/>single-flight, one wrapper per key"]
+      DQ["DelayQueue<br/>orders deadlines only"]
+      WK["amoro-control-worker-* fixed pool<br/>poll the due head, else park"]
+      WS["SchedulerWaitStrategy<br/>signal-version condition wait"]
+      BO["BackoffPolicy<br/>3,3,5,8,13,21,34,55s cap + 0-250ms jitter"]
+    end
+
+    subgraph Step["ProcessReconciler.invoke() - one bounded step"]
+      GUARD["finality check, nextReconcileAt deadline,<br/>ExecutionUnresolved reminder"]
+      OP["at most one state-machine operation"]
+      CAS["repository CAS"]
+      DISP["engine dispatcher: async submit /<br/>resolve / observe / cancel flight"]
+    end
+
+    RETRY["ProcessResultPersistenceRetryer<br/>bounded reservations, fail-closed"]
+    APPLY["ProcessResultApplier<br/>identity-checked CAS"]
+
+    LD --> REG
+    SELF --> REG
+    AR --> REG
+    RP --> REG
+    REG --> DQ
+    DQ --> WK
+    WK --> GUARD
+    GUARD --> OP
+    OP --> CAS
+    OP --> DISP
+    DISP --> RETRY
+    RETRY --> APPLY
+    APPLY --> CAS
+    APPLY -- "durably handled: markDurablyHandled" --> RP
+    WK -. "park while head not due" .-> WS
+    WK -. "unexpected throw" .-> BO
+```
+
+### 9.1 Single-flight registration semantics
+
+- At most one wrapper per `ControllerKey` is in the queue or in flight; same-key invocations never
+  overlap.
+- Repeated `schedule` calls merge to the earliest deadline; a later request never postpones an
+  earlier one. The wrapper is reinserted as the same object, so queue cardinality never grows with
+  repeated schedules.
+- While a key is in flight (`CLAIMED`), a new request only records the earliest desired deadline,
+  which the worker applies after the invocation returns.
+- `unschedule` terminates the entry generation. Registry entries carry generation identity, so a
+  stale worker can never cancel or requeue an entry recreated under the same key; this is also what
+  lets the durable deletion hook unschedule a controller from the mutation lane.
+- Workers never take a real-time poll: the `DelayQueue` only orders deadlines, a worker drains it
+  with a non-blocking poll once the injected `Clock` says the head is due, and otherwise parks on
+  the signal-version wait. Time advancing alone never wakes a worker; only a signal does
+  (new/shortened deadline, unschedule, shutdown).
+
+```mermaid
+stateDiagram-v2
+    direction LR
+    [*] --> QUEUED: schedule() offers the wrapper
+    QUEUED --> CLAIMED: worker polls the due wrapper
+    CLAIMED --> QUEUED: requeue (period / merged request / backoff)
+    QUEUED --> TERMINATED: unschedule / TerminalState
+    CLAIMED --> TERMINATED: unschedule / TerminalState / shutdown
+    TERMINATED --> [*]
+```
+
+### 9.2 Invocation protocol
+
+`ScheduledController.invokeOnce()` maps one invocation to the next deadline:
+
+| Invocation outcome | Next action |
+|---|---|
+| normal return | requeue at the natural period `amoro.control.scheduler.delay-ms` (default 3s) from completion, shortened by any merged earlier request; the reconciler usually registers its own earlier deadline during `invoke()` |
+| `TerminalState` | entry removed; the controller is never rescheduled (final Process) |
+| any other throwable | requeue with backoff {3,3,5,8,13,21,34,55}s capped at 55s plus [0,250)ms jitter; retries are unlimited |
+
+### 9.3 Reconcile round cadence
+
+One round performs at most one durable state-machine operation and never blocks on an engine
+future. The next wake is:
+
+| Round outcome | Next wake |
+|---|---|
+| `nextReconcileAt` in the future | remaining time |
+| engine command already in flight for the identity | `command-in-flight-delay-ms` (default 250ms) |
+| WAIT (observe poll cadence, REJECTED, retry opened, no engine for route) | `poll-interval-ms` (default 3s) |
+| `ExecutionUnresolved` reminder refresh | execution-unresolved reminder interval (default 300s) |
+| engine UNAVAILABLE | operation backoff persisted into `nextReconcileAt` by the result applier |
+| DISPATCHED / DONE without self-schedule | natural scheduler period; the durable-result wake normally arrives first |
+
+Before dispatching any engine side effect, the reconciler reserves bounded result-persistence
+capacity (`max-pending`, default 1024). A saturated lane makes the round WAIT instead of calling the
+engine, which avoids a completed side effect with no in-process owner capable of persisting its
+result.
+
+### 9.4 Maintenance loops
+
+Single-threaded, bounded loops started after the scheduler and stopped before it
+(`ControlPlaneLifecycle`); each is a repair convenience, never the sole correctness path.
+
+| Loop | Thread | Bounded work |
+|---|---|---|
+| Scheduled dummy trigger | `amoro-process-trigger` | one scanner per registered Action plugin; batch pages of `ManagedTablePort` through the shared creation admission |
+| Active rescheduler | `amoro-process-active-rescheduler` | cursor batch (default 256, 1s runtime cap) over `activeOrder`; re-registers non-final Processes every 30s |
+| Execution handle reaper | `amoro-process-execution-handle-reaper` | bounded due batch of idempotent releases every 60s |
+| TTL maintenance | `amoro-process-ttl` | bounded expiry page after the release gate |
+| Result persistence retry | `amoro-process-result-persistence-retry` | fair bounded retry (default batch 64 every 250ms) of completed engine results |
+| Engine adapter close | `amoro-process-engine-close` | bounded adapter shutdown |
+| Local result retention | `amoro-process-local-retention` | simulated local terminal-result retention |
+
+## 10. Reconciliation and Engine command sequence
 
 ```mermaid
 sequenceDiagram
@@ -393,7 +577,7 @@ case where a completed side effect has no in-process owner capable of persisting
 - UNKNOWN/CONFLICT keeps the same generation and sets `SubmissionUnresolved`.
 - LOST sets `ExecutionUnresolved`; only an exact manual command can finish the attempt.
 
-## 10. Cancel and manual resolution
+## 11. Cancel and manual resolution
 
 `PATCH desiredState=CANCEL` persists monotonic intent only. The API thread never calls an Engine.
 The reconciler then resolves an uncertain submission, transitions an acknowledged execution to
@@ -409,7 +593,7 @@ Engine callbacks use the same identity and audit guards. Once a manual result cl
 late submit, resolve, observe, or cancel results are treated as durably handled no-ops and cannot
 overwrite the operator conclusion.
 
-## 11. Release and TTL sequence
+## 12. Release and TTL sequence
 
 ```mermaid
 sequenceDiagram
@@ -446,23 +630,23 @@ still exists. The same mutation lane runs the durable deletion hook and unschedu
 so a failed delete never unschedules an active Process and an old delete cannot kill a new same-name
 controller.
 
-## 12. Thread and queue ownership
+## 13. Thread and queue ownership
 
 | Thread / pool | Bound | Work allowed | Work forbidden |
 |---|---:|---|---|
 | HTTP request pool | Server-managed | DTO validation, snapshot reads, bounded repository calls | Engine calls, Action execution |
 | `amoro-control-worker-*` | `amoro.control.scheduler.workers` | One short reconcile step | Blocking on futures or DB client I/O outside repository facade |
 | `process-mutation-lane` | One thread, bounded mailbox | Ordered derive, DB write, projection publish | Engine/network calls |
-| `amoro-listener-worker-*` | Bounded workers/queue/retries | Post-commit event delivery | Defining correctness by event delivery alone |
+| `control-plane-*` listener workers | Bounded workers/queue/retries | Post-commit event delivery | Defining correctness by event delivery alone |
 | `amoro-process-local-action-*` | Simulation worker count + bounded queue | Dummy Local execution only | Iceberg/Paimon table or Action calls |
 | Engine timeout executor | One per selected Engine | Future completion guards | Business state mutation |
-| Result persistence retry lane | One thread, bounded reservations | Fair retry of completed Engine result CAS | New Engine commands |
-| Active rescheduler | One thread, bounded cursor/runtime | Repair missed listener wakeups | Full cache scan |
-| Execution handle reaper | One thread, bounded due batch | Idempotent release only | Business outcome changes |
-| Scheduled dummy trigger | One thread, bounded table pages | Dummy fact evaluation and shared creation service | Real table probing |
-| TTL maintenance | One thread, bounded expiry page | Expected-version delete after release gate | TRUNCATE or full-cache traversal |
+| Result persistence retry lane (`amoro-process-result-persistence-retry`) | One thread, bounded reservations | Fair retry of completed Engine result CAS | New Engine commands |
+| Active rescheduler (`amoro-process-active-rescheduler`) | One thread, bounded cursor/runtime | Repair missed listener wakeups | Full cache scan |
+| Execution handle reaper (`amoro-process-execution-handle-reaper`) | One thread, bounded due batch | Idempotent release only | Business outcome changes |
+| Scheduled dummy trigger (`amoro-process-trigger`) | One thread, bounded table pages | Dummy fact evaluation and shared creation service | Real table probing |
+| TTL maintenance (`amoro-process-ttl`) | One thread, bounded expiry page | Expected-version delete after release gate | TRUNCATE or full-cache traversal |
 
-## 13. Provider SPI and deployment modes
+## 14. Provider SPI and deployment modes
 
 `ServiceLoader` discovers `ProcessEngineFactory`, `ProcessActionPluginFactory`, and the Local Action
 seam with an explicit classloader. Factory identity includes canonical name and `ProviderMode`.
@@ -484,7 +668,7 @@ A future real provider implements the same ports in a separate delivery. Registe
 not sufficient: only the intersection of selected Action support and selected Engine names becomes
 an admitted route.
 
-## 14. REST surface
+## 15. REST surface
 
 | Method | Path | Purpose |
 |---|---|---|
@@ -499,7 +683,7 @@ Unknown request fields and malformed bodies return `400`. API errors use the sta
 `{code,message,timestamp,traceId}` shape. Persistence outcome unknown is distinct from ordinary
 unavailability and fences the identity instead of inviting a new side-effecting request.
 
-## 15. Startup, restart, and shutdown
+## 16. Startup, restart, and shutdown
 
 Startup order:
 
@@ -520,7 +704,7 @@ destroy callbacks also cover partial startup failures. Any durable `DISPATCHING`
 terminal-release, or expiry state left at shutdown is reconstructed from the DB on the next
 startup.
 
-## 16. Verification boundary
+## 17. Verification boundary
 
 The release gate requires:
 
