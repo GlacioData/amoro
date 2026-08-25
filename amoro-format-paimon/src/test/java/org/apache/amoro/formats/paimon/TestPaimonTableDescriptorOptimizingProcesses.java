@@ -20,8 +20,11 @@ package org.apache.amoro.formats.paimon;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -31,6 +34,7 @@ import org.apache.amoro.AmoroTable;
 import org.apache.amoro.process.ProcessStatus;
 import org.apache.amoro.table.TableIdentifier;
 import org.apache.amoro.table.descriptor.OptimizingProcessInfo;
+import org.apache.amoro.table.descriptor.OptimizingTaskInfo;
 import org.apache.commons.lang3.tuple.Pair;
 import org.apache.paimon.FileStore;
 import org.apache.paimon.Snapshot;
@@ -104,8 +108,15 @@ class TestPaimonTableDescriptorOptimizingProcesses {
    */
   private static AmoroTable<?> wireAmoroTable(
       SnapshotManager snapshotManager, ManifestList manifestList, ManifestFile manifestFile) {
-    FileStore<?> store = mock(FileStore.class);
+    FileStore<?> store = mock(FileStore.class, RETURNS_DEEP_STUBS);
     when(store.snapshotManager()).thenReturn(snapshotManager);
+    when(
+            store
+                .pathFactory()
+                .createDataFilePathFactory(any(), anyInt())
+                .toPath(any(DataFileMeta.class))
+                .toString())
+        .thenReturn("hdfs://test/data-file.parquet");
 
     // ManifestFile / ManifestList are pulled via a factory(). Both factories follow the same
     // shape: factory.create() -> instance.
@@ -193,6 +204,114 @@ class TestPaimonTableDescriptorOptimizingProcesses {
   /** Arms an empty manifest for a snapshot — keeps {@code hasMaxLevels=false}, yielding MINOR. */
   private static void armSnapshotEmpty(ManifestList manifestList, Snapshot snapshot) {
     when(manifestList.readDeltaManifests(snapshot)).thenReturn(Collections.emptyList());
+  }
+
+  private static ManifestEntry manifestEntry(FileKind kind, int bucket, long fileSize) {
+    DataFileMeta file = mock(DataFileMeta.class);
+    when(file.fileSize()).thenReturn(fileSize);
+
+    ManifestEntry entry = mock(ManifestEntry.class);
+    when(entry.file()).thenReturn(file);
+    when(entry.bucket()).thenReturn(bucket);
+    when(entry.kind()).thenReturn(kind);
+    return entry;
+  }
+
+  @Test
+  void optimizingTaskSummaryUsesFileCountsInsteadOfPaths() throws Exception {
+    Snapshot snapshot = mockSnapshot(42L, Snapshot.CommitKind.COMPACT);
+    SnapshotManager manager = mock(SnapshotManager.class);
+    when(manager.tryGetSnapshot(42L)).thenReturn(snapshot);
+
+    ManifestList manifestList = mock(ManifestList.class);
+    ManifestFile manifestFile = mock(ManifestFile.class);
+    ManifestFileMeta manifestMeta = mock(ManifestFileMeta.class);
+    when(manifestMeta.fileName()).thenReturn("compact-manifest");
+    when(manifestList.readDeltaManifests(snapshot))
+        .thenReturn(Collections.singletonList(manifestMeta));
+    List<ManifestEntry> manifestEntries =
+        Arrays.asList(
+            manifestEntry(FileKind.DELETE, 0, 100L),
+            manifestEntry(FileKind.DELETE, 0, 200L),
+            manifestEntry(FileKind.DELETE, 0, 300L),
+            manifestEntry(FileKind.ADD, 0, 400L));
+    when(manifestFile.read("compact-manifest"))
+        .thenReturn(manifestEntries);
+
+    AmoroTable<?> amoroTable = wireAmoroTable(manager, manifestList, manifestFile);
+
+    List<OptimizingTaskInfo> taskInfos =
+        new PaimonTableDescriptor().getOptimizingTaskInfos(amoroTable, "42");
+
+    assertEquals(1, taskInfos.size());
+    OptimizingTaskInfo taskInfo = taskInfos.get(0);
+    assertEquals("3", taskInfo.getSummary().get("removed-files"));
+    assertEquals("1", taskInfo.getSummary().get("added-files"));
+    assertFalse(taskInfo.getSummary().containsKey("deleted-files-count"));
+    assertFalse(taskInfo.getSummary().containsKey("added-files-count"));
+    assertEquals(3, taskInfo.getInputFiles().getFileCnt());
+    assertEquals(600L, taskInfo.getInputFiles().getTotalSize());
+    assertEquals(1, taskInfo.getOutputFiles().getFileCnt());
+    assertEquals(400L, taskInfo.getOutputFiles().getTotalSize());
+  }
+
+  @Test
+  void optimizingTaskSummaryCountsFilesIndependentlyPerBucket() throws Exception {
+    Snapshot snapshot = mockSnapshot(43L, Snapshot.CommitKind.COMPACT);
+    SnapshotManager manager = mock(SnapshotManager.class);
+    when(manager.tryGetSnapshot(43L)).thenReturn(snapshot);
+
+    ManifestList manifestList = mock(ManifestList.class);
+    ManifestFile manifestFile = mock(ManifestFile.class);
+    ManifestFileMeta manifestMeta = mock(ManifestFileMeta.class);
+    when(manifestMeta.fileName()).thenReturn("multi-bucket-manifest");
+    when(manifestList.readDeltaManifests(snapshot))
+        .thenReturn(Collections.singletonList(manifestMeta));
+    List<ManifestEntry> manifestEntries =
+        Arrays.asList(
+            manifestEntry(FileKind.DELETE, 0, 100L),
+            manifestEntry(FileKind.ADD, 0, 200L),
+            manifestEntry(FileKind.DELETE, 1, 300L),
+            manifestEntry(FileKind.ADD, 1, 400L),
+            manifestEntry(FileKind.ADD, 1, 500L));
+    when(manifestFile.read("multi-bucket-manifest")).thenReturn(manifestEntries);
+
+    AmoroTable<?> amoroTable = wireAmoroTable(manager, manifestList, manifestFile);
+
+    List<OptimizingTaskInfo> taskInfos =
+        new PaimonTableDescriptor().getOptimizingTaskInfos(amoroTable, "43");
+    Map<String, OptimizingTaskInfo> tasksByBucket =
+        taskInfos.stream().collect(Collectors.toMap(OptimizingTaskInfo::getPartitionData, t -> t));
+
+    assertEquals(2, taskInfos.size());
+    assertEquals("1", tasksByBucket.get("bucket-0").getSummary().get("removed-files"));
+    assertEquals("1", tasksByBucket.get("bucket-0").getSummary().get("added-files"));
+    assertEquals("1", tasksByBucket.get("bucket-1").getSummary().get("removed-files"));
+    assertEquals("2", tasksByBucket.get("bucket-1").getSummary().get("added-files"));
+    assertEquals(1, tasksByBucket.get("bucket-0").getOutputFiles().getFileCnt());
+    assertEquals(2, tasksByBucket.get("bucket-1").getOutputFiles().getFileCnt());
+  }
+
+  @Test
+  void emptyCompactManifestProducesNoOptimizingTasks() throws Exception {
+    Snapshot snapshot = mockSnapshot(44L, Snapshot.CommitKind.COMPACT);
+    SnapshotManager manager = mock(SnapshotManager.class);
+    when(manager.tryGetSnapshot(44L)).thenReturn(snapshot);
+
+    ManifestList manifestList = mock(ManifestList.class);
+    ManifestFile manifestFile = mock(ManifestFile.class);
+    ManifestFileMeta manifestMeta = mock(ManifestFileMeta.class);
+    when(manifestMeta.fileName()).thenReturn("empty-manifest");
+    when(manifestList.readDeltaManifests(snapshot))
+        .thenReturn(Collections.singletonList(manifestMeta));
+    when(manifestFile.read("empty-manifest")).thenReturn(Collections.emptyList());
+
+    AmoroTable<?> amoroTable = wireAmoroTable(manager, manifestList, manifestFile);
+
+    List<OptimizingTaskInfo> taskInfos =
+        new PaimonTableDescriptor().getOptimizingTaskInfos(amoroTable, "44");
+
+    assertTrue(taskInfos.isEmpty());
   }
 
   @Test

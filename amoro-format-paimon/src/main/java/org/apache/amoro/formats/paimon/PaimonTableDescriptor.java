@@ -699,12 +699,11 @@ public class PaimonTableDescriptor implements FormatTableDescriptor {
             BucketStatistics bucketStats =
                 bucketStatsMap.computeIfAbsent(bucket, k -> new BucketStatistics());
             if (compactManifestEntry.kind() == FileKind.DELETE) {
-              bucketStats.deletedFiles++;
+              bucketStats.removedFileCount++;
               bucketStats.inputSize += compactManifestEntry.file().fileSize();
-              bucketStats.removedFilePaths.add(fullFilePath(store, compactManifestEntry));
             } else {
+              bucketStats.addedFileCount++;
               bucketStats.outputSize += compactManifestEntry.file().fileSize();
-              bucketStats.addedFilePaths.add(fullFilePath(store, compactManifestEntry));
             }
           }
         }
@@ -718,20 +717,18 @@ public class PaimonTableDescriptor implements FormatTableDescriptor {
 
           // Create FilesStatistics for input and output
           FilesStatistics inputFiles =
-              FilesStatistics.builder().addFiles(stats.inputSize, stats.deletedFiles).build();
+              FilesStatistics.builder().addFiles(stats.inputSize, stats.removedFileCount).build();
 
           FilesStatistics outputFiles =
               FilesStatistics.builder()
-                  .addFiles(stats.outputSize, stats.addedFilePaths.size())
+                  .addFiles(stats.outputSize, stats.addedFileCount)
                   .build();
 
           // Create summary with bucket information
           Map<String, String> summary = new HashMap<>();
           summary.put("bucket", String.valueOf(bucket));
-          summary.put("deleted-files-count", String.valueOf(stats.deletedFiles));
-          summary.put("added-files-count", String.valueOf(stats.addedFilePaths.size()));
-          summary.put("removed-files", String.join(",", stats.removedFilePaths));
-          summary.put("added-files", String.join(",", stats.addedFilePaths));
+          summary.put("removed-files", String.valueOf(stats.removedFileCount));
+          summary.put("added-files", String.valueOf(stats.addedFileCount));
 
           // Create OptimizingTaskInfo
           OptimizingTaskInfo taskInfo =
@@ -766,11 +763,10 @@ public class PaimonTableDescriptor implements FormatTableDescriptor {
 
   // Helper class to collect bucket-level statistics
   private static class BucketStatistics {
-    int deletedFiles = 0;
+    int removedFileCount = 0;
+    int addedFileCount = 0;
     long inputSize = 0;
     long outputSize = 0;
-    List<String> removedFilePaths = new ArrayList<>();
-    List<String> addedFilePaths = new ArrayList<>();
 
     public BucketStatistics() {}
   }
