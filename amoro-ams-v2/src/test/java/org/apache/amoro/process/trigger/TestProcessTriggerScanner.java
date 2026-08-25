@@ -28,7 +28,6 @@ import org.apache.amoro.process.ProcessCreationService;
 import org.apache.amoro.process.ProcessDomainAssembly;
 import org.apache.amoro.process.ProcessTestFixtures;
 import org.apache.amoro.process.TestProcessDomain;
-import org.apache.amoro.process.rest.ProcessRestSupport;
 import org.apache.amoro.resources.ProcessResource;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -53,7 +52,6 @@ public class TestProcessTriggerScanner {
 
   private DefaultScheduler scheduler;
   private ProcessDomainAssembly assembly;
-  private ProcessRestSupport rest;
   private ProcessCreationService creationService;
   private InMemoryManagedTables tables;
   private ProcessTriggerScanner scanner;
@@ -71,9 +69,6 @@ public class TestProcessTriggerScanner {
             10_000L,
             65536);
     creationService = new ProcessCreationService(assembly);
-    rest =
-        org.apache.amoro.process.ProcessTestFixtures.simulatedRestSupport(
-            assembly, creationService);
     tables = new InMemoryManagedTables();
     tables.add("prod", "db1", "orders", "42");
     tables.add("prod", "db1", "events", "43");

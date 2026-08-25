@@ -145,16 +145,6 @@ public class ControlPlaneAutoConfiguration {
             creation.getRetryDelaySeconds()));
   }
 
-  @Bean
-  public org.apache.amoro.process.rest.ProcessRestSupport processRestSupport(
-      org.apache.amoro.process.ProcessDomainAssembly assembly,
-      org.apache.amoro.process.ProcessCreationService creationService,
-      org.apache.amoro.process.rest.ProcessRestSupport.TableCatalogPort tableCatalog,
-      org.apache.amoro.process.rest.ProcessActionCatalog actionCatalog) {
-    return new org.apache.amoro.process.rest.ProcessRestSupport(
-        assembly, tableCatalog, creationService, actionCatalog);
-  }
-
   // ------------------------------------------------------------------ process runtime (engines +
   // scheduling)
 
@@ -225,30 +215,30 @@ public class ControlPlaneAutoConfiguration {
   }
 
   @Bean
-  public org.apache.amoro.process.rest.ProcessRestSupport.TableCatalogPort processTableCatalog() {
+  public org.apache.amoro.service.ProcessService.TableCatalogPort processTableCatalog() {
     if (!processProperties.getSimulation().isEnabled()) {
       return emptyProcessTableCatalog();
     }
-    return new org.apache.amoro.process.rest.ProcessRestSupport.TableCatalogPort() {
+    return new org.apache.amoro.service.ProcessService.TableCatalogPort() {
       @Override
-      public org.apache.amoro.process.rest.ProcessRestSupport.TableIdentity resolve(
+      public org.apache.amoro.service.ProcessService.TableIdentity resolve(
           String catalog, String database, String table) {
         if (!org.apache.amoro.process.trigger.simulated.SimulatedProcessFixture.matches(
             catalog, database, table)) {
           return null;
         }
-        return new org.apache.amoro.process.rest.ProcessRestSupport.TableIdentity(
+        return new org.apache.amoro.service.ProcessService.TableIdentity(
             org.apache.amoro.process.trigger.simulated.SimulatedProcessFixture.TABLE_ID,
             org.apache.amoro.process.trigger.simulated.SimulatedProcessFixture.TABLE_FORMAT);
       }
     };
   }
 
-  private static org.apache.amoro.process.rest.ProcessRestSupport.TableCatalogPort
+  private static org.apache.amoro.service.ProcessService.TableCatalogPort
       emptyProcessTableCatalog() {
-    return new org.apache.amoro.process.rest.ProcessRestSupport.TableCatalogPort() {
+    return new org.apache.amoro.service.ProcessService.TableCatalogPort() {
       @Override
-      public org.apache.amoro.process.rest.ProcessRestSupport.TableIdentity resolve(
+      public org.apache.amoro.service.ProcessService.TableIdentity resolve(
           String catalog, String database, String table) {
         return null;
       }

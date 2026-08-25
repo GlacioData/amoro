@@ -9,15 +9,17 @@
  *
  *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
-package org.apache.amoro.rest;
+package org.apache.amoro.resources;
 
+import com.fasterxml.jackson.annotation.JsonAutoDetect;
 import com.fasterxml.jackson.annotation.JsonPropertyOrder;
 import lombok.Builder;
 import lombok.Getter;
@@ -25,10 +27,17 @@ import lombok.Getter;
 import java.util.List;
 
 /**
- * K8s-style list envelope for REST collection endpoints: {@code apiVersion/kind/metadata/items}.
- * Unlike the appmanager reference (whose metadata block is empty), pagination rides inside {@link
+ * K8s-style list envelope for resource collections: {@code apiVersion/kind/metadata/items}. Unlike
+ * the appmanager reference (whose metadata block is empty), pagination rides inside {@link
  * ResourceListMetadata}: one index snapshot serves both the page and the total.
+ *
+ * <p>Fields serialize by name (the resources package uses fluent accessors, invisible to Jackson)
+ * following the same {@code @JsonAutoDetect} contract as {@link ProcessResource}.
  */
+@JsonAutoDetect(
+    fieldVisibility = JsonAutoDetect.Visibility.ANY,
+    getterVisibility = JsonAutoDetect.Visibility.NONE,
+    isGetterVisibility = JsonAutoDetect.Visibility.NONE)
 @Getter
 @Builder
 @JsonPropertyOrder({"apiVersion", "kind", "metadata", "items"})
@@ -40,6 +49,10 @@ public final class ResourceList<T> {
   private final List<T> items;
 
   /** Pagination metadata: total comes from the same snapshot that produced the items. */
+  @JsonAutoDetect(
+      fieldVisibility = JsonAutoDetect.Visibility.ANY,
+      getterVisibility = JsonAutoDetect.Visibility.NONE,
+      isGetterVisibility = JsonAutoDetect.Visibility.NONE)
   @Getter
   @Builder
   @JsonPropertyOrder({"total", "page", "pageSize"})

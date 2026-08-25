@@ -40,12 +40,13 @@ import org.apache.amoro.process.engine.ProcessEngineRegistry;
 import org.apache.amoro.process.engine.ProviderMode;
 import org.apache.amoro.process.rest.ApiError;
 import org.apache.amoro.process.rest.ProcessActionCatalog;
-import org.apache.amoro.process.rest.ProcessRestSupport;
 import org.apache.amoro.process.trigger.ManagedTablePort;
 import org.apache.amoro.process.trigger.ProcessActionPlugin;
 import org.apache.amoro.process.trigger.ProcessActionPluginFactory;
 import org.apache.amoro.process.trigger.ProcessActionRegistry;
 import org.apache.amoro.resources.ProcessResource;
+import org.apache.amoro.service.ProcessService;
+import org.apache.amoro.service.ProcessServiceImpl;
 import org.apache.amoro.test.IsolatedMysql;
 import org.apache.ibatis.session.SqlSession;
 import org.apache.ibatis.session.SqlSessionFactory;
@@ -100,7 +101,7 @@ public class TestProcessE2EMysql {
     private final ProcessEngineRegistry engines = ProcessEngineRegistry.single(ENGINE, dispatcher);
     private final SqlSession blobSession = sqlFactory.openSession(true);
     private final ProcessDomainAssembly assembly;
-    private final ProcessRestSupport rest;
+    private final ProcessServiceImpl rest;
     private final ProcessTtlCleaner cleaner;
     private final ExecutionHandleReaper reaper;
 
@@ -120,7 +121,7 @@ public class TestProcessE2EMysql {
               ProviderMode.SIMULATED,
               new ProcessActionPluginFactory.Context("mysql-e2e"));
       rest =
-          new ProcessRestSupport(
+          new ProcessServiceImpl(
               assembly,
               new DummyTableCatalog(),
               new ProcessCreationService(assembly),
@@ -141,9 +142,9 @@ public class TestProcessE2EMysql {
               idempotencyKey,
               ACTION,
               ENGINE,
-              Collections.singletonMap("simulated", true),
-              "MANUAL")
-          .resource;
+              Collections.singletonMap("simulated", true))
+          .toCompletableFuture()
+          .join();
     }
 
     private void schedule(String processName) {
@@ -239,11 +240,11 @@ public class TestProcessE2EMysql {
     }
   }
 
-  private static final class DummyTableCatalog implements ProcessRestSupport.TableCatalogPort {
+  private static final class DummyTableCatalog implements ProcessService.TableCatalogPort {
     @Override
-    public ProcessRestSupport.TableIdentity resolve(String catalog, String database, String table) {
+    public ProcessService.TableIdentity resolve(String catalog, String database, String table) {
       return CATALOG.equals(catalog) && DATABASE.equals(database) && TABLE.equals(table)
-          ? new ProcessRestSupport.TableIdentity(TABLE_ID, FORMAT)
+          ? new ProcessService.TableIdentity(TABLE_ID, FORMAT)
           : null;
     }
   }

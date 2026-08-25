@@ -35,6 +35,7 @@ import org.apache.amoro.process.ProcessDomainAssembly;
 import org.apache.amoro.process.ProcessTestFixtures;
 import org.apache.amoro.process.TestProcessDomain;
 import org.apache.amoro.resources.ProcessResource;
+import org.apache.amoro.service.ProcessService;
 import org.apache.amoro.service.ProcessServiceImpl;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -60,7 +61,7 @@ public class TestProcessRestApi {
 
   private DefaultScheduler scheduler;
   private ProcessDomainAssembly assembly;
-  private ProcessRestSupport support;
+  private ProcessServiceImpl processService;
   private MockMvc mvc;
   private final ObjectMapper mapper = new ObjectMapper();
 
@@ -75,14 +76,14 @@ public class TestProcessRestApi {
             128,
             10_000L,
             65536);
-    support = org.apache.amoro.process.ProcessTestFixtures.simulatedRestSupport(assembly);
+    processService = ProcessTestFixtures.simulatedProcessService(assembly);
     // mirror the production MVC contract: unknown request fields are rejected (spec §8.1)
     com.fasterxml.jackson.databind.ObjectMapper strict =
         new com.fasterxml.jackson.databind.ObjectMapper();
     strict.configure(
         com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, true);
     mvc =
-        MockMvcBuilders.standaloneSetup(new ProcessController(new ProcessServiceImpl(support)))
+        MockMvcBuilders.standaloneSetup(new ProcessController(processService))
             .setControllerAdvice(new ApiExceptionHandler())
             .setMessageConverters(
                 new org.springframework.http.converter.json.MappingJackson2HttpMessageConverter(
@@ -108,14 +109,14 @@ public class TestProcessRestApi {
   // ------------------------------------------------------------------ create
 
   @Test
-  public void createReturns201WithVersionOneAndPENDING() throws Exception {
+  public void createReturns200WithVersionOneAndPENDING() throws Exception {
     MvcResult result =
         mvc.perform(
                 post(CREATE)
                     .header("Idempotency-Key", "key-1")
                     .contentType("application/json")
                     .content(body("dummy-maintenance", "local")))
-            .andExpect(status().isCreated())
+            .andExpect(status().isOk())
             .andExpect(jsonPath("$.resourceVersion").value(1))
             .andExpect(jsonPath("$.status.phase").value("PENDING"))
             .andExpect(jsonPath("$.spec.desiredState").value("RUN"))
@@ -133,7 +134,7 @@ public class TestProcessRestApi {
                     .header("Idempotency-Key", "key-1")
                     .contentType("application/json")
                     .content(body("dummy-maintenance", "local")))
-            .andExpect(status().isCreated())
+            .andExpect(status().isOk())
             .andReturn();
     String name = mapper.readTree(first.getResponse().getContentAsString()).get("name").asText();
 
@@ -153,7 +154,7 @@ public class TestProcessRestApi {
                 .header("Idempotency-Key", "key-1")
                 .contentType("application/json")
                 .content(body("dummy-maintenance", "local")))
-        .andExpect(status().isCreated());
+        .andExpect(status().isOk());
 
     mvc.perform(
             post(CREATE)
@@ -248,24 +249,26 @@ public class TestProcessRestApi {
               return "blocked-create";
             },
             Duration.ofMillis(25));
-    ProcessRestSupport blockingSupport =
-        ProcessTestFixtures.simulatedRestSupport(assembly, blockingCreation);
+    ProcessServiceImpl blockingService =
+        ProcessTestFixtures.simulatedProcessService(assembly, blockingCreation);
     MockMvc blockingMvc =
-        MockMvcBuilders.standaloneSetup(
-                new ProcessController(new ProcessServiceImpl(blockingSupport)))
+        MockMvcBuilders.standaloneSetup(new ProcessController(blockingService))
             .setControllerAdvice(new ApiExceptionHandler())
             .build();
-    CompletableFuture<ProcessRestSupport.CreateResult> first =
+    CompletableFuture<ProcessResource> first =
         CompletableFuture.supplyAsync(
             () ->
-                blockingSupport.create(
-                    "prod",
-                    "db1",
-                    "orders",
-                    "first",
-                    "dummy-maintenance",
-                    "local",
-                    Collections.emptyMap()));
+                blockingService
+                    .create(
+                        "prod",
+                        "db1",
+                        "orders",
+                        "first",
+                        "dummy-maintenance",
+                        "local",
+                        Collections.emptyMap())
+                    .toCompletableFuture()
+                    .join());
     assertTrue(nameGenerationEntered.await(1, TimeUnit.SECONDS));
 
     blockingMvc
@@ -287,31 +290,34 @@ public class TestProcessRestApi {
   @Test
   public void createUsesOneAtomicTableIdentitySnapshot() {
     AtomicInteger resolves = new AtomicInteger();
-    ProcessRestSupport atomicSupport =
-        new ProcessRestSupport(
+    ProcessServiceImpl atomicService =
+        new ProcessServiceImpl(
             assembly,
             (catalog, database, table) -> {
               if (resolves.incrementAndGet() > 1) {
                 throw new AssertionError("table identity was resolved more than once");
               }
-              return new ProcessRestSupport.TableIdentity("stable-table-id", "simulated");
+              return new ProcessService.TableIdentity("stable-table-id", "simulated");
             },
             new org.apache.amoro.process.ProcessCreationService(assembly),
             ProcessActionCatalog.simulatedRoutingFixtures());
 
-    ProcessRestSupport.CreateResult created =
-        atomicSupport.create(
-            "prod",
-            "db1",
-            "orders",
-            "atomic-table",
-            "dummy-maintenance",
-            "local",
-            Collections.emptyMap());
+    ProcessResource created =
+        atomicService
+            .create(
+                "prod",
+                "db1",
+                "orders",
+                "atomic-table",
+                "dummy-maintenance",
+                "local",
+                Collections.emptyMap())
+            .toCompletableFuture()
+            .join();
 
     assertEquals(1, resolves.get());
-    assertEquals("stable-table-id", created.resource.spec().table().tableId());
-    assertEquals("simulated", created.resource.spec().table().tableFormat());
+    assertEquals("stable-table-id", created.spec().table().tableId());
+    assertEquals("simulated", created.spec().table().tableFormat());
   }
 
   @Test
@@ -332,7 +338,7 @@ public class TestProcessRestApi {
                 .header("Idempotency-Key", "key-1")
                 .contentType("application/json")
                 .content(body("dummy-maintenance", "local")))
-        .andExpect(status().isCreated());
+        .andExpect(status().isOk());
 
     mvc.perform(
             post(CREATE)
@@ -372,13 +378,13 @@ public class TestProcessRestApi {
                 .header("Idempotency-Key", "k1")
                 .contentType("application/json")
                 .content(body("dummy-maintenance", "local")))
-        .andExpect(status().isCreated());
+        .andExpect(status().isOk());
     mvc.perform(
             post("/api/ams/v2/tables/prod/db1/orders2/processes")
                 .header("Idempotency-Key", "k2")
                 .contentType("application/json")
                 .content(body("dummy-maintenance", "local")))
-        .andExpect(status().isCreated());
+        .andExpect(status().isOk());
 
     mvc.perform(get(CREATE).param("action", "dummy-maintenance"))
         .andExpect(status().isOk())
@@ -634,8 +640,7 @@ public class TestProcessRestApi {
     String name = createDispatchingProcess();
     ProcessResource staged = assembly.repository().get(name);
     String attemptKey = staged.status().attempt().submissionKey();
-    ProcessRestSupport support2 = support;
-    ProcessResource current = support2.get(name);
+    ProcessResource current = processService.get(name).toCompletableFuture().join();
     assembly
         .repository()
         .modify(
@@ -744,14 +749,14 @@ public class TestProcessRestApi {
                 .header("Idempotency-Key", "older")
                 .contentType("application/json")
                 .content(body("dummy-maintenance", "local")))
-        .andExpect(status().isCreated());
+        .andExpect(status().isOk());
     Thread.sleep(50L); // distinct createdAt
     mvc.perform(
             post("/api/ams/v2/tables/prod/db1/orders2/processes")
                 .header("Idempotency-Key", "newer")
                 .contentType("application/json")
                 .content(body("dummy-maintenance", "local")))
-        .andExpect(status().isCreated());
+        .andExpect(status().isOk());
 
     // both under one table for ordering: second create targeted orders2; use orders only
     mvc.perform(get(CREATE))

@@ -27,8 +27,8 @@ import org.apache.amoro.persistence.PersistenceListener;
 import org.apache.amoro.process.engine.ExecutionHandleRegistry;
 import org.apache.amoro.process.engine.LocalEngineAdapter;
 import org.apache.amoro.process.engine.ProcessEngineRegistry;
-import org.apache.amoro.process.rest.ProcessRestSupport;
 import org.apache.amoro.resources.ProcessResource;
+import org.apache.amoro.service.ProcessServiceImpl;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -52,7 +52,7 @@ public class TestAutoSchedulingWiring {
   private DefaultScheduler scheduler;
   private LocalEngineAdapter localEngine;
   private ProcessDomainAssembly assembly;
-  private ProcessRestSupport rest;
+  private ProcessServiceImpl rest;
   private ProcessEngineRegistry engines;
 
   @BeforeEach
@@ -72,7 +72,7 @@ public class TestAutoSchedulingWiring {
             10_000L,
             65536,
             new ExecutionHandleRegistry());
-    rest = ProcessTestFixtures.simulatedRestSupport(assembly);
+    rest = ProcessTestFixtures.simulatedProcessService(assembly);
     registerSchedulingListener();
   }
 
@@ -124,7 +124,9 @@ public class TestAutoSchedulingWiring {
   @Test
   public void restCreatedProcessAutoSchedulesToSuccess() {
     ProcessResource created =
-        rest.create("prod", "db", "orders", "wire-1", "dummy-maintenance", "local", null).resource;
+        rest.create("prod", "db", "orders", "wire-1", "dummy-maintenance", "local", null)
+            .toCompletableFuture()
+            .join();
 
     await()
         .atMost(30, TimeUnit.SECONDS)
@@ -142,7 +144,9 @@ public class TestAutoSchedulingWiring {
   @Test
   public void pendingProcessIsRescheduledAfterRebuild() {
     ProcessResource created =
-        rest.create("prod", "db", "orders", "wire-2", "dummy-maintenance", "local", null).resource;
+        rest.create("prod", "db", "orders", "wire-2", "dummy-maintenance", "local", null)
+            .toCompletableFuture()
+            .join();
     await()
         .atMost(30, TimeUnit.SECONDS)
         .until(
@@ -167,7 +171,7 @@ public class TestAutoSchedulingWiring {
             10_000L,
             65536,
             new ExecutionHandleRegistry());
-    rest = ProcessTestFixtures.simulatedRestSupport(assembly);
+    rest = ProcessTestFixtures.simulatedProcessService(assembly);
     registerSchedulingListener();
     assembly.persistence().postStart();
 

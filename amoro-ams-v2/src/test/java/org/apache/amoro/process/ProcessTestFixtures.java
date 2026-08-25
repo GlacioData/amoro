@@ -19,8 +19,9 @@
 package org.apache.amoro.process;
 
 import org.apache.amoro.process.rest.ProcessActionCatalog;
-import org.apache.amoro.process.rest.ProcessRestSupport;
 import org.apache.amoro.resources.ProcessResource;
+import org.apache.amoro.service.ProcessService;
+import org.apache.amoro.service.ProcessServiceImpl;
 
 import java.time.Instant;
 
@@ -29,22 +30,22 @@ public final class ProcessTestFixtures {
 
   private ProcessTestFixtures() {}
 
-  /** Explicit simulated REST fixture; production/default constructors intentionally expose none. */
-  public static ProcessRestSupport simulatedRestSupport(ProcessDomainAssembly assembly) {
-    return simulatedRestSupport(assembly, new ProcessCreationService(assembly));
+  /** Explicit simulated service fixture; production wiring comes from Spring auto-configuration. */
+  public static ProcessServiceImpl simulatedProcessService(ProcessDomainAssembly assembly) {
+    return simulatedProcessService(assembly, new ProcessCreationService(assembly));
   }
 
-  public static ProcessRestSupport simulatedRestSupport(
+  public static ProcessServiceImpl simulatedProcessService(
       ProcessDomainAssembly assembly, ProcessCreationService creationService) {
-    return new ProcessRestSupport(
+    return new ProcessServiceImpl(
         assembly,
-        new ProcessRestSupport.TableCatalogPort() {
+        new ProcessService.TableCatalogPort() {
           @Override
-          public ProcessRestSupport.TableIdentity resolve(
+          public ProcessService.TableIdentity resolve(
               String catalog, String database, String table) {
             return "ghost-table".equals(table) || "ghost".equals(database)
                 ? null
-                : new ProcessRestSupport.TableIdentity(
+                : new ProcessService.TableIdentity(
                     Integer.toUnsignedString(java.util.Objects.hash(catalog, database, table), 16),
                     "simulated");
           }

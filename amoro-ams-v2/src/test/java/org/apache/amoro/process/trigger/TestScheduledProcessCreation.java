@@ -28,7 +28,7 @@ import org.apache.amoro.process.ProcessDomainAssembly;
 import org.apache.amoro.process.ProcessFinality;
 import org.apache.amoro.process.TestProcessDomain;
 import org.apache.amoro.process.rest.ApiError;
-import org.apache.amoro.process.rest.ProcessRestSupport;
+import org.apache.amoro.service.ProcessServiceImpl;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -71,8 +71,8 @@ public class TestScheduledProcessCreation {
   @Test
   public void restAndScannerPersistExactlyOneActiveProcess() throws Exception {
     ProcessCreationService creationService = new ProcessCreationService(assembly);
-    ProcessRestSupport rest =
-        org.apache.amoro.process.ProcessTestFixtures.simulatedRestSupport(
+    ProcessServiceImpl rest =
+        org.apache.amoro.process.ProcessTestFixtures.simulatedProcessService(
             assembly, creationService);
     ManagedTablePort tables =
         new SimulatedManagedTablePort(

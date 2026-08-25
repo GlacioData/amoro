@@ -26,8 +26,8 @@ import org.apache.amoro.process.ProcessDomainAssembly;
 import org.apache.amoro.process.engine.ProcessEngineRegistry;
 import org.apache.amoro.process.rest.ApiError;
 import org.apache.amoro.process.rest.ProcessActionCatalog;
-import org.apache.amoro.process.rest.ProcessRestSupport;
 import org.apache.amoro.resources.ProcessResource;
+import org.apache.amoro.service.ProcessService;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -49,7 +49,7 @@ class SimulatedProcessProviderApplicationTests {
 
   @Autowired private ProcessActionCatalog actions;
 
-  @Autowired private ProcessRestSupport rest;
+  @Autowired private ProcessService rest;
 
   @Autowired private ProcessDomainAssembly assembly;
 
@@ -86,7 +86,8 @@ class SimulatedProcessProviderApplicationTests {
                 "dummy-maintenance",
                 "local",
                 java.util.Collections.singletonMap("value", 1))
-            .resource;
+            .toCompletableFuture()
+            .join();
     ProcessResource localFinal = awaitFinal(local.name());
     assertEquals("simulated", localFinal.spec().table().tableFormat());
     assertEquals("action-plugin", localFinal.status().summary().result().get("submissionBuilder"));
@@ -100,7 +101,8 @@ class SimulatedProcessProviderApplicationTests {
                 "dummy-maintenance",
                 "remote-spark",
                 java.util.Collections.singletonMap("value", 2))
-            .resource;
+            .toCompletableFuture()
+            .join();
     ProcessResource remoteFinal = awaitFinal(remote.name());
     assertEquals("action-plugin", remoteFinal.status().summary().result().get("submissionBuilder"));
   }
@@ -108,7 +110,7 @@ class SimulatedProcessProviderApplicationTests {
   private ProcessResource awaitFinal(String name) throws Exception {
     long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10);
     while (System.nanoTime() < deadline) {
-      ProcessResource resource = rest.get(name);
+      ProcessResource resource = rest.get(name).toCompletableFuture().join();
       if ("SUCCESS".equals(resource.status().phase())) {
         while (assembly
             .indexProjection()

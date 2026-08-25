@@ -9,11 +9,12 @@
  *
  *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package org.apache.amoro.controller;
@@ -28,13 +29,10 @@ import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.responses.ApiResponses;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import org.apache.amoro.process.rest.ApiError;
-import org.apache.amoro.process.rest.ProcessRestSupport;
 import org.apache.amoro.resources.ProcessResource;
+import org.apache.amoro.resources.ResourceList;
 import org.apache.amoro.rest.MoreFutures;
-import org.apache.amoro.rest.ResourceList;
 import org.apache.amoro.service.ProcessService;
-import org.springframework.http.HttpStatus;
-import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -126,8 +124,8 @@ public class ProcessController {
   }
 
   @PostMapping("/tables/{catalog}/{db}/{table}/processes")
-  @Operation(summary = "创建进程", description = "幂等：同 Idempotency-Key + 同请求内容重放返回原进程")
-  public ResponseEntity<ProcessResource> create(
+  @Operation(summary = "创建进程", description = "幂等：同 Idempotency-Key + 同请求内容重放返回原进程，统一 200")
+  public ProcessResource create(
       @Parameter(
               name = "catalog",
               in = ParameterIn.PATH,
@@ -152,19 +150,15 @@ public class ProcessController {
     if (request == null) {
       throw ApiError.of("VALIDATION_FAILED", "request body is required");
     }
-    ProcessRestSupport.CreateResult result =
-        MoreFutures.derefUsingDefaultTimeout(
-            processService.create(
-                catalog,
-                db,
-                table,
-                idempotencyKey,
-                request.action,
-                request.executionEngine,
-                request.parameters));
-    return ResponseEntity.status(result.replay ? HttpStatus.OK : HttpStatus.CREATED)
-        .header("Idempotency-Replayed", String.valueOf(result.replay))
-        .body(result.resource);
+    return MoreFutures.derefUsingDefaultTimeout(
+        processService.create(
+            catalog,
+            db,
+            table,
+            idempotencyKey,
+            request.action,
+            request.executionEngine,
+            request.parameters));
   }
 
   @GetMapping("/processes/{name}")
@@ -204,20 +198,8 @@ public class ProcessController {
       @Parameter(name = "pageSize", description = "每页条数，1..50", example = "20")
           @RequestParam(value = "pageSize", defaultValue = "20")
           int pageSize) {
-    ProcessRestSupport.PageResult pageResult =
-        MoreFutures.derefUsingDefaultTimeout(
-            processService.list(catalog, db, table, action, status, page, pageSize));
-    return ResourceList.<ProcessResource>builder()
-        .apiVersion(ProcessResource.API_VERSION)
-        .kind("ProcessResourceList")
-        .metadata(
-            ResourceList.ResourceListMetadata.builder()
-                .total(pageResult.total)
-                .page(page)
-                .pageSize(pageSize)
-                .build())
-        .items(pageResult.items)
-        .build();
+    return MoreFutures.derefUsingDefaultTimeout(
+        processService.list(catalog, db, table, action, status, page, pageSize));
   }
 
   @PatchMapping("/processes/{name}")
@@ -236,7 +218,7 @@ public class ProcessController {
 
   @PostMapping("/processes/{name}/submission-resolutions")
   @Operation(summary = "提交解析", description = "对提交结果未知的尝试记录人工结论")
-  public ResponseEntity<ProcessResource> submissionResolution(
+  public ProcessResource submissionResolution(
       @Parameter(name = "name", in = ParameterIn.PATH, description = "进程名")
           @PathVariable("name")
           String name,
@@ -251,24 +233,20 @@ public class ProcessController {
     if (request == null) {
       throw ApiError.of("VALIDATION_FAILED", "request body is required");
     }
-    ProcessRestSupport.ResolutionResult result =
-        MoreFutures.derefUsingDefaultTimeout(
-            processService.submissionResolution(
-                name,
-                idempotencyKey,
-                request.submissionKey,
-                request.requestHash,
-                request.resolution,
-                request.externalId,
-                request.reason));
-    return ResponseEntity.ok()
-        .header("Idempotency-Replayed", String.valueOf(result.replay))
-        .body(result.resource);
+    return MoreFutures.derefUsingDefaultTimeout(
+        processService.submissionResolution(
+            name,
+            idempotencyKey,
+            request.submissionKey,
+            request.requestHash,
+            request.resolution,
+            request.externalId,
+            request.reason));
   }
 
   @PostMapping("/processes/{name}/execution-resolutions")
   @Operation(summary = "执行解析", description = "对执行结果未知的尝试记录人工结论")
-  public ResponseEntity<ProcessResource> executionResolution(
+  public ProcessResource executionResolution(
       @Parameter(name = "name", in = ParameterIn.PATH, description = "进程名")
           @PathVariable("name")
           String name,
@@ -283,18 +261,14 @@ public class ProcessController {
     if (request == null) {
       throw ApiError.of("VALIDATION_FAILED", "request body is required");
     }
-    ProcessRestSupport.ResolutionResult result =
-        MoreFutures.derefUsingDefaultTimeout(
-            processService.executionResolution(
-                name,
-                idempotencyKey,
-                request.submissionKey,
-                request.requestHash,
-                request.resolution,
-                request.retryAllowed,
-                request.reason));
-    return ResponseEntity.ok()
-        .header("Idempotency-Replayed", String.valueOf(result.replay))
-        .body(result.resource);
+    return MoreFutures.derefUsingDefaultTimeout(
+        processService.executionResolution(
+            name,
+            idempotencyKey,
+            request.submissionKey,
+            request.requestHash,
+            request.resolution,
+            request.retryAllowed,
+            request.reason));
   }
 }

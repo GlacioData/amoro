@@ -9,17 +9,18 @@
  *
  *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package org.apache.amoro.service;
 
-import org.apache.amoro.process.rest.ProcessRestSupport;
 import org.apache.amoro.resources.ProcessResource;
+import org.apache.amoro.resources.ResourceList;
 
 import java.util.Map;
 import java.util.concurrent.CompletionStage;
@@ -27,20 +28,28 @@ import java.util.concurrent.CompletionStage;
 /**
  * The asynchronous REST-facing process contract (appmanager service-layer style): every method
  * returns a {@link CompletionStage} so the MVC layer can choose its own dereference strategy
- * without touching the contract. The default implementation completes on the caller thread by
- * delegating to {@link ProcessRestSupport}; the asynchronous boundary exists for future
- * non-blocking migrations.
+ * without touching the contract, and every payload is a resource-family object — a single {@link
+ * ProcessResource} or a {@link ResourceList} page. The default implementation completes on the
+ * caller thread; the asynchronous boundary exists for future non-blocking migrations.
  *
- * <p>Validation, admission and persistence semantics live in the underlying layers and are not
- * part of this contract's responsibility.
+ * <p>Idempotent commands (create and the two manual resolutions) return the resulting resource
+ * uniformly, whether the call created it or replayed an existing intent; validation, admission and
+ * persistence semantics live in the underlying layers and are not part of this contract.
  */
 public interface ProcessService {
 
-  /**
-   * Creates (or idempotently replays) a process for the given table; see {@link
-   * ProcessRestSupport#create}.
-   */
-  CompletionStage<ProcessRestSupport.CreateResult> create(
+  /** Format-neutral lookup seam; resolves one atomic identity snapshot for create/list. */
+  interface TableCatalogPort {
+
+    /** Resolves one atomic identity snapshot, or returns null when the table is not managed. */
+    TableIdentity resolve(String catalog, String database, String table);
+  }
+
+  /** Immutable table identity used for the entire create/list operation. */
+  record TableIdentity(String tableId, String tableFormat) {}
+
+  /** Creates (or idempotently replays) a process for the given table and returns the resource. */
+  CompletionStage<ProcessResource> create(
       String catalog,
       String database,
       String table,
@@ -53,7 +62,7 @@ public interface ProcessService {
   CompletionStage<ProcessResource> get(String name);
 
   /** Pages through the processes of one table; one snapshot serves the page and the total. */
-  CompletionStage<ProcessRestSupport.PageResult> list(
+  CompletionStage<ResourceList<ProcessResource>> list(
       String catalog,
       String database,
       String table,
@@ -65,8 +74,8 @@ public interface ProcessService {
   /** Transitions the desired state RUN→CANCEL. */
   CompletionStage<ProcessResource> cancel(String name, String reason);
 
-  /** Records a manual submission resolution; see {@code ProcessRestSupport}. */
-  CompletionStage<ProcessRestSupport.ResolutionResult> submissionResolution(
+  /** Records a manual submission resolution (UNKNOWN/CONFLICT fallback). */
+  CompletionStage<ProcessResource> submissionResolution(
       String name,
       String idempotencyKey,
       String submissionKey,
@@ -75,8 +84,8 @@ public interface ProcessService {
       String externalId,
       String reason);
 
-  /** Records a manual execution resolution; see {@code ProcessRestSupport}. */
-  CompletionStage<ProcessRestSupport.ResolutionResult> executionResolution(
+  /** Records a manual execution resolution (LOST/UNRESOLVED fallback). */
+  CompletionStage<ProcessResource> executionResolution(
       String name,
       String idempotencyKey,
       String submissionKey,
