@@ -73,6 +73,7 @@ export default [
             "tableName": "test_catalog.db.user",
             "optimizeStatus": "idle",
             "duration": 1195501081,
+            "healthScore": 75,
             "fileCount": 0,
             "fileSize": 0,
             "quota": 0.1,

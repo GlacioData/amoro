@@ -43,6 +43,7 @@ public class TableOptimizingInfo {
   private long duration = 0;
   private long fileCount = 0;
   private long fileSize = 0;
+  private int healthScore = -1;
   private double quota = 0;
   private double quotaOccupation = 0.0;
 
@@ -88,6 +89,14 @@ public class TableOptimizingInfo {
     this.fileSize = fileSize;
   }
 
+  public int getHealthScore() {
+    return healthScore;
+  }
+
+  public void setHealthScore(int healthScore) {
+    this.healthScore = healthScore;
+  }
+
   public double getQuota() {
     return quota;
   }
@@ -125,6 +134,7 @@ public class TableOptimizingInfo {
         .add("duration", duration)
         .add("fileCount", fileCount)
         .add("fileSize", fileSize)
+        .add("healthScore", healthScore)
         .add("quota", quota)
         .add("quotaOccupation", quotaOccupation)
         .add("groupName", groupName)

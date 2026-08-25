@@ -33,11 +33,16 @@ export function getOptimizerTableList(
     tableSearchInput: string
     page: number
     pageSize: number
-    actions: string[]
+    actions?: string[]
+    healthScoreMin?: number
+    healthScoreMax?: number
+    durationMinMinutes?: number
+    sortBy?: 'duration' | 'quota'
+    sortOrder?: 'asc' | 'desc'
   },
 ) {
-  const { optimizerGroup, dbSearchInput, tableSearchInput, page, pageSize, actions } = params
-  return request.get(`api/ams/v1/optimize/optimizerGroups/${optimizerGroup}/tables`, { params: { dbSearchInput, tableSearchInput, page, pageSize, actions } })
+  const { optimizerGroup, ...queryParams } = params
+  return request.get(`api/ams/v1/optimize/optimizerGroups/${optimizerGroup}/tables`, { params: queryParams })
 }
 
 export function getOptimizerResourceList(

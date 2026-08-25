@@ -22,6 +22,8 @@ import com.github.pagehelper.Page;
 import com.github.pagehelper.PageHelper;
 import com.github.pagehelper.PageInfo;
 import org.apache.amoro.ServerTableIdentifier;
+import org.apache.amoro.TableFormat;
+import org.apache.amoro.TableRuntime;
 import org.apache.amoro.api.BlockableOperation;
 import org.apache.amoro.api.Blocker;
 import org.apache.amoro.api.TableIdentifier;
@@ -61,6 +63,7 @@ import org.slf4j.LoggerFactory;
 
 import javax.annotation.Nullable;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
@@ -249,34 +252,57 @@ public class DefaultTableManager extends PersistentBase implements TableManager 
 
   @Override
   public Pair<List<TableOptimizingInfo>, Integer> queryTableOptimizingInfo(
-      String optimizerGroup,
-      @Nullable String fuzzyDbName,
-      @Nullable String fuzzyTableName,
-      @Nullable List<Integer> statusCodeFilters,
-      int limit,
-      int offset) {
-
-    // page helper is 1-based
-    int pageNumber = (offset / limit) + 1;
-    int total = 0;
+      TableOptimizingQuery query) {
     List<TableRuntimeMeta> ret;
-    try (Page<?> ignore = PageHelper.startPage(pageNumber, limit, true)) {
+    int total;
+    if (query.requiresDerivedProcessing()) {
       ret =
           getAs(
               TableRuntimeMapper.class,
               mapper ->
                   mapper.queryForGroups(
-                      optimizerGroup, fuzzyDbName, fuzzyTableName, statusCodeFilters));
-      PageInfo<TableRuntimeMeta> pageInfo = new PageInfo<>(ret);
-      total = (int) pageInfo.getTotal();
+                      query.getOptimizerGroup(),
+                      query.getFuzzyDbName(),
+                      query.getFuzzyTableName(),
+                      query.getStatusCodeFilters()));
+      total = ret.size();
+    } else {
+      // PageHelper uses one-based page numbers. Keep this path unchanged for default queries.
+      int pageNumber = (query.getOffset() / query.getLimit()) + 1;
+      try (Page<?> ignore = PageHelper.startPage(pageNumber, query.getLimit(), true)) {
+        ret =
+            getAs(
+                TableRuntimeMapper.class,
+                mapper ->
+                    mapper.queryForGroups(
+                        query.getOptimizerGroup(),
+                        query.getFuzzyDbName(),
+                        query.getFuzzyTableName(),
+                        query.getStatusCodeFilters()));
+        PageInfo<TableRuntimeMeta> pageInfo = new PageInfo<>(ret);
+        total = (int) pageInfo.getTotal();
+      }
     }
 
     if (ret.isEmpty()) {
       return Pair.of(Collections.emptyList(), total);
     }
 
+    List<TableOptimizingInfo> infos = buildTableOptimizingInfos(ret);
+    if (!query.requiresDerivedProcessing()) {
+      return Pair.of(infos, total);
+    }
+
+    List<TableOptimizingInfo> filteredInfos = applyDerivedQuery(infos, query);
+    total = filteredInfos.size();
+    int fromIndex = Math.min(query.getOffset(), total);
+    int toIndex = (int) Math.min((long) fromIndex + query.getLimit(), total);
+    return Pair.of(new ArrayList<>(filteredInfos.subList(fromIndex, toIndex)), total);
+  }
+
+  private List<TableOptimizingInfo> buildTableOptimizingInfos(List<TableRuntimeMeta> runtimes) {
     List<Long> tableIds =
-        ret.stream().map(TableRuntimeMeta::getTableId).collect(Collectors.toList());
+        runtimes.stream().map(TableRuntimeMeta::getTableId).collect(Collectors.toList());
     List<ServerTableIdentifier> identifiers =
         getAs(TableMetaMapper.class, mapper -> mapper.selectTableIdentifiers(tableIds));
     Map<Long, ServerTableIdentifier> tableId2Identifier =
@@ -313,18 +339,84 @@ public class DefaultTableManager extends PersistentBase implements TableManager 
                         Collectors.summingInt(OptimizerInstance::getThreadCount)));
 
     List<TableOptimizingInfo> infos =
-        ret.stream()
+        runtimes.stream()
             .map(
                 meta -> {
                   ServerTableIdentifier identifier = tableId2Identifier.get(meta.getTableId());
                   List<OptimizingTaskMeta> tasks = tableTaskMetaMap.get(meta.getTableId());
                   List<TaskRuntime.TaskQuota> quotas = tableQuotaMap.get(meta.getTableId());
                   int threadCount = optimizerThreadCountMap.getOrDefault(meta.getGroupName(), 0);
-                  return OptimizingUtil.buildTableOptimizeInfo(
-                      identifier, meta, tasks, quotas, Math.max(threadCount, 1));
+                  TableOptimizingInfo info =
+                      OptimizingUtil.buildTableOptimizeInfo(
+                          identifier, meta, tasks, quotas, Math.max(threadCount, 1));
+                  info.setHealthScore(resolveHealthScore(tableService, identifier, meta));
+                  return info;
                 })
             .collect(Collectors.toList());
-    return Pair.of(infos, total);
+    return infos;
+  }
+
+  private List<TableOptimizingInfo> applyDerivedQuery(
+      List<TableOptimizingInfo> infos, TableOptimizingQuery query) {
+    List<TableOptimizingInfo> filtered =
+        infos.stream()
+            .filter(info -> matchesHealthScore(info, query))
+            .filter(
+                info ->
+                    query.getDurationMinMinutes() == null
+                        || info.getDuration() > query.getDurationMinMillis())
+            .collect(Collectors.toList());
+
+    Comparator<TableOptimizingInfo> comparator = comparator(query.getSortField());
+    if (comparator != null) {
+      if (query.getSortOrder() == TableOptimizingQuery.SortOrder.DESC) {
+        comparator = comparator.reversed();
+      }
+      filtered.sort(comparator);
+    }
+    return filtered;
+  }
+
+  private boolean matchesHealthScore(TableOptimizingInfo info, TableOptimizingQuery query) {
+    if (query.getHealthScoreMin() == null && query.getHealthScoreMax() == null) {
+      return true;
+    }
+    int healthScore = info.getHealthScore();
+    return healthScore >= 0
+        && (query.getHealthScoreMin() == null || healthScore >= query.getHealthScoreMin())
+        && (query.getHealthScoreMax() == null || healthScore <= query.getHealthScoreMax());
+  }
+
+  @Nullable
+  private Comparator<TableOptimizingInfo> comparator(
+      @Nullable TableOptimizingQuery.SortField sortField) {
+    if (sortField == TableOptimizingQuery.SortField.DURATION) {
+      return Comparator.comparingLong(TableOptimizingInfo::getDuration);
+    }
+    if (sortField == TableOptimizingQuery.SortField.QUOTA) {
+      return Comparator.comparingDouble(TableOptimizingInfo::getQuota);
+    }
+    return null;
+  }
+
+  static int resolveHealthScore(
+      @Nullable TableService tableService,
+      ServerTableIdentifier identifier,
+      TableRuntimeMeta runtimeMeta) {
+    if (identifier.getFormat() != TableFormat.PAIMON) {
+      return runtimeMeta.getTableSummary().getHealthScore();
+    }
+    if (tableService == null) {
+      return -1;
+    }
+    TableRuntime runtime = tableService.getRuntime(identifier.getId());
+    if (!(runtime instanceof DefaultTableRuntime)) {
+      return -1;
+    }
+    return ((DefaultTableRuntime) runtime)
+        .getRuntimeHealthSnapshot()
+        .map(RuntimeHealthSnapshot::getHealthScore)
+        .orElse(-1);
   }
 
   private Map<Long, List<TaskRuntime.TaskQuota>> getQuotaTime(List<Long> tableIds) {

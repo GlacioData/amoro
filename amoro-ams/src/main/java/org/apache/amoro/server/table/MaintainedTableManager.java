@@ -67,11 +67,22 @@ public interface MaintainedTableManager {
    * @return A pair with the first entry is the actual list under the filters with the offset and
    *     limit, and second value will be the number of total entries under the filters.
    */
-  Pair<List<TableOptimizingInfo>, Integer> queryTableOptimizingInfo(
-      String optimizerGroup,
+  default Pair<List<TableOptimizingInfo>, Integer> queryTableOptimizingInfo(
+      @Nullable String optimizerGroup,
       @Nullable String fuzzyDbName,
       @Nullable String fuzzyTableName,
       @Nullable List<Integer> statusCodeFilters,
       int limit,
-      int offset);
+      int offset) {
+    return queryTableOptimizingInfo(
+        TableOptimizingQuery.builder(limit, offset)
+            .optimizerGroup(optimizerGroup)
+            .fuzzyDbName(fuzzyDbName)
+            .fuzzyTableName(fuzzyTableName)
+            .statusCodeFilters(statusCodeFilters)
+            .build());
+  }
+
+  /** Get table optimizing information with derived filters and sorting. */
+  Pair<List<TableOptimizingInfo>, Integer> queryTableOptimizingInfo(TableOptimizingQuery query);
 }
