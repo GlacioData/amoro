@@ -110,12 +110,11 @@ class TestPaimonTableDescriptorOptimizingProcesses {
       SnapshotManager snapshotManager, ManifestList manifestList, ManifestFile manifestFile) {
     FileStore<?> store = mock(FileStore.class, RETURNS_DEEP_STUBS);
     when(store.snapshotManager()).thenReturn(snapshotManager);
-    when(
-            store
-                .pathFactory()
-                .createDataFilePathFactory(any(), anyInt())
-                .toPath(any(DataFileMeta.class))
-                .toString())
+    when(store
+            .pathFactory()
+            .createDataFilePathFactory(any(), anyInt())
+            .toPath(any(DataFileMeta.class))
+            .toString())
         .thenReturn("hdfs://test/data-file.parquet");
 
     // ManifestFile / ManifestList are pulled via a factory(). Both factories follow the same
@@ -235,8 +234,7 @@ class TestPaimonTableDescriptorOptimizingProcesses {
             manifestEntry(FileKind.DELETE, 0, 200L),
             manifestEntry(FileKind.DELETE, 0, 300L),
             manifestEntry(FileKind.ADD, 0, 400L));
-    when(manifestFile.read("compact-manifest"))
-        .thenReturn(manifestEntries);
+    when(manifestFile.read("compact-manifest")).thenReturn(manifestEntries);
 
     AmoroTable<?> amoroTable = wireAmoroTable(manager, manifestList, manifestFile);
 

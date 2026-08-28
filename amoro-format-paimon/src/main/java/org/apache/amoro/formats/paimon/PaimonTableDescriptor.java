@@ -720,9 +720,7 @@ public class PaimonTableDescriptor implements FormatTableDescriptor {
               FilesStatistics.builder().addFiles(stats.inputSize, stats.removedFileCount).build();
 
           FilesStatistics outputFiles =
-              FilesStatistics.builder()
-                  .addFiles(stats.outputSize, stats.addedFileCount)
-                  .build();
+              FilesStatistics.builder().addFiles(stats.outputSize, stats.addedFileCount).build();
 
           // Create summary with bucket information
           Map<String, String> summary = new HashMap<>();

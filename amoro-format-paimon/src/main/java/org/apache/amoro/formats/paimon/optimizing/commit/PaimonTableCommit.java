@@ -48,6 +48,22 @@ import java.util.concurrent.TimeUnit;
  * StreamTableCommit#filterAndCommit} to preserve idempotency for the same {@code (commitUser,
  * commitIdentifier)}.
  *
+ * <p>This distinction is pinned to Apache Paimon 1.4.2 at immutable commit {@code
+ * ac223f47d916f4c8e9c07fd1745db448e4e7d0d8}: {@code StreamTableCommit.commit} does not check
+ * whether an identifier was already committed (<a
+ * href="https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/table/sink/StreamTableCommit.java#L52-L76">source</a>).
+ * Paimon's {@code StreamWriteBuilder} requires a stable {@code commitUser}, matching write/commit
+ * identifiers, and {@code filterAndCommit} for recovery (<a
+ * href="https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/table/sink/StreamWriteBuilder.java#L27-L37">source</a>).
+ * In contrast, {@code filterAndCommit} filters committed identifiers before committing the
+ * remainder (<a
+ * href="https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/table/sink/TableCommitImpl.java#L277-L290">source</a>).
+ * The filter reads the latest snapshot for the same {@code commitUser} and compares the {@code
+ * commitIdentifier} (<a
+ * href="https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/operation/FileStoreCommitImpl.java#L246-L284">source</a>).
+ * Recheck these contracts before upgrading {@code paimon.version}; a successful normal commit must
+ * not be replayed through another direct commit.
+ *
  * <p>The caller is expected to pass the persisted plan commit identifier from {@link
  * org.apache.amoro.formats.paimon.optimizing.PaimonCompactionInput#getCommitIdentifier()}.
  *
