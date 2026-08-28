@@ -38,8 +38,18 @@ import org.junit.Before;
 import org.junit.Test;
 import org.mockito.Mockito;
 
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.stream.Collectors;
 
 public class TestDefaultTableRuntimeStore extends AMSManagerTestBase {
@@ -234,6 +244,263 @@ public class TestDefaultTableRuntimeStore extends AMSManagerTestBase {
             .getStateValue());
   }
 
+  @Test
+  public void testHandlerWaitsForOutermostSynchronizedInvokeToUnlock() {
+    DefaultTableRuntimeStore store = newStore();
+    AtomicInteger originalHandlerCalls = new AtomicInteger();
+    AtomicInteger replacementHandlerCalls = new AtomicInteger();
+    store.setRuntimeHandler(
+        new NoOpTableRuntimeHandler() {
+          @Override
+          public void handleTableChanged(
+              TableRuntime tableRuntime, TableConfiguration originalConfig) {
+            originalHandlerCalls.incrementAndGet();
+          }
+        });
+
+    store.synchronizedInvoke(
+        () -> {
+          store.synchronizedInvoke(
+              () -> {
+                store.begin().updateTableConfig(config -> config.put("key", "conf")).commit();
+                Assert.assertEquals(0, originalHandlerCalls.get());
+              });
+          Assert.assertEquals(0, originalHandlerCalls.get());
+          store.setRuntimeHandler(
+              new NoOpTableRuntimeHandler() {
+                @Override
+                public void handleTableChanged(
+                    TableRuntime tableRuntime, TableConfiguration originalConfig) {
+                  replacementHandlerCalls.incrementAndGet();
+                }
+              });
+        });
+
+    Assert.assertEquals(1, originalHandlerCalls.get());
+    Assert.assertEquals(0, replacementHandlerCalls.get());
+    Assert.assertEquals("conf", store.getTableConfig().get("key"));
+    Assert.assertEquals(
+        "conf", persistence.runtime(tableIdentifier.getId()).getTableConfig().get("key"));
+  }
+
+  @Test
+  public void testDeferredHandlerRemainsSynchronousAndPreservesOrder() {
+    DefaultTableRuntimeStore store = newStore();
+    List<String> callbackOrder = new ArrayList<>();
+    store.setRuntimeHandler(
+        new TableRuntimeHandler() {
+          @Override
+          public void handleTableChanged(
+              TableRuntime tableRuntime, OptimizingStatus originalStatus) {
+            callbackOrder.add("status");
+          }
+
+          @Override
+          public void handleTableChanged(
+              TableRuntime tableRuntime, TableConfiguration originalConfig) {
+            callbackOrder.add("config");
+          }
+        });
+
+    store.synchronizedInvoke(
+        () -> {
+          store
+              .begin()
+              .updateStatusCode(ignored -> OptimizingStatus.PENDING.getCode())
+              .updateTableConfig(config -> config.put("key", "conf"))
+              .commit();
+          Assert.assertTrue(callbackOrder.isEmpty());
+        });
+
+    Assert.assertEquals(Arrays.asList("status", "config"), callbackOrder);
+  }
+
+  @Test
+  public void testDeferredHandlerBreaksTableAndProcessLockCycle() throws Exception {
+    DefaultTableRuntimeStore store = newStore();
+    // Simulates TableOptimizingProcess.lock; production code must not replace state transitions
+    // with tryLock. The bounded acquisition below only makes the old ABBA topology safe to test.
+    ReentrantLock processLock = new ReentrantLock();
+    CountDownLatch processLockHeld = new CountDownLatch(1);
+    CountDownLatch allowProcessTableRequest = new CountDownLatch(1);
+    CountDownLatch processRequestingTable = new CountDownLatch(1);
+    AtomicBoolean handlerAcquiredProcessLock = new AtomicBoolean();
+    store.setRuntimeHandler(
+        new NoOpTableRuntimeHandler() {
+          @Override
+          public void handleTableChanged(
+              TableRuntime tableRuntime, TableConfiguration originalConfig) {
+            allowProcessTableRequest.countDown();
+            await(processRequestingTable);
+            boolean acquired = tryLock(processLock);
+            handlerAcquiredProcessLock.set(acquired);
+            if (acquired) {
+              processLock.unlock();
+            }
+          }
+        });
+
+    ExecutorService executor = Executors.newFixedThreadPool(2);
+    try {
+      Future<?> processFuture =
+          executor.submit(
+              () -> {
+                processLock.lock();
+                try {
+                  processLockHeld.countDown();
+                  await(allowProcessTableRequest);
+                  processRequestingTable.countDown();
+                  store.synchronizedInvoke(() -> {});
+                } finally {
+                  processLock.unlock();
+                }
+              });
+      Assert.assertTrue(processLockHeld.await(5, TimeUnit.SECONDS));
+
+      Future<?> refreshFuture =
+          executor.submit(
+              () ->
+                  store.synchronizedInvoke(
+                      () ->
+                          store
+                              .begin()
+                              .updateTableConfig(config -> config.put("key", "conf"))
+                              .commit()));
+
+      refreshFuture.get(10, TimeUnit.SECONDS);
+      processFuture.get(10, TimeUnit.SECONDS);
+      Assert.assertTrue(handlerAcquiredProcessLock.get());
+    } finally {
+      executor.shutdownNow();
+      Assert.assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+    }
+  }
+
+  @Test
+  public void testCommittedHandlerStillRunsWhenOuterActionFails() {
+    DefaultTableRuntimeStore store = newStore();
+    AtomicInteger handlerCalls = new AtomicInteger();
+    store.setRuntimeHandler(
+        new NoOpTableRuntimeHandler() {
+          @Override
+          public void handleTableChanged(
+              TableRuntime tableRuntime, TableConfiguration originalConfig) {
+            handlerCalls.incrementAndGet();
+          }
+        });
+    RuntimeException outerFailure = new RuntimeException("outer failure");
+
+    RuntimeException actual =
+        Assert.assertThrows(
+            RuntimeException.class,
+            () ->
+                store.synchronizedInvoke(
+                    () -> {
+                      store.begin().updateTableConfig(config -> config.put("key", "conf")).commit();
+                      throw outerFailure;
+                    }));
+
+    Assert.assertSame(outerFailure, actual);
+    Assert.assertEquals(1, handlerCalls.get());
+    store.synchronizedInvoke(() -> {});
+    Assert.assertEquals(1, handlerCalls.get());
+  }
+
+  @Test
+  public void testDeferredHandlerSupportsReentrantOperation() {
+    DefaultTableRuntimeStore store = newStore();
+    List<String> callbackOrder = new ArrayList<>();
+    store.setRuntimeHandler(
+        new TableRuntimeHandler() {
+          @Override
+          public void handleTableChanged(
+              TableRuntime tableRuntime, OptimizingStatus originalStatus) {
+            callbackOrder.add("status");
+          }
+
+          @Override
+          public void handleTableChanged(
+              TableRuntime tableRuntime, TableConfiguration originalConfig) {
+            callbackOrder.add("config-start");
+            store.synchronizedInvoke(
+                () ->
+                    store
+                        .begin()
+                        .updateStatusCode(ignored -> OptimizingStatus.PENDING.getCode())
+                        .commit());
+            callbackOrder.add("config-end");
+          }
+        });
+
+    store.synchronizedInvoke(
+        () -> store.begin().updateTableConfig(config -> config.put("key", "conf")).commit());
+
+    Assert.assertEquals(Arrays.asList("config-start", "status", "config-end"), callbackOrder);
+  }
+
+  @Test
+  public void testOuterFailureRemainsPrimaryWhenDeferredHandlerFails() {
+    DefaultTableRuntimeStore store = newStore();
+    RuntimeException callbackFailure = new RuntimeException("callback failure");
+    RuntimeException outerFailure = new RuntimeException("outer failure");
+    store.setRuntimeHandler(
+        new NoOpTableRuntimeHandler() {
+          @Override
+          public void handleTableChanged(
+              TableRuntime tableRuntime, TableConfiguration originalConfig) {
+            throw callbackFailure;
+          }
+        });
+
+    RuntimeException actual =
+        Assert.assertThrows(
+            RuntimeException.class,
+            () ->
+                store.synchronizedInvoke(
+                    () -> {
+                      store.begin().updateTableConfig(config -> config.put("key", "conf")).commit();
+                      throw outerFailure;
+                    }));
+
+    Assert.assertSame(outerFailure, actual);
+    Assert.assertArrayEquals(new Throwable[] {callbackFailure}, actual.getSuppressed());
+    store.setRuntimeHandler(new NoOpTableRuntimeHandler());
+    store.synchronizedInvoke(() -> {});
+  }
+
+  private DefaultTableRuntimeStore newStore() {
+    DefaultTableRuntimeStore store =
+        new DefaultTableRuntimeStore(tableIdentifier, meta, requiredKeys, Collections.emptyList());
+    store.setTableRuntime(Mockito.mock(TableRuntime.class));
+    return store;
+  }
+
+  private static void await(CountDownLatch latch) {
+    try {
+      Assert.assertTrue(latch.await(5, TimeUnit.SECONDS));
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      throw new AssertionError(e);
+    }
+  }
+
+  private static boolean tryLock(ReentrantLock lock) {
+    try {
+      return lock.tryLock(5, TimeUnit.SECONDS);
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      throw new AssertionError(e);
+    }
+  }
+
+  private static class NoOpTableRuntimeHandler implements TableRuntimeHandler {
+    @Override
+    public void handleTableChanged(TableRuntime tableRuntime, OptimizingStatus originalStatus) {}
+
+    @Override
+    public void handleTableChanged(TableRuntime tableRuntime, TableConfiguration originalConfig) {}
+  }
+
   class Persistence extends PersistentBase {
 
     public void persistTableRuntimeMeta(ServerTableIdentifier identifier, TableRuntimeMeta meta) {
@@ -250,6 +517,10 @@ public class TestDefaultTableRuntimeStore extends AMSManagerTestBase {
       return getAs(TableRuntimeMapper.class, TableRuntimeMapper::selectAllStates).stream()
           .filter(s -> s.getTableId() == tableId)
           .collect(Collectors.toList());
+    }
+
+    public TableRuntimeMeta runtime(long tableId) {
+      return getAs(TableRuntimeMapper.class, mapper -> mapper.selectRuntime(tableId));
     }
 
     public void clean(long tableId) {

@@ -31,6 +31,7 @@ import org.apache.amoro.server.persistence.TableRuntimeState;
 import org.apache.amoro.server.persistence.mapper.TableMetaMapper;
 import org.apache.amoro.server.persistence.mapper.TableRuntimeMapper;
 import org.apache.amoro.shade.guava32.com.google.common.base.Preconditions;
+import org.apache.amoro.shade.guava32.com.google.common.collect.ImmutableList;
 import org.apache.amoro.shade.guava32.com.google.common.collect.Lists;
 import org.apache.amoro.shade.guava32.com.google.common.collect.Sets;
 import org.apache.amoro.table.StateKey;
@@ -39,12 +40,14 @@ import org.apache.amoro.table.TableSummary;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayDeque;
+import java.util.Deque;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -52,7 +55,15 @@ import java.util.stream.Collectors;
 /** Default table runtime store implementation. */
 public class DefaultTableRuntimeStore extends PersistentBase implements TableRuntimeStore {
   private static final Logger LOG = LoggerFactory.getLogger(DefaultTableRuntimeStore.class);
-  private final Lock tableLock = new ReentrantLock();
+
+  // An operation may reenter this lock from synchronizedInvoke. Releasing only the operation's
+  // hold does not make handler invocation safe: handlers enter OptimizingQueue/process locks,
+  // while process paths acquire the locks in the opposite process-lock -> table-lock direction.
+  // Keep committed callbacks synchronous, but defer them until the outermost table-lock hold is
+  // fully released so the reverse table-lock -> process-lock edge cannot be formed.
+  private final ReentrantLock tableLock = new ReentrantLock();
+  private final ThreadLocal<Deque<Runnable>> deferredRuntimeHandlerCallbacks =
+      ThreadLocal.withInitial(ArrayDeque::new);
   private final ServerTableIdentifier tableIdentifier;
   private final TableRuntimeMeta meta;
   private final Map<String, TableRuntimeState> states = new ConcurrentHashMap<>();
@@ -113,12 +124,74 @@ public class DefaultTableRuntimeStore extends PersistentBase implements TableRun
 
   @Override
   public void synchronizedInvoke(Runnable runnable) {
+    Throwable actionFailure = null;
     tableLock.lock();
     try {
       runnable.run();
+    } catch (Throwable throwable) {
+      actionFailure = throwable;
     } finally {
       tableLock.unlock();
     }
+
+    Throwable callbackFailure = null;
+    try {
+      drainRuntimeHandlerCallbacksIfUnlocked();
+    } catch (Throwable throwable) {
+      callbackFailure = throwable;
+    }
+    if (actionFailure != null) {
+      if (callbackFailure != null && callbackFailure != actionFailure) {
+        actionFailure.addSuppressed(callbackFailure);
+      }
+      rethrow(actionFailure);
+    }
+    if (callbackFailure != null) {
+      rethrow(callbackFailure);
+    }
+  }
+
+  private void dispatchOrDeferRuntimeHandlerCallback(Runnable callback) {
+    if (callback != null) {
+      deferredRuntimeHandlerCallbacks.get().addLast(callback);
+    }
+    drainRuntimeHandlerCallbacksIfUnlocked();
+  }
+
+  private void drainRuntimeHandlerCallbacksIfUnlocked() {
+    if (tableLock.isHeldByCurrentThread()) {
+      return;
+    }
+
+    Deque<Runnable> callbacks = deferredRuntimeHandlerCallbacks.get();
+    // Remove before invoking handlers so a reentrant operation gets an independent queue and so
+    // both normal and exceptional callback paths release thread-local references.
+    deferredRuntimeHandlerCallbacks.remove();
+    Throwable callbackFailure = null;
+    while (!callbacks.isEmpty()) {
+      try {
+        callbacks.removeFirst().run();
+      } catch (Throwable throwable) {
+        if (callbackFailure == null) {
+          callbackFailure = throwable;
+        } else if (callbackFailure != throwable) {
+          callbackFailure.addSuppressed(throwable);
+        }
+      }
+    }
+    if (callbackFailure != null) {
+      rethrow(callbackFailure);
+    }
+  }
+
+  private static void rethrow(Throwable throwable) {
+    if (throwable instanceof RuntimeException) {
+      throw (RuntimeException) throwable;
+    }
+    if (throwable instanceof Error) {
+      throw (Error) throwable;
+    }
+    throw new IllegalStateException(throwable);
   }
 
   @Override
@@ -178,7 +251,8 @@ public class DefaultTableRuntimeStore extends PersistentBase implements TableRun
     private final Map<String, String> oldStates = new ConcurrentHashMap<>();
     private boolean metaOperation = false;
 
-    private final List<Consumer<TableRuntimeHandler>> handlerCallback = Lists.newArrayList();
+    private final List<BiConsumer<TableRuntimeHandler, TableRuntime>> handlerCallbacks =
+        Lists.newArrayList();
 
     public TableRuntimeOperationImpl() {}
 
@@ -216,8 +290,8 @@ public class DefaultTableRuntimeStore extends PersistentBase implements TableRun
             OptimizingStatus originalStatus = OptimizingStatus.ofCode(oldMeta.getStatusCode());
             Integer newStatusCode = updater.apply(oldMeta.getStatusCode());
             oldMeta.setStatusCode(newStatusCode);
-            handlerCallback.add(
-                handler -> handler.handleTableChanged(tableRuntime, originalStatus));
+            handlerCallbacks.add(
+                (handler, runtime) -> handler.handleTableChanged(runtime, originalStatus));
           });
       metaOperation = true;
       return this;
@@ -232,8 +306,8 @@ public class DefaultTableRuntimeStore extends PersistentBase implements TableRun
             Map<String, String> tableConfig = oldMeta.getTableConfig();
             updater.accept(tableConfig);
             oldMeta.setTableConfig(tableConfig);
-            handlerCallback.add(
-                handler -> handler.handleTableChanged(tableRuntime, oldConfiguration));
+            handlerCallbacks.add(
+                (handler, runtime) -> handler.handleTableChanged(runtime, oldConfiguration));
           });
       metaOperation = true;
       return this;
@@ -272,7 +346,7 @@ public class DefaultTableRuntimeStore extends PersistentBase implements TableRun
       // A handler may start its own persistence transaction (for example, strict Process close).
       // Invoke it only after the current NestedSqlSession is closed so its commit is not absorbed
       // as a nested no-op after this operation has already committed.
-      notifyRuntimeHandler();
+      dispatchOrDeferRuntimeHandlerCallback(runtimeHandlerCallback());
     }
 
     private void initializeWorkingSnapshot() {
@@ -311,10 +385,15 @@ public class DefaultTableRuntimeStore extends PersistentBase implements TableRun
           });
     }
 
-    private void notifyRuntimeHandler() {
-      if (runtimeHandler != null && tableRuntime != null) {
-        handlerCallback.forEach(c -> c.accept(runtimeHandler));
+    private Runnable runtimeHandlerCallback() {
+      TableRuntimeHandler callbackHandler = runtimeHandler;
+      TableRuntime callbackRuntime = tableRuntime;
+      if (callbackHandler == null || callbackRuntime == null || handlerCallbacks.isEmpty()) {
+        return null;
       }
+      List<BiConsumer<TableRuntimeHandler, TableRuntime>> callbacks =
+          ImmutableList.copyOf(handlerCallbacks);
+      return () -> callbacks.forEach(callback -> callback.accept(callbackHandler, callbackRuntime));
     }
   }
 }
