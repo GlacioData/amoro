@@ -17,8 +17,19 @@ limitations under the License.
 / -->
 
 <script setup lang="ts">
-import { computed, onBeforeMount, reactive, watch } from 'vue'
+import { computed, onBeforeMount, onBeforeUnmount, reactive, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import {
+  clearTableCache,
+  createTableCache,
+  createTableSearchPlan,
+  getCachedTables,
+  getSelectedPathExpandedKeys,
+  getStoredCatalogExpandedKeys,
+  getTableCacheGeneration,
+  loadTablesWithCache,
+  refreshExpandedDatabaseNodes,
+} from './table-explorer-state'
 import { getCatalogList, getDatabaseList, getTableList } from '@/services/table.service'
 import { tableTypeIconMap } from '@/types/common.type'
 import type { ICatalogItem } from '@/types/common.type'
@@ -49,18 +60,21 @@ const route = useRoute()
 
 const storageTableKey = 'easylake-menu-catalog-db-table'
 const expandedKeysSessionKey = 'tables_expanded_keys'
+const tableCache = createTableCache<TableItem>()
+let searchRequestId = 0
 
 const state = reactive({
   loading: false,
+  refreshing: false,
   searchKey: '',
   filterKey: '',
   treeData: [] as TreeNode[],
   expandedKeys: [] as string[],
   selectedKeys: [] as string[],
+  searchTablesByDatabase: {} as Record<string, TableItem[]>,
   // Cache
   catalogList: [] as string[],
   dbListByCatalog: {} as Record<string, string[]>,
-  tablesByCatalogDb: {} as Record<string, TableItem[]>,
 })
 
 function buildCatalogNode(catalog: string): TreeNode {
@@ -164,16 +178,18 @@ async function loadChildren(node: any) {
     if (!catalog || !db) {
       return
     }
-    const cacheKey = `${catalog}/${db}`
-    if (state.tablesByCatalogDb[cacheKey]) {
-      return
-    }
-
     state.loading = true
     try {
-      const res = await getTableList({ catalog, db, keywords: '' })
-      const tables = (res || []) as TableItem[]
-      state.tablesByCatalogDb[cacheKey] = tables
+      const cacheGeneration = getTableCacheGeneration(tableCache)
+      const tables = await loadTablesWithCache(
+        tableCache,
+        catalog,
+        db,
+        async () => (await getTableList({ catalog, db, keywords: '' }) || []) as TableItem[],
+      )
+      if (getTableCacheGeneration(tableCache) !== cacheGeneration) {
+        return
+      }
       if (!tables.length) {
         data.isLeaf = false
         updateTreeNodeChildren(data.key as string, [])
@@ -189,39 +205,64 @@ async function loadChildren(node: any) {
   }
 }
 
-async function expandPathBySelected(catalog: string, db: string) {
+async function expandCatalogBySelected(catalog: string) {
   const safeCatalog = (catalog || '').trim()
-  const safeDb = (db || '').trim()
 
   if (!safeCatalog) {
     return
   }
 
-  const nextExpandedKeys = new Set(state.expandedKeys)
-
   const catalogKey = `catalog:${safeCatalog}`
   const catalogNode = state.treeData.find(node => node.key === catalogKey)
   if (catalogNode) {
     await loadChildren({ dataRef: catalogNode })
-    nextExpandedKeys.add(catalogKey)
   }
 
-  if (safeDb) {
-    const dbKey = `catalog:${safeCatalog}/db:${safeDb}`
-    const latestCatalogNode = state.treeData.find(node => node.key === catalogKey)
-    const dbNode = latestCatalogNode?.children?.find(child => child.key === dbKey)
-    if (dbNode) {
-      await loadChildren({ dataRef: dbNode })
-      nextExpandedKeys.add(dbKey)
-    }
-  }
-
-  state.expandedKeys = Array.from(nextExpandedKeys)
+  state.expandedKeys = getSelectedPathExpandedKeys(state.expandedKeys, safeCatalog)
   try {
     sessionStorage.setItem(expandedKeysSessionKey, JSON.stringify(state.expandedKeys))
   }
   catch (e) {
     // ignore sessionStorage write errors
+  }
+}
+
+function getDatabaseNodes(): TreeNode[] {
+  return state.treeData.flatMap(catalogNode =>
+    (catalogNode.children || []).filter(node => node.nodeType === 'database'),
+  )
+}
+
+async function refreshTableTree() {
+  if (state.refreshing) {
+    return
+  }
+
+  state.refreshing = true
+  try {
+    const databaseNodes = getDatabaseNodes()
+
+    cancelScheduledSearch()
+    state.searchTablesByDatabase = {}
+    clearTableCache(tableCache)
+
+    await refreshExpandedDatabaseNodes(
+      databaseNodes,
+      state.expandedKeys,
+      (node) => {
+        node.children = undefined
+        node.isLeaf = false
+      },
+      node => loadChildren({ dataRef: node }),
+    )
+
+    cancelScheduledSearch()
+    if (state.searchKey.trim()) {
+      await loadSearchTablesSafely(state.searchKey)
+    }
+  }
+  finally {
+    state.refreshing = false
   }
 }
 
@@ -342,6 +383,35 @@ function normalizeKeyword(raw: string) {
   return raw.trim().toLowerCase()
 }
 
+function getSearchTreeSource(): TreeNode[] {
+  if (!Object.keys(state.searchTablesByDatabase).length) {
+    return state.treeData
+  }
+
+  return state.treeData.map((catalogNode) => {
+    if (!catalogNode.children?.length) {
+      return catalogNode
+    }
+
+    let catalogChanged = false
+    const children = catalogNode.children.map((databaseNode) => {
+      if (!Object.prototype.hasOwnProperty.call(state.searchTablesByDatabase, databaseNode.key)) {
+        return databaseNode
+      }
+
+      catalogChanged = true
+      return {
+        ...databaseNode,
+        children: state.searchTablesByDatabase[databaseNode.key].map(table =>
+          buildTableNode(databaseNode.catalog, databaseNode.db || '', table),
+        ),
+      }
+    })
+
+    return catalogChanged ? { ...catalogNode, children } : catalogNode
+  })
+}
+
 function filterBySingleKeyword(nodes: TreeNode[], keyword: string, expandedSet: Set<string>): TreeNode[] {
   const result: TreeNode[] = []
 
@@ -439,19 +509,86 @@ function filterTree(source: TreeNode[], rawKeyword: string): { tree: TreeNode[],
   }
 }
 
-let searchTimer: any = null
+let searchTimer: ReturnType<typeof setTimeout> | undefined
+
+async function loadSearchTables(rawKeyword: string) {
+  const requestId = ++searchRequestId
+  state.searchTablesByDatabase = {}
+
+  const searchPlan = createTableSearchPlan(rawKeyword, {
+    catalog: String(route.query.catalog || ''),
+    database: String(route.query.db || ''),
+  })
+  state.filterKey = searchPlan.filterKeyword
+
+  if (!searchPlan.target) {
+    return
+  }
+
+  const target = searchPlan.target
+
+  const catalogKey = `catalog:${target.catalog}`
+  const catalogNode = state.treeData.find(node => node.key === catalogKey)
+  if (!catalogNode) {
+    return
+  }
+
+  await loadChildren({ dataRef: catalogNode })
+  if (requestId !== searchRequestId) {
+    return
+  }
+
+  const databaseKey = `${catalogKey}/db:${target.database}`
+  const databaseNode = catalogNode.children?.find(node => node.key === databaseKey)
+  if (!databaseNode) {
+    return
+  }
+
+  const cachedTables = getCachedTables(tableCache, target.catalog, target.database)
+  const tables = cachedTables
+    ?? (await getTableList({
+      catalog: target.catalog,
+      db: target.database,
+      keywords: target.keyword,
+    }) || []) as TableItem[]
+
+  if (requestId === searchRequestId) {
+    state.searchTablesByDatabase[databaseKey] = tables
+  }
+}
+
+async function loadSearchTablesSafely(rawKeyword: string) {
+  try {
+    await loadSearchTables(rawKeyword)
+  }
+  catch (e) {
+    // Request errors are reported by the shared request interceptor.
+  }
+}
+
+function cancelScheduledSearch() {
+  if (searchTimer !== undefined) {
+    clearTimeout(searchTimer)
+    searchTimer = undefined
+  }
+  searchRequestId += 1
+}
 
 watch(
   () => state.searchKey,
   (val) => {
-    if (searchTimer) {
-      clearTimeout(searchTimer)
-    }
+    cancelScheduledSearch()
     searchTimer = setTimeout(() => {
-      state.filterKey = val || ''
+      searchTimer = undefined
+      void loadSearchTablesSafely(val || '')
     }, 500)
   },
 )
+
+onBeforeUnmount(() => {
+  cancelScheduledSearch()
+  clearTableCache(tableCache)
+})
 
 watch(
   () => route.query,
@@ -468,7 +605,7 @@ watch(
     const tableStr = (table as string) || ''
 
     if (catalogStr && dbStr) {
-      await expandPathBySelected(catalogStr, dbStr)
+      await expandCatalogBySelected(catalogStr)
       if (tableStr) {
         const tableKey = `catalog:${catalogStr}/db:${dbStr}/table:${tableStr}`
         state.selectedKeys = [tableKey]
@@ -491,7 +628,7 @@ const searchResult = computed(() => {
       expandedKeys: state.expandedKeys,
     }
   }
-  return filterTree(state.treeData, keyword)
+  return filterTree(getSearchTreeSource(), keyword)
 })
 
 const displayTreeData = computed(() => searchResult.value.tree)
@@ -507,7 +644,9 @@ onBeforeMount(async () => {
     if (stored) {
       const parsed = JSON.parse(stored)
       if (Array.isArray(parsed)) {
-        restoredExpandedKeys = parsed.map((key: string | number) => String(key))
+        restoredExpandedKeys = getStoredCatalogExpandedKeys(
+          parsed.map((key: string | number) => String(key)),
+        )
       }
     }
   }
@@ -524,19 +663,6 @@ onBeforeMount(async () => {
       }
     }
 
-    const dbKeys = restoredExpandedKeys.filter(key => key.includes('/db:') && !key.includes('/table:'))
-    for (const dbKey of dbKeys) {
-      const [catalogPart] = dbKey.split('/db:')
-      const catalogName = catalogPart.replace('catalog:', '')
-      const catalogNode = state.treeData.find(node => node.key === `catalog:${catalogName}`)
-      if (catalogNode && catalogNode.children && catalogNode.children.length) {
-        const dbNode = catalogNode.children.find((child: TreeNode) => child.key === dbKey)
-        if (dbNode) {
-          await loadChildren({ dataRef: dbNode })
-        }
-      }
-    }
-
     state.expandedKeys = restoredExpandedKeys
   }
 
@@ -546,7 +672,7 @@ onBeforeMount(async () => {
   const queryTable = (query.table as string) || ''
 
   if (queryCatalog && queryDb) {
-    await expandPathBySelected(queryCatalog, queryDb)
+    await expandCatalogBySelected(queryCatalog)
     if (queryTable) {
       const tableKey = `catalog:${queryCatalog}/db:${queryDb}/table:${queryTable}`
       state.selectedKeys = [tableKey]
@@ -568,6 +694,20 @@ onBeforeMount(async () => {
           <SearchOutlined class="search-input-prefix-icon" />
         </template>
       </a-input>
+      <a-tooltip title="Refresh loaded table lists">
+        <a-button
+          type="text"
+          size="small"
+          :loading="state.refreshing"
+          aria-label="Refresh loaded table lists"
+          class="refresh-button"
+          @click="refreshTableTree"
+        >
+          <template #icon>
+            <ReloadOutlined />
+          </template>
+        </a-button>
+      </a-tooltip>
     </div>
 
     <div class="table-explorer-body">
@@ -620,9 +760,13 @@ onBeforeMount(async () => {
   .table-explorer-header {
     padding: 0 7px 0 8px;
     margin-bottom: 8px;
+    display: flex;
+    align-items: center;
+    gap: 4px;
 
     .search-input {
-      width: 100%;
+      flex: 1;
+      min-width: 0;
 
       :deep(.ant-input-affix-wrapper) {
         height: 24px;
@@ -649,6 +793,10 @@ onBeforeMount(async () => {
           color: #ccc;
         }
       }
+    }
+
+    .refresh-button {
+      flex: 0 0 auto;
     }
   }
 

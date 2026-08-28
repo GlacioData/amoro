@@ -25,6 +25,7 @@ import io.javalin.http.NotFoundResponse;
 import org.apache.amoro.Constants;
 import org.apache.amoro.ServerTableIdentifier;
 import org.apache.amoro.TableFormat;
+import org.apache.amoro.TableIDWithFormat;
 import org.apache.amoro.api.CatalogMeta;
 import org.apache.amoro.api.OptimizingService;
 import org.apache.amoro.client.OptimizingClientPools;
@@ -675,8 +676,10 @@ public class TableController {
           }
         };
 
+    List<TableIDWithFormat> catalogTables = serverCatalog.listTables(db);
     List<TableMeta> tables =
-        serverCatalog.listTables(db).stream()
+        catalogTables.stream()
+            .filter(table -> matchesSearchKeyword(table.getIdentifier().getTableName(), keywords))
             .map(
                 idWithFormat ->
                     new TableMeta(
@@ -701,18 +704,21 @@ public class TableController {
 
       List<String> hiveTables = HiveTableUtil.getAllHiveTables(hmsClientPool, db);
       Set<String> mixedHiveTables =
-          tables.stream().map(TableMeta::getName).collect(Collectors.toSet());
+          catalogTables.stream()
+              .map(table -> table.getIdentifier().getTableName())
+              .collect(Collectors.toSet());
       hiveTables.stream()
+          .filter(table -> matchesSearchKeyword(table, keywords))
           .filter(e -> !mixedHiveTables.contains(e))
           .sorted(String::compareTo)
           .forEach(e -> tables.add(new TableMeta(e, TableMeta.TableType.HIVE.toString())));
     }
 
-    ctx.json(
-        OkResponse.of(
-            tables.stream()
-                .filter(t -> StringUtils.isBlank(keywords) || t.getName().contains(keywords))
-                .collect(Collectors.toList())));
+    ctx.json(OkResponse.of(tables));
+  }
+
+  static boolean matchesSearchKeyword(String tableName, String keywords) {
+    return StringUtils.isBlank(keywords) || StringUtils.containsIgnoreCase(tableName, keywords);
   }
 
   /**

@@ -5,11 +5,12 @@
   "scripts": {
     "dev": "vite",
     "dev:mock": "vite --mode mock",
-    "build": "node ./scripts/preload-error-recovery.test.mjs && vite build",
+    "build": "node ./scripts/preload-error-recovery.test.mjs && node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --experimental-strip-types --test ./scripts/table-explorer-state.test.mts && vite build",
     "typecheck": "vue-tsc --noEmit",
     "gen:license": "node ./license.node.js",
     "preview": "vite preview",
     "test:preload-recovery": "node ./scripts/preload-error-recovery.test.mjs",
+    "test:table-explorer": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --experimental-strip-types --test ./scripts/table-explorer-state.test.mts",
     "lint": "eslint ./src",
     "format": "eslint ./src --fix"
   },
