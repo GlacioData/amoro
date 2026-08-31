@@ -46,6 +46,7 @@ import org.apache.amoro.server.AmoroServiceConstants;
 import org.apache.amoro.server.catalog.CatalogManager;
 import org.apache.amoro.server.manager.MetricManager;
 import org.apache.amoro.server.optimizing.TaskRuntime.Status;
+import org.apache.amoro.server.persistence.OptimizingPayloadException;
 import org.apache.amoro.server.persistence.OptimizingProcessState;
 import org.apache.amoro.server.persistence.PersistentBase;
 import org.apache.amoro.server.persistence.TaskFilesPersistence;
@@ -101,6 +102,8 @@ public class OptimizingQueue extends PersistentBase {
 
   private static final Logger LOG = LoggerFactory.getLogger(OptimizingQueue.class);
   private static final long STALE_OWNER_RECYCLE_MILLIS = TimeUnit.MINUTES.toMillis(15);
+  private static final long RECOVERY_RETRY_INITIAL_MILLIS = TimeUnit.SECONDS.toMillis(30);
+  private static final long RECOVERY_RETRY_MAX_MILLIS = TimeUnit.MINUTES.toMillis(5);
   private static final Set<ProcessStatus> ACTIVE_PROCESS_STATUSES =
       EnumSet.of(
           ProcessStatus.PENDING,
@@ -125,6 +128,8 @@ public class OptimizingQueue extends PersistentBase {
   private final Function<DefaultTableRuntime, OptimizingOwnership> ownershipGuard;
   private final Map<ServerTableIdentifier, AtomicInteger> optimizingTasksMap =
       new ConcurrentHashMap<>();
+  private final Map<Long, PendingRecovery> pendingRecoveries = new ConcurrentHashMap<>();
+  private final RecoveryGate recoveryGate = new RecoveryGate();
 
   public OptimizingQueue(
       CatalogManager catalogManager,
@@ -178,90 +183,291 @@ public class OptimizingQueue extends PersistentBase {
   }
 
   private void recoverOwnedTable(DefaultTableRuntime tableRuntime, String trigger) {
+    long tableId = tableRuntime.getTableIdentifier().getId();
+    long expectedProcessId = -1L;
+    RecoveryKey recoveryKey = null;
     try {
-      OptimizingOwnership ownership = ownershipGuard.apply(tableRuntime);
-      if (ownership != OptimizingOwnership.OWNED) {
+      expectedProcessId = tableRuntime.getProcessId();
+      recoveryKey = recoveryGate.tryEnter(tableId, expectedProcessId);
+      if (recoveryKey == null) {
         LOG.debug(
-            "Optimizing reconciliation trigger={} table={} processId={} eligibility=NOT_EVALUATED"
-                + " ownership={} action=SKIP result=OWNERSHIP_CHANGED",
-            trigger,
+            "Skip concurrent optimizing recovery for table {} processId={} trigger={}",
             tableRuntime.getTableIdentifier(),
-            tableRuntime.getProcessId(),
-            ownership);
+            expectedProcessId,
+            trigger);
         return;
       }
-
-      OptimizingProcess localProcess = tableRuntime.getOptimizingProcess();
-      if (localProcess instanceof TableOptimizingProcess
-          && ((TableOptimizingProcess) localProcess).belongsTo(this)) {
-        if (localProcess.getStatus() == ProcessStatus.RUNNING) {
-          TableOptimizingProcess process = (TableOptimizingProcess) localProcess;
-          if (process.reconcileEligibility(trigger) == EligibilityReconciliationResult.ELIGIBLE) {
-            resumeOwnedTable(tableRuntime, process, trigger);
-          }
-        }
-        return;
+      recoverOwnedTableInternal(tableRuntime, expectedProcessId, trigger);
+      pendingRecoveries.remove(tableId);
+    } catch (RuntimeException e) {
+      handleRecoveryFailure(tableRuntime, expectedProcessId, trigger, e);
+    } finally {
+      if (recoveryKey != null) {
+        recoveryGate.exit(recoveryKey);
       }
-
-      TableProcessMeta processMeta = loadProcessMeta(tableRuntime);
-      TableOptimizingProcess process = null;
-      if (isPersistedPaimonCommitReplay(tableRuntime, processMeta)) {
-        process = loadProcess(tableRuntime, processMeta);
-        if (canReplayPaimonCommittingProcess(process)) {
-          LOG.info(
-              "Paimon process {} on table {} is already COMMITTING with completed tasks during"
-                  + " recovery, keeping it for commit replay",
-              process.getProcessId(),
-              tableRuntime.getTableIdentifier());
-          return;
-        }
-      }
-
-      Optional<Boolean> eligibility = optimizingEligibility(tableRuntime);
-      if (!eligibility.isPresent()) {
-        LOG.warn(
-            "Optimizing reconciliation trigger={} table={} processId={} eligibility=UNKNOWN"
-                + " ownership=OWNED action=SKIP result=ERROR",
-            trigger,
-            tableRuntime.getTableIdentifier(),
-            tableRuntime.getProcessId());
-        return;
-      }
-
-      if (process == null) {
-        process = loadProcess(tableRuntime, processMeta);
-      }
-      if (!eligibility.get()) {
-        EligibilityReconciliationResult reconciliation =
-            process == null
-                ? reconcileEligibilityWithoutProcess(tableRuntime, trigger)
-                : reconcileProcessIfRunning(process, trigger);
-        if (reconciliation != EligibilityReconciliationResult.ELIGIBLE) {
-          return;
-        }
-      }
-
-      tableRuntime.resetTaskQuotas(
-          System.currentTimeMillis() - AmoroServiceConstants.QUOTA_LOOK_BACK_TIME);
-      resumeOwnedTable(tableRuntime, process, trigger);
-    } catch (Exception e) {
-      LOG.error(
-          "Optimizing reconciliation trigger={} table={} processId={} eligibility=UNKNOWN"
-              + " ownership=OWNED action=RECOVER result={}",
-          trigger,
-          tableRuntime.getTableIdentifier(),
-          tableRuntime.getProcessId(),
-          containsCause(e, OptimizingOwnerConflictException.class) ? "CAS_CONFLICT" : "ERROR",
-          e);
     }
   }
 
+  private void recoverOwnedTableInternal(
+      DefaultTableRuntime tableRuntime, long expectedProcessId, String trigger) {
+    OptimizingOwnership ownership = ownershipGuard.apply(tableRuntime);
+    if (ownership != OptimizingOwnership.OWNED) {
+      LOG.debug(
+          "Optimizing reconciliation trigger={} table={} processId={} eligibility=NOT_EVALUATED"
+              + " ownership={} action=SKIP result=OWNERSHIP_CHANGED",
+          trigger,
+          tableRuntime.getTableIdentifier(),
+          expectedProcessId,
+          ownership);
+      return;
+    }
+    long currentProcessId = tableRuntime.getProcessId();
+    if (currentProcessId != expectedProcessId) {
+      LOG.info(
+          "Discard stale optimizing recovery for table {} expectedProcessId={} currentProcessId={}"
+              + " trigger={}",
+          tableRuntime.getTableIdentifier(),
+          expectedProcessId,
+          currentProcessId,
+          trigger);
+      return;
+    }
+
+    OptimizingProcess localProcess = tableRuntime.getOptimizingProcess();
+    if (localProcess instanceof TableOptimizingProcess
+        && ((TableOptimizingProcess) localProcess).belongsTo(this)) {
+      if (localProcess.getStatus() == ProcessStatus.RUNNING) {
+        TableOptimizingProcess process = (TableOptimizingProcess) localProcess;
+        if (process.reconcileEligibility(trigger) == EligibilityReconciliationResult.ELIGIBLE) {
+          resumeOwnedTable(tableRuntime, process, trigger);
+        }
+      }
+      return;
+    }
+
+    TableProcessMeta processMeta = loadProcessMeta(expectedProcessId);
+    TableOptimizingProcess process = null;
+    if (isPersistedPaimonCommitReplay(tableRuntime, processMeta)) {
+      process = loadProcess(tableRuntime, processMeta);
+      if (canReplayPaimonCommittingProcess(process)) {
+        LOG.info(
+            "Paimon process {} on table {} is already COMMITTING with completed tasks during"
+                + " recovery, keeping it for commit replay",
+            process.getProcessId(),
+            tableRuntime.getTableIdentifier());
+        return;
+      }
+    }
+
+    Optional<Boolean> eligibility = optimizingEligibility(tableRuntime);
+    if (!eligibility.isPresent()) {
+      throw new IllegalStateException(
+          "Failed to evaluate optimizing eligibility for " + tableRuntime.getTableIdentifier());
+    }
+
+    if (process == null) {
+      process = loadProcess(tableRuntime, processMeta);
+    }
+    if (!eligibility.get()) {
+      EligibilityReconciliationResult reconciliation =
+          process == null
+              ? reconcileEligibilityWithoutProcess(tableRuntime, trigger)
+              : reconcileProcessIfRunning(process, trigger);
+      if (reconciliation != EligibilityReconciliationResult.ELIGIBLE) {
+        return;
+      }
+    }
+
+    tableRuntime.resetTaskQuotas(
+        System.currentTimeMillis() - AmoroServiceConstants.QUOTA_LOOK_BACK_TIME);
+    resumeOwnedTable(tableRuntime, process, trigger);
+  }
+
+  private void handleRecoveryFailure(
+      DefaultTableRuntime tableRuntime,
+      long expectedProcessId,
+      String trigger,
+      RuntimeException failure) {
+    detachUnpublishedProcess(tableRuntime, expectedProcessId);
+    Throwable permanentFailure = permanentRecoveryFailure(failure);
+    if (permanentFailure != null) {
+      try {
+        closeCorruptedProcess(tableRuntime, expectedProcessId, trigger, permanentFailure);
+        pendingRecoveries.remove(tableRuntime.getTableIdentifier().getId());
+      } catch (RuntimeException closeFailure) {
+        if (containsCause(closeFailure, OptimizingOwnerConflictException.class)) {
+          pendingRecoveries.remove(tableRuntime.getTableIdentifier().getId());
+          LOG.warn(
+              "Optimizing reconciliation trigger={} table={} processId={} eligibility=UNKNOWN"
+                  + " ownership=OWNED action=CLOSE_AND_REPLAN result=CAS_CONFLICT",
+              trigger,
+              tableRuntime.getTableIdentifier(),
+              expectedProcessId,
+              closeFailure);
+        } else {
+          registerPendingRecovery(tableRuntime, expectedProcessId, trigger, closeFailure);
+        }
+      }
+      return;
+    }
+    registerPendingRecovery(tableRuntime, expectedProcessId, trigger, failure);
+  }
+
+  private void detachUnpublishedProcess(DefaultTableRuntime tableRuntime, long expectedProcessId) {
+    OptimizingProcess localProcess = tableRuntime.getOptimizingProcess();
+    if (!(localProcess instanceof TableOptimizingProcess)
+        || !((TableOptimizingProcess) localProcess).belongsTo(this)
+        || localProcess.getProcessId() != expectedProcessId
+        || tableRuntime.getOptimizingStatus() == OptimizingStatus.COMMITTING) {
+      return;
+    }
+    boolean queued =
+        tableQueue.stream().anyMatch(process -> process.getProcessId() == expectedProcessId);
+    if (!queued) {
+      tableRuntime.detachOptimizingProcess(localProcess);
+    }
+  }
+
+  private void closeCorruptedProcess(
+      DefaultTableRuntime tableRuntime, long expectedProcessId, String trigger, Throwable failure) {
+    long currentProcessId = tableRuntime.getProcessId();
+    if (currentProcessId != expectedProcessId) {
+      throw new OptimizingOwnerConflictException(
+          "close corrupted process",
+          tableRuntime.getTableIdentifier(),
+          expectedProcessId,
+          currentProcessId);
+    }
+    TableProcessMeta processMeta = loadProcessMeta(expectedProcessId);
+    if (processMeta == null) {
+      throw new IllegalStateException(
+          "No process metadata found while closing corrupted optimizing process");
+    }
+    OptimizingProcessState processState =
+        getAs(
+            OptimizingProcessMapper.class,
+            mapper -> mapper.getProcessState(processMeta.getProcessId()));
+    TableOptimizingProcess process =
+        new TableOptimizingProcess(tableRuntime, processMeta, processState, false);
+    String failureCategory =
+        failure instanceof OptimizingPayloadException
+            ? ((OptimizingPayloadException) failure).getReason().name()
+            : "DESCRIPTOR_INCOMPATIBLE";
+    process.failedReason =
+        "RECOVERY_PAYLOAD_CORRUPTED["
+            + failureCategory
+            + "]: "
+            + ExceptionUtil.getErrorMessage(failure, 3500);
+    process.closeStrict(trigger, OptimizingOwnership.OWNED, "NOT_EVALUATED");
+    refreshTable(tableRuntime);
+    LOG.warn(
+        "Optimizing reconciliation trigger={} table={} processId={} eligibility=NOT_EVALUATED"
+            + " ownership=OWNED action=CLOSE_AND_REPLAN result=SUCCESS reason={}",
+        trigger,
+        tableRuntime.getTableIdentifier(),
+        processMeta.getProcessId(),
+        failure.getClass().getSimpleName());
+  }
+
+  @VisibleForTesting
+  static Throwable permanentRecoveryFailure(Throwable failure) {
+    OptimizingPayloadException payloadFailure =
+        findCause(failure, OptimizingPayloadException.class);
+    if (payloadFailure != null) {
+      return payloadFailure;
+    }
+    return findCause(failure, CorruptedRecoveryDataException.class);
+  }
+
+  private void registerPendingRecovery(
+      DefaultTableRuntime tableRuntime,
+      long expectedProcessId,
+      String trigger,
+      RuntimeException failure) {
+    long tableId = tableRuntime.getTableIdentifier().getId();
+    PendingRecovery pending =
+        pendingRecoveries.compute(
+            tableId,
+            (ignored, current) -> {
+              if (current == null || current.expectedProcessId != expectedProcessId) {
+                return PendingRecovery.first(tableRuntime, expectedProcessId);
+              }
+              return current.nextAttempt();
+            });
+    if (shouldLogRecoveryAttempt(pending.attempts)) {
+      LOG.warn(
+          "Optimizing reconciliation trigger={} table={} processId={} eligibility=UNKNOWN"
+              + " ownership=OWNED action=RETRY result=ERROR attempt={} nextRetryMs={}",
+          trigger,
+          tableRuntime.getTableIdentifier(),
+          expectedProcessId,
+          pending.attempts,
+          Math.max(0L, pending.nextRetryAt - System.currentTimeMillis()),
+          failure);
+    } else {
+      LOG.debug(
+          "Optimizing recovery remains pending for table {} processId={} attempt={}",
+          tableRuntime.getTableIdentifier(),
+          expectedProcessId,
+          pending.attempts,
+          failure);
+    }
+  }
+
+  public void retryPendingRecoveries(long now) {
+    pendingRecoveries.forEach(
+        (tableId, pending) -> {
+          if (pending.nextRetryAt > now) {
+            return;
+          }
+          if (pending.expectedProcessId >= 0L) {
+            try {
+              long currentProcessId = pending.tableRuntime.getProcessId();
+              if (currentProcessId != pending.expectedProcessId) {
+                pendingRecoveries.remove(tableId, pending);
+                LOG.info(
+                    "Discard stale optimizing recovery for table {} expectedProcessId={}"
+                        + " currentProcessId={}",
+                    pending.tableRuntime.getTableIdentifier(),
+                    pending.expectedProcessId,
+                    currentProcessId);
+                return;
+              }
+            } catch (RuntimeException e) {
+              LOG.debug(
+                  "Failed to verify pending recovery owner for table {}",
+                  pending.tableRuntime.getTableIdentifier(),
+                  e);
+            }
+          }
+          recoverOwnedTable(pending.tableRuntime, "PERIODIC_RETRY");
+        });
+  }
+
+  @VisibleForTesting
+  int pendingRecoveryCount() {
+    return pendingRecoveries.size();
+  }
+
+  @VisibleForTesting
+  static long recoveryRetryDelayMillis(int attempts) {
+    int shift = Math.max(0, Math.min(attempts - 1, 4));
+    return Math.min(RECOVERY_RETRY_INITIAL_MILLIS << shift, RECOVERY_RETRY_MAX_MILLIS);
+  }
+
+  private static boolean shouldLogRecoveryAttempt(int attempts) {
+    return attempts > 0 && (attempts & (attempts - 1)) == 0;
+  }
+
   private TableProcessMeta loadProcessMeta(DefaultTableRuntime tableRuntime) {
-    if (tableRuntime.getProcessId() == 0) {
+    return loadProcessMeta(tableRuntime.getProcessId());
+  }
+
+  private TableProcessMeta loadProcessMeta(long expectedProcessId) {
+    if (expectedProcessId == 0) {
       return null;
     }
-    return getAs(
-        TableProcessMapper.class, mapper -> mapper.getProcessMeta(tableRuntime.getProcessId()));
+    return getAs(TableProcessMapper.class, mapper -> mapper.getProcessMeta(expectedProcessId));
   }
 
   private TableOptimizingProcess loadProcess(
@@ -272,11 +478,11 @@ public class OptimizingQueue extends PersistentBase {
     OptimizingProcessState state =
         getAs(
             OptimizingProcessMapper.class,
-            mapper -> mapper.getProcessState(tableRuntime.getProcessId()));
+            mapper -> mapper.getProcessState(processMeta.getProcessId()));
     if (state == null) {
       LOG.warn(
           "No optimizing process state found for process {} on table {}, skipping process recovery",
-          tableRuntime.getProcessId(),
+          processMeta.getProcessId(),
           tableRuntime.getTableIdentifier());
       return null;
     }
@@ -333,6 +539,10 @@ public class OptimizingQueue extends PersistentBase {
       OptimizingStatus recoveredOptimizingStatus,
       ProcessStatus processStatus,
       boolean allTasksPrepared) {
+    // Apache Paimon release-1.4.2 (ac223f47d916f4c8e9c07fd1745db448e4e7d0d8)
+    // TableCommitImpl#filterAndCommit first calls FileStoreCommitImpl#filterCommitted. Therefore a
+    // fully restored COMMITTING Paimon process alone may enter RECOVERY_REPLAY; the format
+    // committer must retain persisted commitUser/processId and use filterAndCommit for idempotency.
     return format == TableFormat.PAIMON
             && recoveredOptimizingStatus == OptimizingStatus.COMMITTING
             && processStatus == ProcessStatus.RUNNING
@@ -1076,14 +1286,18 @@ public class OptimizingQueue extends PersistentBase {
   }
 
   private boolean containsCause(Throwable throwable, Class<? extends Throwable> causeClass) {
+    return findCause(throwable, causeClass) != null;
+  }
+
+  private static <T extends Throwable> T findCause(Throwable throwable, Class<T> causeClass) {
     Throwable current = throwable;
     while (current != null) {
       if (causeClass.isInstance(current)) {
-        return true;
+        return causeClass.cast(current);
       }
       current = current.getCause();
     }
-    return false;
+    return null;
   }
 
   public void ackTask(OptimizingTaskId taskId, OptimizerThread thread) {
@@ -1152,6 +1366,8 @@ public class OptimizingQueue extends PersistentBase {
   }
 
   public void dispose() {
+    pendingRecoveries.clear();
+    recoveryGate.clear();
     this.metrics.unregister();
   }
 
@@ -1179,6 +1395,92 @@ public class OptimizingQueue extends PersistentBase {
     return scheduler;
   }
 
+  private static final class PendingRecovery {
+    private final DefaultTableRuntime tableRuntime;
+    private final long expectedProcessId;
+    private final int attempts;
+    private final long nextRetryAt;
+
+    private PendingRecovery(
+        DefaultTableRuntime tableRuntime, long expectedProcessId, int attempts, long nextRetryAt) {
+      this.tableRuntime = tableRuntime;
+      this.expectedProcessId = expectedProcessId;
+      this.attempts = attempts;
+      this.nextRetryAt = nextRetryAt;
+    }
+
+    private static PendingRecovery first(DefaultTableRuntime tableRuntime, long expectedProcessId) {
+      return new PendingRecovery(
+          tableRuntime,
+          expectedProcessId,
+          1,
+          System.currentTimeMillis() + recoveryRetryDelayMillis(1));
+    }
+
+    private PendingRecovery nextAttempt() {
+      int nextAttempts = attempts + 1;
+      return new PendingRecovery(
+          tableRuntime,
+          expectedProcessId,
+          nextAttempts,
+          System.currentTimeMillis() + recoveryRetryDelayMillis(nextAttempts));
+    }
+  }
+
+  /** Marks descriptor rows that were read successfully but cannot be reconstructed safely. */
+  @VisibleForTesting
+  static final class CorruptedRecoveryDataException extends RuntimeException {
+    CorruptedRecoveryDataException(String message, Throwable cause) {
+      super(message, cause);
+    }
+  }
+
+  @VisibleForTesting
+  static final class RecoveryKey {
+    private final long tableId;
+    private final long processId;
+
+    private RecoveryKey(long tableId, long processId) {
+      this.tableId = tableId;
+      this.processId = processId;
+    }
+
+    @Override
+    public boolean equals(Object other) {
+      if (this == other) {
+        return true;
+      }
+      if (!(other instanceof RecoveryKey)) {
+        return false;
+      }
+      RecoveryKey that = (RecoveryKey) other;
+      return tableId == that.tableId && processId == that.processId;
+    }
+
+    @Override
+    public int hashCode() {
+      return Objects.hash(tableId, processId);
+    }
+  }
+
+  @VisibleForTesting
+  static final class RecoveryGate {
+    private final Set<RecoveryKey> inProgress = ConcurrentHashMap.newKeySet();
+
+    RecoveryKey tryEnter(long tableId, long processId) {
+      RecoveryKey key = new RecoveryKey(tableId, processId);
+      return inProgress.add(key) ? key : null;
+    }
+
+    void exit(RecoveryKey key) {
+      inProgress.remove(key);
+    }
+
+    private void clear() {
+      inProgress.clear();
+    }
+  }
+
   private class TableOptimizingProcess implements OptimizingProcess {
 
     private final Lock lock = new ReentrantLock();
@@ -1201,6 +1503,7 @@ public class OptimizingQueue extends PersistentBase {
     private long endTime = AmoroServiceConstants.INVALID_TIME;
     private Map<String, Long> fromSequence = Maps.newHashMap();
     private Map<String, Long> toSequence = Maps.newHashMap();
+    private final Map<String, String> persistedSummaryOverride;
     private boolean hasCommitted = false;
 
     public TaskRuntime<?> poll(OptimizerThread thread, boolean needQuotaChecking) {
@@ -1243,6 +1546,7 @@ public class OptimizingQueue extends PersistentBase {
       targetSnapshotId = planResult.getTargetSnapshotId();
       targetChangeSnapshotId = planResult.getTargetChangeSnapshotId();
       commitMode = CommitMode.NORMAL;
+      persistedSummaryOverride = null;
       loadTaskRuntimes(planResult.getTasks());
       fromSequence = planResult.getFromSequence();
       toSequence = planResult.getToSequence();
@@ -1253,25 +1557,47 @@ public class OptimizingQueue extends PersistentBase {
         DefaultTableRuntime tableRuntime,
         TableProcessMeta processMeta,
         OptimizingProcessState processState) {
+      this(tableRuntime, processMeta, processState, true);
+    }
+
+    private TableOptimizingProcess(
+        DefaultTableRuntime tableRuntime,
+        TableProcessMeta processMeta,
+        OptimizingProcessState processState,
+        boolean loadPayloads) {
       this.tableRuntime = tableRuntime;
       this.format = tableRuntime.getFormat();
-      processId = tableRuntime.getProcessId();
+      processId = processMeta.getProcessId();
       optimizingType = OptimizingType.valueOf(processMeta.getProcessType());
-      targetSnapshotId = processState.getTargetSnapshotId();
-      targetChangeSnapshotId = processState.getTargetChangeSnapshotId();
+      targetSnapshotId = processState == null ? -1L : processState.getTargetSnapshotId();
+      targetChangeSnapshotId =
+          processState == null ? -1L : processState.getTargetChangeSnapshotId();
       planTime = processMeta.getCreateTime();
       OptimizingStatus recoveredOptimizingStatus = tableRuntime.getOptimizingStatus();
-      if (processState.getFromSequence() != null) {
+      if (processState != null && processState.getFromSequence() != null) {
         fromSequence = processState.getFromSequence();
       }
-      if (processState.getToSequence() != null) {
+      if (processState != null && processState.getToSequence() != null) {
         toSequence = processState.getToSequence();
       }
       this.status = processMeta.getStatus();
-      tableRuntime.recover(this);
-      loadTaskRuntimes(this);
-      commitMode =
-          resolveRecoveryCommitMode(format, recoveredOptimizingStatus, status, allTasksPrepared());
+      persistedSummaryOverride =
+          loadPayloads || processMeta.getSummary() == null
+              ? null
+              : new HashMap<>(processMeta.getSummary());
+      if (loadPayloads) {
+        loadTaskRuntimes();
+        commitMode =
+            resolveRecoveryCommitMode(
+                format, recoveredOptimizingStatus, status, allTasksPrepared());
+        // Publish only after all descriptors and payloads have been decoded and validated. This
+        // prevents a recovery exception from leaving a process attached to the runtime but absent
+        // from tableQueue.
+        tableRuntime.recover(this);
+      } else {
+        loadTaskRuntimesWithoutPayload();
+        commitMode = CommitMode.NORMAL;
+      }
     }
 
     private int getQuotaLimit() {
@@ -1794,7 +2120,7 @@ public class OptimizingQueue extends PersistentBase {
                           0,
                           planTime,
                           new HashMap<>(),
-                          getSummary().summaryAsMap(false))),
+                          summaryForPersistence())),
           () ->
               doAs(
                   OptimizingProcessMapper.class,
@@ -1839,7 +2165,7 @@ public class OptimizingQueue extends PersistentBase {
                           System.currentTimeMillis(),
                           getFailedReason(),
                           new HashMap<>(),
-                          getSummary().summaryAsMap(false))),
+                          summaryForPersistence())),
           () -> {
             if (strictOwner) {
               tableRuntime.completeProcessStrict(this, success);
@@ -1852,6 +2178,12 @@ public class OptimizingQueue extends PersistentBase {
 
     private void cancelTasks() {
       taskMap.values().forEach(TaskRuntime::tryCanceling);
+    }
+
+    private Map<String, String> summaryForPersistence() {
+      return persistedSummaryOverride == null
+          ? getSummary().summaryAsMap(false)
+          : new HashMap<>(persistedSummaryOverride);
     }
 
     /**
@@ -1927,58 +2259,81 @@ public class OptimizingQueue extends PersistentBase {
       }
     }
 
-    private void loadTaskRuntimes(OptimizingProcess optimizingProcess) {
+    private void loadTaskRuntimes() {
+      // Recovery is format-agnostic: descriptor and payload runtime types are restored first, and
+      // no process is published until every row has passed validation.
+      List<TaskRuntime<? extends StagedTaskDescriptor<? extends BaseOptimizingInput, ?, ?>>>
+          taskRuntimes;
       try {
-        // Recovery is format-agnostic after C3/C4: TaskDescriptorTypeConverter resolves the
-        // descriptor subclass from TASK_EXECUTOR_FACTORY_IMPL, and TaskFilesPersistence returns
-        // a Map<Integer, BaseOptimizingInput> whose concrete values carry their own runtime
-        // class. We widen the compile-time view to StagedTaskDescriptor<? extends
-        // BaseOptimizingInput, ?, ?> so the same call recovers both Iceberg and Paimon rows.
-        List<TaskRuntime<? extends StagedTaskDescriptor<? extends BaseOptimizingInput, ?, ?>>>
-            taskRuntimes =
-                getAs(
-                    OptimizingProcessMapper.class,
-                    mapper ->
-                        mapper.selectTaskRuntimes(
-                            tableRuntime.getTableIdentifier().getId(), processId));
-        Map<Integer, BaseOptimizingInput> inputs = TaskFilesPersistence.loadTaskInputs(processId);
-        // Compensation for pre-0.9 Iceberg rows: TaskDescriptorTypeConverter correctly routes rows
-        // with a missing TASK_EXECUTOR_FACTORY_IMPL to RewriteStageTask, but the key itself is
-        // still absent from the descriptor's properties map on restore. OptimizerExecutor later
-        // reads that key via reflection to build the executor factory — without this injection it
-        // would NPE. Idempotent: we never overwrite an existing key (e.g. for Paimon rows where
-        // the Paimon planner already populated it).
-        injectLegacyExecutorFactoryDefaults(taskRuntimes);
-        taskRuntimes.forEach(
-            taskRuntime -> {
-              taskRuntime.getCompletedFuture().whenCompleted(() -> acceptResult(taskRuntime));
-              BaseOptimizingInput input = inputs.get(taskRuntime.getTaskId().getTaskId());
-              TaskDescriptorRecoveryTypes.validateRecoveredTask(
-                  taskRuntime.getTaskDescriptor(), input, tableRuntime.getFormat());
-              bindLoadedInput(taskRuntime.getTaskDescriptor(), input);
-              taskMap.put(taskRuntime.getTaskId(), taskRuntime);
-              if (taskRuntime.getStatus() == TaskRuntime.Status.PLANNED) {
-                taskQueue.offer(taskRuntime);
-              } else if (taskRuntime.getStatus() == TaskRuntime.Status.SCHEDULED
-                  || taskRuntime.getStatus() == TaskRuntime.Status.ACKED) {
-                // Don't reset — let the optimizer finish execution and report
-                // the result. If the optimizer is dead, OptimizerKeeper will
-                // detect the stale token and reset the task via retryTask().
-                LOG.debug(
-                    "Keeping task {} in {} during recovery, waiting for optimizer to complete",
-                    taskRuntime.getTaskId(),
-                    taskRuntime.getStatus());
-              } else if (taskRuntime.getStatus() == TaskRuntime.Status.FAILED) {
-                retryTask(taskRuntime);
-              }
-            });
-      } catch (IllegalArgumentException | ClassCastException e) {
-        LOG.warn(
-            "Load task inputs failed, close the optimizing process : {}",
-            optimizingProcess.getProcessId(),
-            e);
-        optimizingProcess.close(false);
+        taskRuntimes =
+            getAs(
+                OptimizingProcessMapper.class,
+                mapper ->
+                    mapper.selectTaskRuntimes(
+                        tableRuntime.getTableIdentifier().getId(), processId));
+      } catch (RuntimeException failure) {
+        if (findCause(failure, OptimizingPayloadException.class) != null) {
+          throw failure;
+        }
+        Throwable descriptorFailure = findCause(failure, IllegalArgumentException.class);
+        if (descriptorFailure == null) {
+          descriptorFailure = findCause(failure, ClassCastException.class);
+        }
+        if (descriptorFailure != null) {
+          throw new CorruptedRecoveryDataException(
+              "Failed to materialize optimizing task descriptors for processId=" + processId,
+              descriptorFailure);
+        }
+        throw failure;
       }
+      Map<Integer, BaseOptimizingInput> inputs = TaskFilesPersistence.loadTaskInputs(processId);
+      injectLegacyExecutorFactoryDefaults(taskRuntimes);
+
+      for (TaskRuntime<? extends StagedTaskDescriptor<? extends BaseOptimizingInput, ?, ?>>
+          taskRuntime : taskRuntimes) {
+        BaseOptimizingInput input = inputs.get(taskRuntime.getTaskId().getTaskId());
+        try {
+          TaskDescriptorRecoveryTypes.validateRecoveredTask(
+              taskRuntime.getTaskDescriptor(), input, tableRuntime.getFormat());
+          bindLoadedInput(taskRuntime.getTaskDescriptor(), input);
+        } catch (IllegalArgumentException | ClassCastException failure) {
+          throw new CorruptedRecoveryDataException(
+              "Invalid optimizing task descriptor for processId="
+                  + processId
+                  + ", taskId="
+                  + taskRuntime.getTaskId().getTaskId(),
+              failure);
+        }
+      }
+
+      for (TaskRuntime<? extends StagedTaskDescriptor<? extends BaseOptimizingInput, ?, ?>>
+          taskRuntime : taskRuntimes) {
+        taskRuntime.getCompletedFuture().whenCompleted(() -> acceptResult(taskRuntime));
+        taskMap.put(taskRuntime.getTaskId(), taskRuntime);
+        if (taskRuntime.getStatus() == TaskRuntime.Status.PLANNED) {
+          taskQueue.offer(taskRuntime);
+        } else if (taskRuntime.getStatus() == TaskRuntime.Status.SCHEDULED
+            || taskRuntime.getStatus() == TaskRuntime.Status.ACKED) {
+          LOG.debug(
+              "Keeping task {} in {} during recovery, waiting for optimizer to complete",
+              taskRuntime.getTaskId(),
+              taskRuntime.getStatus());
+        } else if (taskRuntime.getStatus() == TaskRuntime.Status.FAILED) {
+          resetTask(taskRuntime);
+        }
+      }
+    }
+
+    private void loadTaskRuntimesWithoutPayload() {
+      List<TaskRuntime<? extends StagedTaskDescriptor<? extends BaseOptimizingInput, ?, ?>>>
+          taskRuntimes =
+              getAs(
+                  OptimizingProcessMapper.class,
+                  mapper ->
+                      mapper.selectTaskRuntimesWithoutPayload(
+                          tableRuntime.getTableIdentifier().getId(), processId));
+      injectLegacyExecutorFactoryDefaults(taskRuntimes);
+      taskRuntimes.forEach(taskRuntime -> taskMap.put(taskRuntime.getTaskId(), taskRuntime));
     }
 
     private <T extends StagedTaskDescriptor<?, ?, ?>> void loadTaskRuntimes(

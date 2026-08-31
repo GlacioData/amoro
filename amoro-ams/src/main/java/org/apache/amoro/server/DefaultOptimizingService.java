@@ -868,6 +868,8 @@ public class DefaultOptimizingService extends StatedPersistentBase
     @Override
     public void run() {
       syncGroups();
+      long now = System.currentTimeMillis();
+      optimizingQueueByGroup.values().forEach(queue -> queue.retryPendingRecoveries(now));
     }
 
     private void syncGroups() {

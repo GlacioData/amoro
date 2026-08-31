@@ -23,7 +23,6 @@ import org.apache.amoro.optimizing.RewriteFilesOutput;
 import org.apache.amoro.process.StagedTaskDescriptor;
 import org.apache.amoro.server.optimizing.TaskRuntime;
 import org.apache.amoro.server.persistence.mapper.OptimizingProcessMapper;
-import org.apache.amoro.server.utils.CompressUtil;
 import org.apache.amoro.utils.SerializationUtil;
 
 import java.util.Collection;
@@ -38,7 +37,8 @@ import java.util.stream.Collectors;
  *
  * <p>Storage shape is intentionally format-agnostic: we serialize a {@code Map<Integer,
  * BaseOptimizingInput>} via {@link SerializationUtil#simpleSerialize(Object)} (Java serialization)
- * and gzip it through {@link CompressUtil}. Any {@link BaseOptimizingInput} subclass that is {@code
+ * and encode it through {@link OptimizingPayloadCodec}. New writes retain GZIP while reads also
+ * accept historical raw Java serialization. Any {@link BaseOptimizingInput} subclass that is {@code
  * Serializable} round-trips without this layer needing to know the concrete type — concretely, both
  * the Iceberg {@code RewriteFilesInput} and Paimon {@code PaimonCompactionInput} are covered.
  *
@@ -90,7 +90,14 @@ public class TaskFilesPersistence {
     if (bytes == null || bytes.isEmpty()) {
       return Collections.emptyMap();
     } else {
-      return SerializationUtil.simpleDeserialize(CompressUtil.unGzip(bytes.get(0)));
+      try {
+        return OptimizingPayloadCodec.decode(bytes.get(0));
+      } catch (OptimizingPayloadException e) {
+        throw new OptimizingPayloadException(
+            e.getReason(),
+            "field=rewrite_input, processId=" + processId + ", " + e.getMessage(),
+            e);
+      }
     }
   }
 
