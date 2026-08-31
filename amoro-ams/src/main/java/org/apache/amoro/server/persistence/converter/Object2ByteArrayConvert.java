@@ -19,8 +19,8 @@
 package org.apache.amoro.server.persistence.converter;
 
 import org.apache.amoro.server.AmoroManagementConf;
-import org.apache.amoro.server.utils.CompressUtil;
-import org.apache.amoro.utils.SerializationUtil;
+import org.apache.amoro.server.persistence.OptimizingPayloadCodec;
+import org.apache.amoro.server.persistence.OptimizingPayloadException;
 import org.apache.ibatis.type.JdbcType;
 import org.apache.ibatis.type.TypeHandler;
 
@@ -48,10 +48,7 @@ public class Object2ByteArrayConvert<T> implements TypeHandler<T> {
       return;
     }
 
-    ps.setBinaryStream(
-        i,
-        new ByteArrayInputStream(
-            CompressUtil.gzip(SerializationUtil.simpleSerialize(parameter).array())));
+    ps.setBinaryStream(i, new ByteArrayInputStream(OptimizingPayloadCodec.encode(parameter)));
   }
 
   @Override
@@ -60,7 +57,7 @@ public class Object2ByteArrayConvert<T> implements TypeHandler<T> {
     if (bytes == null) {
       return null;
     }
-    return SerializationUtil.simpleDeserialize(CompressUtil.unGzip(bytes));
+    return decodeOutput(bytes);
   }
 
   @Override
@@ -69,7 +66,7 @@ public class Object2ByteArrayConvert<T> implements TypeHandler<T> {
     if (bytes == null) {
       return null;
     }
-    return SerializationUtil.simpleDeserialize(CompressUtil.unGzip(bytes));
+    return decodeOutput(bytes);
   }
 
   @Override
@@ -78,6 +75,15 @@ public class Object2ByteArrayConvert<T> implements TypeHandler<T> {
     if (bytes == null) {
       return null;
     }
-    return SerializationUtil.simpleDeserialize(CompressUtil.unGzip(bytes));
+    return decodeOutput(bytes);
+  }
+
+  private T decodeOutput(byte[] bytes) {
+    try {
+      return OptimizingPayloadCodec.decode(bytes);
+    } catch (OptimizingPayloadException e) {
+      throw new OptimizingPayloadException(
+          e.getReason(), "field=rewrite_output, " + e.getMessage(), e);
+    }
   }
 }

@@ -133,37 +133,56 @@ public interface OptimizingProcessMapper {
       "SELECT process_id, task_id, 'executing' as stage, retry_num, table_id, partition_data,  create_time, start_time, end_time,"
           + " status, fail_reason, optimizer_token, thread_id, rewrite_output, metrics_summary, properties FROM "
           + "task_runtime WHERE table_id = #{table_id} AND process_id = #{process_id}")
-  @Results({
-    @Result(property = "taskId.processId", column = "process_id"),
-    @Result(property = "taskId.taskId", column = "task_id"),
-    @Result(
-        property = "taskDescriptor",
-        column = "stage",
-        typeHandler = TaskDescriptorTypeConverter.class),
-    @Result(property = "runTimes", column = "retry_num"),
-    @Result(property = "taskDescriptor.tableId", column = "table_id"),
-    @Result(property = "taskDescriptor.partition", column = "partition_data"),
-    @Result(property = "startTime", column = "start_time", typeHandler = Long2TsConverter.class),
-    @Result(property = "endTime", column = "end_time", typeHandler = Long2TsConverter.class),
-    @Result(property = "status", column = "status"),
-    @Result(property = "failReason", column = "fail_reason"),
-    @Result(property = "token", column = "optimizer_token"),
-    @Result(property = "threadId", column = "thread_id"),
-    @Result(
-        property = "taskDescriptor.output",
-        column = "rewrite_output",
-        typeHandler = Object2ByteArrayConvert.class),
-    @Result(
-        property = "taskDescriptor.summary",
-        column = "metrics_summary",
-        typeHandler = TaskDescriptorSummaryConverter.class),
-    @Result(
-        property = "taskDescriptor.properties",
-        column = "properties",
-        typeHandler = Map2StringConverter.class)
-  })
+  @Results(
+      id = "taskRuntimeDescriptorMap",
+      value = {
+        @Result(property = "taskId.processId", column = "process_id"),
+        @Result(property = "taskId.taskId", column = "task_id"),
+        @Result(
+            property = "taskDescriptor",
+            column = "stage",
+            typeHandler = TaskDescriptorTypeConverter.class),
+        @Result(property = "runTimes", column = "retry_num"),
+        @Result(property = "taskDescriptor.tableId", column = "table_id"),
+        @Result(property = "taskDescriptor.partition", column = "partition_data"),
+        @Result(
+            property = "startTime",
+            column = "start_time",
+            typeHandler = Long2TsConverter.class),
+        @Result(property = "endTime", column = "end_time", typeHandler = Long2TsConverter.class),
+        @Result(property = "status", column = "status"),
+        @Result(property = "failReason", column = "fail_reason"),
+        @Result(property = "token", column = "optimizer_token"),
+        @Result(property = "threadId", column = "thread_id"),
+        @Result(
+            property = "taskDescriptor.output",
+            column = "rewrite_output",
+            typeHandler = Object2ByteArrayConvert.class),
+        @Result(
+            property = "taskDescriptor.summary",
+            column = "metrics_summary",
+            typeHandler = TaskDescriptorSummaryConverter.class),
+        @Result(
+            property = "taskDescriptor.properties",
+            column = "properties",
+            typeHandler = Map2StringConverter.class)
+      })
   List<TaskRuntime<? extends StagedTaskDescriptor<? extends BaseOptimizingInput, ?, ?>>>
       selectTaskRuntimes(@Param("table_id") long tableId, @Param("process_id") long processId);
+
+  /**
+   * Loads task state without materializing {@code rewrite_output}. This is only used to close an
+   * otherwise unrecoverable process when the output BLOB itself is corrupt.
+   */
+  @Select(
+      "SELECT process_id, task_id, 'executing' as stage, retry_num, table_id, partition_data, "
+          + "create_time, start_time, end_time, status, fail_reason, optimizer_token, thread_id, "
+          + "NULL AS rewrite_output, metrics_summary, properties FROM task_runtime "
+          + "WHERE table_id = #{table_id} AND process_id = #{process_id}")
+  @ResultMap("taskRuntimeDescriptorMap")
+  List<TaskRuntime<? extends StagedTaskDescriptor<? extends BaseOptimizingInput, ?, ?>>>
+      selectTaskRuntimesWithoutPayload(
+          @Param("table_id") long tableId, @Param("process_id") long processId);
 
   @Select(
       "<script>"
@@ -174,26 +193,37 @@ public interface OptimizingProcessMapper {
           + "#{item}"
           + "</foreach>"
           + "</script>")
-  @Results({
-    @Result(property = "processId", column = "process_id"),
-    @Result(property = "taskId", column = "task_id"),
-    @Result(property = "retryNum", column = "retry_num"),
-    @Result(property = "tableId", column = "table_id"),
-    @Result(property = "partitionData", column = "partition_data"),
-    @Result(property = "createTime", column = "create_time", typeHandler = Long2TsConverter.class),
-    @Result(property = "startTime", column = "start_time", typeHandler = Long2TsConverter.class),
-    @Result(property = "endTime", column = "end_time", typeHandler = Long2TsConverter.class),
-    @Result(property = "costTime", column = "cost_time"),
-    @Result(property = "status", column = "status"),
-    @Result(property = "failReason", column = "fail_reason"),
-    @Result(property = "optimizerToken", column = "optimizer_token"),
-    @Result(property = "threadId", column = "thread_id"),
-    @Result(
-        property = "metricsSummary",
-        column = "metrics_summary",
-        typeHandler = JsonObjectConverter.class),
-    @Result(property = "properties", column = "properties", typeHandler = Map2StringConverter.class)
-  })
+  @Results(
+      id = "optimizingTaskRuntimeMap",
+      value = {
+        @Result(property = "processId", column = "process_id"),
+        @Result(property = "taskId", column = "task_id"),
+        @Result(property = "retryNum", column = "retry_num"),
+        @Result(property = "tableId", column = "table_id"),
+        @Result(property = "partitionData", column = "partition_data"),
+        @Result(
+            property = "createTime",
+            column = "create_time",
+            typeHandler = Long2TsConverter.class),
+        @Result(
+            property = "startTime",
+            column = "start_time",
+            typeHandler = Long2TsConverter.class),
+        @Result(property = "endTime", column = "end_time", typeHandler = Long2TsConverter.class),
+        @Result(property = "costTime", column = "cost_time"),
+        @Result(property = "status", column = "status"),
+        @Result(property = "failReason", column = "fail_reason"),
+        @Result(property = "optimizerToken", column = "optimizer_token"),
+        @Result(property = "threadId", column = "thread_id"),
+        @Result(
+            property = "metricsSummary",
+            column = "metrics_summary",
+            typeHandler = JsonObjectConverter.class),
+        @Result(
+            property = "properties",
+            column = "properties",
+            typeHandler = Map2StringConverter.class)
+      })
   List<OptimizingTaskMeta> selectOptimizeTaskMetas(@Param("processIds") List<Long> processIds);
 
   @Update(
