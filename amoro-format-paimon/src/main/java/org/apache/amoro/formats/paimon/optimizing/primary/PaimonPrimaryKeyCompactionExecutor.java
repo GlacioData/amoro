@@ -33,6 +33,7 @@ import org.apache.paimon.table.sink.BatchTableWrite;
 import org.apache.paimon.table.sink.CommitMessage;
 import org.apache.paimon.table.sink.CommitMessageImpl;
 import org.apache.paimon.table.sink.CommitMessageSerializer;
+import org.apache.paimon.table.sink.InnerTableWrite;
 import org.apache.paimon.utils.SerializationUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -91,6 +92,14 @@ public class PaimonPrimaryKeyCompactionExecutor
     try (IOManager ioManager = IOManager.create(System.getProperty("java.io.tmpdir"));
         BatchTableWrite write =
             compactTable.newBatchWriteBuilder().newWrite().withIOManager(ioManager)) {
+      if (!(write instanceof InnerTableWrite)) {
+        throw new IllegalStateException(
+            "Paimon primary-key compaction requires InnerTableWrite, got "
+                + write.getClass().getName());
+      }
+      ((InnerTableWrite) write)
+          .withWriteRestore(
+              new PaimonPrimaryKeySnapshotWriteRestore(compactTable, input.getTargetSnapshotId()));
       for (PaimonBucketCompactionUnit unit : input.getUnits()) {
         BinaryRow partition = SerializationUtils.deserializeBinaryRow(unit.getPartitionBytes());
         write.compact(partition, unit.getBucket(), input.isFullCompaction());
@@ -140,6 +149,12 @@ public class PaimonPrimaryKeyCompactionExecutor
       throw new IllegalStateException(
           "PaimonPrimaryKeyCompactionInput has invalid commitIdentifier "
               + input.getCommitIdentifier()
+              + ".");
+    }
+    if (input.getTargetSnapshotId() <= 0L) {
+      throw new IllegalStateException(
+          "PaimonPrimaryKeyCompactionInput has invalid targetSnapshotId "
+              + input.getTargetSnapshotId()
               + ".");
     }
     if (input.getOptimizingType() == null) {

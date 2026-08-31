@@ -118,6 +118,55 @@ class TestPaimonPrimaryKeyTableCommit {
   }
 
   @Test
+  @DisplayName("Planned-snapshot compaction preserves rows appended before commit")
+  void plannedSnapshotCompactionPreservesConcurrentAppend(@TempDir Path warehouse)
+      throws Exception {
+    Catalog catalog = fsCatalog(warehouse);
+    Identifier id =
+        createPrimaryKeyTable(catalog, "t_planned_snapshot_concurrent_append", primaryKeyOptions());
+    writeCommits(catalog.getTable(id), 2);
+    OptimizingPlanResult<PaimonPrimaryKeyCompactionTask> result =
+        planner(catalog, id, runtimeOptions("num-sorted-run.compaction-trigger", "2")).plan();
+    assertEquals(OptimizingType.MINOR, result.getOptimizingType());
+    assertFalse(result.getTasks().isEmpty());
+    List<PaimonPrimaryKeyCompactionTask> tasks = new ArrayList<>(result.getTasks());
+
+    writeCommit(catalog.getTable(id), 2, "name-2");
+    for (PaimonPrimaryKeyCompactionTask task : tasks) {
+      setOutput(task, new PaimonPrimaryKeyCompactionExecutor(task.getInput()).execute());
+    }
+    new PaimonPrimaryKeyTableCommit((FileStoreTable) catalog.getTable(id), tasks).commit();
+
+    assertEquals(
+        java.util.Arrays.asList("0|name-0", "1|name-1", "2|name-2"),
+        readRows(catalog.getTable(id)));
+  }
+
+  @Test
+  @DisplayName("Compaction preserves a concurrent primary-key update backed by deletion vectors")
+  void compactionPreservesConcurrentDeletionVectorUpdate(@TempDir Path warehouse) throws Exception {
+    Catalog catalog = fsCatalog(warehouse);
+    Map<String, String> options = primaryKeyOptions();
+    options.put(CoreOptions.DELETION_VECTORS_ENABLED.key(), "true");
+    Identifier id = createPrimaryKeyTable(catalog, "t_concurrent_dv_update", options);
+    writeCommits(catalog.getTable(id), 2);
+    OptimizingPlanResult<PaimonPrimaryKeyCompactionTask> result =
+        planner(catalog, id, runtimeOptions("num-sorted-run.compaction-trigger", "2")).plan();
+    assertEquals(OptimizingType.MINOR, result.getOptimizingType());
+    assertFalse(result.getTasks().isEmpty());
+    List<PaimonPrimaryKeyCompactionTask> tasks = new ArrayList<>(result.getTasks());
+
+    writeCommit(catalog.getTable(id), 0, "name-0-new");
+    for (PaimonPrimaryKeyCompactionTask task : tasks) {
+      setOutput(task, new PaimonPrimaryKeyCompactionExecutor(task.getInput()).execute());
+    }
+    new PaimonPrimaryKeyTableCommit((FileStoreTable) catalog.getTable(id), tasks).commit();
+
+    assertEquals(
+        java.util.Arrays.asList("0|name-0-new", "1|name-1"), readRows(catalog.getTable(id)));
+  }
+
+  @Test
   @DisplayName("Committer filters replayed commit identity")
   void committerFiltersReplayedCommitIdentity(@TempDir Path warehouse) throws Exception {
     Catalog catalog = fsCatalog(warehouse);
@@ -536,13 +585,17 @@ class TestPaimonPrimaryKeyTableCommit {
 
   private static void writeCommits(Table table, int count) throws Exception {
     for (int i = 0; i < count; i++) {
-      BatchWriteBuilder builder = table.newBatchWriteBuilder();
-      try (BatchTableWrite write = builder.newWrite()) {
-        write.write(GenericRow.of(i, BinaryString.fromString("name-" + i)));
-        List<CommitMessage> messages = write.prepareCommit();
-        try (BatchTableCommit commit = builder.newCommit()) {
-          commit.commit(messages);
-        }
+      writeCommit(table, i, "name-" + i);
+    }
+  }
+
+  private static void writeCommit(Table table, int id, String name) throws Exception {
+    BatchWriteBuilder builder = table.newBatchWriteBuilder();
+    try (BatchTableWrite write = builder.newWrite()) {
+      write.write(GenericRow.of(id, BinaryString.fromString(name)));
+      List<CommitMessage> messages = write.prepareCommit();
+      try (BatchTableCommit commit = builder.newCommit()) {
+        commit.commit(messages);
       }
     }
   }
