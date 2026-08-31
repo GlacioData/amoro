@@ -18,9 +18,11 @@
 
 package org.apache.amoro.formats.paimon.optimizing.primary;
 
+import static org.apache.paimon.deletionvectors.DeletionVectorsIndexFile.DELETION_VECTORS_INDEX;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -43,12 +45,21 @@ import org.apache.amoro.optimizing.OptimizingType;
 import org.apache.amoro.table.TableIdentifier;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.paimon.CoreOptions;
+import org.apache.paimon.FileStore;
 import org.apache.paimon.Snapshot;
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.data.BinaryString;
 import org.apache.paimon.data.GenericRow;
+import org.apache.paimon.fs.FileIO;
+import org.apache.paimon.index.IndexFileHandler;
+import org.apache.paimon.index.IndexFileMeta;
+import org.apache.paimon.io.DataFileMeta;
+import org.apache.paimon.manifest.ManifestEntry;
+import org.apache.paimon.operation.FileStoreScan;
+import org.apache.paimon.operation.RestoreFiles;
+import org.apache.paimon.operation.WriteRestore;
 import org.apache.paimon.options.CatalogOptions;
 import org.apache.paimon.schema.Schema;
 import org.apache.paimon.table.BucketMode;
@@ -58,11 +69,14 @@ import org.apache.paimon.table.sink.BatchTableCommit;
 import org.apache.paimon.table.sink.BatchTableWrite;
 import org.apache.paimon.table.sink.BatchWriteBuilder;
 import org.apache.paimon.table.sink.CommitMessage;
+import org.apache.paimon.table.sink.InnerTableWrite;
 import org.apache.paimon.types.DataTypes;
 import org.apache.paimon.utils.SerializationUtils;
+import org.apache.paimon.utils.SnapshotManager;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.mockito.ArgumentCaptor;
 
 import java.nio.file.Path;
 import java.util.Collections;
@@ -188,6 +202,88 @@ class TestPaimonPrimaryKeyCompactionExecutor {
     assertNativeFullCompactionFlag(OptimizingType.MINOR, false);
     assertNativeFullCompactionFlag(OptimizingType.MAJOR, false);
     assertNativeFullCompactionFlag(OptimizingType.FULL, true);
+  }
+
+  @Test
+  @DisplayName("executor restores files from the latest reachable snapshot without listing")
+  @SuppressWarnings("unchecked")
+  void executorRestoresFilesFromLatestReachableSnapshot() throws Exception {
+    long targetSnapshotId = 10L;
+    long restoreSnapshotId = 12L;
+    FileStoreTable table = mock(FileStoreTable.class);
+    when(table.primaryKeys()).thenReturn(Collections.singletonList("id"));
+    when(table.bucketMode()).thenReturn(BucketMode.HASH_FIXED);
+    when(table.options()).thenReturn(Collections.emptyMap());
+    FileStoreTable compactTable = mock(FileStoreTable.class);
+    when(table.copy(anyMap())).thenReturn(compactTable);
+    when(compactTable.options()).thenReturn(Collections.emptyMap());
+    SnapshotManager snapshotManager = mock(SnapshotManager.class);
+    Snapshot restoreSnapshot = mock(Snapshot.class);
+    when(compactTable.snapshotManager()).thenReturn(snapshotManager);
+    FileIO fileIO = mock(FileIO.class);
+    when(snapshotManager.fileIO()).thenReturn(fileIO);
+    when(snapshotManager.snapshotDirectory())
+        .thenReturn(new org.apache.paimon.fs.Path("file:/tmp/snapshot"));
+    when(fileIO.readOverwrittenFileUtf8(any(org.apache.paimon.fs.Path.class)))
+        .thenReturn(Optional.empty());
+    when(snapshotManager.snapshotExists(11L)).thenReturn(true);
+    when(snapshotManager.snapshotExists(12L)).thenReturn(true);
+    when(snapshotManager.snapshotExists(13L)).thenReturn(false);
+    when(snapshotManager.snapshot(restoreSnapshotId)).thenReturn(restoreSnapshot);
+    FileStore<?> store = mock(FileStore.class);
+    FileStoreScan scan = mock(FileStoreScan.class);
+    FileStoreScan.Plan scanPlan = mock(FileStoreScan.Plan.class);
+    IndexFileHandler indexFileHandler = mock(IndexFileHandler.class);
+    ManifestEntry entry = mock(ManifestEntry.class);
+    DataFileMeta dataFile = mock(DataFileMeta.class);
+    IndexFileMeta dynamicBucketIndex = mock(IndexFileMeta.class);
+    IndexFileMeta deletionVectorIndex = mock(IndexFileMeta.class);
+    when(compactTable.store()).thenReturn((FileStore) store);
+    when(store.newScan()).thenReturn(scan);
+    when(store.newIndexFileHandler()).thenReturn(indexFileHandler);
+    when(scan.withSnapshot(restoreSnapshot)).thenReturn(scan);
+    when(scan.withPartitionBucket(any(BinaryRow.class), eq(0))).thenReturn(scan);
+    when(scan.plan()).thenReturn(scanPlan);
+    when(scanPlan.files()).thenReturn(Collections.singletonList(entry));
+    when(entry.totalBuckets()).thenReturn(1);
+    when(entry.file()).thenReturn(dataFile);
+    when(indexFileHandler.scanHashIndex(restoreSnapshot, BinaryRow.EMPTY_ROW, 0))
+        .thenReturn(Optional.of(dynamicBucketIndex));
+    when(indexFileHandler.scan(restoreSnapshot, DELETION_VECTORS_INDEX, BinaryRow.EMPTY_ROW, 0))
+        .thenReturn(Collections.singletonList(deletionVectorIndex));
+    BatchWriteBuilder writeBuilder = mock(BatchWriteBuilder.class);
+    InnerTableWrite write = mock(InnerTableWrite.class);
+    when(compactTable.newBatchWriteBuilder()).thenReturn(writeBuilder);
+    when(writeBuilder.newWrite()).thenReturn(write);
+    when(write.withIOManager(any())).thenReturn(write);
+    when(write.prepareCommit()).thenReturn(Collections.emptyList());
+    PaimonPrimaryKeyCompactionInput input =
+        new PaimonPrimaryKeyCompactionInput(
+            wrap(table, "t_latest_reachable_snapshot_restore"),
+            Collections.singletonList(
+                new PaimonBucketCompactionUnit(
+                    SerializationUtils.serializeBinaryRow(BinaryRow.EMPTY_ROW), 0, 1L, 1L, 1L, 1L)),
+            OptimizingType.MINOR,
+            false,
+            targetSnapshotId,
+            "user",
+            1L);
+
+    new PaimonPrimaryKeyCompactionExecutor(input).execute();
+
+    ArgumentCaptor<WriteRestore> restoreCaptor = ArgumentCaptor.forClass(WriteRestore.class);
+    verify(write).withWriteRestore(restoreCaptor.capture());
+    assertEquals(Long.MIN_VALUE, restoreCaptor.getValue().latestCommittedIdentifier("user"));
+    RestoreFiles restored =
+        restoreCaptor.getValue().restoreFiles(BinaryRow.EMPTY_ROW, 0, true, true);
+    verify(snapshotManager).snapshot(restoreSnapshotId);
+    verify(snapshotManager, never()).snapshot(targetSnapshotId);
+    verify(snapshotManager, never()).latestSnapshotFromFileSystem();
+    assertSame(restoreSnapshot, restored.snapshot());
+    assertEquals(1, restored.totalBuckets());
+    assertEquals(Collections.singletonList(dataFile), restored.dataFiles());
+    assertSame(dynamicBucketIndex, restored.dynamicBucketIndex());
+    assertEquals(Collections.singletonList(deletionVectorIndex), restored.deleteVectorsIndex());
   }
 
   @Test
@@ -420,14 +516,23 @@ class TestPaimonPrimaryKeyCompactionExecutor {
     when(table.options()).thenReturn(Collections.emptyMap());
     FileStoreTable compactTable = mock(FileStoreTable.class);
     when(table.copy(anyMap())).thenReturn(compactTable);
+    when(compactTable.options()).thenReturn(Collections.emptyMap());
+    SnapshotManager snapshotManager = mock(SnapshotManager.class);
+    Snapshot plannedSnapshot = mock(Snapshot.class);
+    when(compactTable.snapshotManager()).thenReturn(snapshotManager);
+    FileStore<?> store = mock(FileStore.class);
+    when(compactTable.store()).thenReturn((FileStore) store);
+    when(store.newScan()).thenReturn(mock(FileStoreScan.class));
+    when(store.newIndexFileHandler()).thenReturn(mock(IndexFileHandler.class));
     BatchWriteBuilder writeBuilder = mock(BatchWriteBuilder.class);
-    BatchTableWrite write = mock(BatchTableWrite.class);
+    InnerTableWrite write = mock(InnerTableWrite.class);
     when(compactTable.newBatchWriteBuilder()).thenReturn(writeBuilder);
     when(writeBuilder.newWrite()).thenReturn(write);
     when(write.withIOManager(any())).thenReturn(write);
     when(write.prepareCommit()).thenReturn(Collections.emptyList());
 
     long targetSnapshotId = 10L;
+    when(snapshotManager.snapshot(targetSnapshotId)).thenReturn(plannedSnapshot);
     if (optimizingType == OptimizingType.FULL) {
       Snapshot snapshot = mock(Snapshot.class);
       when(snapshot.id()).thenReturn(targetSnapshotId);
