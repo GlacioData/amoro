@@ -19,6 +19,7 @@
 package org.apache.amoro.optimizer.spark;
 
 import org.apache.amoro.api.OptimizingTask;
+import org.apache.amoro.api.OptimizingTaskId;
 import org.apache.amoro.api.OptimizingTaskResult;
 import org.apache.amoro.optimizer.common.OptimizerConfig;
 import org.apache.amoro.optimizer.common.OptimizerExecutor;
@@ -78,7 +79,7 @@ public class SparkOptimizerExecutor extends OptimizerExecutor {
     }
   }
 
-  private String jobDescription(OptimizingTask task) {
+  static String jobDescription(OptimizingTask task) {
     // Delegate to OptimizingInput#describe() so format-specific modules (Iceberg, Paimon, ...) own
     // the phrasing and amoro-optimizer-spark stays free of direct format imports. If the input
     // cannot be deserialized for any reason we still return a usable, task-id-scoped label so the
@@ -95,6 +96,11 @@ public class SparkOptimizerExecutor extends OptimizerExecutor {
           t);
       describe = "undeserializable-input";
     }
-    return String.format("Amoro optimizing task, %s, task id:%s", describe, task.getTaskId());
+    OptimizingTaskId taskId = task.getTaskId();
+    String taskIdDescription =
+        taskId == null
+            ? "processId:<unknown>, taskId:<unknown>"
+            : String.format("processId:%s, taskId:%s", taskId.getProcessId(), taskId.getTaskId());
+    return String.format("Amoro optimizing task, %s, %s", describe, taskIdDescription);
   }
 }

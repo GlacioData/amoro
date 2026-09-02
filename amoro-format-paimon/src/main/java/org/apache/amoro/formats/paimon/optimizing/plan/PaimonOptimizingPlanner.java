@@ -42,6 +42,9 @@ import org.apache.paimon.options.Options;
 import org.apache.paimon.predicate.Predicate;
 import org.apache.paimon.table.AppendOnlyFileStoreTable;
 import org.apache.paimon.table.sink.AppendCompactTaskSerializer;
+import org.apache.paimon.types.RowType;
+import org.apache.paimon.utils.InternalRowPartitionComputer;
+import org.apache.paimon.utils.PartitionPathUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -407,7 +410,7 @@ public class PaimonOptimizingPlanner implements TableOptimizingPlanner {
                 bytes,
                 serializerVersion,
                 commitUser,
-                task.partition() == null ? "" : task.partition().toString(),
+                partitionPath(table, task.partition()),
                 targetSnapshotId,
                 processId);
         Map<String, String> props = Maps.newHashMap();
@@ -616,6 +619,35 @@ public class PaimonOptimizingPlanner implements TableOptimizingPlanner {
       return null;
     }
     return table;
+  }
+
+  /**
+   * Converts Paimon's internal partition row to its canonical, human-readable partition path.
+   *
+   * <p>Paimon stores the partition as a {@link BinaryRow}; its default {@code toString()} is an
+   * object identity rather than the partition values. The generated {@code key=value/} path matches
+   * Paimon's partition-directory convention documented at
+   * https://paimon.apache.org/docs/1.4/concepts/spec/datafile/.
+   */
+  private static String partitionPath(AppendOnlyFileStoreTable table, BinaryRow partition) {
+    if (partition == null) {
+      return "";
+    }
+
+    RowType partitionType = table.schema().logicalPartitionType();
+    if (partitionType.getFieldCount() == 0) {
+      return "";
+    }
+
+    CoreOptions options = new CoreOptions(table.options());
+    InternalRowPartitionComputer partitionComputer =
+        new InternalRowPartitionComputer(
+            options.partitionDefaultName(),
+            partitionType,
+            partitionType.getFieldNames().toArray(new String[0]),
+            false);
+    return PartitionPathUtils.generatePartitionPath(
+        partitionComputer.generatePartValues(partition));
   }
 
   private static boolean matchesCurrentContext(
