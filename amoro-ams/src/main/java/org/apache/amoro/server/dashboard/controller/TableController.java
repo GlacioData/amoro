@@ -21,6 +21,7 @@ package org.apache.amoro.server.dashboard.controller;
 import static org.apache.amoro.properties.CatalogMetaProperties.CATALOG_TYPE_HIVE;
 
 import io.javalin.http.Context;
+import io.javalin.http.NotFoundResponse;
 import org.apache.amoro.Constants;
 import org.apache.amoro.ServerTableIdentifier;
 import org.apache.amoro.TableFormat;
@@ -51,6 +52,7 @@ import org.apache.amoro.server.dashboard.response.OkResponse;
 import org.apache.amoro.server.dashboard.response.PageResult;
 import org.apache.amoro.server.dashboard.utils.AmsUtil;
 import org.apache.amoro.server.optimizing.OptimizingStatus;
+import org.apache.amoro.server.optimizing.OptimizingTaskMeta;
 import org.apache.amoro.server.persistence.TableRuntimeMeta;
 import org.apache.amoro.server.process.TableProcessMeta;
 import org.apache.amoro.server.table.DefaultTableRuntime;
@@ -105,6 +107,7 @@ import java.util.stream.Collectors;
 
 /** The controller that handles table requests. */
 public class TableController {
+  private static final int MAX_OPTIMIZING_HISTORY_PAGE_SIZE = 100;
   private static final Logger LOG = LoggerFactory.getLogger(TableController.class);
   private static final long UPGRADE_INFO_EXPIRE_INTERVAL = 60 * 60 * 1000;
 
@@ -400,10 +403,8 @@ public class TableController {
     Integer pageSize = ctx.queryParamAsClass("pageSize", Integer.class).getOrDefault(20);
     String lastSnapshot = ctx.queryParam("lastSnapshot");
 
-    int offset = (page - 1) * pageSize;
+    int offset = optimizingHistoryOffset(page, pageSize);
     int limit = pageSize;
-    Preconditions.checkArgument(offset >= 0, "offset[%s] must >= 0", offset);
-    Preconditions.checkArgument(limit >= 0, "limit[%s] must >= 0", limit);
 
     TableIdentifier tableIdentifier = TableIdentifier.of(catalog, db, table);
     ProcessStatus processStatus =
@@ -415,7 +416,8 @@ public class TableController {
             processStatus,
             limit,
             offset,
-            lastSnapshot);
+            lastSnapshot,
+            false);
     List<OptimizingProcessInfo> result = optimizingProcessesInfo.getLeft();
     int total = optimizingProcessesInfo.getRight();
 
@@ -446,18 +448,73 @@ public class TableController {
     Integer page = ctx.queryParamAsClass("page", Integer.class).getOrDefault(1);
     Integer pageSize = ctx.queryParamAsClass("pageSize", Integer.class).getOrDefault(20);
 
-    int offset = (page - 1) * pageSize;
+    int offset = optimizingHistoryOffset(page, pageSize);
     int limit = pageSize;
-    Preconditions.checkArgument(offset >= 0, "offset[%s] must >= 0", offset);
-    Preconditions.checkArgument(limit >= 0, "limit[%s] must >= 0", limit);
 
     TableIdentifier tableIdentifier = TableIdentifier.of(catalog, db, table);
-    List<OptimizingTaskInfo> optimizingTaskInfos =
+    Pair<List<OptimizingTaskInfo>, Integer> optimizingTaskInfos =
         tableDescriptor.getOptimizingProcessTaskInfos(
-            tableIdentifier.buildTableIdentifier(), processId);
+            tableIdentifier.buildTableIdentifier(), processId, limit, offset, false);
 
-    PageResult<OptimizingTaskInfo> pageResult = PageResult.of(optimizingTaskInfos, offset, limit);
+    PageResult<OptimizingTaskInfo> pageResult =
+        PageResult.of(optimizingTaskInfos.getLeft(), optimizingTaskInfos.getRight());
     ctx.json(OkResponse.of(pageResult));
+  }
+
+  public void getOptimizingProcessError(Context ctx) {
+    long processId = Long.parseLong(ctx.pathParam("processId"));
+    TableProcessMeta process = getOwnedProcess(ctx, processId);
+    writeErrorMessage(ctx, process.getFailMessage());
+  }
+
+  public void getOptimizingTaskError(Context ctx) {
+    long processId = Long.parseLong(ctx.pathParam("processId"));
+    int taskId = Integer.parseInt(ctx.pathParam("taskId"));
+    TableProcessMeta process = getOwnedProcess(ctx, processId);
+    Optional<OptimizingTaskMeta> task =
+        tableDescriptor.findOptimizingTask(process.getTableId(), processId, taskId);
+    if (!task.isPresent()) {
+      throw new NotFoundResponse("Optimizing task not found");
+    }
+    writeErrorMessage(ctx, task.get().getFailReason());
+  }
+
+  private TableProcessMeta getOwnedProcess(Context ctx, long processId) {
+    TableIdentifier tableIdentifier =
+        TableIdentifier.of(ctx.pathParam("catalog"), ctx.pathParam("db"), ctx.pathParam("table"));
+    ServerTableIdentifier serverTableIdentifier =
+        tableManager.getServerTableIdentifier(tableIdentifier.buildTableIdentifier());
+    TableProcessMeta process = tableManager.getTableProcessMeta(processId);
+    if (serverTableIdentifier == null
+        || process == null
+        || process.getTableId() != serverTableIdentifier.getId()) {
+      throw new NotFoundResponse("Optimizing process not found");
+    }
+    return process;
+  }
+
+  private static void writeErrorMessage(Context ctx, String errorMessage) {
+    ctx.header("Cache-Control", "no-store");
+    if (errorMessage == null) {
+      ctx.status(204);
+      return;
+    }
+    ctx.contentType("text/plain; charset=UTF-8");
+    ctx.result(errorMessage);
+  }
+
+  private static int optimizingHistoryOffset(int page, int pageSize) {
+    Preconditions.checkArgument(page > 0, "page[%s] must > 0", page);
+    Preconditions.checkArgument(pageSize > 0, "pageSize[%s] must > 0", pageSize);
+    Preconditions.checkArgument(
+        pageSize <= MAX_OPTIMIZING_HISTORY_PAGE_SIZE,
+        "pageSize[%s] must <= %s",
+        pageSize,
+        MAX_OPTIMIZING_HISTORY_PAGE_SIZE);
+    long offset = (long) (page - 1) * pageSize;
+    Preconditions.checkArgument(
+        offset <= Integer.MAX_VALUE, "offset[%s] exceeds supported range", offset);
+    return (int) offset;
   }
 
   /**

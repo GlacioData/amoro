@@ -20,10 +20,10 @@ limitations under the License.
 import { onMounted, reactive, ref, shallowReactive } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute } from 'vue-router'
-import { Modal } from 'ant-design-vue'
+import { Modal, message } from 'ant-design-vue'
 import { usePagination } from '@/hooks/usePagination'
 import type { BreadcrumbOptimizingItem, IColumns, ILableAndValue } from '@/types/common.type'
-import { cancelOptimizingProcess, getOptimizingProcesses, getTableOptimizingTypes, getTasksByOptimizingProcessId } from '@/services/table.service'
+import { cancelOptimizingProcess, getOptimizingProcessError, getOptimizingProcesses, getOptimizingTaskError, getTableOptimizingTypes, getTasksByOptimizingProcessId } from '@/services/table.service'
 import { bytesToSize, dateFormat, formatMS2Time } from '@/utils/index'
 import { canManageTable } from '@/utils/permission'
 
@@ -78,8 +78,16 @@ const breadcrumbColumns = shallowReactive([
 ])
 
 const dataSource = reactive<any[]>([])
-const processId = ref<number>(0)
+const processId = ref<string>('')
 const breadcrumbDataSource = reactive<BreadcrumbOptimizingItem[]>([])
+const errorModal = reactive({
+  open: false,
+  loading: false,
+  title: '',
+  content: '',
+  canCopy: false,
+})
+let errorRequestSequence = 0
 
 const loading = ref<boolean>(false)
 const cancelDisabled = ref(true)
@@ -256,7 +264,7 @@ function handleFilterChange() {
   refresh()
 }
 
-function toggleBreadcrumb(rowProcessId: number, status: string) {
+function toggleBreadcrumb(rowProcessId: string, status: string) {
   processId.value = rowProcessId
   cancelDisabled.value = status !== 'RUNNING'
   hasBreadcrumb.value = !hasBreadcrumb.value
@@ -269,6 +277,100 @@ function toggleBreadcrumb(rowProcessId: number, status: string) {
     pagination.current = 1
   }
   refresh()
+}
+
+async function showProcessError(record: { processId: string }) {
+  await showError(
+    t('processErrorTitle'),
+    () => getOptimizingProcessError({
+      catalog: sourceData.catalog,
+      db: sourceData.db,
+      table: sourceData.table,
+      processId: record.processId,
+    }),
+  )
+}
+
+async function showTaskError(record: BreadcrumbOptimizingItem) {
+  await showError(
+    t('taskErrorTitle'),
+    () => getOptimizingTaskError({
+      catalog: sourceData.catalog,
+      db: sourceData.db,
+      table: sourceData.table,
+      processId: processId.value,
+      taskId: record.taskId,
+    }),
+  )
+}
+
+async function showError(title: string, loadError: () => Promise<string>) {
+  const requestSequence = ++errorRequestSequence
+  errorModal.open = true
+  errorModal.loading = true
+  errorModal.title = title
+  errorModal.content = ''
+  errorModal.canCopy = false
+  try {
+    const content = await loadError()
+    if (requestSequence !== errorRequestSequence) {
+      return
+    }
+    errorModal.content = content || t('errorMessageUnavailable')
+    errorModal.canCopy = Boolean(content)
+  }
+  catch (error) {
+    if (requestSequence === errorRequestSequence) {
+      errorModal.content = t('loadErrorFailed')
+    }
+  }
+  finally {
+    if (requestSequence === errorRequestSequence) {
+      errorModal.loading = false
+    }
+  }
+}
+
+function closeError() {
+  errorRequestSequence++
+  errorModal.open = false
+  errorModal.loading = false
+}
+
+async function copyError() {
+  try {
+    try {
+      if (!navigator.clipboard) {
+        throw new Error('Clipboard API is unavailable')
+      }
+      await navigator.clipboard.writeText(errorModal.content)
+    }
+    catch (error) {
+      copyErrorWithTextarea(errorModal.content)
+    }
+    message.success(t('copySuccess'))
+  }
+  catch (error) {
+    message.error(t('copyFailed'))
+  }
+}
+
+function copyErrorWithTextarea(content: string) {
+  const textarea = document.createElement('textarea')
+  textarea.value = content
+  textarea.readOnly = true
+  textarea.style.position = 'fixed'
+  textarea.style.opacity = '0'
+  document.body.appendChild(textarea)
+  try {
+    textarea.select()
+    if (!document.execCommand('copy')) {
+      throw new Error('Copy command failed')
+    }
+  }
+  finally {
+    document.body.removeChild(textarea)
+  }
 }
 
 onMounted(() => {
@@ -334,17 +436,12 @@ onMounted(() => {
                 class="status-icon"
               />
               <span>{{ record.status }}</span>
-              <a-tooltip
-                v-if="record.status === 'FAILED'" placement="topRight" class="g-ml-4"
-                overlay-class-name="table-failed-tip"
+              <a-button
+                v-if="record.status === 'FAILED' || record.status === 'CLOSED'" type="link" class="error-detail-button g-ml-4"
+                :aria-label="t('viewError')" :title="t('viewError')" @click.stop="showProcessError(record)"
               >
-                <template #title>
-                  <div class="tip-title">
-                    {{ record.failReason }}
-                  </div>
-                </template>
                 <question-circle-outlined />
-              </a-tooltip>
+              </a-button>
             </div>
           </template>
         </template>
@@ -418,17 +515,12 @@ onMounted(() => {
                 class="status-icon"
               />
               <span>{{ record.status }}</span>
-              <a-tooltip
-                v-if="record.status === 'FAILED'" placement="topRight" class="g-ml-4"
-                overlay-class-name="table-failed-tip"
+              <a-button
+                v-if="record.status === 'FAILED'" type="link" class="error-detail-button g-ml-4"
+                :aria-label="t('viewError')" :title="t('viewError')" @click.stop="showTaskError(record)"
               >
-                <template #title>
-                  <div class="tip-title">
-                    {{ record.failReason }}
-                  </div>
-                </template>
                 <question-circle-outlined />
-              </a-tooltip>
+              </a-button>
             </div>
           </template>
         </template>
@@ -444,6 +536,19 @@ onMounted(() => {
         </template>
       </a-table>
     </template>
+    <a-modal v-model:open="errorModal.open" :title="errorModal.title" :width="960" @cancel="closeError">
+      <a-spin :spinning="errorModal.loading">
+        <pre class="error-stack">{{ errorModal.content }}</pre>
+      </a-spin>
+      <template #footer>
+        <a-button :disabled="!errorModal.canCopy" @click="copyError">
+          {{ t('copy') }}
+        </a-button>
+        <a-button type="primary" @click="closeError">
+          {{ t('close') }}
+        </a-button>
+      </template>
+    </a-modal>
   </div>
 </template>
 
@@ -480,6 +585,24 @@ onMounted(() => {
   display: inline-block;
   margin-right: 8px;
 }
+
+.error-detail-button {
+  height: auto;
+  line-height: 1;
+}
+
+.error-stack {
+  min-height: 120px;
+  max-height: 65vh;
+  margin: 0;
+  padding: 12px;
+  overflow: auto;
+  color: #1d2129;
+  background: #f7f8fa;
+  border: 1px solid #e5e6eb;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 </style>
 
 <style lang="less">
@@ -497,19 +620,6 @@ onMounted(() => {
 
   .ant-btn-link {
     padding: 0;
-  }
-}
-
-.table-failed-tip {
-  .ant-tooltip-content {
-    width: 800px;
-  }
-
-  .tip-title {
-    display: block;
-    max-height: 700px;
-    overflow: auto;
-    white-space: pre-wrap;
   }
 }
 </style>

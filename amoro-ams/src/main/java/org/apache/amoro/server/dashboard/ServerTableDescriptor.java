@@ -25,6 +25,7 @@ import org.apache.amoro.config.Configurations;
 import org.apache.amoro.process.ProcessStatus;
 import org.apache.amoro.server.catalog.CatalogManager;
 import org.apache.amoro.server.catalog.ServerCatalog;
+import org.apache.amoro.server.optimizing.OptimizingTaskMeta;
 import org.apache.amoro.server.persistence.PersistentBase;
 import org.apache.amoro.server.table.TableManager;
 import org.apache.amoro.table.descriptor.AmoroSnapshotsOfTable;
@@ -41,9 +42,11 @@ import org.apache.amoro.table.descriptor.TagOrBranchInfo;
 import org.apache.commons.lang3.tuple.Pair;
 import org.apache.iceberg.util.ThreadPools;
 
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.ServiceLoader;
 import java.util.concurrent.ExecutorService;
 
@@ -53,6 +56,7 @@ public class ServerTableDescriptor extends PersistentBase {
 
   private final CatalogManager catalogManager;
   private final TableManager tableManager;
+  private final AmsOptimizingHistory optimizingHistory = new AmsOptimizingHistory();
 
   public ServerTableDescriptor(
       CatalogManager catalogManager, TableManager tableManager, Configurations serviceConfig) {
@@ -141,17 +145,78 @@ public class ServerTableDescriptor extends PersistentBase {
       int limit,
       int offset,
       String lastSnapshot) {
+    return getOptimizingProcessesInfo(
+        tableIdentifier, type, status, limit, offset, lastSnapshot, true);
+  }
+
+  public Pair<List<OptimizingProcessInfo>, Integer> getOptimizingProcessesInfo(
+      TableIdentifier tableIdentifier,
+      String type,
+      ProcessStatus status,
+      int limit,
+      int offset,
+      String lastSnapshot,
+      boolean includeError) {
     AmoroTable<?> amoroTable = loadTable(tableIdentifier);
+    if (usesAmsOptimizingHistory(amoroTable.format())) {
+      return optimizingHistory.getProcesses(amoroTable, type, status, limit, offset, includeError);
+    }
     FormatTableDescriptor formatTableDescriptor = formatDescriptorMap.get(amoroTable.format());
-    return formatTableDescriptor.getOptimizingProcessesInfo(
-        amoroTable, type, status, limit, offset, lastSnapshot);
+    Pair<List<OptimizingProcessInfo>, Integer> result =
+        formatTableDescriptor.getOptimizingProcessesInfo(
+            amoroTable, type, status, limit, offset, lastSnapshot);
+    if (!includeError) {
+      result.getLeft().forEach(process -> process.setFailReason(null));
+    }
+    return result;
   }
 
   public List<OptimizingTaskInfo> getOptimizingProcessTaskInfos(
       TableIdentifier tableIdentifier, String processId) {
+    return getOptimizingProcessTaskInfos(tableIdentifier, processId, true);
+  }
+
+  public List<OptimizingTaskInfo> getOptimizingProcessTaskInfos(
+      TableIdentifier tableIdentifier, String processId, boolean includeError) {
     AmoroTable<?> amoroTable = loadTable(tableIdentifier);
+    if (usesAmsOptimizingHistory(amoroTable.format())) {
+      return optimizingHistory.getTasks(amoroTable, processId, includeError);
+    }
     FormatTableDescriptor formatTableDescriptor = formatDescriptorMap.get(amoroTable.format());
-    return formatTableDescriptor.getOptimizingTaskInfos(amoroTable, processId);
+    List<OptimizingTaskInfo> result =
+        formatTableDescriptor.getOptimizingTaskInfos(amoroTable, processId);
+    if (!includeError) {
+      result.forEach(task -> task.setFailReason(null));
+    }
+    return result;
+  }
+
+  public Pair<List<OptimizingTaskInfo>, Integer> getOptimizingProcessTaskInfos(
+      TableIdentifier tableIdentifier,
+      String processId,
+      int limit,
+      int offset,
+      boolean includeError) {
+    AmoroTable<?> amoroTable = loadTable(tableIdentifier);
+    if (usesAmsOptimizingHistory(amoroTable.format())) {
+      return optimizingHistory.getTaskPage(amoroTable, processId, limit, offset, includeError);
+    }
+
+    List<OptimizingTaskInfo> tasks =
+        formatDescriptorMap.get(amoroTable.format()).getOptimizingTaskInfos(amoroTable, processId);
+    if (!includeError) {
+      tasks.forEach(task -> task.setFailReason(null));
+    }
+    int total = tasks.size();
+    if (offset >= total) {
+      return Pair.of(Collections.emptyList(), total);
+    }
+    int toIndex = (int) Math.min((long) offset + limit, total);
+    return Pair.of(tasks.subList(offset, toIndex), total);
+  }
+
+  public Optional<OptimizingTaskMeta> findOptimizingTask(long tableId, long processId, int taskId) {
+    return optimizingHistory.findTask(tableId, processId, taskId);
   }
 
   public Map<String, String> getTableOptimizingTypes(TableIdentifier tableIdentifier) {
@@ -163,5 +228,12 @@ public class ServerTableDescriptor extends PersistentBase {
   private AmoroTable<?> loadTable(TableIdentifier identifier) {
     ServerCatalog catalog = catalogManager.getServerCatalog(identifier.getCatalog());
     return catalog.loadTable(identifier.getDatabase(), identifier.getTableName());
+  }
+
+  private static boolean usesAmsOptimizingHistory(TableFormat format) {
+    return format == TableFormat.PAIMON
+        || format == TableFormat.ICEBERG
+        || format == TableFormat.MIXED_ICEBERG
+        || format == TableFormat.MIXED_HIVE;
   }
 }

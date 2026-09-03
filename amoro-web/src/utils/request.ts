@@ -41,6 +41,7 @@ interface CustomAxiosRequestConfig extends AxiosRequestConfig {
   requestMark?: string // cancel the request
   supportCancel?: boolean // false
   routeChangeCancel?: boolean // false
+  rawData?: boolean // false, return the response body without the standard API envelope
 }
 
 /**
@@ -77,6 +78,7 @@ const DEFAULT_OPTIONS = {
   returnCode: false,
   supportCancel: false,
   routeChangeCancel: false,
+  rawData: false,
 }
 
 const instance = axios.create(DEFAULT_CONFIG)
@@ -93,7 +95,7 @@ function clearRequest(config: CustomAxiosRequestConfig) {
 instance.interceptors.response.use(
   async (response: AxiosResponse): Promise<AxiosResponse<any>> => {
     clearRequest(response.config as CustomAxiosRequestConfig)
-    if (response.status === 200 && response.data) {
+    if (response.status >= 200 && response.status < 300) {
       return response
     }
     else {
@@ -148,6 +150,12 @@ const request: any = function (options: CustomAxiosRequestConfig) {
 
   return instance(requestConfig)
     .then((res) => {
+      if (requestConfig.rawData) {
+        return res.data ?? ''
+      }
+      if (res.status === 204) {
+        return undefined
+      }
       const { code, message: msg } = res.data
       // return code
       if (requestConfig.returnCode) {

@@ -357,7 +357,7 @@ public class OptimizingQueue extends PersistentBase {
         "RECOVERY_PAYLOAD_CORRUPTED["
             + failureCategory
             + "]: "
-            + ExceptionUtil.getErrorMessage(failure, 3500);
+            + ExceptionUtil.getErrorMessage(failure);
     process.closeStrict(trigger, OptimizingOwnership.OWNED, "NOT_EVALUATED");
     refreshTable(tableRuntime);
     LOG.warn(
@@ -1794,9 +1794,9 @@ public class OptimizingQueue extends PersistentBase {
           if (taskRuntime.getRetry()
               < tableRuntime.getOptimizingConfig().getMaxExecuteRetryCount()) {
             LOG.info(
-                "Put task {} to retry queue, because {}",
+                "Put task {} to retry queue after failure (errorCharacters={})",
                 taskRuntime.getTaskId(),
-                taskRuntime.getFailReason());
+                taskRuntime.getFailReason() == null ? 0 : taskRuntime.getFailReason().length());
             retryTask(taskRuntime);
           } else {
             if (tableRuntime.isAllowPartialCommit()
@@ -2064,7 +2064,7 @@ public class OptimizingQueue extends PersistentBase {
         } catch (Throwable t) {
           LOG.error("{} Commit optimizing failed ", tableRuntime.getTableIdentifier(), t);
           status = ProcessStatus.FAILED;
-          failedReason = ExceptionUtil.getErrorMessage(t, 4000);
+          failedReason = ExceptionUtil.getErrorMessage(t);
           endTime = System.currentTimeMillis();
           persistAndSetCompleted(false);
         }

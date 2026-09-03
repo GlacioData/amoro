@@ -346,10 +346,19 @@ ams:
   database:
     type: mysql
     jdbc-driver-class: com.mysql.cj.jdbc.Driver
-    url: jdbc:mysql://127.0.0.1:3306/amoro?useUnicode=true&characterEncoding=UTF8&autoReconnect=true&useAffectedRows=true&allowPublicKeyRetrieval=true&useSSL=false
+    url: jdbc:mysql://127.0.0.1:3306/amoro?useUnicode=true&characterEncoding=UTF-8&autoReconnect=true&useAffectedRows=true&allowPublicKeyRetrieval=true&useSSL=false
     username: root
     password: cGFzc3dvcmQ=    # Ciphertext for "password"
 ```
+
+When MySQL stores complete optimizer stack traces, configure the server's
+`max_allowed_packet` to at least `128M`. Amoro's default Thrift message limit is 100 MiB, so a
+smaller MySQL packet limit can reject a valid optimizer result before it is persisted. Apply the
+current `mysql/upgrade.sql` before deploying this version; it changes every optimizer error column
+to `LONGTEXT CHARACTER SET utf8mb4`. Connector/J initializes its `maxAllowedPacket` setting from
+the server's `max_allowed_packet` when the JDBC URL does not override it. Keep
+`characterEncoding=UTF-8` in the JDBC URL so Connector/J uses the corresponding Unicode character
+set.
 
 
 ### Environments variables

@@ -22,6 +22,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
 
 import org.apache.amoro.api.OptimizingTask;
 import org.apache.amoro.api.OptimizingTaskId;
@@ -122,6 +125,28 @@ public class TestPaimonSparkOptimizerExecutor {
             .contains("PaimonPrimaryKeyCompactionInput is missing required fields"),
         "Spark executor should reach the Paimon primary-key executor failure, was: "
             + result.getErrorMessage());
+  }
+
+  @Test
+  @DisplayName("Spark driver failure preserves complete error message")
+  void testSparkDriverFailurePreservesCompleteErrorMessage() throws CmdLineException {
+    String tail = "完整 Spark 错误尾部-🚀";
+    StringBuilder failure = new StringBuilder();
+    for (int i = 0; i < 1_000; i++) {
+      failure.append("spark-driver-context-").append(i).append('\n');
+    }
+    JavaSparkContext failingContext = mock(JavaSparkContext.class);
+    doThrow(new IllegalStateException(failure.append(tail).toString()))
+        .when(failingContext)
+        .setJobDescription(anyString());
+    SparkOptimizerExecutor executor =
+        new SparkOptimizerExecutor(failingContext, optimizerConfig(), 3);
+    OptimizingTask task = new OptimizingTask(new OptimizingTaskId(90L, 1));
+
+    OptimizingTaskResult result = executor.executeTask(task);
+
+    assertTrue(result.getErrorMessage().length() > 4_000);
+    assertTrue(result.getErrorMessage().contains(tail));
   }
 
   private static OptimizerConfig optimizerConfig() throws CmdLineException {

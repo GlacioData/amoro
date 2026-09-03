@@ -77,7 +77,7 @@ public interface TableProcessMapper {
           + "process_stage = #{processStage}, "
           + "retry_number = #{retryNumber}, "
           + "finish_time = #{finishTime, typeHandler=org.apache.amoro.server.persistence.converter.Long2TsConverter}, "
-          + "fail_message = #{failMessage, jdbcType=VARCHAR}, "
+          + "fail_message = #{failMessage, jdbcType=LONGVARCHAR}, "
           + "process_parameters = #{processParameters, typeHandler=org.apache.amoro.server.persistence.converter.Map2StringConverter}, "
           + "summary = #{summary, typeHandler=org.apache.amoro.server.persistence.converter.Map2StringConverter} "
           + "WHERE process_id = #{processId} AND table_id = #{tableId}")
@@ -136,6 +136,21 @@ public interface TableProcessMapper {
           + "</script>")
   @ResultMap("tableProcessMap")
   List<TableProcessMeta> listProcessMeta(
+      @Param("tableId") long tableId,
+      @Param("processType") String processType,
+      @Param("status") ProcessStatus optimizingStatus);
+
+  @Select(
+      "<script>"
+          + "SELECT process_id, table_id, external_process_identifier, status, process_type, process_stage, execution_engine, retry_number, "
+          + "create_time, finish_time, process_parameters, summary "
+          + "FROM table_process WHERE table_id = #{tableId} "
+          + " <if test='processType != null'> AND process_type = #{processType}</if>"
+          + " <if test='status != null'> AND status = #{status}</if>"
+          + " ORDER BY process_id desc"
+          + "</script>")
+  @ResultMap("tableProcessMap")
+  List<TableProcessMeta> listProcessMetaWithoutFailMessage(
       @Param("tableId") long tableId,
       @Param("processType") String processType,
       @Param("status") ProcessStatus optimizingStatus);

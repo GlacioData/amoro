@@ -293,7 +293,7 @@ CREATE TABLE task_runtime
     end_time TIMESTAMP,
     cost_time BIGINT,
     status VARCHAR(16),
-    fail_reason VARCHAR(4096),
+    fail_reason TEXT,
     optimizer_token VARCHAR(50),
     thread_id INT,
     rewrite_output BYTEA,
@@ -330,7 +330,7 @@ CREATE TABLE table_process_state
      status       VARCHAR(10) NOT NULL,
      start_time   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
      end_time     TIMESTAMP DEFAULT NULL,
-     fail_reason  VARCHAR(4096) DEFAULT NULL,
+     fail_reason  TEXT DEFAULT NULL,
      summary      TEXT,
      PRIMARY KEY (process_id)
 );
@@ -355,7 +355,7 @@ CREATE TABLE optimizing_task_quota
     table_id BIGINT NOT NULL,
     start_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     end_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    fail_reason VARCHAR(4096),
+    fail_reason TEXT,
     PRIMARY KEY (process_id, task_id, retry_num)
 );
 CREATE INDEX quota_index ON optimizing_task_quota (table_id);

@@ -563,7 +563,7 @@ public class AmoroServiceContainer {
     final TProtocolFactory protocolFactory = new TBinaryProtocol.Factory();
     final TProtocolFactory inputProtoFactory =
         new TBinaryProtocol.Factory(true, true, maxMessageSize, maxMessageSize);
-    TTransportFactory transportFactory = new TFramedTransport.Factory();
+    TTransportFactory transportFactory = createThriftTransportFactory(maxMessageSize);
     TMultiplexedProcessor multiplexedProcessor = new TMultiplexedProcessor();
     multiplexedProcessor.registerProcessor(processorName, processor);
     THsHaServer.Args args =
@@ -582,6 +582,14 @@ public class AmoroServiceContainer {
         processorName,
         queueSizePerSelector);
     return new THsHaServer(args);
+  }
+
+  static TTransportFactory createThriftTransportFactory(long maxMessageSize) {
+    if (maxMessageSize <= 0 || maxMessageSize > Integer.MAX_VALUE) {
+      throw new IllegalArgumentException(
+          "Thrift max message size must be between 1 and " + Integer.MAX_VALUE + " bytes");
+    }
+    return new TFramedTransport.Factory((int) maxMessageSize);
   }
 
   private ThreadFactory getThriftThreadFactory(String processorName) {

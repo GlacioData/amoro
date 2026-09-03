@@ -18,6 +18,7 @@
 
 package org.apache.amoro.client;
 
+import org.apache.amoro.shade.thrift.org.apache.thrift.transport.TTransport;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
@@ -56,5 +57,25 @@ public class TestPoolConfig {
         () -> {
           PoolConfig.forUrl(url);
         });
+  }
+
+  @Test
+  @SuppressWarnings({"rawtypes", "unchecked"})
+  public void testMaxMessageSizeIsAppliedToSocketTransport() throws Exception {
+    int maxMessageSize = 12_345_678;
+    PoolConfig poolConfig = new PoolConfig();
+    poolConfig.setMaxMessageSize(maxMessageSize);
+    ThriftClientPool clientPool =
+        new ThriftClientPool(
+            "thrift://127.0.0.1:1261",
+            transport -> null,
+            client -> true,
+            poolConfig,
+            "OptimizingService");
+
+    TTransport transport = clientPool.getTransport(new ServiceInfo("127.0.0.1", 1261));
+
+    Assertions.assertEquals(maxMessageSize, transport.getConfiguration().getMaxMessageSize());
+    Assertions.assertEquals(maxMessageSize, transport.getConfiguration().getMaxFrameSize());
   }
 }
