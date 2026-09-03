@@ -44,6 +44,7 @@ import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantLock;
@@ -111,6 +112,11 @@ public class DefaultTableRuntimeStore extends PersistentBase implements TableRun
   @Override
   public int getStatusCode() {
     return this.meta.getStatusCode();
+  }
+
+  /** @return the persisted timestamp when the status code was last updated. */
+  public long getStatusCodeUpdateTime() {
+    return this.meta.getStatusCodeUpdateTime();
   }
 
   @Override
@@ -288,7 +294,11 @@ public class DefaultTableRuntimeStore extends PersistentBase implements TableRun
       operations.add(
           () -> {
             OptimizingStatus originalStatus = OptimizingStatus.ofCode(oldMeta.getStatusCode());
-            Integer newStatusCode = updater.apply(oldMeta.getStatusCode());
+            Integer originalStatusCode = oldMeta.getStatusCode();
+            Integer newStatusCode = updater.apply(originalStatusCode);
+            if (Objects.equals(originalStatusCode, newStatusCode)) {
+              return;
+            }
             oldMeta.setStatusCode(newStatusCode);
             handlerCallbacks.add(
                 (handler, runtime) -> handler.handleTableChanged(runtime, originalStatus));
