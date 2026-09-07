@@ -123,21 +123,26 @@ public class TestPaimonExecutorSparkDispatch {
   }
 
   @Test
-  @DisplayName("Simulated jobDescription for Paimon embeds describe() output + task id")
+  @DisplayName("Simulated jobDescription for Paimon embeds describe() output + flat task id")
   void testSimulatedJobDescriptionContainsTableAndTaskId() {
-    // Reproduce the phrasing SparkOptimizerExecutor#jobDescription constructs so any drift from
-    // that format string causes a failure here, even though this module does not depend on Spark.
+    // Keep the wire-level phrasing documented without pulling Spark test dependencies into this
+    // module. The Spark module directly verifies SparkOptimizerExecutor#jobDescription.
     PaimonCompactionInput input = new PaimonCompactionInput();
     OptimizingTaskId taskId = new OptimizingTaskId(100L, 3);
     String simulated =
-        String.format("Amoro optimizing task, %s, task id:%s", input.describe(), taskId);
+        String.format(
+            "Amoro optimizing task, %s, processId:%s, taskId:%s",
+            input.describe(), taskId.getProcessId(), taskId.getTaskId());
 
     assertTrue(
         simulated.contains("paimon compaction task"),
         "Simulated jobDescription must carry Paimon marker for Spark UI observability: "
             + simulated);
     assertTrue(
-        simulated.contains("task id:OptimizingTaskId"),
-        "Simulated jobDescription must carry taskId: " + simulated);
+        simulated.contains("processId:100, taskId:3"),
+        "Simulated jobDescription must carry processId and taskId: " + simulated);
+    assertFalse(
+        simulated.contains("OptimizingTaskId("),
+        "Simulated jobDescription must not expose generated Thrift toString(): " + simulated);
   }
 }

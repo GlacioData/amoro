@@ -365,6 +365,8 @@ public class TestPaimonOptimizingPlanner {
 
     assertEquals(1, result.getTasks().size());
     assertEquals(OptimizingType.MINOR, result.getOptimizingType());
+    assertEquals("dt=p1/", result.getTasks().get(0).getInput().getPartitionPath());
+    assertTrue(result.getTasks().get(0).getInput().describe().contains("partition:dt=p1/"));
     AppendOnlyFileStoreTable appendTable =
         (AppendOnlyFileStoreTable) catalog.getTable(Identifier.create("db1", "t_quota_type"));
     assertEquals(Collections.singleton("dt=p1/"), partitionPaths(result, appendTable));
