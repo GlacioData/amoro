@@ -175,3 +175,12 @@ CREATE TABLE IF NOT EXISTS bucket_assignments (
 -- ADD node_heartbeat_ts to table bucket_assignments
 ALTER TABLE `bucket_assignments` ADD COLUMN `node_heartbeat_ts` BIGINT NOT NULL DEFAULT 0 COMMENT 'Per-node heartbeat timestamp updated only by the owning node (ms since epoch)';
 
+-- Preserve complete optimizer failure stack traces as UTF-8/utf8mb4 text.
+ALTER TABLE `table_process`
+MODIFY COLUMN `fail_message` LONGTEXT CHARACTER SET utf8mb4 DEFAULT NULL COMMENT 'Error message after task failed';
+ALTER TABLE `task_runtime`
+MODIFY COLUMN `fail_reason` LONGTEXT CHARACTER SET utf8mb4 DEFAULT NULL COMMENT 'Error message after task failed';
+ALTER TABLE `table_process_state`
+MODIFY COLUMN `fail_reason` LONGTEXT CHARACTER SET utf8mb4 DEFAULT NULL COMMENT 'Error message after task failed';
+ALTER TABLE `optimizing_task_quota`
+MODIFY COLUMN `fail_reason` LONGTEXT CHARACTER SET utf8mb4 DEFAULT NULL COMMENT 'Error message after task failed';

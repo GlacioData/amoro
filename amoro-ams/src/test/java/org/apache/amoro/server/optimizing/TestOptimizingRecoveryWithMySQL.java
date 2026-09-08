@@ -28,6 +28,8 @@ import com.google.gson.Gson;
 import org.apache.amoro.AmoroTable;
 import org.apache.amoro.ServerTableIdentifier;
 import org.apache.amoro.TableFormat;
+import org.apache.amoro.api.OptimizingTaskId;
+import org.apache.amoro.api.OptimizingTaskResult;
 import org.apache.amoro.config.Configurations;
 import org.apache.amoro.exception.PersistenceException;
 import org.apache.amoro.formats.paimon.optimizing.PaimonCompactionExecutorFactory;
@@ -58,6 +60,7 @@ import org.apache.amoro.server.persistence.mapper.TableRuntimeMapper;
 import org.apache.amoro.server.process.ProcessFactoryRouter;
 import org.apache.amoro.server.process.TableProcessMeta;
 import org.apache.amoro.server.process.iceberg.IcebergProcessFactory;
+import org.apache.amoro.server.resource.OptimizerThread;
 import org.apache.amoro.server.table.DefaultTableRuntime;
 import org.apache.amoro.server.table.DefaultTableRuntimeStore;
 import org.apache.amoro.table.StateKey;
@@ -182,6 +185,43 @@ class TestOptimizingRecoveryWithMySQL {
         (RewriteFilesOutput) tasks.get(1).getTaskDescriptor().getOutput();
     assertArrayEquals(new DataFile[0], gzipOutput.getDataFiles());
     assertArrayEquals(new DataFile[0], rawOutput.getDataFiles());
+  }
+
+  @Test
+  void storesCompleteUnicodeFailureMessagesInMySqlLongText() throws Exception {
+    long tableId = 151L;
+    long processId = 1501L;
+    String error =
+        "java.lang.IllegalStateException: 顶层异常-🚀\n"
+            + repeat("at 测试.完整错误上下文(PaimonCompaction.java:319)\n", 10_000)
+            + "Caused by: snapshot-319 不可达，完整尾部-😃";
+
+    PERSISTENCE.insertProcess(tableId, processId);
+    PERSISTENCE.failProcess(tableId, processId, error);
+    insertTask(tableId, processId, 1, TaskRuntime.Status.PLANNED, null, null);
+    Map<String, String> taskProperties = new HashMap<>();
+    taskProperties.put(
+        TaskProperties.TASK_EXECUTOR_FACTORY_IMPL, PaimonCompactionExecutorFactory.class.getName());
+    TaskRuntime<PaimonCompactionTask> taskRuntime =
+        new TaskRuntime<>(
+            new OptimizingTaskId(processId, 1),
+            new PaimonCompactionTask(tableId, "dt=2026-09-03", null, taskProperties));
+    OptimizerThread optimizerThread =
+        new OptimizerThread(29, null) {
+          @Override
+          public String getToken() {
+            return "optimizer-token";
+          }
+        };
+    taskRuntime.schedule(optimizerThread);
+    taskRuntime.ack(optimizerThread);
+    taskRuntime.complete(
+        optimizerThread,
+        new OptimizingTaskResult(new OptimizingTaskId(processId, 1), 29).setErrorMessage(error));
+
+    assertTrue(error.length() > 4_096);
+    assertEquals(error, PERSISTENCE.process(processId).getFailMessage());
+    assertEquals(error, PERSISTENCE.taskMetas(processId).get(0).getFailReason());
   }
 
   @Test
@@ -535,6 +575,14 @@ class TestOptimizingRecoveryWithMySQL {
     }
   }
 
+  private static String repeat(String value, int count) {
+    StringBuilder builder = new StringBuilder(value.length() * count);
+    for (int i = 0; i < count; i++) {
+      builder.append(value);
+    }
+    return builder.toString();
+  }
+
   private static void assertGzipMagic(String table, String column, String idColumn, long id)
       throws Exception {
     String sql = "SELECT " + column + " FROM " + table + " WHERE " + idColumn + " = ?";
@@ -625,6 +673,23 @@ class TestOptimizingRecoveryWithMySQL {
                   "AMORO",
                   0,
                   System.currentTimeMillis(),
+                  new HashMap<>(),
+                  new HashMap<>()));
+    }
+
+    private void failProcess(long tableId, long processId, String error) {
+      doAs(
+          TableProcessMapper.class,
+          mapper ->
+              mapper.updateProcess(
+                  tableId,
+                  processId,
+                  "",
+                  ProcessStatus.FAILED,
+                  "failed",
+                  0,
+                  System.currentTimeMillis(),
+                  error,
                   new HashMap<>(),
                   new HashMap<>()));
     }

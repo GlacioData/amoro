@@ -97,8 +97,7 @@ public class FlinkOptimizerExecutor extends OptimizerExecutor {
         runtimeContext.forEach((k, v) -> sb.append(k).append("=").append(v).append("\n"));
       }
       String errorMsg = sb + result.getErrorMessage();
-      result.setErrorMessage(
-          errorMsg.substring(0, Math.min(ERROR_MESSAGE_MAX_LENGTH, errorMsg.length())));
+      result.setErrorMessage(errorMsg);
     }
     return result;
   }

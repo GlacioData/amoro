@@ -35,6 +35,7 @@ import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.Arrays;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -43,6 +44,7 @@ import java.util.concurrent.atomic.AtomicReference;
 public class TestOptimizerExecutor extends OptimizerTestBase {
 
   private static final String FAILED_TASK_MESSAGE = "Execute Task failed";
+  private static final String COMPLETE_ERROR_TAIL = "完整堆栈尾部-🚀";
 
   /**
    * When set, slow test tasks count this down as soon as execute() begins, letting tests wait
@@ -214,19 +216,63 @@ public class TestOptimizerExecutor extends OptimizerTestBase {
     Assertions.assertTrue(taskResult.getErrorMessage().contains(FAILED_TASK_MESSAGE));
   }
 
+  @Test
+  public void testCompleteStackTraceIsReportedWithoutTruncation()
+      throws InterruptedException, TException {
+    TEST_AMS.getOptimizerHandler().authenticate(new OptimizerRegisterInfo());
+    String token =
+        TEST_AMS.getOptimizerHandler().getRegisteredOptimizers().keySet().iterator().next();
+    TEST_AMS.getOptimizerHandler().offerTask(TestOptimizingInput.longFailedInput(1).toTask(0, 0));
+    optimizerExecutor.setToken(token);
+
+    TimeUnit.MILLISECONDS.sleep(OptimizerTestHelpers.CALL_AMS_INTERVAL * 2);
+
+    OptimizingTaskResult taskResult =
+        TEST_AMS.getOptimizerHandler().getCompletedTasks().get(token).get(0);
+    Assertions.assertTrue(taskResult.getErrorMessage().length() > 4_000);
+    Assertions.assertTrue(taskResult.getErrorMessage().contains(COMPLETE_ERROR_TAIL));
+  }
+
+  @Test
+  public void testCompleteTaskTransfersErrorLargerThanDefaultThriftFrame() throws TException {
+    TEST_AMS.getOptimizerHandler().authenticate(new OptimizerRegisterInfo());
+    String token =
+        TEST_AMS.getOptimizerHandler().getRegisteredOptimizers().keySet().iterator().next();
+    optimizerExecutor.setToken(token);
+    OptimizingTaskId taskId = new OptimizingTaskId(0, 0);
+    TEST_AMS.getOptimizerHandler().ackTask(token, 0, taskId);
+    char[] payload = new char[16 * 1024 * 1024 + 1024];
+    Arrays.fill(payload, 'x');
+    String error = new String(payload) + COMPLETE_ERROR_TAIL;
+    OptimizingTaskResult result = new OptimizingTaskResult(taskId, 0).setErrorMessage(error);
+
+    optimizerExecutor.completeTask(TEST_AMS.getServerUrl(), result);
+
+    Assertions.assertEquals(
+        error,
+        TEST_AMS.getOptimizerHandler().getCompletedTasks().get(token).get(0).getErrorMessage());
+  }
+
   public static class TestOptimizingInput extends BaseOptimizingInput {
     private final int inputId;
     private final boolean executeSuccess;
     private final long executionTimeMs;
+    private final String failureMessage;
 
     private TestOptimizingInput(int inputId, boolean executeSuccess) {
-      this(inputId, executeSuccess, 0L);
+      this(inputId, executeSuccess, 0L, FAILED_TASK_MESSAGE);
     }
 
     private TestOptimizingInput(int inputId, boolean executeSuccess, long executionTimeMs) {
+      this(inputId, executeSuccess, executionTimeMs, FAILED_TASK_MESSAGE);
+    }
+
+    private TestOptimizingInput(
+        int inputId, boolean executeSuccess, long executionTimeMs, String failureMessage) {
       this.inputId = inputId;
       this.executeSuccess = executeSuccess;
       this.executionTimeMs = executionTimeMs;
+      this.failureMessage = failureMessage;
     }
 
     public static TestOptimizingInput successInput(int inputId) {
@@ -235,6 +281,15 @@ public class TestOptimizerExecutor extends OptimizerTestBase {
 
     public static TestOptimizingInput failedInput(int inputId) {
       return new TestOptimizingInput(inputId, false);
+    }
+
+    public static TestOptimizingInput longFailedInput(int inputId) {
+      StringBuilder failure = new StringBuilder(FAILED_TASK_MESSAGE).append('\n');
+      for (int i = 0; i < 1_000; i++) {
+        failure.append("调用链-").append(i).append('\n');
+      }
+      return new TestOptimizingInput(
+          inputId, false, 0L, failure.append(COMPLETE_ERROR_TAIL).toString());
     }
 
     public static TestOptimizingInput slowSuccessInput(int inputId, long executionTimeMs) {
@@ -297,7 +352,7 @@ public class TestOptimizerExecutor extends OptimizerTestBase {
       if (input.executeSuccess) {
         return new TestOptimizingOutput(input.inputId());
       } else {
-        throw new IllegalStateException(FAILED_TASK_MESSAGE);
+        throw new IllegalStateException(input.failureMessage);
       }
     }
   }

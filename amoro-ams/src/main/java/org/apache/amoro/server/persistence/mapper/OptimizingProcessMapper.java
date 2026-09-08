@@ -105,7 +105,7 @@ public interface OptimizingProcessMapper {
         + " #{taskRuntime.taskDescriptor.tableId}, #{taskRuntime.taskDescriptor.partition}, "
         + "#{taskRuntime.startTime, typeHandler=org.apache.amoro.server.persistence.converter.Long2TsConverter},"
         + " #{taskRuntime.endTime, typeHandler=org.apache.amoro.server.persistence.converter.Long2TsConverter}, "
-        + "#{taskRuntime.status}, #{taskRuntime.failReason, jdbcType=VARCHAR},"
+        + "#{taskRuntime.status}, #{taskRuntime.failReason, jdbcType=LONGVARCHAR},"
         + " #{taskRuntime.token, jdbcType=VARCHAR}, #{taskRuntime.threadId, "
         + "jdbcType=INTEGER}, #{taskRuntime.taskDescriptor.output, jdbcType=BLOB, "
         + " typeHandler=org.apache.amoro.server.persistence.converter.Object2ByteArrayConvert},"
@@ -226,6 +226,48 @@ public interface OptimizingProcessMapper {
       })
   List<OptimizingTaskMeta> selectOptimizeTaskMetas(@Param("processIds") List<Long> processIds);
 
+  @Select(
+      "<script>"
+          + "SELECT process_id, task_id, retry_num, table_id, partition_data, create_time, start_time, end_time, "
+          + "cost_time, status, optimizer_token, thread_id, metrics_summary, properties FROM task_runtime "
+          + "WHERE process_id IN"
+          + "<foreach item='item' index='index' collection='processIds' open='(' separator=',' close=')'>"
+          + "#{item}"
+          + "</foreach>"
+          + "</script>")
+  @ResultMap("optimizingTaskRuntimeMap")
+  List<OptimizingTaskMeta> selectOptimizeTaskMetasWithoutFailReason(
+      @Param("processIds") List<Long> processIds);
+
+  @Select(
+      "SELECT process_id, task_id, retry_num, table_id, partition_data, create_time, start_time, end_time, "
+          + "cost_time, status, fail_reason, optimizer_token, thread_id, metrics_summary, properties "
+          + "FROM task_runtime WHERE table_id = #{tableId} AND process_id = #{processId} "
+          + "ORDER BY task_id")
+  @ResultMap("optimizingTaskRuntimeMap")
+  List<OptimizingTaskMeta> selectOptimizeTaskMetasByProcess(
+      @Param("tableId") long tableId, @Param("processId") long processId);
+
+  @Select(
+      "SELECT process_id, task_id, retry_num, table_id, partition_data, create_time, start_time, end_time, "
+          + "cost_time, status, optimizer_token, thread_id, metrics_summary, properties "
+          + "FROM task_runtime WHERE table_id = #{tableId} AND process_id = #{processId} "
+          + "ORDER BY task_id")
+  @ResultMap("optimizingTaskRuntimeMap")
+  List<OptimizingTaskMeta> selectOptimizeTaskMetasWithoutFailReasonByProcess(
+      @Param("tableId") long tableId, @Param("processId") long processId);
+
+  @Select(
+      "SELECT process_id, task_id, retry_num, table_id, partition_data, create_time, start_time, end_time, "
+          + "cost_time, status, fail_reason, optimizer_token, thread_id, metrics_summary, properties "
+          + "FROM task_runtime WHERE table_id = #{tableId} AND process_id = #{processId} "
+          + "AND task_id = #{taskId}")
+  @ResultMap("optimizingTaskRuntimeMap")
+  OptimizingTaskMeta selectOptimizeTaskMeta(
+      @Param("tableId") long tableId,
+      @Param("processId") long processId,
+      @Param("taskId") int taskId);
+
   @Update(
       "UPDATE task_runtime SET retry_num = #{taskRuntime.runTimes}, "
           + "start_time = #{taskRuntime.startTime,"
@@ -233,7 +275,7 @@ public interface OptimizingProcessMapper {
           + " end_time = #{taskRuntime.endTime,"
           + " typeHandler=org.apache.amoro.server.persistence.converter.Long2TsConverter},"
           + " cost_time = #{taskRuntime.costTime}, status = #{taskRuntime.status},"
-          + " fail_reason = #{taskRuntime.failReason, jdbcType=VARCHAR},"
+          + " fail_reason = #{taskRuntime.failReason, jdbcType=LONGVARCHAR},"
           + " optimizer_token = #{taskRuntime.token, jdbcType=VARCHAR},"
           + " thread_id = #{taskRuntime.threadId, jdbcType=INTEGER},"
           + " rewrite_output = #{taskRuntime.taskDescriptor.output, jdbcType=BLOB,"
@@ -290,7 +332,7 @@ public interface OptimizingProcessMapper {
           + " #{taskQuota.tableId},"
           + " #{taskQuota.startTime, typeHandler=org.apache.amoro.server.persistence.converter.Long2TsConverter}, "
           + " #{taskQuota.endTime, typeHandler=org.apache.amoro.server.persistence.converter.Long2TsConverter},"
-          + " #{taskQuota.failReason, jdbcType=VARCHAR})")
+          + " #{taskQuota.failReason, jdbcType=LONGVARCHAR})")
   void insertTaskQuota(@Param("taskQuota") TaskRuntime.TaskQuota taskQuota);
 
   @Delete(

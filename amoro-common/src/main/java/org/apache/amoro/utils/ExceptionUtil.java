@@ -24,7 +24,7 @@ import java.io.StringWriter;
 public class ExceptionUtil {
   public static final String EMPTY_ERROR_MESSAGE = "null";
 
-  public static String getErrorMessage(Throwable t, int maxLength) {
+  public static String getErrorMessage(Throwable t) {
     if (t == null) {
       return EMPTY_ERROR_MESSAGE;
     }
@@ -32,12 +32,21 @@ public class ExceptionUtil {
     PrintWriter pw = new PrintWriter(sw);
     t.printStackTrace(pw);
     String stackTrace = sw.toString();
+    return stackTrace.isEmpty() ? EMPTY_ERROR_MESSAGE : stackTrace;
+  }
+
+  /**
+   * Returns a stack trace limited to {@code maxLength} UTF-16 code units.
+   *
+   * @deprecated Error-reporting paths should preserve the complete stack trace with {@link
+   *     #getErrorMessage(Throwable)}. This overload remains for source compatibility only.
+   */
+  @Deprecated
+  public static String getErrorMessage(Throwable t, int maxLength) {
+    String stackTrace = getErrorMessage(t);
     if (stackTrace.length() > maxLength) {
       return stackTrace.substring(0, maxLength);
-    } else if (stackTrace.length() == 0) {
-      return EMPTY_ERROR_MESSAGE;
-    } else {
-      return stackTrace;
     }
+    return stackTrace;
   }
 }

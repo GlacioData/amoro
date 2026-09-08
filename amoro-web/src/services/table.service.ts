@@ -189,7 +189,7 @@ export function getTasksByOptimizingProcessId(
     catalog: string
     db: string
     table: string
-    processId: number
+    processId: string
     page: number
     pageSize: number
     token?: string
@@ -197,6 +197,33 @@ export function getTasksByOptimizingProcessId(
 ) {
   const { catalog, db, table, processId, page, pageSize, token } = params
   return request.get(`api/ams/v1/tables/catalogs/${catalog}/dbs/${db}/tables/${table}/optimizing-processes/${processId}/tasks`, { params: { page, pageSize, token } })
+}
+
+export function getOptimizingProcessError(params: {
+  catalog: string
+  db: string
+  table: string
+  processId: string
+}): Promise<string> {
+  const { catalog, db, table, processId } = params
+  return request.get(
+    `api/ams/v1/tables/catalogs/${catalog}/dbs/${db}/tables/${table}/optimizing-processes/${processId}/error`,
+    { rawData: true, responseType: 'text' },
+  )
+}
+
+export function getOptimizingTaskError(params: {
+  catalog: string
+  db: string
+  table: string
+  processId: string
+  taskId: number
+}): Promise<string> {
+  const { catalog, db, table, processId, taskId } = params
+  return request.get(
+    `api/ams/v1/tables/catalogs/${catalog}/dbs/${db}/tables/${table}/optimizing-processes/${processId}/tasks/${taskId}/error`,
+    { rawData: true, responseType: 'text' },
+  )
 }
 
 // get table processes

@@ -18,6 +18,7 @@
 
 package org.apache.amoro.client;
 
+import org.apache.amoro.shade.guava32.com.google.common.annotations.VisibleForTesting;
 import org.apache.amoro.shade.thrift.org.apache.thrift.TConfiguration;
 import org.apache.amoro.shade.thrift.org.apache.thrift.transport.TSocket;
 import org.apache.amoro.shade.thrift.org.apache.thrift.transport.TTransport;
@@ -147,7 +148,8 @@ public class ThriftClientPool<
             poolConfig);
   }
 
-  private TTransport getTransport(ServiceInfo serviceInfo) throws TTransportException {
+  @VisibleForTesting
+  TTransport getTransport(ServiceInfo serviceInfo) throws TTransportException {
 
     if (serviceInfo == null) {
       throw new NoBackendServiceException();
@@ -156,7 +158,7 @@ public class ThriftClientPool<
     configuration.setMaxMessageSize(poolConfig.getMaxMessageSize());
     return new TFramedTransport(
         new TSocket(
-            new TConfiguration(),
+            configuration,
             serviceInfo.getHost(),
             serviceInfo.getPort(),
             poolConfig.getConnectTimeout(),

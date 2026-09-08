@@ -117,7 +117,7 @@ public class TestConfigShade {
           .put("database.jdbc-driver-class", "com.mysql.cj.jdbc.Driver")
           .put(
               "database.url",
-              "jdbc:mysql://127.0.0.1:3306/amoro?useUnicode=true&characterEncoding=UTF8&autoReconnect=true&useAffectedRows=true&allowPublicKeyRetrieval=true&useSSL=false")
+              "jdbc:mysql://127.0.0.1:3306/amoro?useUnicode=true&characterEncoding=UTF-8&autoReconnect=true&useAffectedRows=true&allowPublicKeyRetrieval=true&useSSL=false")
           .put("database.username", "root")
           .put("database.password", "password")
           .build();
@@ -134,7 +134,7 @@ public class TestConfigShade {
           .put("database.jdbc-driver-class", "com.mysql.cj.jdbc.Driver")
           .put(
               "database.url",
-              "jdbc:mysql://127.0.0.1:3306/amoro?useUnicode=true&characterEncoding=UTF8&autoReconnect=true&useAffectedRows=true&allowPublicKeyRetrieval=true&useSSL=false")
+              "jdbc:mysql://127.0.0.1:3306/amoro?useUnicode=true&characterEncoding=UTF-8&autoReconnect=true&useAffectedRows=true&allowPublicKeyRetrieval=true&useSSL=false")
           .put("database.username", "root")
           .put("database.password", "password")
           .build();

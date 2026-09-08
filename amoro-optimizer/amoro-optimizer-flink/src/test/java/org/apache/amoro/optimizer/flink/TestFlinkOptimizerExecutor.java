@@ -20,9 +20,14 @@ package org.apache.amoro.optimizer.flink;
 
 import org.apache.amoro.TestAms;
 import org.apache.amoro.api.OptimizerRegisterInfo;
+import org.apache.amoro.api.OptimizingTask;
+import org.apache.amoro.api.OptimizingTaskId;
+import org.apache.amoro.api.OptimizingTaskResult;
 import org.apache.amoro.optimizer.common.OptimizerConfig;
+import org.apache.amoro.shade.guava32.com.google.common.collect.Maps;
 import org.apache.amoro.shade.thrift.org.apache.thrift.TException;
 import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.kohsuke.args4j.CmdLineException;
@@ -62,5 +67,35 @@ public class TestFlinkOptimizerExecutor {
     executor.bestEffortTouch();
     executor.setToken(null);
     executor.bestEffortTouch();
+  }
+
+  @Test
+  public void testRuntimeContextDoesNotTruncateCompleteError() throws CmdLineException {
+    OptimizerConfig config =
+        new OptimizerConfig(new String[] {"-a", TEST_AMS.getServerUrl(), "-p", "1", "-g", "g1"});
+    TestableFlinkOptimizerExecutor executor = new TestableFlinkOptimizerExecutor(config, 0);
+    String tail = "完整运行环境尾部-🚀";
+    StringBuilder runtimeContext = new StringBuilder();
+    for (int i = 0; i < 1_000; i++) {
+      runtimeContext.append("task-manager-context-").append(i).append('\n');
+    }
+    executor.addRuntimeContext("flink", runtimeContext.append(tail).toString());
+    OptimizingTask task = new OptimizingTask(new OptimizingTaskId(1L, 1));
+    task.setProperties(Maps.newHashMap());
+
+    OptimizingTaskResult result = executor.executeForTest(task);
+
+    Assertions.assertTrue(result.getErrorMessage().length() > 4_000);
+    Assertions.assertTrue(result.getErrorMessage().contains(tail));
+  }
+
+  private static class TestableFlinkOptimizerExecutor extends FlinkOptimizerExecutor {
+    private TestableFlinkOptimizerExecutor(OptimizerConfig config, int threadId) {
+      super(config, threadId);
+    }
+
+    private OptimizingTaskResult executeForTest(OptimizingTask task) {
+      return super.executeTask(task);
+    }
   }
 }

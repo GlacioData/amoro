@@ -44,7 +44,6 @@ import java.util.concurrent.TimeUnit;
 public class OptimizerExecutor extends AbstractOptimizerOperator {
 
   private static final Logger LOG = LoggerFactory.getLogger(OptimizerExecutor.class);
-  protected static final int ERROR_MESSAGE_MAX_LENGTH = 4000;
 
   /**
    * How long completeTask keeps retrying through transient AMS errors, measured from the moment
@@ -147,7 +146,7 @@ public class OptimizerExecutor extends AbstractOptimizerOperator {
                 ackTask.getTaskId(),
                 amsUrl,
                 t);
-            String errorMessage = ExceptionUtil.getErrorMessage(t, ERROR_MESSAGE_MAX_LENGTH);
+            String errorMessage = ExceptionUtil.getErrorMessage(t);
             result = new OptimizingTaskResult(ackTask.getTaskId(), threadId);
             result.setErrorMessage(errorMessage);
           } else {
@@ -261,6 +260,7 @@ public class OptimizerExecutor extends AbstractOptimizerOperator {
 
   protected void completeTask(String amsUrl, OptimizingTaskResult optimizingTaskResult) {
     int taskOutputBytes = taskOutputBytes(optimizingTaskResult);
+    int errorMessageCharacters = errorMessageCharacters(optimizingTaskResult);
     String status = taskStatus(optimizingTaskResult);
     try {
       // Report the result even when shutdown was requested before or during this call: a
@@ -275,21 +275,24 @@ public class OptimizerExecutor extends AbstractOptimizerOperator {
           },
           COMPLETE_TASK_DRAIN_TIMEOUT_MS);
       LOG.info(
-          "Optimizer executor[{}] completed task[{}](status: {}) to AMS {}, taskOutputBytes={}",
-          threadId,
-          optimizingTaskResult.getTaskId(),
-          status,
-          amsUrl,
-          taskOutputBytes);
-    } catch (Exception exception) {
-      LOG.error(
-          "Optimizer executor[{}] completed task[{}](status: {}) to AMS {} failed, "
-              + "taskOutputBytes={}",
+          "Optimizer executor[{}] completed task[{}](status: {}) to AMS {}, taskOutputBytes={}, "
+              + "errorMessageCharacters={}",
           threadId,
           optimizingTaskResult.getTaskId(),
           status,
           amsUrl,
           taskOutputBytes,
+          errorMessageCharacters);
+    } catch (Exception exception) {
+      LOG.error(
+          "Optimizer executor[{}] completed task[{}](status: {}) to AMS {} failed, "
+              + "taskOutputBytes={}, errorMessageCharacters={}",
+          threadId,
+          optimizingTaskResult.getTaskId(),
+          status,
+          amsUrl,
+          taskOutputBytes,
+          errorMessageCharacters,
           exception);
     }
   }
@@ -301,6 +304,11 @@ public class OptimizerExecutor extends AbstractOptimizerOperator {
   private static int taskOutputBytes(OptimizingTaskResult optimizingTaskResult) {
     byte[] taskOutput = optimizingTaskResult.getTaskOutput();
     return taskOutput == null ? 0 : taskOutput.length;
+  }
+
+  private static int errorMessageCharacters(OptimizingTaskResult optimizingTaskResult) {
+    String errorMessage = optimizingTaskResult.getErrorMessage();
+    return errorMessage == null ? 0 : errorMessage.length();
   }
 
   @SuppressWarnings({"rawtypes", "unchecked"})
@@ -340,7 +348,7 @@ public class OptimizerExecutor extends AbstractOptimizerOperator {
           System.currentTimeMillis() - startTime,
           t);
       OptimizingTaskResult errorResult = new OptimizingTaskResult(task.getTaskId(), threadId);
-      errorResult.setErrorMessage(ExceptionUtil.getErrorMessage(t, ERROR_MESSAGE_MAX_LENGTH));
+      errorResult.setErrorMessage(ExceptionUtil.getErrorMessage(t));
       return errorResult;
     }
   }

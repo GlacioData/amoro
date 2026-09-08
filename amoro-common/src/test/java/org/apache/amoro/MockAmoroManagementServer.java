@@ -187,7 +187,7 @@ public class MockAmoroManagementServer implements Runnable {
       TThreadPoolServer.Args args =
           new TThreadPoolServer.Args(socket)
               .processor(processor)
-              .transportFactory(new TFramedTransport.Factory())
+              .transportFactory(new TFramedTransport.Factory((int) maxMessageSize))
               .protocolFactory(protocolFactory)
               .inputProtocolFactory(inputProtoFactory)
               .executorService(threadPoolExecutor);

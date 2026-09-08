@@ -236,3 +236,8 @@ CREATE INDEX IF NOT EXISTS idx_bucket_assignments_cluster ON bucket_assignments 
 
 -- ADD node_heartbeat_ts to table bucket_assignments
 ALTER TABLE bucket_assignments ADD COLUMN node_heartbeat_ts BIGINT NOT NULL DEFAULT 0;
+
+-- Preserve complete optimizer failure stack traces.
+ALTER TABLE task_runtime ALTER COLUMN fail_reason TYPE TEXT;
+ALTER TABLE table_process_state ALTER COLUMN fail_reason TYPE TEXT;
+ALTER TABLE optimizing_task_quota ALTER COLUMN fail_reason TYPE TEXT;
