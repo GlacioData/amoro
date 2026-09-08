@@ -59,11 +59,11 @@ public class TestPaimonCompactionOutputSummary {
   }
 
   @Test
-  @DisplayName("summary() emits all 8 keys — 4 Paimon-native + 4 dashboard-compat")
-  void testSummaryContainsAllEightKeys() {
+  @DisplayName("summary() emits all 10 keys — 4 Paimon-native + 6 dashboard-compat")
+  void testSummaryContainsFileAndRecordKeys() {
     Map<String, String> summary = newOutput().summary();
     assertNotNull(summary);
-    assertEquals(8, summary.size(), "expected 4 Paimon-native + 4 dashboard-compat keys");
+    assertEquals(10, summary.size(), "expected 4 Paimon-native + 6 dashboard-compat keys");
 
     // Paimon-native keys.
     assertTrue(summary.containsKey(PaimonCompactionOutput.COMPACTED_FILES));
@@ -133,10 +133,10 @@ public class TestPaimonCompactionOutputSummary {
   }
 
   @Test
-  @DisplayName("Empty (no-arg) output still emits all 8 keys with zero values")
+  @DisplayName("Empty (no-arg) output still emits all 10 keys with zero values")
   void testEmptyOutputEmitsZeros() {
     Map<String, String> summary = new PaimonCompactionOutput().summary();
-    assertEquals(8, summary.size());
+    assertEquals(10, summary.size());
     assertEquals("0", summary.get(PaimonCompactionOutput.COMPACTED_FILES));
     assertEquals("0", summary.get(PaimonCompactionOutput.COMPACTED_BYTES));
     assertEquals("0", summary.get(PaimonCompactionOutput.PRODUCED_FILES));

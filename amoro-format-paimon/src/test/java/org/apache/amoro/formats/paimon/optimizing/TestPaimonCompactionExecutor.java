@@ -23,6 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import org.apache.amoro.config.OptimizingConfig;
 import org.apache.amoro.formats.paimon.PaimonCatalogFactory;
 import org.apache.amoro.formats.paimon.PaimonTable;
 import org.apache.amoro.formats.paimon.PaimonTableDescriptor;
@@ -48,6 +49,7 @@ import org.apache.paimon.table.sink.BatchTableCommit;
 import org.apache.paimon.table.sink.BatchTableWrite;
 import org.apache.paimon.table.sink.BatchWriteBuilder;
 import org.apache.paimon.table.sink.CommitMessage;
+import org.apache.paimon.table.source.DataSplit;
 import org.apache.paimon.types.DataTypes;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -143,8 +145,8 @@ public class TestPaimonCompactionExecutor {
   void testCompactionOutputSummary() {
     PaimonCompactionOutput output = new PaimonCompactionOutput();
     assertNotNull(output.summary());
-    // 4 Paimon-native + 4 dashboard-compat keys.
-    assertEquals(8, output.summary().size());
+    // Outputs expose four native counters and six dashboard counters.
+    assertEquals(10, output.summary().size());
     assertEquals("0", output.summary().get(PaimonCompactionOutput.COMPACTED_FILES));
     assertEquals("0", output.summary().get(PaimonCompactionOutput.PRODUCED_FILES));
     assertEquals("0", output.summary().get(PaimonCompactionOutput.DASHBOARD_INPUT_DATA_FILES));
@@ -313,7 +315,7 @@ public class TestPaimonCompactionExecutor {
             processId,
             1.0,
             64L * 1024 * 1024,
-            new org.apache.amoro.config.OptimizingConfig()
+            new OptimizingConfig()
                 .setEnabled(true)
                 .setMinorLeastInterval(1)
                 .setFullTriggerInterval(-1)
@@ -340,8 +342,8 @@ public class TestPaimonCompactionExecutor {
 
   private static long countDataFiles(AppendOnlyFileStoreTable table) throws Exception {
     return table.newReadBuilder().newScan().plan().splits().stream()
-        .filter(s -> s instanceof org.apache.paimon.table.source.DataSplit)
-        .mapToLong(s -> ((org.apache.paimon.table.source.DataSplit) s).dataFiles().size())
+        .filter(s -> s instanceof DataSplit)
+        .mapToLong(s -> ((DataSplit) s).dataFiles().size())
         .sum();
   }
 }

@@ -17,7 +17,7 @@ limitations under the License.
 / -->
 
 <script lang="ts" setup>
-import { onMounted, reactive, ref, shallowReactive } from 'vue'
+import { computed, onMounted, reactive, ref, shallowReactive } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute } from 'vue-router'
 import { Modal, message } from 'ant-design-vue'
@@ -49,24 +49,19 @@ const TASK_STATUS_CONFIG = shallowReactive({
 })
 
 const { t } = useI18n()
-const baseColumns: IColumns[] = [
+const columns = computed<IColumns[]>(() => [
   { title: t('processId'), dataIndex: 'processId' },
   { title: t('startTime'), dataIndex: 'startTime', width: 172 },
   { title: t('type'), dataIndex: 'optimizingType' },
   { title: t('status'), dataIndex: 'status' },
   { title: t('duration'), dataIndex: 'duration', width: 120 },
-]
-
-const optimizingColumns: IColumns[] = [
   { title: t('tasks'), dataIndex: 'tasks' },
   { title: t('finishTime'), dataIndex: 'finishTime', width: 172 },
   { title: t('input'), dataIndex: 'inputFiles' },
   { title: t('output'), dataIndex: 'outputFiles' },
-]
+])
 
-const columns: IColumns[] = shallowReactive([...baseColumns, ...optimizingColumns])
-
-const breadcrumbColumns = shallowReactive([
+const breadcrumbColumns = computed(() => [
   { title: t('taskId'), dataIndex: 'taskId', width: 82 },
   { title: t('partition'), dataIndex: 'partitionData', ellipsis: true },
   { title: t('startTime'), dataIndex: 'startTime', width: 172 },
@@ -224,6 +219,10 @@ function refresh() {
   else {
     refreshOptimizingProcesses()
   }
+}
+
+function formatPartition(partition: string): string {
+  return partition.replace(/^Unpartitioned(?= \[bucket=)/, t('unpartitioned'))
 }
 
 async function refreshOptimizingTasks() {
@@ -503,9 +502,9 @@ onMounted(() => {
           <template v-if="column.dataIndex === 'partitionData'">
             <a-tooltip>
               <template #title>
-                {{ record.partitionData }}
+                {{ formatPartition(record.partitionData) }}
               </template>
-              <span>{{ record.partitionData }}</span>
+              <span>{{ formatPartition(record.partitionData) }}</span>
             </a-tooltip>
           </template>
           <template v-if="column.dataIndex === 'status'">

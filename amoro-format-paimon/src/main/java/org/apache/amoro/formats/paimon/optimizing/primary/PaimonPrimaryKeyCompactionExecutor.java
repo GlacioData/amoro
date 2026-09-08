@@ -18,20 +18,18 @@
 
 package org.apache.amoro.formats.paimon.optimizing.primary;
 
+import org.apache.amoro.formats.paimon.optimizing.PaimonRewriteMetrics;
 import org.apache.amoro.optimizing.OptimizingExecutor;
 import org.apache.amoro.optimizing.OptimizingType;
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.Snapshot;
 import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.disk.IOManager;
-import org.apache.paimon.io.CompactIncrement;
-import org.apache.paimon.io.DataFileMeta;
 import org.apache.paimon.table.AppendOnlyFileStoreTable;
 import org.apache.paimon.table.BucketMode;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.sink.BatchTableWrite;
 import org.apache.paimon.table.sink.CommitMessage;
-import org.apache.paimon.table.sink.CommitMessageImpl;
 import org.apache.paimon.table.sink.CommitMessageSerializer;
 import org.apache.paimon.table.sink.InnerTableWrite;
 import org.apache.paimon.utils.SerializationUtils;
@@ -105,15 +103,17 @@ public class PaimonPrimaryKeyCompactionExecutor
         write.compact(partition, unit.getBucket(), input.isFullCompaction());
       }
       List<CommitMessage> messages = write.prepareCommit();
+      PaimonRewriteMetrics metrics = PaimonRewriteMetrics.collect(messages);
       PaimonPrimaryKeyCompactionOutput output =
           new PaimonPrimaryKeyCompactionOutput(
               CommitMessageSerializer.serializeAll(messages),
               input.getUnits().size(),
-              compactedFileCount(),
-              compactedFileSize(),
-              compactedRecordCount(),
-              producedFileCount(messages),
-              producedFileSize(messages));
+              metrics.inputFiles(),
+              metrics.inputBytes(),
+              metrics.inputRecords(),
+              metrics.outputFiles(),
+              metrics.outputBytes());
+      output.setRewriteRecords(metrics.inputRecords(), metrics.outputRecords());
       LOG.info(
           "Paimon primary-key compaction produced commit messages: table={}, type={}, "
               + "identifier={}, bucketUnits={}, commitMessageCount={}, commitMessageBytes={}, "
@@ -191,55 +191,9 @@ public class PaimonPrimaryKeyCompactionExecutor
   }
 
   private PaimonPrimaryKeyCompactionOutput noOpOutput() {
-    return new PaimonPrimaryKeyCompactionOutput(Collections.emptyList(), 0, 0L, 0L, 0L, 0L, 0L);
-  }
-
-  private long compactedFileCount() {
-    return input.getUnits().stream().mapToLong(PaimonBucketCompactionUnit::getFileCount).sum();
-  }
-
-  private long compactedFileSize() {
-    return input.getUnits().stream()
-        .mapToLong(PaimonBucketCompactionUnit::getFileSizeInBytes)
-        .sum();
-  }
-
-  private long compactedRecordCount() {
-    return input.getUnits().stream().mapToLong(PaimonBucketCompactionUnit::getRecordCount).sum();
-  }
-
-  private static long producedFileCount(List<CommitMessage> messages) {
-    long count = 0L;
-    for (CommitMessage message : messages) {
-      count += compactAfter(message).size();
-    }
-    return count;
-  }
-
-  private static long producedFileSize(List<CommitMessage> messages) {
-    long size = 0L;
-    for (CommitMessage message : messages) {
-      for (DataFileMeta file : compactAfter(message)) {
-        size += file.fileSize();
-      }
-    }
-    return size;
-  }
-
-  private static List<DataFileMeta> compactAfter(CommitMessage message) {
-    if (!(message instanceof CommitMessageImpl)) {
-      throw new IllegalStateException(
-          "Paimon primary-key compact message must be CommitMessageImpl, got "
-              + (message == null ? "null" : message.getClass().getName()));
-    }
-    CompactIncrement increment = ((CommitMessageImpl) message).compactIncrement();
-    if (increment == null) {
-      throw new IllegalStateException("Paimon primary-key compact message has null increment.");
-    }
-    List<DataFileMeta> compactAfter = increment.compactAfter();
-    if (compactAfter == null) {
-      throw new IllegalStateException("Paimon primary-key compact message has null compactAfter.");
-    }
-    return compactAfter;
+    PaimonPrimaryKeyCompactionOutput output =
+        new PaimonPrimaryKeyCompactionOutput(Collections.emptyList(), 0, 0L, 0L, 0L, 0L, 0L);
+    output.setRewriteRecords(0L, 0L);
+    return output;
   }
 }

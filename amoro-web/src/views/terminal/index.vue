@@ -17,7 +17,7 @@ limitations under the License.
 / -->
 
 <script lang="ts">
-import { defineComponent, onBeforeUnmount, onMounted, reactive, ref, shallowReactive, watch } from 'vue'
+import { defineComponent, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
 import SqlResult from './components/sql-result.vue'
 import SqlLog from './components/sql-log.vue'
@@ -77,7 +77,7 @@ export default defineComponent({
 
     const sqlResultHeight = ref<number>(476)
 
-    const bgcMap: IMap<string> = shallowReactive(debugResultBgcMap)
+    const bgcMap: IMap<string> = { ...debugResultBgcMap }
     const storageSqlSourceKey = 'easylake-sql-source'
     const storageUseCatalogKey = 'easylake-use-catalog'
 

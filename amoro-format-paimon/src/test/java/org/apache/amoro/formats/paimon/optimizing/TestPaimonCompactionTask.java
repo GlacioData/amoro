@@ -40,6 +40,24 @@ import java.util.Map;
 public class TestPaimonCompactionTask {
 
   @Test
+  void recordsAndAvailabilitySurviveSerializationAndReset() {
+    PaimonCompactionTask task = new PaimonCompactionTask(1, "", null, new HashMap<>());
+    PaimonCompactionOutput output = new PaimonCompactionOutput(new byte[0], 1, 3, 100, 1, 50);
+    output.setRewriteRecords(20, 12);
+    ByteBuffer bytes = SerializationUtil.simpleSerialize(output);
+    byte[] payload = new byte[bytes.remaining()];
+    bytes.get(payload);
+    task.setOutputBytes(payload);
+    assertEquals(20, task.getSummary().getCompactedRecordCount());
+    assertEquals(12, task.getSummary().getProducedRecordCount());
+    task.reset();
+    assertEquals(0, task.getSummary().getProducedFileCount());
+    task.setOutputBytes(payload);
+    assertEquals(3, task.getSummary().getCompactedFileCount());
+    assertEquals(20, task.getSummary().getCompactedRecordCount());
+  }
+
+  @Test
   @DisplayName("Full-args ctor builds a non-null summary even before output arrives")
   void testConstructorInitializesSummary() {
     PaimonCompactionInput input = new PaimonCompactionInput(null, new byte[] {1}, 2, "u", "p", 9L);

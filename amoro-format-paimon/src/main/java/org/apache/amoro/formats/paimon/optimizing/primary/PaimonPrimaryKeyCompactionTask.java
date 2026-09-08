@@ -25,11 +25,14 @@ import org.apache.amoro.shade.guava32.com.google.common.base.MoreObjects;
 import org.apache.amoro.utils.SerializationUtil;
 
 import java.nio.ByteBuffer;
+import java.util.HashMap;
 import java.util.Map;
 
 public class PaimonPrimaryKeyCompactionTask
     extends StagedTaskDescriptor<
         PaimonPrimaryKeyCompactionInput, PaimonPrimaryKeyCompactionOutput, PaimonMetricsSummary> {
+
+  public static final String PARTITION_DISPLAY = "paimon.partition-display";
 
   private String partition;
 
@@ -42,6 +45,12 @@ public class PaimonPrimaryKeyCompactionTask
       Map<String, String> properties) {
     super(tableId, input, properties);
     this.partition = partition;
+    if (partition != null && partition.length() > 128) {
+      // The database label is bounded; properties preserve the exact historical display.
+      this.properties = properties == null ? new HashMap<>() : new HashMap<>(properties);
+      this.properties.put(PARTITION_DISPLAY, partition);
+      this.partition = "partition-" + Integer.toUnsignedString(partition.hashCode(), 16);
+    }
   }
 
   public static PaimonPrimaryKeyCompactionTask buildTask(
@@ -69,6 +78,8 @@ public class PaimonPrimaryKeyCompactionTask
       metricsSummary.setCompactedFileSize(output.getCompactedFileSize());
       metricsSummary.setProducedFileCount(output.getProducedFileCount());
       metricsSummary.setProducedFileSize(output.getProducedFileSize());
+      metricsSummary.setCompactedRecordCount(output.getCompactedRecordCount());
+      metricsSummary.setProducedRecordCount(output.getProducedRecordCount());
     }
     summary = metricsSummary;
   }

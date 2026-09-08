@@ -41,6 +41,8 @@ import org.apache.paimon.io.DataFileMeta;
 import org.apache.paimon.options.Options;
 import org.apache.paimon.predicate.Predicate;
 import org.apache.paimon.table.AppendOnlyFileStoreTable;
+import org.apache.paimon.table.BucketMode;
+import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.sink.AppendCompactTaskSerializer;
 import org.apache.paimon.types.RowType;
 import org.apache.paimon.utils.InternalRowPartitionComputer;
@@ -79,10 +81,10 @@ import java.util.function.ToLongFunction;
  * Optimizer side can reflectively load {@link PaimonCompactionExecutorFactory}.
  *
  * <p>The {@code commitUser} returned via {@link #getCommitUser()} is generated once per {@link
- * #plan()} call and is carried end-to-end inside each {@link
- * org.apache.amoro.formats.paimon.optimizing.PaimonCompactionInput} (flushed through {@code
- * TaskFilesPersistence}). Retries and AMS restarts therefore re-use the same value automatically —
- * callers do not need to persist it separately to {@code TableProcessStore.properties}.
+ * #plan()} call and is carried end-to-end inside each {@link PaimonCompactionInput} (flushed
+ * through {@code TaskFilesPersistence}). Retries and AMS restarts therefore re-use the same value
+ * automatically — callers do not need to persist it separately to {@code
+ * TableProcessStore.properties}.
  */
 public class PaimonOptimizingPlanner implements TableOptimizingPlanner {
 
@@ -448,11 +450,10 @@ public class PaimonOptimizingPlanner implements TableOptimizingPlanner {
    * not yet been invoked or if no compaction was necessary.
    *
    * <p>The value is authoritative only <em>after</em> {@link #plan()} runs: it is propagated into
-   * every task via {@link
-   * org.apache.amoro.formats.paimon.optimizing.PaimonCompactionInput#getCommitUser()} and survives
-   * AMS restarts through {@code TaskFilesPersistence}. External callers do not need to persist it
-   * separately — {@link #COMMIT_USER_PROPERTY} is retained as a property-key constant for future
-   * integrations that might want to expose the value on {@code TableProcessStore.properties}.
+   * every task via {@link PaimonCompactionInput#getCommitUser()} and survives AMS restarts through
+   * {@code TaskFilesPersistence}. External callers do not need to persist it separately — {@link
+   * #COMMIT_USER_PROPERTY} is retained as a property-key constant for future integrations that
+   * might want to expose the value on {@code TableProcessStore.properties}.
    */
   public String getCommitUser() {
     return commitUser;
@@ -611,7 +612,7 @@ public class PaimonOptimizingPlanner implements TableOptimizingPlanner {
       return null;
     }
     AppendOnlyFileStoreTable table = (AppendOnlyFileStoreTable) raw;
-    if (table.bucketMode() != org.apache.paimon.table.BucketMode.BUCKET_UNAWARE) {
+    if (table.bucketMode() != BucketMode.BUCKET_UNAWARE) {
       LOG.info(
           "Paimon table [{}] bucketMode={} is not BUCKET_UNAWARE; skip.",
           paimonTable.id().getTableName(),
@@ -629,7 +630,7 @@ public class PaimonOptimizingPlanner implements TableOptimizingPlanner {
    * Paimon's partition-directory convention documented at
    * https://paimon.apache.org/docs/1.4/concepts/spec/datafile/.
    */
-  private static String partitionPath(AppendOnlyFileStoreTable table, BinaryRow partition) {
+  static String partitionPath(FileStoreTable table, BinaryRow partition) {
     if (partition == null) {
       return "";
     }

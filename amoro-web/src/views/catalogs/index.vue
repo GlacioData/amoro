@@ -138,7 +138,7 @@ function addCatalog() {
     addNewCatalog()
   }
 }
-  async function addNewCatalog() {
+async function addNewCatalog() {
   const item: ICatalogItem = {
     catalogName: NEW_CATALOG,
     catalogType: '',
@@ -174,7 +174,7 @@ onBeforeRouteLeave((_to, _form, next) => {
 </script>
 
 <template>
-  <div class="page-scroll" ref="pageScrollRef">
+  <div :ref="el => { pageScrollRef = el as HTMLElement | null }" class="page-scroll">
     <div class="catalogs-wrap g-flex">
       <div class="catalog-list-left">
         <div class="catalog-header">
@@ -202,8 +202,6 @@ onBeforeRouteLeave((_to, _form, next) => {
   height: 100%;
   overflow-y: auto;
 }
-
-
 
  .catalogs-wrap {
    height: 100%;

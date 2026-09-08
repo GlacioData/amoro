@@ -25,12 +25,8 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
 
-/**
- * Task-level metrics summary for Paimon BUCKET_UNAWARE compaction. Kept intentionally lean for the
- * first version — file count/size covers the 90% case and avoids bleeding Iceberg-specific fields
- * (position/equality deletes, record counts via ContentFile) into the Paimon path.
- */
-public class PaimonMetricsSummary {
+/** Metrics collected from rewritten Paimon data files. */
+public class PaimonMetricsSummary implements TaskMetricsSummary {
 
   public static final String COMPACTED_FILES = "compacted-files";
   public static final String COMPACTED_BYTES = "compacted-bytes";
@@ -44,6 +40,8 @@ public class PaimonMetricsSummary {
   static final String ICEBERG_OUTPUT_DATA_FILES = TaskMetricsSummary.AGG_OUTPUT_DATA_FILES;
   static final String ICEBERG_OUTPUT_DATA_SIZE = TaskMetricsSummary.AGG_OUTPUT_DATA_SIZE;
 
+  private long compactedRecordCount;
+  private long producedRecordCount;
   private long compactedFileCount;
   private long compactedFileSize;
   private long producedFileCount;
@@ -60,6 +58,22 @@ public class PaimonMetricsSummary {
     this.compactedFileSize = compactedFileSize;
     this.producedFileCount = producedFileCount;
     this.producedFileSize = producedFileSize;
+  }
+
+  public long getCompactedRecordCount() {
+    return compactedRecordCount;
+  }
+
+  public void setCompactedRecordCount(long value) {
+    compactedRecordCount = value;
+  }
+
+  public long getProducedRecordCount() {
+    return producedRecordCount;
+  }
+
+  public void setProducedRecordCount(long value) {
+    producedRecordCount = value;
   }
 
   public long getCompactedFileCount() {
@@ -103,26 +117,22 @@ public class PaimonMetricsSummary {
     return summary;
   }
 
-  /**
-   * Adapt this Paimon summary to the shared {@link TaskMetricsSummary} view consumed by {@code
-   * OptimizingQueue.getSummary()}. Emits only the Iceberg-compatible {@code input-data-*} / {@code
-   * output-data-*} keys — record counts are not surfaced by Paimon's {@code AppendCompactTask}, so
-   * we intentionally omit those fields rather than lie with zero.
-   */
+  /** Snapshots counters so subsequent resets cannot change the returned summary. */
   public TaskMetricsSummary toMetricsSummary() {
-    // Snapshot values at call-time to keep the returned adapter independent of later mutations.
-    final long compactedFiles = compactedFileCount;
-    final long compactedBytes = compactedFileSize;
-    final long producedFiles = producedFileCount;
-    final long producedBytes = producedFileSize;
-    return humanReadable -> {
-      Map<String, String> out = new LinkedHashMap<>();
-      out.put(ICEBERG_INPUT_DATA_FILES, Long.toString(compactedFiles));
-      out.put(ICEBERG_INPUT_DATA_SIZE, Long.toString(compactedBytes));
-      out.put(ICEBERG_OUTPUT_DATA_FILES, Long.toString(producedFiles));
-      out.put(ICEBERG_OUTPUT_DATA_SIZE, Long.toString(producedBytes));
-      return out;
-    };
+    Map<String, String> values = summaryAsMap(false);
+    return humanReadable -> new LinkedHashMap<>(values);
+  }
+
+  @Override
+  public Map<String, String> summaryAsMap(boolean humanReadable) {
+    Map<String, String> values = new LinkedHashMap<>();
+    values.put(ICEBERG_INPUT_DATA_FILES, Long.toString(compactedFileCount));
+    values.put(ICEBERG_INPUT_DATA_SIZE, Long.toString(compactedFileSize));
+    values.put(ICEBERG_OUTPUT_DATA_FILES, Long.toString(producedFileCount));
+    values.put(ICEBERG_OUTPUT_DATA_SIZE, Long.toString(producedFileSize));
+    values.put(TaskMetricsSummary.AGG_INPUT_DATA_RECORDS, Long.toString(compactedRecordCount));
+    values.put(TaskMetricsSummary.AGG_OUTPUT_DATA_RECORDS, Long.toString(producedRecordCount));
+    return values;
   }
 
   @Override
@@ -137,12 +147,20 @@ public class PaimonMetricsSummary {
     return compactedFileCount == that.compactedFileCount
         && compactedFileSize == that.compactedFileSize
         && producedFileCount == that.producedFileCount
-        && producedFileSize == that.producedFileSize;
+        && producedFileSize == that.producedFileSize
+        && compactedRecordCount == that.compactedRecordCount
+        && producedRecordCount == that.producedRecordCount;
   }
 
   @Override
   public int hashCode() {
-    return Objects.hash(compactedFileCount, compactedFileSize, producedFileCount, producedFileSize);
+    return Objects.hash(
+        compactedFileCount,
+        compactedFileSize,
+        producedFileCount,
+        producedFileSize,
+        compactedRecordCount,
+        producedRecordCount);
   }
 
   @Override

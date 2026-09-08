@@ -77,6 +77,7 @@ export default {
   inputPlaceholder: 'Please input {inputPh}',
   filterPlaceholder: 'Filter {inputPh}',
   basicInformation: 'Basic Information',
+  unpartitioned: 'Unpartitioned',
   partition: 'Partition',
   taskId: 'Task ID',
   fileCount: 'File Count',

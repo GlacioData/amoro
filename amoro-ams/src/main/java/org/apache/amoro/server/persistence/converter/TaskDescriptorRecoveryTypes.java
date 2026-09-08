@@ -38,6 +38,7 @@ import org.apache.amoro.optimizing.MixedIcebergRewriteExecutorFactory;
 import org.apache.amoro.optimizing.RewriteFilesInput;
 import org.apache.amoro.optimizing.RewriteFilesOutput;
 import org.apache.amoro.optimizing.RewriteStageTask;
+import org.apache.amoro.optimizing.TaskMetricsSummary;
 import org.apache.amoro.optimizing.TaskProperties;
 import org.apache.amoro.process.StagedTaskDescriptor;
 
@@ -89,6 +90,12 @@ public final class TaskDescriptorRecoveryTypes {
   }
 
   private TaskDescriptorRecoveryTypes() {}
+
+  /** History accepts legacy generic summaries even when an executor is no longer registered. */
+  static Class<? extends TaskMetricsSummary> historySummaryClass(String factoryImpl) {
+    RecoveryTypes types = FACTORY_IMPL_TO_RECOVERY_TYPES.get(factoryImpl);
+    return types == null ? MetricsSummary.class : types.summaryClass();
+  }
 
   public static RecoveryTypes resolve(String factoryImpl) {
     if (factoryImpl == null || factoryImpl.isEmpty()) {
@@ -191,13 +198,13 @@ public final class TaskDescriptorRecoveryTypes {
     private final Class<? extends StagedTaskDescriptor<?, ?, ?>> descriptorClass;
     private final Class<? extends BaseOptimizingInput> inputClass;
     private final Class<?> outputClass;
-    private final Class<?> summaryClass;
+    private final Class<? extends TaskMetricsSummary> summaryClass;
 
     private RecoveryTypes(
         Class<? extends StagedTaskDescriptor<?, ?, ?>> descriptorClass,
         Class<? extends BaseOptimizingInput> inputClass,
         Class<?> outputClass,
-        Class<?> summaryClass) {
+        Class<? extends TaskMetricsSummary> summaryClass) {
       this.descriptorClass = descriptorClass;
       this.inputClass = inputClass;
       this.outputClass = outputClass;
@@ -216,7 +223,7 @@ public final class TaskDescriptorRecoveryTypes {
       return outputClass;
     }
 
-    public Class<?> summaryClass() {
+    public Class<? extends TaskMetricsSummary> summaryClass() {
       return summaryClass;
     }
   }

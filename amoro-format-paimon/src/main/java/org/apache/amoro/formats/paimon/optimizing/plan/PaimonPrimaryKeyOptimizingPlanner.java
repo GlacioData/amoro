@@ -42,6 +42,7 @@ import org.apache.paimon.predicate.Predicate;
 import org.apache.paimon.table.BucketMode;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.PrimaryKeyFileStoreTable;
+import org.apache.paimon.utils.SerializationUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -316,8 +317,16 @@ public class PaimonPrimaryKeyOptimizingPlanner implements TableOptimizingPlanner
       props.put(
           TaskProperties.TASK_EXECUTOR_FACTORY_IMPL,
           PaimonPrimaryKeyCompactionExecutorFactory.class.getName());
-      tasks.add(
-          PaimonPrimaryKeyCompactionTask.buildTask(tableId, "primary-key-buckets", input, props));
+      String partition =
+          PaimonOptimizingPlanner.partitionPath(
+              (FileStoreTable) paimonTable.originalTable(),
+              SerializationUtils.deserializeBinaryRow(unit.getPartitionBytes()));
+      String display =
+          (partition.isEmpty() ? "Unpartitioned" : partition)
+              + " [bucket="
+              + unit.getBucket()
+              + "]";
+      tasks.add(PaimonPrimaryKeyCompactionTask.buildTask(tableId, display, input, props));
     }
     return tasks;
   }
