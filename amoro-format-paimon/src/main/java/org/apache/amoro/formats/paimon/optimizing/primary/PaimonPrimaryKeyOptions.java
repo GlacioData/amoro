@@ -18,6 +18,8 @@
 
 package org.apache.amoro.formats.paimon.optimizing.primary;
 
+import org.apache.amoro.formats.paimon.optimizing.PaimonOptimizingEligibility;
+import org.apache.paimon.CoreOptions;
 import org.apache.paimon.utils.TimeUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -26,6 +28,7 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.Duration;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
 
@@ -58,6 +61,33 @@ public class PaimonPrimaryKeyOptions {
     BigDecimal majorMaxBucketRatio = parseMajorMaxBucketRatio(props);
 
     return new PaimonPrimaryKeyOptions(partitionIdleTime, majorMaxBucketRatio);
+  }
+
+  static CoreOptions compactionStrategyOptions(CoreOptions originalOptions) {
+    Map<String, String> options = new HashMap<>(originalOptions.toMap());
+    if (PaimonOptimizingEligibility.isEligible(options)) {
+      // Paimon 1.4.2：EarlyFullCompaction#create/tryFullCompact 的计时状态属于实例，
+      // interval 非空且 lastFullCompaction 为空时，多 run 可在首次选择成为全量候选。
+      // Amoro 双开关托管时由自身控制周期 FULL，仅移除 interval，保留原生大小阈值。
+      // 源码：paimon-core/src/main/java/org/apache/paimon/mergetree/compact/EarlyFullCompaction.java
+      // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/mergetree/compact/EarlyFullCompaction.java#L57-L81
+      options.remove(CoreOptions.COMPACTION_OPTIMIZATION_INTERVAL.key());
+    }
+    return CoreOptions.fromMap(options);
+  }
+
+  static Map<String, String> compactionWriteOverrides(Map<String, String> originalOptions) {
+    Map<String, String> overrides = new HashMap<>();
+    // 必须依据原始双开关判定，不能在 write-only 已改为 false 的副本上判断托管资格。
+    if (PaimonOptimizingEligibility.isEligible(originalOptions)) {
+      // Paimon 1.4.2：AbstractFileStoreTable#copy(Map)/copyInternal 将 null 解释为移除副本的键；
+      // 仅省略覆盖项会保留旧值。此 Map 专供 table.copy 使用，不是完整 CoreOptions 配置。
+      // 源码：paimon-core/src/main/java/org/apache/paimon/table/AbstractFileStoreTable.java
+      // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/table/AbstractFileStoreTable.java#L322-L378
+      overrides.put(CoreOptions.COMPACTION_OPTIMIZATION_INTERVAL.key(), null);
+    }
+    overrides.put(CoreOptions.WRITE_ONLY.key(), "false");
+    return overrides;
   }
 
   private static Duration parseDuration(String value) {
