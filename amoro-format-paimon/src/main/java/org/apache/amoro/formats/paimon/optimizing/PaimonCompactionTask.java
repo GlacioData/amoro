@@ -55,18 +55,21 @@ public class PaimonCompactionTask
 
   @Override
   protected void calculateSummary() {
-    PaimonMetricsSummary metricsSummary = ensureTypedSummary();
+    PaimonMetricsSummary metricsSummary = new PaimonMetricsSummary();
     if (output != null) {
       metricsSummary.setCompactedFileCount(output.getCompactedFileCount());
       metricsSummary.setCompactedFileSize(output.getCompactedFileSize());
       metricsSummary.setProducedFileCount(output.getProducedFileCount());
       metricsSummary.setProducedFileSize(output.getProducedFileSize());
+      metricsSummary.setCompactedRecordCount(output.getCompactedRecordCount());
+      metricsSummary.setProducedRecordCount(output.getProducedRecordCount());
     }
+    summary = metricsSummary;
   }
 
   private PaimonMetricsSummary ensureTypedSummary() {
     if (!(summary instanceof PaimonMetricsSummary)) {
-      summary = new PaimonMetricsSummary();
+      calculateSummary();
     }
     return summary;
   }

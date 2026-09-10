@@ -22,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import org.apache.amoro.optimizing.TaskMetricsSummary;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -29,6 +30,19 @@ import java.util.Map;
 
 @DisplayName("PaimonMetricsSummary basics")
 public class TestPaimonMetricsSummary {
+
+  @Test
+  void commonContractPreservesRecordCountersAndSnapshotIsolation() {
+    PaimonMetricsSummary metrics = new PaimonMetricsSummary(3, 300, 1, 100);
+    metrics.setCompactedRecordCount(30);
+    metrics.setProducedRecordCount(10);
+    TaskMetricsSummary snapshot = metrics.toMetricsSummary();
+    assertEquals(metrics.summaryAsMap(false), snapshot.summaryAsMap(false));
+    metrics.setCompactedRecordCount(99);
+    assertEquals("30", snapshot.summaryAsMap(false).get("input-data-records"));
+    assertEquals("10", snapshot.summaryAsMap(false).get("output-data-records"));
+    assertEquals("99", metrics.summaryAsMap(false).get("input-data-records"));
+  }
 
   @Test
   @DisplayName("equals / hashCode reflect all four numeric fields")

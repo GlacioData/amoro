@@ -104,7 +104,7 @@ async function getTableInfo() {
       operation: operation.value,
       page: pagination.current,
       pageSize: pagination.pageSize,
-      lastSnapshot: lastSnapshot.value,
+      lastSnapshot: lastSnapshot.value ?? undefined,
     })
     const { list = [], total } = result
     const rcData: ILineChartOriginalData = {}
@@ -120,14 +120,15 @@ async function getTableInfo() {
       p.commitTime = p.commitTime ? dateFormat(p.commitTime) : '-'
       dataSource.push(p)
     })
-    
+
     // Update lastSnapshot with the last item's snapshotId from current page for cursor-based pagination
     if (list && list.length > 0) {
       lastSnapshot.value = list[list.length - 1].snapshotId || null
-    } else {
+    }
+    else {
       lastSnapshot.value = null
     }
-    
+
     recordChartOption.value = generateLineChartOption(t('recordChartTitle'), rcData)
     fileChartOption.value = generateLineChartOption(t('fileChartTitle'), fcData)
     pagination.total = total
@@ -211,7 +212,8 @@ function toggleBreadcrumb(record: SnapshotItem) {
   if (hasBreadcrumb.value) {
     breadcrumbPagination.current = 1
     getBreadcrumbTable()
-  } else {
+  }
+  else {
     // Reset cursor-based pagination when returning to main view
     lastSnapshot.value = null
     pagination.current = 1

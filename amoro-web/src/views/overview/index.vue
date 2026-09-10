@@ -20,12 +20,12 @@ limitations under the License.
 import { onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import SingleDataCard from './components/SingleDataCard.vue'
-import { usePageScroll } from '@/hooks/usePageScroll'
 import MultipleDataCard from './components/MultipleDataCard.vue'
 import Top10TablesCard from './components/Top10TablesCard.vue'
 import ResourceUsageCard from './components/ResourceUsageCard.vue'
 import DataSizeCard from './components/DataSizeCard.vue'
 import PieChartCard from './components/PieChartCard.vue'
+import { usePageScroll } from '@/hooks/usePageScroll'
 import { getOverviewOptimizingStatus, getOverviewSummary } from '@/services/overview.service'
 import { bytesToSize } from '@/utils'
 import type { IKeyAndValue } from '@/types/common.type'
@@ -56,7 +56,7 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="page-scroll" ref="pageScrollRef">
+  <div :ref="el => { pageScrollRef = el as HTMLElement | null }" class="page-scroll">
     <div :style="{ background: '#F8F7F8', padding: '24px', minHeight: '900px' }" class="overview-content">
       <a-row :gutter="[16, 8]">
         <a-col v-for="(card, index) in singleData" :key="index" :span="6">

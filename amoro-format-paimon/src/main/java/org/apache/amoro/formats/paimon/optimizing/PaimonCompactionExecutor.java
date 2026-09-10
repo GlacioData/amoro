@@ -21,7 +21,6 @@ package org.apache.amoro.formats.paimon.optimizing;
 import org.apache.amoro.optimizing.OptimizingExecutor;
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.append.AppendCompactTask;
-import org.apache.paimon.io.DataFileMeta;
 import org.apache.paimon.operation.BaseAppendFileStoreWrite;
 import org.apache.paimon.table.AppendOnlyFileStoreTable;
 import org.apache.paimon.table.SpecialFields;
@@ -31,7 +30,7 @@ import org.apache.paimon.table.sink.CommitMessageSerializer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.List;
+import java.util.Collections;
 
 /**
  * Optimizer-side executor that performs Paimon BUCKET_UNAWARE compaction for one task.
@@ -123,11 +122,11 @@ public class PaimonCompactionExecutor implements OptimizingExecutor<PaimonCompac
           "Failed to serialize Paimon CommitMessage for partition " + input.getPartitionPath(), e);
     }
 
-    long compactedFileCount = task.compactBefore() == null ? 0L : task.compactBefore().size();
-    long compactedFileSize = sumFileSize(task.compactBefore());
-    List<DataFileMeta> after = task.compactAfter();
-    long producedFileCount = after == null ? 0L : after.size();
-    long producedFileSize = sumFileSize(after);
+    PaimonRewriteMetrics metrics = PaimonRewriteMetrics.collect(Collections.singletonList(message));
+    long compactedFileCount = metrics.inputFiles();
+    long compactedFileSize = metrics.inputBytes();
+    long producedFileCount = metrics.outputFiles();
+    long producedFileSize = metrics.outputBytes();
 
     LOG.info(
         "Paimon compaction done: partition={} compactedFiles={} compactedBytes={} producedFiles={} producedBytes={}",
@@ -137,23 +136,15 @@ public class PaimonCompactionExecutor implements OptimizingExecutor<PaimonCompac
         producedFileCount,
         producedFileSize);
 
-    return new PaimonCompactionOutput(
-        msgBytes,
-        msgVersion,
-        compactedFileCount,
-        compactedFileSize,
-        producedFileCount,
-        producedFileSize);
-  }
-
-  private static long sumFileSize(List<DataFileMeta> files) {
-    if (files == null || files.isEmpty()) {
-      return 0L;
-    }
-    long total = 0L;
-    for (DataFileMeta m : files) {
-      total += m.fileSize();
-    }
-    return total;
+    PaimonCompactionOutput output =
+        new PaimonCompactionOutput(
+            msgBytes,
+            msgVersion,
+            compactedFileCount,
+            compactedFileSize,
+            producedFileCount,
+            producedFileSize);
+    output.setRewriteRecords(metrics.inputRecords(), metrics.outputRecords());
+    return output;
   }
 }

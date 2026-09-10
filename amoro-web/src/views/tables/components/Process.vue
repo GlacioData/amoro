@@ -17,7 +17,7 @@ limitations under the License.
 / -->
 
 <script lang="ts" setup>
-import { onMounted, reactive, ref, shallowReactive } from 'vue'
+import { computed, onMounted, reactive, ref, shallowReactive } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute } from 'vue-router'
 import { usePagination } from '@/hooks/usePagination'
@@ -40,7 +40,7 @@ const statusMap = {
 const STATUS_CONFIG = shallowReactive(statusMap)
 
 const { t } = useI18n()
-const columns: IColumns[] = shallowReactive([
+const columns = computed<IColumns[]>(() => [
   { title: t('processId'), dataIndex: 'processId' },
   { title: t('status'), dataIndex: 'status', width: 140 },
   { title: t('processType'), dataIndex: 'processType' },

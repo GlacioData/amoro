@@ -40,7 +40,7 @@ public class PaimonCompactionOutput implements TableOptimizing.OptimizingOutput 
 
   /*
    * Dashboard-compatible keys — chosen to match what {@code
-   * org.apache.amoro.optimizing.MetricsSummary#fromMap(Map)} in {@code amoro-format-iceberg}
+   * MetricsSummary#fromMap(Map)} in {@code amoro-format-iceberg}
    * actually reads, so that the existing dashboard pipeline renders Paimon task summaries
    * without special-casing:
    *
@@ -67,6 +67,8 @@ public class PaimonCompactionOutput implements TableOptimizing.OptimizingOutput 
   private long compactedFileSize;
   private long producedFileCount;
   private long producedFileSize;
+  private long compactedRecordCount;
+  private long producedRecordCount;
 
   public PaimonCompactionOutput() {}
 
@@ -109,6 +111,20 @@ public class PaimonCompactionOutput implements TableOptimizing.OptimizingOutput 
     return producedFileSize;
   }
 
+  /** Records the physical rows of the rewritten data files. */
+  public void setRewriteRecords(long inputRecords, long outputRecords) {
+    this.compactedRecordCount = inputRecords;
+    this.producedRecordCount = outputRecords;
+  }
+
+  public long getProducedRecordCount() {
+    return producedRecordCount;
+  }
+
+  public long getCompactedRecordCount() {
+    return compactedRecordCount;
+  }
+
   @Override
   public Map<String, String> summary() {
     Map<String, String> summary = new LinkedHashMap<>();
@@ -124,6 +140,8 @@ public class PaimonCompactionOutput implements TableOptimizing.OptimizingOutput 
     summary.put(DASHBOARD_INPUT_DATA_SIZE, Long.toString(compactedFileSize));
     summary.put(DASHBOARD_OUTPUT_DATA_FILES, Long.toString(producedFileCount));
     summary.put(DASHBOARD_OUTPUT_DATA_SIZE, Long.toString(producedFileSize));
+    summary.put("input-data-records(rewrite)", Long.toString(compactedRecordCount));
+    summary.put("output-data-records", Long.toString(producedRecordCount));
     return summary;
   }
 

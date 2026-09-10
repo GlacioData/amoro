@@ -71,8 +71,8 @@ public class TestPaimonCompactionOutputSerialization {
   void testSummaryKeys() {
     PaimonCompactionOutput output = new PaimonCompactionOutput(null, 2, 5L, 500L, 1L, 450L);
     Map<String, String> summary = output.summary();
-    // 4 Paimon-native + 4 dashboard-compat (see PaimonCompactionOutput.summary javadoc for why).
-    assertEquals(8, summary.size());
+    // 4 Paimon-native + 6 dashboard-compat (see PaimonCompactionOutput.summary javadoc for why).
+    assertEquals(10, summary.size());
     assertTrue(summary.containsKey(PaimonCompactionOutput.COMPACTED_FILES));
     assertTrue(summary.containsKey(PaimonCompactionOutput.COMPACTED_BYTES));
     assertTrue(summary.containsKey(PaimonCompactionOutput.PRODUCED_FILES));

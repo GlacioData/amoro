@@ -71,6 +71,7 @@ import org.apache.paimon.table.sink.BatchWriteBuilder;
 import org.apache.paimon.table.sink.CommitMessage;
 import org.apache.paimon.table.sink.InnerTableWrite;
 import org.apache.paimon.types.DataTypes;
+import org.apache.paimon.types.RowKind;
 import org.apache.paimon.utils.SerializationUtils;
 import org.apache.paimon.utils.SnapshotManager;
 import org.junit.jupiter.api.DisplayName;
@@ -385,9 +386,11 @@ class TestPaimonPrimaryKeyCompactionExecutor {
 
     assertFalse(output.getCommitMessageBytesList().isEmpty());
     assertEquals(task.getInput().getUnits().size(), output.getCompactedBucketCount());
-    assertEquals(sumFiles(task.getInput().getUnits()), output.getCompactedFileCount());
-    assertEquals(sumBytes(task.getInput().getUnits()), output.getCompactedFileSize());
-    assertEquals(sumRecords(task.getInput().getUnits()), output.getCompactedRecordCount());
+    // Actual execution includes the newly added file instead of using the planned bucket total.
+    assertEquals(2, sumFiles(task.getInput().getUnits()));
+    assertEquals(3, output.getCompactedFileCount());
+    assertEquals(3, output.getCompactedRecordCount());
+    assertTrue(output.getProducedRecordCount() > 0);
     assertTrue(output.getProducedFileCount() > 0);
     assertTrue(output.getProducedFileSize() > 0);
     assertEquals(concurrentSnapshotId, latestSnapshotId(catalog, id));
@@ -441,6 +444,48 @@ class TestPaimonPrimaryKeyCompactionExecutor {
   }
 
   @Test
+  void fullMetricsIncludePhysicalDeleteRows(@TempDir Path warehouse) throws Exception {
+    verifyFullDeleteMetrics(warehouse, false);
+  }
+
+  @Test
+  void fullMetricsWithDeletionVectors(@TempDir Path warehouse) throws Exception {
+    verifyFullDeleteMetrics(warehouse, true);
+  }
+
+  private void verifyFullDeleteMetrics(Path warehouse, boolean deletionVectors) throws Exception {
+    try (Catalog catalog = fsCatalog(warehouse)) {
+      Map<String, String> options = primaryKeyOptions();
+      options.put("deletion-vectors.enabled", Boolean.toString(deletionVectors));
+      Identifier id = createPrimaryKeyTable(catalog, "t_full_delete_metrics", options);
+      writeCommits(catalog.getTable(id), 2);
+      BatchWriteBuilder builder = catalog.getTable(id).newBatchWriteBuilder();
+      try (BatchTableWrite write = builder.newWrite();
+          BatchTableCommit commit = builder.newCommit()) {
+        GenericRow deletion = GenericRow.of(0, BinaryString.fromString("name-0"));
+        deletion.setRowKind(RowKind.DELETE);
+        write.write(deletion);
+        commit.commit(write.prepareCommit());
+      }
+      PaimonPrimaryKeyCompactionInput planned = planMinorTasks(catalog, id).get(0).getInput();
+      PaimonPrimaryKeyCompactionInput full =
+          new PaimonPrimaryKeyCompactionInput(
+              planned.getTable(),
+              planned.getUnits(),
+              OptimizingType.FULL,
+              true,
+              planned.getTargetSnapshotId(),
+              planned.getCommitUser(),
+              planned.getCommitIdentifier());
+      PaimonPrimaryKeyCompactionOutput output =
+          new PaimonPrimaryKeyCompactionExecutor(full).execute();
+      assertEquals(3, output.getCompactedFileCount());
+      assertEquals(3, output.getCompactedRecordCount());
+      assertEquals(1, output.getProducedRecordCount());
+    }
+  }
+
+  @Test
   @DisplayName("FULL executor returns no-op output when snapshot changed after planning")
   void fullExecutorNoOpsWhenSnapshotChangedAfterPlanning(@TempDir Path warehouse) throws Exception {
     Catalog catalog = fsCatalog(warehouse);
@@ -462,6 +507,10 @@ class TestPaimonPrimaryKeyCompactionExecutor {
     assertEquals(0, output.getCompactedBucketCount());
     assertEquals(0L, output.getCompactedFileCount());
     assertEquals(0L, output.getProducedFileCount());
+    assertEquals(0L, output.getCompactedFileSize());
+    assertEquals(0L, output.getProducedFileSize());
+    assertEquals(0L, output.getCompactedRecordCount());
+    assertEquals(0L, output.getProducedRecordCount());
   }
 
   @Test
@@ -491,6 +540,10 @@ class TestPaimonPrimaryKeyCompactionExecutor {
     assertEquals(0, output.getCompactedBucketCount());
     assertEquals(0L, output.getCompactedFileCount());
     assertEquals(0L, output.getProducedFileCount());
+    assertEquals(0L, output.getCompactedFileSize());
+    assertEquals(0L, output.getProducedFileSize());
+    assertEquals(0L, output.getCompactedRecordCount());
+    assertEquals(0L, output.getProducedRecordCount());
     verify(table, never()).copy(anyMap());
   }
 

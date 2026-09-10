@@ -23,6 +23,8 @@ import com.github.pagehelper.PageHelper;
 import com.github.pagehelper.PageInfo;
 import org.apache.amoro.AmoroTable;
 import org.apache.amoro.ServerTableIdentifier;
+import org.apache.amoro.TableFormat;
+import org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeyCompactionTask;
 import org.apache.amoro.optimizing.MetricsSummary;
 import org.apache.amoro.process.ProcessStatus;
 import org.apache.amoro.process.ProcessTaskStatus;
@@ -131,7 +133,7 @@ class AmsOptimizingHistory extends PersistentBase {
     long tableId = serverTableId(amoroTable);
     return taskMetas.stream()
         .filter(task -> task.getTableId() == tableId)
-        .map(AmsOptimizingHistory::buildOptimizingTaskInfo)
+        .map(task -> buildOptimizingTaskInfo(task, amoroTable.format() == TableFormat.PAIMON))
         .collect(Collectors.toList());
   }
 
@@ -160,7 +162,7 @@ class AmsOptimizingHistory extends PersistentBase {
 
     return Pair.of(
         taskMetas.stream()
-            .map(AmsOptimizingHistory::buildOptimizingTaskInfo)
+            .map(task -> buildOptimizingTaskInfo(task, amoroTable.format() == TableFormat.PAIMON))
             .collect(Collectors.toList()),
         total);
   }
@@ -185,7 +187,8 @@ class AmsOptimizingHistory extends PersistentBase {
     return identifier == null ? Long.MIN_VALUE : identifier.getId();
   }
 
-  private static OptimizingTaskInfo buildOptimizingTaskInfo(OptimizingTaskMeta taskMeta) {
+  private static OptimizingTaskInfo buildOptimizingTaskInfo(
+      OptimizingTaskMeta taskMeta, boolean paimon) {
     MetricsSummary metricsSummary = taskMeta.getMetricsSummary();
     if (metricsSummary == null) {
       metricsSummary = new MetricsSummary();
@@ -194,7 +197,12 @@ class AmsOptimizingHistory extends PersistentBase {
         taskMeta.getTableId(),
         String.valueOf(taskMeta.getProcessId()),
         taskMeta.getTaskId(),
-        taskMeta.getPartitionData(),
+        paimon && taskMeta.getProperties() != null
+            ? taskMeta
+                .getProperties()
+                .getOrDefault(
+                    PaimonPrimaryKeyCompactionTask.PARTITION_DISPLAY, taskMeta.getPartitionData())
+            : taskMeta.getPartitionData(),
         ProcessTaskStatus.valueOf(taskMeta.getStatus().name()),
         taskMeta.getRetryNum(),
         taskMeta.getOptimizerToken(),

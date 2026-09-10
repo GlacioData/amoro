@@ -18,8 +18,7 @@ limitations under the License.
 
 <script lang="ts">
 import { message } from 'ant-design-vue'
-import { defineComponent, reactive, ref, onMounted, onUnmounted, nextTick } from 'vue'
-import { useRouter } from 'vue-router'
+import { defineComponent, onMounted, onUnmounted, reactive, ref } from 'vue'
 import loginService from '@/services/login.service'
 import { usePlaceholder } from '@/hooks/usePlaceholder'
 import useStore from '@/store'
@@ -32,7 +31,6 @@ interface FormState {
 export default defineComponent({
   name: 'Login',
   setup() {
-    const router = useRouter()
     const store = useStore()
     const formState = reactive<FormState>({
       username: '',
@@ -196,13 +194,13 @@ export default defineComponent({
           <div class="input-wrapper">
             <span class="input-prefix">▸</span>
             <input
-                v-model="formState.username"
-                type="text"
-                class="form-input"
-                :placeholder="placeholder.usernamePh"
-                autocomplete="username"
-                @input="handleInput"
-                @change="handleInput"
+              v-model="formState.username"
+              type="text"
+              class="form-input"
+              :placeholder="placeholder.usernamePh"
+              autocomplete="username"
+              @input="handleInput"
+              @change="handleInput"
             >
           </div>
         </div>
@@ -211,13 +209,13 @@ export default defineComponent({
           <div class="input-wrapper">
             <span class="input-prefix">#</span>
             <input
-                v-model="formState.password"
-                :type="passwordVisible ? 'text' : 'password'"
-                class="form-input"
-                :placeholder="placeholder.passwordPh"
-                autocomplete="current-password"
-                @input="handleInput"
-                @change="handleInput"
+              v-model="formState.password"
+              :type="passwordVisible ? 'text' : 'password'"
+              class="form-input"
+              :placeholder="placeholder.passwordPh"
+              autocomplete="current-password"
+              @input="handleInput"
+              @change="handleInput"
             >
             <span class="password-toggle" @click="togglePassword">
               <svg v-if="!passwordVisible" class="eye-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">

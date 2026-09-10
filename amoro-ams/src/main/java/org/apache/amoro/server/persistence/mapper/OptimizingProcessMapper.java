@@ -23,11 +23,11 @@ import org.apache.amoro.process.StagedTaskDescriptor;
 import org.apache.amoro.server.optimizing.OptimizingTaskMeta;
 import org.apache.amoro.server.optimizing.TaskRuntime;
 import org.apache.amoro.server.persistence.OptimizingProcessState;
-import org.apache.amoro.server.persistence.converter.JsonObjectConverter;
 import org.apache.amoro.server.persistence.converter.Long2TsConverter;
 import org.apache.amoro.server.persistence.converter.Map2StringConverter;
 import org.apache.amoro.server.persistence.converter.MapLong2StringConverter;
 import org.apache.amoro.server.persistence.converter.Object2ByteArrayConvert;
+import org.apache.amoro.server.persistence.converter.OptimizingTaskSummaryConverter;
 import org.apache.amoro.server.persistence.converter.TaskDescriptorSummaryConverter;
 import org.apache.amoro.server.persistence.converter.TaskDescriptorTypeConverter;
 import org.apache.amoro.server.persistence.extension.InListExtendedLanguageDriver;
@@ -218,7 +218,7 @@ public interface OptimizingProcessMapper {
         @Result(
             property = "metricsSummary",
             column = "metrics_summary",
-            typeHandler = JsonObjectConverter.class),
+            typeHandler = OptimizingTaskSummaryConverter.class),
         @Result(
             property = "properties",
             column = "properties",

@@ -65,7 +65,7 @@ class TestPaimonPrimaryKeyCompactionOutput {
   void emptyOutputSummaryUsesZeros() {
     Map<String, String> summary = new PaimonPrimaryKeyCompactionOutput().summary();
 
-    assertEquals(10, summary.size());
+    assertEquals(12, summary.size());
     assertEquals("0", summary.get(PaimonPrimaryKeyCompactionOutput.COMPACTED_BUCKETS));
     assertEquals("0", summary.get(PaimonPrimaryKeyCompactionOutput.COMPACTED_FILES));
     assertEquals("0", summary.get(PaimonPrimaryKeyCompactionOutput.COMPACTED_BYTES));

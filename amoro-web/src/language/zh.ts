@@ -77,6 +77,7 @@ export default {
   inputPlaceholder: '请输入 {inputPh}',
   filterPlaceholder: '过滤 {inputPh}',
   basicInformation: '基本信息',
+  unpartitioned: '无分区',
   partition: '分区',
   taskId: '任务 ID',
   fileCount: '文件总数',

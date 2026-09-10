@@ -119,7 +119,7 @@ function getSettingInfo() {
 </script>
 
 <template>
-  <div class="page-scroll" ref="pageScrollRef">
+  <div :ref="el => { pageScrollRef = el as HTMLElement | null }" class="page-scroll">
     <div class="setting-wrap">
       <a-tabs v-model:activeKey="activeKeyTab" @change="onChangeTab">
         <a-tab-pane :key="tabMap.system.key" :tab="tabMap.system.title">

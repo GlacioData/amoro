@@ -113,15 +113,7 @@ public class MetricsSummary implements TaskMetricsSummary {
     return metricsSummary;
   }
 
-  /**
-   * Build a Paimon-flavored {@link MetricsSummary} from raw file/byte counters. Iceberg "input" /
-   * "output" slots are reused so the downstream dashboard renders without special-casing.
-   *
-   * <p>Records are intentionally left at zero: Paimon's BUCKET_UNAWARE {@code AppendCompactTask}
-   * does not expose per-row counts up to the Amoro scheduling layer (the record count lives in
-   * {@code DataFileMeta#rowCount()} but is not threaded through). Emitting zero here is less
-   * misleading than fabricating a number.
-   */
+  /** Adapts Paimon file counters to the shared dashboard metrics. */
   public static MetricsSummary fromPaimonStats(
       long inputFiles, long inputBytes, long outputFiles, long outputBytes) {
     MetricsSummary summary = new MetricsSummary();
@@ -156,7 +148,10 @@ public class MetricsSummary implements TaskMetricsSummary {
     long inputBytes = parseLongOr(map.get(TaskMetricsSummary.AGG_INPUT_DATA_SIZE), 0L);
     long outputFiles = parseLongOr(map.get(TaskMetricsSummary.AGG_OUTPUT_DATA_FILES), 0L);
     long outputBytes = parseLongOr(map.get(TaskMetricsSummary.AGG_OUTPUT_DATA_SIZE), 0L);
-    return fromPaimonStats(inputFiles, inputBytes, outputFiles, outputBytes);
+    MetricsSummary result = fromPaimonStats(inputFiles, inputBytes, outputFiles, outputBytes);
+    result.rewriteDataRecordCnt = parseLongOr(map.get(AGG_INPUT_DATA_RECORDS), 0L);
+    result.newDataRecordCnt = parseLongOr(map.get(AGG_OUTPUT_DATA_RECORDS), 0L);
+    return result;
   }
 
   private static long parseLongOr(String value, long fallback) {

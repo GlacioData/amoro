@@ -18,12 +18,14 @@
 
 package org.apache.amoro.optimizing;
 
+import org.apache.amoro.process.StagedTaskDescriptor;
+
 import java.util.Map;
 
 /**
  * Format-agnostic task-level metrics summary abstraction that lives in {@code amoro-common} so that
- * {@link org.apache.amoro.process.StagedTaskDescriptor#toMetricsSummary()} can declare a return
- * type without dragging Iceberg/Paimon types across the module boundary.
+ * {@link StagedTaskDescriptor#toMetricsSummary()} can declare a return type without dragging
+ * Iceberg/Paimon types across the module boundary.
  *
  * <p>The Iceberg {@code MetricsSummary} implements this interface directly; the Paimon side emits a
  * lightweight adapter from {@code PaimonMetricsSummary#toMetricsSummary()} that writes Iceberg
@@ -34,6 +36,9 @@ public interface TaskMetricsSummary {
 
   // Aggregate-path keys (no format suffix). New formats' summaryAsMap() should use these keys
   // so that MetricsSummary.normalize() can read them via the same constants.
+  String AGG_INPUT_DATA_RECORDS = "input-data-records";
+  String AGG_OUTPUT_DATA_RECORDS = "output-data-records";
+
   String AGG_INPUT_DATA_FILES = "input-data-files";
   String AGG_INPUT_DATA_SIZE = "input-data-size";
   String AGG_OUTPUT_DATA_FILES = "output-data-files";

@@ -26,7 +26,6 @@ const emit = defineEmits<{
   (e: 'goBack'): void
 }>()
 
-const formRef = ref()
 const catalogOptions = ref<SelectProps['options']>([
   {
     value: 'catalog1',
@@ -72,7 +71,7 @@ function goBack() {
         <p class="title">
           {{ $t('basicInformation') }}
         </p>
-        <a-form ref="formRef" :model="formState" class="label-120">
+        <a-form :model="formState" class="label-120">
           <a-form-item name="catalog" :label="$t('catalog')" :rules="[{ required: true, message: `${placeholder.selectClPh}` }]">
             <a-select
               v-model:value="formState.catalog"
