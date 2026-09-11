@@ -20,6 +20,7 @@ package org.apache.amoro.process;
 
 import org.apache.amoro.ServerTableIdentifier;
 import org.apache.amoro.TableRuntime;
+import org.apache.amoro.shade.guava32.com.google.common.base.MoreObjects;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -73,4 +74,14 @@ public abstract class TableProcess implements AmoroProcess {
    * @param status the terminal status of the process
    */
   public void afterComplete(ProcessStatus status) {}
+
+  @Override
+  public String toString() {
+    return MoreObjects.toStringHelper(this)
+        .add("tableIdentifier", getTableIdentifier())
+        .add("action", getAction())
+        .add("processStage", getProcessStage())
+        .add("executionEngine", getExecutionEngine())
+        .toString();
+  }
 }

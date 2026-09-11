@@ -144,7 +144,7 @@ public class OptimizerGroupMetrics {
         OPTIMIZER_GROUP_PLANING_TABLES,
         (Gauge<Long>)
             () ->
-                optimizingQueue.getSchedulingPolicy().getTableRuntimeMap().values().stream()
+                optimizingQueue.getSchedulingPolicy().snapshotTableRuntimes().stream()
                     .filter(t -> t.getOptimizingStatus().equals(PLANNING))
                     .count());
     registerMetric(
@@ -152,7 +152,7 @@ public class OptimizerGroupMetrics {
         OPTIMIZER_GROUP_PENDING_TABLES,
         (Gauge<Long>)
             () ->
-                optimizingQueue.getSchedulingPolicy().getTableRuntimeMap().values().stream()
+                optimizingQueue.getSchedulingPolicy().snapshotTableRuntimes().stream()
                     .filter(t -> t.getOptimizingStatus().equals(PENDING))
                     .count());
     registerMetric(
@@ -160,7 +160,7 @@ public class OptimizerGroupMetrics {
         OPTIMIZER_GROUP_EXECUTING_TABLES,
         (Gauge<Long>)
             () ->
-                optimizingQueue.getSchedulingPolicy().getTableRuntimeMap().values().stream()
+                optimizingQueue.getSchedulingPolicy().snapshotTableRuntimes().stream()
                     .filter(t -> t.getOptimizingStatus().isProcessing())
                     .count());
     registerMetric(
@@ -168,7 +168,7 @@ public class OptimizerGroupMetrics {
         OPTIMIZER_GROUP_IDLE_TABLES,
         (Gauge<Long>)
             () ->
-                optimizingQueue.getSchedulingPolicy().getTableRuntimeMap().values().stream()
+                optimizingQueue.getSchedulingPolicy().snapshotTableRuntimes().stream()
                     .filter(t -> t.getOptimizingStatus().equals(IDLE))
                     .count());
     registerMetric(
@@ -176,7 +176,7 @@ public class OptimizerGroupMetrics {
         OPTIMIZER_GROUP_COMMITTING_TABLES,
         (Gauge<Long>)
             () ->
-                optimizingQueue.getSchedulingPolicy().getTableRuntimeMap().values().stream()
+                optimizingQueue.getSchedulingPolicy().snapshotTableRuntimes().stream()
                     .filter(t -> t.getOptimizingStatus().equals(COMMITTING))
                     .count());
 

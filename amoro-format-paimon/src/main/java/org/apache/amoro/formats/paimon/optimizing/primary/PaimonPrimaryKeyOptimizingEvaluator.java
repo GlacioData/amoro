@@ -111,7 +111,9 @@ public class PaimonPrimaryKeyOptimizingEvaluator {
     final CoreOptions coreOptions;
     try {
       primaryKeyOptions = PaimonPrimaryKeyOptions.from(table.options());
-      coreOptions = CoreOptions.fromMap(table.options());
+      // 每轮只派生一次策略选项；Paimon EarlyFullCompaction 的实例计时依据见配置 helper。
+      coreOptions =
+          PaimonPrimaryKeyOptions.compactionStrategyOptions(CoreOptions.fromMap(table.options()));
     } catch (RuntimeException e) {
       LOG.warn(
           "Paimon primary-key optimizing options are invalid for table [{}], skip planning.",
@@ -264,7 +266,9 @@ public class PaimonPrimaryKeyOptimizingEvaluator {
     final CoreOptions coreOptions;
     try {
       primaryKeyOptions = PaimonPrimaryKeyOptions.from(table.options());
-      coreOptions = healthContext.coreOptions().get();
+      // analysis 复用也会新建原生策略；独立副本保留 health context，依据见配置 helper。
+      coreOptions =
+          PaimonPrimaryKeyOptions.compactionStrategyOptions(healthContext.coreOptions().get());
     } catch (RuntimeException e) {
       LOG.warn(
           "Paimon primary-key optimizing options are invalid for table [{}], skip planning.",
