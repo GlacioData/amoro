@@ -21,8 +21,10 @@ package org.apache.amoro.formats.paimon.optimizing;
 import org.apache.amoro.optimizing.OptimizingExecutor;
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.append.AppendCompactTask;
+import org.apache.paimon.io.DataFileMeta;
 import org.apache.paimon.operation.BaseAppendFileStoreWrite;
 import org.apache.paimon.table.AppendOnlyFileStoreTable;
+import org.apache.paimon.table.BucketMode;
 import org.apache.paimon.table.SpecialFields;
 import org.apache.paimon.table.sink.AppendCompactTaskSerializer;
 import org.apache.paimon.table.sink.CommitMessage;
@@ -88,6 +90,16 @@ public class PaimonCompactionExecutor implements OptimizingExecutor<PaimonCompac
               + (raw == null ? "null" : raw.getClass().getName()));
     }
     AppendOnlyFileStoreTable table = (AppendOnlyFileStoreTable) raw;
+    if (table.bucketMode() != BucketMode.BUCKET_UNAWARE) {
+      throw new IllegalStateException("Append compaction requires BUCKET_UNAWARE table");
+    }
+    // Paimon 1.4.2 AppendCompactTask#doCompact 只重写 compactBefore；不得另扫 latest 扩大输入。
+    // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/append/AppendCompactTask.java
+    long requiredSchemaId =
+        task.compactBefore().stream().mapToLong(DataFileMeta::schemaId).max().orElse(-1);
+    table =
+        (AppendOnlyFileStoreTable)
+            PaimonCompactionSchema.refresh(table, requiredSchemaId, input.getTargetSnapshotId());
 
     BaseAppendFileStoreWrite write = table.store().newWrite(input.getCommitUser());
     CoreOptions coreOptions = table.coreOptions();
