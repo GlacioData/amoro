@@ -119,6 +119,27 @@ public class TestSchedulingPolicy {
   }
 
   @Test
+  public void testTableRuntimesSnapshotIsIndependentOfMembershipChanges() {
+    SchedulingPolicy policy =
+        new SchedulingPolicy(new ResourceGroup.Builder("test", "local").build());
+    Assert.assertTrue(policy.snapshotTableRuntimes().isEmpty());
+    DefaultTableRuntime original =
+        tableRuntime("original", 12L, OptimizingStatus.PENDING, 0L, 2L, 1L, 0L);
+    DefaultTableRuntime replacement =
+        tableRuntime("replacement", 13L, OptimizingStatus.IDLE, 0L, 2L, 1L, 0L);
+    policy.addTable(original);
+
+    List<DefaultTableRuntime> snapshot = policy.snapshotTableRuntimes();
+    policy.removeTable(original);
+    policy.addTable(replacement);
+
+    Assert.assertEquals(Collections.singletonList(original), snapshot);
+    Assert.assertSame(original, snapshot.get(0));
+    snapshot.clear();
+    Assert.assertEquals(Collections.singletonList(replacement), policy.snapshotTableRuntimes());
+  }
+
+  @Test
   public void testScheduleTablesDoesNotHoldTableLockWhileSorting() throws Exception {
     SchedulingPolicy policy =
         new SchedulingPolicy(new ResourceGroup.Builder("test", "local").build());

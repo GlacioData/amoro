@@ -166,6 +166,16 @@ public class SchedulingPolicy {
     }
   }
 
+  /** 在 tableLock 保护下复制当前表运行时列表，供指标采集等线程安全遍历。 快照仅隔离列表成员变化，列表中的运行时对象仍共享实时状态。 */
+  public List<DefaultTableRuntime> snapshotTableRuntimes() {
+    tableLock.lock();
+    try {
+      return new ArrayList<>(tableRuntimeMap.values());
+    } finally {
+      tableLock.unlock();
+    }
+  }
+
   @VisibleForTesting
   Map<ServerTableIdentifier, DefaultTableRuntime> getTableRuntimeMap() {
     return tableRuntimeMap;
