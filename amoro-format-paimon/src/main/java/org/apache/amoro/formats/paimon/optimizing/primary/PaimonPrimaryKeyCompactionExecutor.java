@@ -18,6 +18,7 @@
 
 package org.apache.amoro.formats.paimon.optimizing.primary;
 
+import org.apache.amoro.formats.paimon.optimizing.PaimonCompactionSchema;
 import org.apache.amoro.formats.paimon.optimizing.PaimonRewriteMetrics;
 import org.apache.amoro.optimizing.OptimizingExecutor;
 import org.apache.amoro.optimizing.OptimizingType;
@@ -85,8 +86,29 @@ public class PaimonPrimaryKeyCompactionExecutor
       return noOpOutput();
     }
 
+    PaimonPrimaryKeySnapshotWriteRestore restore;
+    try {
+      restore =
+          new PaimonPrimaryKeySnapshotWriteRestore(
+              table, input.getTargetSnapshotId(), input.getUnits());
+    } catch (RuntimeException e) {
+      throw new IllegalStateException(
+          "Failed to prepare Paimon compaction inputs: table="
+              + input.getTable().id()
+              + ", plannedSnapshot="
+              + input.getTargetSnapshotId(),
+          e);
+    }
+    FileStoreTable refreshed =
+        PaimonCompactionSchema.refresh(table, restore.requiredSchemaId(), restore.snapshotId());
+
+    // Paimon 1.4.2：writer 的 MergeTreeCompactManagerFactory#createCompactStrategy 会重新
+    // 从 options 创建 EarlyFullCompaction，只屏蔽 evaluator 无法约束执行端。
+    // 源码：paimon-core/src/main/java/org/apache/paimon/mergetree/compact/MergeTreeCompactManagerFactory.java
+    // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/mergetree/compact/MergeTreeCompactManagerFactory.java#L190-L224
+    // null 移除的原生依据见 compactionWriteOverrides；原表配置和显式 FULL 参数均保留。
     FileStoreTable compactTable =
-        table.copy(Collections.singletonMap(CoreOptions.WRITE_ONLY.key(), "false"));
+        refreshed.copy(PaimonPrimaryKeyOptions.compactionWriteOverrides(table.options()));
     try (IOManager ioManager = IOManager.create(System.getProperty("java.io.tmpdir"));
         BatchTableWrite write =
             compactTable.newBatchWriteBuilder().newWrite().withIOManager(ioManager)) {
@@ -95,9 +117,7 @@ public class PaimonPrimaryKeyCompactionExecutor
             "Paimon primary-key compaction requires InnerTableWrite, got "
                 + write.getClass().getName());
       }
-      ((InnerTableWrite) write)
-          .withWriteRestore(
-              new PaimonPrimaryKeySnapshotWriteRestore(compactTable, input.getTargetSnapshotId()));
+      ((InnerTableWrite) write).withWriteRestore(restore);
       for (PaimonBucketCompactionUnit unit : input.getUnits()) {
         BinaryRow partition = SerializationUtils.deserializeBinaryRow(unit.getPartitionBytes());
         write.compact(partition, unit.getBucket(), input.isFullCompaction());

@@ -213,14 +213,16 @@ class TestPaimonPrimaryKeyCompactionExecutor {
     long restoreSnapshotId = 12L;
     FileStoreTable table = mock(FileStoreTable.class);
     when(table.primaryKeys()).thenReturn(Collections.singletonList("id"));
-    when(table.bucketMode()).thenReturn(BucketMode.HASH_FIXED);
-    when(table.options()).thenReturn(Collections.emptyMap());
+    when(table.bucketMode()).thenReturn(BucketMode.HASH_DYNAMIC);
+    when(table.options()).thenReturn(Collections.singletonMap("deletion-vectors.enabled", "true"));
     FileStoreTable compactTable = mock(FileStoreTable.class);
     when(table.copy(anyMap())).thenReturn(compactTable);
     when(compactTable.options()).thenReturn(Collections.emptyMap());
     SnapshotManager snapshotManager = mock(SnapshotManager.class);
     Snapshot restoreSnapshot = mock(Snapshot.class);
-    when(compactTable.snapshotManager()).thenReturn(snapshotManager);
+    when(table.snapshotManager()).thenReturn(snapshotManager);
+    when(table.schema())
+        .thenReturn(org.mockito.Mockito.mock(org.apache.paimon.schema.TableSchema.class));
     FileIO fileIO = mock(FileIO.class);
     when(snapshotManager.fileIO()).thenReturn(fileIO);
     when(snapshotManager.snapshotDirectory())
@@ -239,7 +241,7 @@ class TestPaimonPrimaryKeyCompactionExecutor {
     DataFileMeta dataFile = mock(DataFileMeta.class);
     IndexFileMeta dynamicBucketIndex = mock(IndexFileMeta.class);
     IndexFileMeta deletionVectorIndex = mock(IndexFileMeta.class);
-    when(compactTable.store()).thenReturn((FileStore) store);
+    when(table.store()).thenReturn((FileStore) store);
     when(store.newScan()).thenReturn(scan);
     when(store.newIndexFileHandler()).thenReturn(indexFileHandler);
     when(scan.withSnapshot(restoreSnapshot)).thenReturn(scan);
@@ -572,10 +574,24 @@ class TestPaimonPrimaryKeyCompactionExecutor {
     when(compactTable.options()).thenReturn(Collections.emptyMap());
     SnapshotManager snapshotManager = mock(SnapshotManager.class);
     Snapshot plannedSnapshot = mock(Snapshot.class);
-    when(compactTable.snapshotManager()).thenReturn(snapshotManager);
+    when(table.snapshotManager()).thenReturn(snapshotManager);
+    when(table.schema())
+        .thenReturn(org.mockito.Mockito.mock(org.apache.paimon.schema.TableSchema.class));
     FileStore<?> store = mock(FileStore.class);
-    when(compactTable.store()).thenReturn((FileStore) store);
-    when(store.newScan()).thenReturn(mock(FileStoreScan.class));
+    when(table.store()).thenReturn((FileStore) store);
+    FileStoreScan scan = mock(FileStoreScan.class);
+    FileStoreScan.Plan scanPlan = mock(FileStoreScan.Plan.class);
+    when(store.newScan()).thenReturn(scan);
+    when(scan.withSnapshot(plannedSnapshot)).thenReturn(scan);
+    when(scan.withPartitionBucket(any(BinaryRow.class), eq(0))).thenReturn(scan);
+    when(scan.plan()).thenReturn(scanPlan);
+    when(scanPlan.files()).thenReturn(Collections.emptyList());
+    FileIO fileIO = mock(FileIO.class);
+    when(snapshotManager.fileIO()).thenReturn(fileIO);
+    when(snapshotManager.snapshotDirectory())
+        .thenReturn(new org.apache.paimon.fs.Path("file:/tmp/snapshot"));
+    when(fileIO.readOverwrittenFileUtf8(any(org.apache.paimon.fs.Path.class)))
+        .thenReturn(Optional.empty());
     when(store.newIndexFileHandler()).thenReturn(mock(IndexFileHandler.class));
     BatchWriteBuilder writeBuilder = mock(BatchWriteBuilder.class);
     InnerTableWrite write = mock(InnerTableWrite.class);
