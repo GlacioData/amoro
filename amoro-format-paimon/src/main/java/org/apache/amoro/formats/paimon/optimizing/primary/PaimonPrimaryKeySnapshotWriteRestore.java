@@ -40,6 +40,7 @@ import org.apache.paimon.utils.SnapshotManager;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 
@@ -155,9 +156,12 @@ final class PaimonPrimaryKeySnapshotWriteRestore implements WriteRestore {
       boolean scanDynamicBucketIndex,
       boolean scanDeleteVectorsIndex) {
     List<DataFileMeta> dataFiles = new ArrayList<>();
-    List<ManifestEntry> entries =
-        scan.withSnapshot(snapshot).withPartitionBucket(partition, bucket).plan().files();
-    Integer totalBuckets = WriteRestore.extractDataFiles(entries, dataFiles);
+    // Paimon 1.4.2 iterator 分批读取 ADD manifest，避免 plan 物化全部 ManifestEntry。
+    // 此恢复 scan 不设置 value filter/limit，因而没有 KeyValueFileStoreScan 的 plan 后置过滤。
+    // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/operation/AbstractFileStoreScan.java#L390-L433
+    Iterator<ManifestEntry> entries =
+        scan.withSnapshot(snapshot).withPartitionBucket(partition, bucket).readFileIterator();
+    Integer totalBuckets = extractDataFiles(entries, dataFiles);
 
     IndexFileMeta dynamicBucketIndex =
         scanDynamicBucketIndex
@@ -170,11 +174,30 @@ final class PaimonPrimaryKeySnapshotWriteRestore implements WriteRestore {
     return new RestoreFiles(
         snapshot,
         totalBuckets,
-        Collections.unmodifiableList(new ArrayList<>(dataFiles)),
+        Collections.unmodifiableList(dataFiles),
         dynamicBucketIndex,
         deletionVectorIndexes == null
             ? null
             : Collections.unmodifiableList(new ArrayList<>(deletionVectorIndexes)));
+  }
+
+  // 与 Paimon 1.4.2 WriteRestore#extractDataFiles 的桶数校验及空结果 null 语义保持一致。
+  // 原生 helper 只接收 List；这里接受 iterator，避免重新物化 entry 列表。
+  // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/operation/WriteRestore.java#L41-L54
+  static Integer extractDataFiles(Iterator<ManifestEntry> entries, List<DataFileMeta> dataFiles) {
+    Integer totalBuckets = null;
+    while (entries.hasNext()) {
+      ManifestEntry entry = entries.next();
+      if (totalBuckets != null && totalBuckets != entry.totalBuckets()) {
+        throw new RuntimeException(
+            String.format(
+                "Bucket data files has different total bucket number, %s vs %s, this should be a bug.",
+                totalBuckets, entry.totalBuckets()));
+      }
+      totalBuckets = entry.totalBuckets();
+      dataFiles.add(entry.file());
+    }
+    return totalBuckets;
   }
 
   private synchronized Snapshot latestReachableSnapshot() {

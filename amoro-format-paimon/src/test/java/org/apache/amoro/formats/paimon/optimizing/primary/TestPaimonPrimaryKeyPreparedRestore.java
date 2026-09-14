@@ -27,6 +27,7 @@ import static org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKe
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.anyMap;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
@@ -39,6 +40,7 @@ import org.apache.paimon.FileStore;
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.data.GenericRow;
+import org.apache.paimon.index.IndexFileHandler;
 import org.apache.paimon.operation.FileStoreScan;
 import org.apache.paimon.operation.RestoreFiles;
 import org.apache.paimon.table.FileStoreTable;
@@ -47,6 +49,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.file.Path;
 import java.util.Arrays;
@@ -65,9 +68,27 @@ public class TestPaimonPrimaryKeyPreparedRestore {
       FileStoreScan scan = spy(old.store().newScan());
       doReturn(store).when(tracked).store();
       doReturn(scan).when(store).newScan();
-      doThrow(new IllegalStateException("second unit scan failed"))
+      java.util.concurrent.atomic.AtomicInteger reads =
+          new java.util.concurrent.atomic.AtomicInteger();
+      doAnswer(
+              invocation -> {
+                if (reads.incrementAndGet() == 1) {
+                  return invocation.callRealMethod();
+                }
+                return new java.util.Iterator<org.apache.paimon.manifest.ManifestEntry>() {
+                  @Override
+                  public boolean hasNext() {
+                    throw new IllegalStateException("second unit iterator failed");
+                  }
+
+                  @Override
+                  public org.apache.paimon.manifest.ManifestEntry next() {
+                    throw new java.util.NoSuchElementException();
+                  }
+                };
+              })
           .when(scan)
-          .withPartitionBucket(BinaryRow.EMPTY_ROW, 1);
+          .readFileIterator();
       PaimonBucketCompactionUnit second =
           new PaimonBucketCompactionUnit(
               SerializationUtils.serializeBinaryRow(BinaryRow.EMPTY_ROW), 1, 1, 1, 1, 1);
@@ -83,10 +104,68 @@ public class TestPaimonPrimaryKeyPreparedRestore {
       assertThrows(
           IllegalStateException.class,
           () -> new PaimonPrimaryKeyCompactionExecutor(multi).execute());
-      verify(scan, times(1)).plan();
+      verify(scan, times(2)).readFileIterator();
       verify(tracked, never()).copy(anyMap());
       verify(tracked, never()).newBatchWriteBuilder();
       assertEquals(planned.getTargetSnapshotId(), old.latestSnapshot().get().id());
+    }
+  }
+
+  @ParameterizedTest
+  @ValueSource(booleans = {true, false})
+  void indexReadFailureAfterFilesPreventsWriter(boolean dynamic, @TempDir Path warehouse)
+      throws Exception {
+    try (Catalog catalog = catalog(warehouse)) {
+      Map<String, String> opts = options(true);
+      opts.put("bucket", dynamic ? "-1" : "1");
+      opts.put("deletion-vectors.enabled", String.valueOf(!dynamic));
+      FileStoreTable table = table(catalog, "index_failure", opts);
+      append(table, GenericRow.of(1, 10, 20, 1L));
+      PaimonPrimaryKeyCompactionInput planned = input(table, OptimizingType.MINOR, 99L);
+      FileStoreTable tracked = spy(table);
+      FileStore<?> store = spy(table.store());
+      FileStoreScan scan = spy(table.store().newScan());
+      IndexFileHandler indexes = spy(store.newIndexFileHandler());
+      doReturn(store).when(tracked).store();
+      doReturn(scan).when(store).newScan();
+      doReturn(indexes).when(store).newIndexFileHandler();
+      org.apache.paimon.Snapshot snapshot = table.latestSnapshot().get();
+      IllegalStateException failure = new IllegalStateException("index scan failed");
+      if (dynamic) {
+        doThrow(failure).when(indexes).scanHashIndex(snapshot, BinaryRow.EMPTY_ROW, 0);
+      } else {
+        doThrow(failure)
+            .when(indexes)
+            .scan(
+                snapshot,
+                org.apache.paimon.deletionvectors.DeletionVectorsIndexFile.DELETION_VECTORS_INDEX,
+                BinaryRow.EMPTY_ROW,
+                0);
+      }
+      PaimonPrimaryKeyCompactionInput input =
+          new PaimonPrimaryKeyCompactionInput(
+              wrap(tracked),
+              planned.getUnits(),
+              planned.getOptimizingType(),
+              false,
+              planned.getTargetSnapshotId(),
+              planned.getCommitUser(),
+              planned.getCommitIdentifier());
+      IllegalStateException error =
+          assertThrows(
+              IllegalStateException.class,
+              () -> new PaimonPrimaryKeyCompactionExecutor(input).execute());
+      assertEquals(failure, error.getCause());
+      assertEquals(
+          "Failed to prepare Paimon compaction inputs: table="
+              + input.getTable().id()
+              + ", plannedSnapshot="
+              + planned.getTargetSnapshotId(),
+          error.getMessage());
+      verify(scan).readFileIterator();
+      verify(tracked, never()).copy(anyMap());
+      verify(tracked, never()).newBatchWriteBuilder();
+      assertEquals(snapshot.id(), table.latestSnapshot().get().id());
     }
   }
 

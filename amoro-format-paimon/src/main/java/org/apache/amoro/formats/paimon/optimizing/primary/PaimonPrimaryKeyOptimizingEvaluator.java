@@ -49,6 +49,7 @@ import java.nio.ByteBuffer;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -311,6 +312,7 @@ public class PaimonPrimaryKeyOptimizingEvaluator {
       return evaluateFull(
           table,
           tableName,
+          healthContext,
           analysis,
           allUnits,
           primaryKeyOptions,
@@ -443,15 +445,15 @@ public class PaimonPrimaryKeyOptimizingEvaluator {
     }
 
     Duration idleTime = primaryKeyOptions.partitionIdleTime().get();
-    if (!table.partitionKeys().isEmpty()) {
-      snapshotFiles.loadPartitionWatermarks();
-    }
+    Map<ByteBuffer, Long> partitionWatermarks =
+        table.partitionKeys().isEmpty()
+            ? Collections.emptyMap()
+            : loadPartitionWatermarks(snapshotFiles.reader);
     List<PaimonBucketCompactionUnit> fullCandidates = new ArrayList<>();
     for (PaimonBucketCompactionUnit unit : allUnits) {
       long lastCreationTime = unit.getLastFileCreationTime();
       if (!table.partitionKeys().isEmpty()) {
-        lastCreationTime =
-            snapshotFiles.partitionLastCreationTime.get(ByteBuffer.wrap(unit.getPartitionBytes()));
+        lastCreationTime = partitionWatermarks.get(ByteBuffer.wrap(unit.getPartitionBytes()));
       }
       if (isIdle(lastCreationTime, idleTime, planTime)) {
         fullCandidates.add(unit);
@@ -467,6 +469,7 @@ public class PaimonPrimaryKeyOptimizingEvaluator {
   private static PaimonPrimaryKeyOptimizingEvaluation evaluateFull(
       FileStoreTable table,
       String tableName,
+      PaimonHealthEvaluationContext healthContext,
       PaimonPrimaryKeySnapshotAnalysis analysis,
       List<PaimonBucketCompactionUnit> allUnits,
       PaimonPrimaryKeyOptions primaryKeyOptions,
@@ -489,11 +492,18 @@ public class PaimonPrimaryKeyOptimizingEvaluator {
     }
 
     Duration idleTime = primaryKeyOptions.partitionIdleTime().get();
+    // FULL 门槛通过后才读取水位；固定已捕获的 S，不再次解析 latest。
+    Map<ByteBuffer, Long> partitionWatermarks =
+        table.partitionKeys().isEmpty()
+            ? Collections.emptyMap()
+            : loadPartitionWatermarks(
+                table.newSnapshotReader().withSnapshot(healthContext.snapshot().get()));
     List<PaimonBucketCompactionUnit> fullCandidates = new ArrayList<>();
     for (PaimonBucketCompactionUnit unit : allUnits) {
       long lastCreationTime = unit.getLastFileCreationTime();
       if (!table.partitionKeys().isEmpty()) {
-        Long partitionWatermark = analysis.partitionWatermark(unit.getPartitionBytes());
+        Long partitionWatermark =
+            partitionWatermarks.get(ByteBuffer.wrap(unit.getPartitionBytes()));
         if (partitionWatermark == null) {
           throw new IllegalStateException("Missing partition watermark for analyzed bucket");
         }
@@ -549,11 +559,22 @@ public class PaimonPrimaryKeyOptimizingEvaluator {
     return idleMillis == 0 || planTime - lastFileCreationTime >= idleMillis;
   }
 
+  private static Map<ByteBuffer, Long> loadPartitionWatermarks(SnapshotReader reader) {
+    // Paimon 1.4.2 PartitionEntry 的 DELETE 创建时间也参与最大值，不能用存活文件替代。
+    // withSnapshot 接收 Snapshot 对象；沿用原生 manifest/cache 可读性，不另查 JSON 存在性。
+    // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/manifest/PartitionEntry.java#L85-L129
+    Map<ByteBuffer, Long> watermarks = new HashMap<>();
+    for (PartitionEntry entry : reader.partitionEntries()) {
+      byte[] partitionBytes = SerializationUtils.serializeBinaryRow(entry.partition());
+      watermarks.put(ByteBuffer.wrap(partitionBytes), entry.lastFileCreationTime());
+    }
+    return watermarks;
+  }
+
   private static class SnapshotFiles {
 
     private final SnapshotReader reader;
     private final Map<BucketKey, BucketFiles> buckets = new LinkedHashMap<>();
-    private final Map<ByteBuffer, Long> partitionLastCreationTime = new HashMap<>();
 
     private SnapshotFiles(SnapshotReader reader) {
       this.reader = reader;
@@ -563,14 +584,6 @@ public class PaimonPrimaryKeyOptimizingEvaluator {
       byte[] partitionBytes = SerializationUtils.serializeBinaryRow(partition);
       BucketKey key = new BucketKey(partitionBytes, bucket);
       buckets.computeIfAbsent(key, ignored -> new BucketFiles(partitionBytes, bucket)).add(file);
-    }
-
-    private void loadPartitionWatermarks() {
-      for (PartitionEntry entry : reader.partitionEntries()) {
-        byte[] partitionBytes = SerializationUtils.serializeBinaryRow(entry.partition());
-        partitionLastCreationTime.put(
-            ByteBuffer.wrap(partitionBytes), entry.lastFileCreationTime());
-      }
     }
   }
 
