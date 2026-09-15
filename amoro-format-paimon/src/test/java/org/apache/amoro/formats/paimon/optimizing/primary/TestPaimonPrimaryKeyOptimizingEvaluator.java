@@ -32,6 +32,7 @@ import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -416,9 +417,8 @@ class TestPaimonPrimaryKeyOptimizingEvaluator {
   }
 
   @Test
-  @DisplayName("partition watermarks are immutable facts captured during analysis")
-  void partitionWatermarksAreCapturedBeforeAnalysisReturns(@TempDir Path warehouse)
-      throws Exception {
+  @DisplayName("partition watermark failure after analysis skips FULL and retains health")
+  void partitionWatermarksAreReloadedOnlyForFull(@TempDir Path warehouse) throws Exception {
     Catalog catalog = fsCatalog(warehouse);
     Map<String, String> options = primaryKeyOptions();
     options.put(PaimonPrimaryKeyOptions.PARTITION_IDLE_TIME, "0s");
@@ -448,11 +448,21 @@ class TestPaimonPrimaryKeyOptimizingEvaluator {
     assertEquals(OptimizingType.FULL, evaluation.optimizingType());
     PaimonPrimaryKeySnapshotAnalysis analysis = evaluation.analysis().get();
     when(fixture.reader.partitionEntries())
-        .thenThrow(new IllegalStateException("reader must not be retained"));
-    assertEquals(
-        1_000L,
-        analysis.partitionWatermark(SerializationUtils.serializeBinaryRow(partition)).longValue());
-    verify(fixture.reader).partitionEntries();
+        .thenThrow(new IllegalStateException("watermark IO failed"));
+    PaimonPrimaryKeyOptimizingEvaluation failed =
+        PaimonPrimaryKeyOptimizingEvaluator.evaluate(
+            fixture.table,
+            fixture.id.getObjectName(),
+            fixture.context,
+            analysis,
+            defaultConfig().setMinorLeastInterval(Integer.MAX_VALUE).setFullTriggerInterval(1),
+            10_000L,
+            0L,
+            null,
+            10_000L);
+    assertFalse(failed.necessary());
+    assertEquals(analysis.healthDetails(), failed.analysis().get().healthDetails());
+    verify(fixture.reader, times(2)).partitionEntries();
   }
 
   @Test

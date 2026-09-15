@@ -235,7 +235,6 @@ class TestPaimonPrimaryKeyCompactionExecutor {
     when(snapshotManager.snapshot(restoreSnapshotId)).thenReturn(restoreSnapshot);
     FileStore<?> store = mock(FileStore.class);
     FileStoreScan scan = mock(FileStoreScan.class);
-    FileStoreScan.Plan scanPlan = mock(FileStoreScan.Plan.class);
     IndexFileHandler indexFileHandler = mock(IndexFileHandler.class);
     ManifestEntry entry = mock(ManifestEntry.class);
     DataFileMeta dataFile = mock(DataFileMeta.class);
@@ -246,8 +245,7 @@ class TestPaimonPrimaryKeyCompactionExecutor {
     when(store.newIndexFileHandler()).thenReturn(indexFileHandler);
     when(scan.withSnapshot(restoreSnapshot)).thenReturn(scan);
     when(scan.withPartitionBucket(any(BinaryRow.class), eq(0))).thenReturn(scan);
-    when(scan.plan()).thenReturn(scanPlan);
-    when(scanPlan.files()).thenReturn(Collections.singletonList(entry));
+    when(scan.readFileIterator()).thenReturn(Collections.singletonList(entry).iterator());
     when(entry.totalBuckets()).thenReturn(1);
     when(entry.file()).thenReturn(dataFile);
     when(indexFileHandler.scanHashIndex(restoreSnapshot, BinaryRow.EMPTY_ROW, 0))
@@ -580,12 +578,10 @@ class TestPaimonPrimaryKeyCompactionExecutor {
     FileStore<?> store = mock(FileStore.class);
     when(table.store()).thenReturn((FileStore) store);
     FileStoreScan scan = mock(FileStoreScan.class);
-    FileStoreScan.Plan scanPlan = mock(FileStoreScan.Plan.class);
     when(store.newScan()).thenReturn(scan);
     when(scan.withSnapshot(plannedSnapshot)).thenReturn(scan);
     when(scan.withPartitionBucket(any(BinaryRow.class), eq(0))).thenReturn(scan);
-    when(scan.plan()).thenReturn(scanPlan);
-    when(scanPlan.files()).thenReturn(Collections.emptyList());
+    when(scan.readFileIterator()).thenReturn(Collections.emptyIterator());
     FileIO fileIO = mock(FileIO.class);
     when(snapshotManager.fileIO()).thenReturn(fileIO);
     when(snapshotManager.snapshotDirectory())

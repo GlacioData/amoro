@@ -40,7 +40,6 @@ import org.apache.paimon.index.IndexFileHandler;
 import org.apache.paimon.index.IndexFileMeta;
 import org.apache.paimon.io.DataFileMeta;
 import org.apache.paimon.manifest.ManifestEntry;
-import org.apache.paimon.manifest.PartitionEntry;
 import org.apache.paimon.mergetree.Levels;
 import org.apache.paimon.table.BucketMode;
 import org.apache.paimon.table.FileStoreTable;
@@ -52,7 +51,6 @@ import org.slf4j.LoggerFactory;
 
 import javax.annotation.Nullable;
 
-import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -95,7 +93,6 @@ public final class PaimonPrimaryKeySnapshotAnalysis implements FormatTableAnalys
   private final List<BucketFacts> bucketFacts;
   private final int activePartitionCount;
   private final boolean validForPlanning;
-  private final Map<ByteBuffer, Long> partitionWatermarks;
 
   private PaimonPrimaryKeySnapshotAnalysis(
       TableAnalysisKey key,
@@ -103,15 +100,13 @@ public final class PaimonPrimaryKeySnapshotAnalysis implements FormatTableAnalys
       TableHealthDetails healthDetails,
       List<BucketFacts> bucketFacts,
       int activePartitionCount,
-      boolean validForPlanning,
-      Map<ByteBuffer, Long> partitionWatermarks) {
+      boolean validForPlanning) {
     this.key = key;
     this.pendingInput = pendingInput;
     this.healthDetails = healthDetails;
     this.bucketFacts = Collections.unmodifiableList(new ArrayList<>(bucketFacts));
     this.activePartitionCount = activePartitionCount;
     this.validForPlanning = validForPlanning;
-    this.partitionWatermarks = immutableWatermarks(partitionWatermarks);
   }
 
   /** Analyze the exact {@link Snapshot} already captured by the metadata-only context. */
@@ -146,7 +141,7 @@ public final class PaimonPrimaryKeySnapshotAnalysis implements FormatTableAnalys
       Result result =
           healthEvaluator.evaluate(
               Collections.emptyList(), context.activityInput(0), evaluationMode(bucketMode));
-      return create(context, result, Collections.emptyList(), 0, true, Collections.emptyMap());
+      return create(context, result, Collections.emptyList(), 0, true);
     }
 
     try {
@@ -174,7 +169,11 @@ public final class PaimonPrimaryKeySnapshotAnalysis implements FormatTableAnalys
       KeyValueFileStore store,
       PaimonPrimaryKeyHealthEvaluator healthEvaluator,
       EvaluationMode mode) {
+    // Paimon 1.4.2 PojoDataFileMeta#copyWithoutStats 仅裁剪 valueStats/valueStatsCols。
+    // 健康与候选评估保留 key/level/schema/行数；这些元数据不用于 Optimizer 提交。
+    // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/io/PojoDataFileMeta.java#L308-L330
     SnapshotReader reader = table.newSnapshotReader().withSnapshot(snapshot);
+    reader.dropStats();
     Map<BucketKey, MutableBucket> buckets = new LinkedHashMap<>();
     Set<BinaryRow> partitions = new HashSet<>();
     Iterator<ManifestEntry> entries = reader.readFileIterator();
@@ -186,18 +185,6 @@ public final class PaimonPrimaryKeySnapshotAnalysis implements FormatTableAnalys
       buckets
           .computeIfAbsent(key, ignored -> new MutableBucket(partition, entry.bucket()))
           .add(entry.file());
-    }
-
-    Map<ByteBuffer, Long> partitionWatermarks = new HashMap<>();
-    if (!table.partitionKeys().isEmpty()) {
-      try {
-        for (PartitionEntry entry : reader.partitionEntries()) {
-          byte[] partitionBytes = SerializationUtils.serializeBinaryRow(entry.partition().copy());
-          partitionWatermarks.put(ByteBuffer.wrap(partitionBytes), entry.lastFileCreationTime());
-        }
-      } catch (RuntimeException e) {
-        partitionWatermarks.clear();
-      }
     }
 
     List<MutableBucket> orderedBuckets = new ArrayList<>(buckets.values());
@@ -219,7 +206,7 @@ public final class PaimonPrimaryKeySnapshotAnalysis implements FormatTableAnalys
       Result result =
           evaluateHealth(
               context, snapshot, store, healthEvaluator, mode, orderedBuckets, partitions, facts);
-      return create(context, result, facts, partitions.size(), true, partitionWatermarks);
+      return create(context, result, facts, partitions.size(), true);
     } catch (RuntimeException e) {
       LOG.warn(
           "Failed to evaluate Paimon primary-key table [{}] at snapshot [{}] after collecting [{}] bucket facts.",
@@ -232,7 +219,6 @@ public final class PaimonPrimaryKeySnapshotAnalysis implements FormatTableAnalys
           PaimonPrimaryKeyHealthEvaluator.SNAPSHOT_SCAN_FAILED,
           facts,
           partitions.size(),
-          partitionWatermarks,
           true);
     }
   }
@@ -302,8 +288,7 @@ public final class PaimonPrimaryKeySnapshotAnalysis implements FormatTableAnalys
       Result result,
       List<BucketFacts> bucketFacts,
       int activePartitionCount,
-      boolean validForPlanning,
-      Map<ByteBuffer, Long> partitionWatermarks) {
+      boolean validForPlanning) {
     StructuralSummary structural = StructuralSummary.from(context, bucketFacts);
     PaimonPrimaryKeyPendingInput pendingInput =
         result.healthScore() < 0 && !bucketFacts.isEmpty()
@@ -318,19 +303,12 @@ public final class PaimonPrimaryKeySnapshotAnalysis implements FormatTableAnalys
             result.reasonCodes(),
             structural);
     return new PaimonPrimaryKeySnapshotAnalysis(
-        context.key(),
-        pendingInput,
-        details,
-        bucketFacts,
-        activePartitionCount,
-        validForPlanning,
-        partitionWatermarks);
+        context.key(), pendingInput, details, bucketFacts, activePartitionCount, validForPlanning);
   }
 
   private static PaimonPrimaryKeySnapshotAnalysis invalid(
       PaimonHealthEvaluationContext context, String reasonCode) {
-    return invalidHealth(
-        context, reasonCode, Collections.emptyList(), 0, Collections.emptyMap(), false);
+    return invalidHealth(context, reasonCode, Collections.emptyList(), 0, false);
   }
 
   private static PaimonPrimaryKeySnapshotAnalysis invalidHealth(
@@ -338,7 +316,6 @@ public final class PaimonPrimaryKeySnapshotAnalysis implements FormatTableAnalys
       String reasonCode,
       List<BucketFacts> bucketFacts,
       int activePartitionCount,
-      Map<ByteBuffer, Long> partitionWatermarks,
       boolean validForPlanning) {
     StructuralSummary structural = StructuralSummary.from(context, bucketFacts);
     PaimonPrimaryKeyPendingInput pendingInput =
@@ -354,13 +331,7 @@ public final class PaimonPrimaryKeySnapshotAnalysis implements FormatTableAnalys
             Collections.singletonList(reasonCode),
             structural);
     return new PaimonPrimaryKeySnapshotAnalysis(
-        context.key(),
-        pendingInput,
-        details,
-        bucketFacts,
-        activePartitionCount,
-        validForPlanning,
-        partitionWatermarks);
+        context.key(), pendingInput, details, bucketFacts, activePartitionCount, validForPlanning);
   }
 
   private static PaimonPrimaryKeyPendingInput structuralPendingInput(
@@ -556,20 +527,6 @@ public final class PaimonPrimaryKeySnapshotAnalysis implements FormatTableAnalys
     return Integer.compare(left.length, right.length);
   }
 
-  private static Map<ByteBuffer, Long> immutableWatermarks(Map<ByteBuffer, Long> source) {
-    if (source.isEmpty()) {
-      return Collections.emptyMap();
-    }
-    Map<ByteBuffer, Long> copy = new HashMap<>();
-    for (Map.Entry<ByteBuffer, Long> entry : source.entrySet()) {
-      ByteBuffer buffer = entry.getKey().duplicate();
-      byte[] bytes = new byte[buffer.remaining()];
-      buffer.get(bytes);
-      copy.put(ByteBuffer.wrap(bytes).asReadOnlyBuffer(), entry.getValue());
-    }
-    return Collections.unmodifiableMap(copy);
-  }
-
   @Override
   public TableAnalysisKey key() {
     return key;
@@ -595,11 +552,6 @@ public final class PaimonPrimaryKeySnapshotAnalysis implements FormatTableAnalys
 
   public boolean validForPlanning() {
     return validForPlanning;
-  }
-
-  Long partitionWatermark(byte[] partitionBytes) {
-    return partitionWatermarks.get(
-        ByteBuffer.wrap(Arrays.copyOf(partitionBytes, partitionBytes.length)));
   }
 
   static final class BucketFacts {
