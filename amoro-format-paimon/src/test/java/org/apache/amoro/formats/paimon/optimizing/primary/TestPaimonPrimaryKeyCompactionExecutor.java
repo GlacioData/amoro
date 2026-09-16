@@ -504,6 +504,8 @@ class TestPaimonPrimaryKeyCompactionExecutor {
         new PaimonPrimaryKeyCompactionExecutor(result.getTasks().get(0).getInput()).execute();
 
     assertTrue(output.getCommitMessageBytesList().isEmpty());
+    assertEquals(
+        PaimonPrimaryKeyCompactionOutput.STALE_FULL_BEFORE_EXECUTE, output.getSkipReason());
     assertEquals(0, output.getCompactedBucketCount());
     assertEquals(0L, output.getCompactedFileCount());
     assertEquals(0L, output.getProducedFileCount());

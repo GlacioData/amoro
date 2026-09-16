@@ -98,6 +98,70 @@ public class PaimonPrimaryKeyOptimizingEvaluator {
       long lastFullOptimizingTime,
       Predicate partitionFilter,
       long planTime) {
+    return evaluate(
+        table,
+        tableName,
+        optimizingConfig,
+        lastMinorOptimizingTime,
+        lastFullOptimizingTime,
+        partitionFilter,
+        planTime,
+        0L);
+  }
+
+  public static PaimonPrimaryKeyOptimizingEvaluation evaluate(
+      FileStoreTable table,
+      String tableName,
+      PaimonHealthEvaluationContext healthContext,
+      OptimizingConfig optimizingConfig,
+      long lastMinorOptimizingTime,
+      long lastFullOptimizingTime,
+      Predicate partitionFilter,
+      long planTime) {
+    return evaluate(
+        table,
+        tableName,
+        healthContext,
+        optimizingConfig,
+        lastMinorOptimizingTime,
+        lastFullOptimizingTime,
+        partitionFilter,
+        planTime,
+        0L);
+  }
+
+  public static PaimonPrimaryKeyOptimizingEvaluation evaluate(
+      FileStoreTable table,
+      String tableName,
+      PaimonHealthEvaluationContext healthContext,
+      PaimonPrimaryKeySnapshotAnalysis analysis,
+      OptimizingConfig optimizingConfig,
+      long lastMinorOptimizingTime,
+      long lastFullOptimizingTime,
+      Predicate partitionFilter,
+      long planTime) {
+    return evaluate(
+        table,
+        tableName,
+        healthContext,
+        analysis,
+        optimizingConfig,
+        lastMinorOptimizingTime,
+        lastFullOptimizingTime,
+        partitionFilter,
+        planTime,
+        0L);
+  }
+
+  public static PaimonPrimaryKeyOptimizingEvaluation evaluate(
+      FileStoreTable table,
+      String tableName,
+      OptimizingConfig optimizingConfig,
+      long lastMinorOptimizingTime,
+      long lastFullOptimizingTime,
+      Predicate partitionFilter,
+      long planTime,
+      long fullRetryNotBefore) {
     if (!supportsTableShape(table)) {
       return PaimonPrimaryKeyOptimizingEvaluation.empty(-1L);
     }
@@ -112,7 +176,8 @@ public class PaimonPrimaryKeyOptimizingEvaluator {
     final CoreOptions coreOptions;
     try {
       primaryKeyOptions = PaimonPrimaryKeyOptions.from(table.options());
-      // 每轮只派生一次策略选项；Paimon EarlyFullCompaction 的实例计时依据见配置 helper。
+      // Derive strategy options once per evaluation; see the configuration helper for the
+      // per-instance EarlyFullCompaction timer.
       coreOptions =
           PaimonPrimaryKeyOptions.compactionStrategyOptions(CoreOptions.fromMap(table.options()));
     } catch (RuntimeException e) {
@@ -194,7 +259,8 @@ public class PaimonPrimaryKeyOptimizingEvaluator {
           effectiveConfig,
           lastFullOptimizingTime,
           planTime,
-          targetSnapshot.id());
+          targetSnapshot.id(),
+          fullRetryNotBefore);
     } catch (RuntimeException e) {
       LOG.warn(
           "Failed to evaluate fixed snapshot [{}] for Paimon primary-key table [{}]; skip "
@@ -218,7 +284,8 @@ public class PaimonPrimaryKeyOptimizingEvaluator {
       long lastMinorOptimizingTime,
       long lastFullOptimizingTime,
       Predicate partitionFilter,
-      long planTime) {
+      long planTime,
+      long fullRetryNotBefore) {
     if (!supportsHealthShape(table)) {
       return PaimonPrimaryKeyOptimizingEvaluation.empty(healthContext.snapshotId());
     }
@@ -234,7 +301,8 @@ public class PaimonPrimaryKeyOptimizingEvaluator {
         lastMinorOptimizingTime,
         lastFullOptimizingTime,
         partitionFilter,
-        planTime);
+        planTime,
+        fullRetryNotBefore);
   }
 
   /** Decide HASH optimizing from reusable facts already scanned for the exact health key. */
@@ -247,7 +315,8 @@ public class PaimonPrimaryKeyOptimizingEvaluator {
       long lastMinorOptimizingTime,
       long lastFullOptimizingTime,
       Predicate partitionFilter,
-      long planTime) {
+      long planTime,
+      long fullRetryNotBefore) {
     if (!healthContext.key().equals(analysis.key())) {
       throw new IllegalArgumentException(
           "Paimon primary-key analysis key does not match the captured planning context");
@@ -267,7 +336,8 @@ public class PaimonPrimaryKeyOptimizingEvaluator {
     final CoreOptions coreOptions;
     try {
       primaryKeyOptions = PaimonPrimaryKeyOptions.from(table.options());
-      // analysis 复用也会新建原生策略；独立副本保留 health context，依据见配置 helper。
+      // Reused analysis also creates a new native strategy; a separate copy preserves the health
+      // context. See the configuration helper.
       coreOptions =
           PaimonPrimaryKeyOptions.compactionStrategyOptions(healthContext.coreOptions().get());
     } catch (RuntimeException e) {
@@ -319,7 +389,8 @@ public class PaimonPrimaryKeyOptimizingEvaluator {
           effectiveConfig,
           lastFullOptimizingTime,
           planTime,
-          targetSnapshotId);
+          targetSnapshotId,
+          fullRetryNotBefore);
     } catch (RuntimeException e) {
       LOG.warn(
           "Failed to decide optimizing for analyzed Paimon primary-key snapshot [{}] of table "
@@ -429,9 +500,11 @@ public class PaimonPrimaryKeyOptimizingEvaluator {
       OptimizingConfig optimizingConfig,
       long lastFullOptimizingTime,
       long planTime,
-      long targetSnapshotId) {
+      long targetSnapshotId,
+      long fullRetryNotBefore) {
     int fullTriggerInterval = optimizingConfig.getFullTriggerInterval();
-    if (fullTriggerInterval <= 0
+    if (planTime < fullRetryNotBefore
+        || fullTriggerInterval <= 0
         || planTime - lastFullOptimizingTime < fullTriggerInterval
         || allUnits.isEmpty()) {
       return PaimonPrimaryKeyOptimizingEvaluation.empty(targetSnapshotId);
@@ -476,9 +549,11 @@ public class PaimonPrimaryKeyOptimizingEvaluator {
       OptimizingConfig optimizingConfig,
       long lastFullOptimizingTime,
       long planTime,
-      long targetSnapshotId) {
+      long targetSnapshotId,
+      long fullRetryNotBefore) {
     int fullTriggerInterval = optimizingConfig.getFullTriggerInterval();
-    if (fullTriggerInterval <= 0
+    if (planTime < fullRetryNotBefore
+        || fullTriggerInterval <= 0
         || planTime - lastFullOptimizingTime < fullTriggerInterval
         || allUnits.isEmpty()) {
       return PaimonPrimaryKeyOptimizingEvaluation.healthOnly(targetSnapshotId, analysis);
@@ -492,7 +567,8 @@ public class PaimonPrimaryKeyOptimizingEvaluator {
     }
 
     Duration idleTime = primaryKeyOptions.partitionIdleTime().get();
-    // FULL 门槛通过后才读取水位；固定已捕获的 S，不再次解析 latest。
+    // Read watermarks only after FULL eligibility passes; use the captured snapshot S without
+    // resolving latest again.
     Map<ByteBuffer, Long> partitionWatermarks =
         table.partitionKeys().isEmpty()
             ? Collections.emptyMap()
@@ -560,8 +636,10 @@ public class PaimonPrimaryKeyOptimizingEvaluator {
   }
 
   private static Map<ByteBuffer, Long> loadPartitionWatermarks(SnapshotReader reader) {
-    // Paimon 1.4.2 PartitionEntry 的 DELETE 创建时间也参与最大值，不能用存活文件替代。
-    // withSnapshot 接收 Snapshot 对象；沿用原生 manifest/cache 可读性，不另查 JSON 存在性。
+    // Paimon 1.4.2 includes DELETE creation times in the PartitionEntry maximum; live files cannot
+    // substitute for it.
+    // withSnapshot accepts a Snapshot object; preserve native manifest/cache readability without a
+    // separate JSON existence check.
     // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/manifest/PartitionEntry.java#L85-L129
     Map<ByteBuffer, Long> watermarks = new HashMap<>();
     for (PartitionEntry entry : reader.partitionEntries()) {

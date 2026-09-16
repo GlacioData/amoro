@@ -35,6 +35,7 @@ import static org.mockito.Mockito.when;
 
 import org.apache.amoro.config.OptimizingConfig;
 import org.apache.amoro.exception.OptimizingCommitException;
+import org.apache.amoro.exception.OptimizingCommitSkippedException;
 import org.apache.amoro.formats.paimon.PaimonCatalogFactory;
 import org.apache.amoro.formats.paimon.PaimonTable;
 import org.apache.amoro.formats.paimon.optimizing.PaimonOptimizingEligibility;
@@ -42,6 +43,7 @@ import org.apache.amoro.formats.paimon.optimizing.plan.PaimonPrimaryKeyOptimizin
 import org.apache.amoro.optimizing.OptimizingPlanResult;
 import org.apache.amoro.optimizing.OptimizingType;
 import org.apache.amoro.optimizing.TableOptimizingCommitter.CommitMode;
+import org.apache.amoro.optimizing.TableOptimizingCommitter.ReconciliationResult;
 import org.apache.amoro.table.TableIdentifier;
 import org.apache.amoro.utils.SerializationUtil;
 import org.apache.hadoop.conf.Configuration;
@@ -81,6 +83,74 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 @DisplayName("PaimonPrimaryKeyTableCommit")
 class TestPaimonPrimaryKeyTableCommit {
+
+  @Test
+  void fullCommitAndReplayKeepAllFileIoInsideAuthentication(@TempDir Path warehouse)
+      throws Exception {
+    try (Catalog catalog = fsCatalog(warehouse)) {
+      Map<String, String> options = primaryKeyOptions();
+      options.put(PaimonPrimaryKeyOptions.PARTITION_IDLE_TIME, "0s");
+      Identifier id = createPrimaryKeyTable(catalog, "authenticated_full", options);
+      writeCommits(catalog.getTable(id), 2);
+      OptimizingPlanResult<PaimonPrimaryKeyCompactionTask> plan =
+          planner(
+                  catalog,
+                  id,
+                  Collections.emptyMap(),
+                  defaultConfig().setMinorLeastFileCount(99).setFullTriggerInterval(1))
+              .plan();
+      assertEquals(OptimizingType.FULL, plan.getOptimizingType());
+      List<PaimonPrimaryKeyCompactionTask> tasks = new ArrayList<>(plan.getTasks());
+      for (PaimonPrimaryKeyCompactionTask task : tasks) {
+        setOutput(task, new PaimonPrimaryKeyCompactionExecutor(task.getInput()).execute());
+      }
+      FileStoreTable original = (FileStoreTable) catalog.getTable(id);
+      AtomicBoolean armed = new AtomicBoolean(false);
+      AtomicBoolean authenticated = new AtomicBoolean(false);
+      java.util.concurrent.atomic.AtomicInteger ioCalls =
+          new java.util.concurrent.atomic.AtomicInteger();
+      org.apache.paimon.fs.FileIO guarded =
+          (org.apache.paimon.fs.FileIO)
+              java.lang.reflect.Proxy.newProxyInstance(
+                  getClass().getClassLoader(),
+                  new Class<?>[] {org.apache.paimon.fs.FileIO.class},
+                  (proxy, method, args) -> {
+                    if (armed.get() && method.getDeclaringClass() != Object.class) {
+                      assertTrue(
+                          authenticated.get(),
+                          "FileIO outside authentication: " + method.getName());
+                      ioCalls.incrementAndGet();
+                    }
+                    try {
+                      return method.invoke(original.fileIO(), args);
+                    } catch (java.lang.reflect.InvocationTargetException failure) {
+                      throw failure.getCause();
+                    }
+                  });
+      FileStoreTable table =
+          org.apache.paimon.table.FileStoreTableFactory.create(
+              guarded, original.location(), original.schema());
+      PaimonTable wrapper = mock(PaimonTable.class);
+      when(wrapper.doAs(any()))
+          .thenAnswer(
+              invocation -> {
+                authenticated.set(true);
+                try {
+                  return ((Callable<?>) invocation.getArgument(0)).call();
+                } finally {
+                  authenticated.set(false);
+                }
+              });
+      armed.set(true);
+      PaimonPrimaryKeyTableCommit committer =
+          new PaimonPrimaryKeyTableCommit(wrapper, table, tasks);
+      committer.commit();
+      committer.commit(CommitMode.RECOVERY_REPLAY);
+      assertTrue(ioCalls.get() > 0);
+      assertFalse(authenticated.get());
+      verify(wrapper, times(2)).doAs(any());
+    }
+  }
 
   @Test
   @DisplayName("Committer commits executor output as a COMPACT snapshot")
@@ -389,10 +459,11 @@ class TestPaimonPrimaryKeyTableCommit {
 
     PaimonPrimaryKeyTableCommit normal =
         new PaimonPrimaryKeyTableCommit((FileStoreTable) catalog.getTable(id), tasks);
-    normal.commit();
+    assertThrows(OptimizingCommitSkippedException.class, normal::commit);
     PaimonPrimaryKeyTableCommit replay =
         new PaimonPrimaryKeyTableCommit((FileStoreTable) catalog.getTable(id), tasks);
-    replay.commit(CommitMode.RECOVERY_REPLAY);
+    assertThrows(
+        OptimizingCommitSkippedException.class, () -> replay.commit(CommitMode.RECOVERY_REPLAY));
 
     FileStoreTable afterCommit = (FileStoreTable) catalog.getTable(id);
     assertEquals(snapshotBeforeCommit, afterCommit.snapshotManager().latestSnapshot().id());
@@ -525,6 +596,257 @@ class TestPaimonPrimaryKeyTableCommit {
     assertEquals(
         snapshotBefore,
         ((FileStoreTable) catalog.getTable(id)).snapshotManager().latestSnapshot().id());
+  }
+
+  @Test
+  void recoveryOnlyInspectsPublicationWithoutChangingSnapshotsOrRows(@TempDir Path warehouse)
+      throws Exception {
+    try (Catalog catalog = fsCatalog(warehouse)) {
+      Map<String, String> options = primaryKeyOptions();
+      options.put(PaimonPrimaryKeyOptions.PARTITION_IDLE_TIME, "0s");
+      Identifier id = createPrimaryKeyTable(catalog, "readonly_recovery", options);
+      writeCommits(catalog.getTable(id), 2);
+      List<PaimonPrimaryKeyCompactionTask> tasks = fullTasks(catalog, id);
+      FileStoreTable table = (FileStoreTable) catalog.getTable(id);
+      PaimonPrimaryKeyTableCommit committer = new PaimonPrimaryKeyTableCommit(table, tasks);
+      long before = latestSnapshotId(catalog, id);
+      List<String> rows = readRows(catalog.getTable(id));
+      assertEquals(ReconciliationResult.REPLAN, committer.reconcile());
+      assertEquals(before, latestSnapshotId(catalog, id));
+      assertEquals(rows, readRows(catalog.getTable(id)));
+      committer.commit();
+      writeCommit(catalog.getTable(id), 99, "later-writer");
+      before = latestSnapshotId(catalog, id);
+      rows = readRows(catalog.getTable(id));
+      assertEquals(
+          ReconciliationResult.PUBLISHED,
+          new PaimonPrimaryKeyTableCommit((FileStoreTable) catalog.getTable(id), tasks)
+              .reconcile());
+      assertEquals(before, latestSnapshotId(catalog, id));
+      assertEquals(rows, readRows(catalog.getTable(id)));
+    }
+  }
+
+  @Test
+  void readOnlyRecoveryPropagatesStorageFailureAndNeverCreatesCommitter() {
+    FileStoreTable table = mockCommitTable();
+    when(table.latestSnapshot()).thenThrow(new IllegalStateException("storage unavailable"));
+    assertThrows(
+        OptimizingCommitException.class,
+        () ->
+            new PaimonPrimaryKeyTableCommit(table, Collections.singletonList(emptyFullTask()))
+                .reconcile());
+    verify(table, never()).newCommit(any());
+  }
+
+  @Test
+  void fullReplayFindsExactIdentityBehindNewerWriterAndKeepsRows(@TempDir Path warehouse)
+      throws Exception {
+    try (Catalog catalog = fsCatalog(warehouse)) {
+      Map<String, String> options = primaryKeyOptions();
+      options.put(PaimonPrimaryKeyOptions.PARTITION_IDLE_TIME, "0s");
+      Identifier id = createPrimaryKeyTable(catalog, "full_replay", options);
+      writeCommits(catalog.getTable(id), 2);
+      List<PaimonPrimaryKeyCompactionTask> tasks = fullTasks(catalog, id);
+      FileStoreTable table = (FileStoreTable) catalog.getTable(id);
+      new PaimonPrimaryKeyTableCommit(table, tasks).commit();
+      writeCommit(catalog.getTable(id), 99, "later-writer");
+      List<String> rows = readRows(catalog.getTable(id));
+      long snapshot = latestSnapshotId(catalog, id);
+      new PaimonPrimaryKeyTableCommit((FileStoreTable) catalog.getTable(id), tasks)
+          .commit(CommitMode.RECOVERY_REPLAY);
+      assertEquals(snapshot, latestSnapshotId(catalog, id));
+      assertEquals(rows, readRows(catalog.getTable(id)));
+    }
+  }
+
+  @Test
+  void staleProofRequiresEqualIdentityAndStopsAtExpiredSnapshot() throws Exception {
+    FileStoreTable table = mockCommitTable();
+    org.apache.paimon.utils.SnapshotManager manager =
+        mock(org.apache.paimon.utils.SnapshotManager.class);
+    when(table.snapshotManager()).thenReturn(manager);
+    Snapshot latest = snapshot(4, "user", 100);
+    when(table.latestSnapshot()).thenReturn(java.util.Optional.of(latest));
+    Snapshot exact = snapshot(3, "user", 7);
+    when(manager.tryGetSnapshot(3)).thenReturn(exact);
+    new PaimonPrimaryKeyTableCommit(table, Collections.singletonList(emptyFullTask()))
+        .commit(CommitMode.RECOVERY_REPLAY);
+    verify(table, never()).newCommit(any());
+
+    when(manager.tryGetSnapshot(3)).thenThrow(new java.io.FileNotFoundException("expired"));
+    assertThrows(
+        OptimizingCommitSkippedException.class,
+        () ->
+            new PaimonPrimaryKeyTableCommit(table, Collections.singletonList(emptyFullTask()))
+                .commit());
+    verify(manager, never()).tryGetSnapshot(2);
+    verify(table, never()).newCommit(any());
+  }
+
+  @Test
+  void exactIdentityProbeIsBoundedAndIoFailureIsNotSkip() throws Exception {
+    FileStoreTable table = mockCommitTable();
+    org.apache.paimon.utils.SnapshotManager manager =
+        mock(org.apache.paimon.utils.SnapshotManager.class);
+    when(table.snapshotManager()).thenReturn(manager);
+    Snapshot latest = snapshot(1000, "other", 7);
+    when(table.latestSnapshot()).thenReturn(java.util.Optional.of(latest));
+    when(manager.tryGetSnapshot(org.mockito.ArgumentMatchers.anyLong()))
+        .thenAnswer(call -> snapshot(call.getArgument(0), "other", 7));
+    OptimizingCommitSkippedException skipped =
+        assertThrows(
+            OptimizingCommitSkippedException.class,
+            () ->
+                new PaimonPrimaryKeyTableCommit(table, Collections.singletonList(emptyFullTask()))
+                    .commit());
+    assertTrue(skipped.getMessage().contains("BUDGET_EXHAUSTED"));
+    verify(manager, times(255)).tryGetSnapshot(org.mockito.ArgumentMatchers.anyLong());
+    verify(table, never()).newCommit(any());
+    RuntimeException denied = new RuntimeException("Permission denied");
+    when(manager.tryGetSnapshot(999)).thenThrow(denied);
+    OptimizingCommitException failed =
+        assertThrows(
+            OptimizingCommitException.class,
+            () ->
+                new PaimonPrimaryKeyTableCommit(table, Collections.singletonList(emptyFullTask()))
+                    .commit());
+    assertFalse(failed instanceof OptimizingCommitSkippedException);
+    assertSame(denied, failed.getCause());
+  }
+
+  @Test
+  void explicitSkipCancelsWholeFullAndUnknownMarkerFailsClosed() throws Exception {
+    FileStoreTable table = mockCommitTable();
+    PaimonPrimaryKeyCompactionTask task = emptyFullTask();
+    PaimonPrimaryKeyCompactionTask skipped = emptyFullTask();
+    setOutput(skipped, PaimonPrimaryKeyCompactionOutput.staleFull());
+    assertThrows(
+        OptimizingCommitSkippedException.class,
+        () ->
+            new PaimonPrimaryKeyTableCommit(table, java.util.Arrays.asList(task, skipped))
+                .commit());
+    verify(table).latestSnapshot();
+    verify(table, never()).newCommit(any());
+    PaimonPrimaryKeyCompactionOutput invalid = PaimonPrimaryKeyCompactionOutput.staleFull();
+    java.lang.reflect.Field field = invalid.getClass().getDeclaredField("skipReason");
+    field.setAccessible(true);
+    field.set(invalid, "FUTURE_REASON");
+    setOutput(skipped, invalid);
+    OptimizingCommitException failure =
+        assertThrows(
+            OptimizingCommitException.class,
+            () ->
+                new PaimonPrimaryKeyTableCommit(table, Collections.singletonList(skipped))
+                    .commit());
+    assertFalse(failure instanceof OptimizingCommitSkippedException);
+    assertTrue(failure.getMessage().contains("Invalid"));
+  }
+
+  @Test
+  void executionSkipConflictingWithPublishedIdentityFails() {
+    FileStoreTable table = mockCommitTable();
+    Snapshot exact = snapshot(2, "user", 7);
+    when(table.latestSnapshot()).thenReturn(java.util.Optional.of(exact));
+    PaimonPrimaryKeyCompactionTask task = emptyFullTask();
+    setOutput(task, PaimonPrimaryKeyCompactionOutput.staleFull());
+    OptimizingCommitException failure =
+        assertThrows(
+            OptimizingCommitException.class,
+            () -> new PaimonPrimaryKeyTableCommit(table, Collections.singletonList(task)).commit());
+    assertFalse(failure instanceof OptimizingCommitSkippedException);
+    assertTrue(failure.getMessage().contains("conflicts"));
+    verify(table, never()).newCommit(any());
+  }
+
+  @Test
+  void directFailureRechecksFreshnessBeforeFallback(@TempDir Path warehouse) throws Exception {
+    assertFullDirectFailure(warehouse.resolve("published"), true);
+    assertFullDirectFailure(warehouse.resolve("unpublished"), false);
+  }
+
+  private static void assertFullDirectFailure(Path warehouse, boolean published) throws Exception {
+    try (Catalog catalog = fsCatalog(warehouse)) {
+      Map<String, String> options = primaryKeyOptions();
+      options.put(PaimonPrimaryKeyOptions.PARTITION_IDLE_TIME, "0s");
+      Identifier id = createPrimaryKeyTable(catalog, "fallback", options);
+      writeCommits(catalog.getTable(id), 2);
+      List<PaimonPrimaryKeyCompactionTask> tasks = fullTasks(catalog, id);
+      FileStoreTable real = (FileStoreTable) catalog.getTable(id);
+      FileStoreTable guarded = org.mockito.Mockito.spy(real);
+      when(guarded.copy(anyMap())).thenReturn(guarded);
+      TableCommitImpl direct = mock(TableCommitImpl.class);
+      org.mockito.Mockito.doAnswer(
+              call -> {
+                if (published) {
+                  try (org.apache.paimon.table.sink.StreamTableCommit nativeCommit =
+                      real.newCommit(tasks.get(0).getInput().getCommitUser())) {
+                    nativeCommit.commit(call.getArgument(0), call.getArgument(1));
+                  }
+                }
+                writeCommit(catalog.getTable(id), 99, "concurrent");
+                throw new RuntimeException("ambiguous direct response");
+              })
+          .when(direct)
+          .commit(org.mockito.ArgumentMatchers.anyLong(), any());
+      org.mockito.Mockito.doReturn(direct).when(guarded).newCommit(any());
+      PaimonPrimaryKeyTableCommit committer = new PaimonPrimaryKeyTableCommit(guarded, tasks);
+      if (published) {
+        committer.commit();
+      } else {
+        assertTrue(
+            assertThrows(OptimizingCommitSkippedException.class, committer::commit)
+                .isPublicationUncertain());
+      }
+      assertEquals(published ? 4L : 3L, latestSnapshotId(catalog, id));
+      assertTrue(readRows(catalog.getTable(id)).contains("99|concurrent"));
+      verify(guarded, times(1)).newCommit(any());
+      verify(direct, never()).filterAndCommit(anyMap());
+    }
+  }
+
+  private static List<PaimonPrimaryKeyCompactionTask> fullTasks(Catalog catalog, Identifier id)
+      throws Exception {
+    OptimizingPlanResult<PaimonPrimaryKeyCompactionTask> plan =
+        planner(
+                catalog,
+                id,
+                Collections.emptyMap(),
+                defaultConfig().setMinorLeastFileCount(99).setFullTriggerInterval(1))
+            .plan();
+    assertEquals(OptimizingType.FULL, plan.getOptimizingType());
+    List<PaimonPrimaryKeyCompactionTask> tasks = new ArrayList<>(plan.getTasks());
+    assertFalse(tasks.isEmpty());
+    for (PaimonPrimaryKeyCompactionTask task : tasks) {
+      setOutput(task, new PaimonPrimaryKeyCompactionExecutor(task.getInput()).execute());
+    }
+    return tasks;
+  }
+
+  private static FileStoreTable mockCommitTable() {
+    FileStoreTable table = mock(FileStoreTable.class);
+    when(table.copy(anyMap())).thenReturn(table);
+    return table;
+  }
+
+  private static Snapshot snapshot(long id, String user, long identifier) {
+    Snapshot snapshot = mock(Snapshot.class);
+    when(snapshot.id()).thenReturn(id);
+    when(snapshot.commitUser()).thenReturn(user);
+    when(snapshot.commitIdentifier()).thenReturn(identifier);
+    return snapshot;
+  }
+
+  private static PaimonPrimaryKeyCompactionTask emptyFullTask() {
+    PaimonPrimaryKeyCompactionTask task =
+        new PaimonPrimaryKeyCompactionTask(
+            1L,
+            "p",
+            new PaimonPrimaryKeyCompactionInput(
+                null, Collections.emptyList(), OptimizingType.FULL, true, 1L, "user", 7L),
+            new HashMap<>());
+    setOutput(task, new PaimonPrimaryKeyCompactionOutput());
+    return task;
   }
 
   private static List<PaimonPrimaryKeyCompactionTask> planAndExecute(Catalog catalog, Identifier id)

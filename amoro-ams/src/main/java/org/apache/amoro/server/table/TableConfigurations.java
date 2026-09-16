@@ -307,6 +307,19 @@ public class TableConfigurations {
                 properties,
                 TableProperties.SELF_OPTIMIZING_FULL_TRIGGER_INTERVAL,
                 TableProperties.SELF_OPTIMIZING_FULL_TRIGGER_INTERVAL_DEFAULT))
+        .setFullSkipRetryInitialDelayMs(
+            Long.parseLong(
+                properties.getOrDefault(
+                    TableProperties.SELF_OPTIMIZING_FULL_SKIP_RETRY_INITIAL_DELAY_MS,
+                    Long.toString(
+                        TableProperties.SELF_OPTIMIZING_FULL_SKIP_RETRY_INITIAL_DELAY_MS_DEFAULT))))
+        .setFullSkipRetryMaxDelayMs(
+            Long.parseLong(
+                properties.getOrDefault(
+                    TableProperties.SELF_OPTIMIZING_FULL_SKIP_RETRY_MAX_DELAY_MS,
+                    Long.toString(
+                        TableProperties.SELF_OPTIMIZING_FULL_SKIP_RETRY_MAX_DELAY_MS_DEFAULT))))
+        .validateFullSkipRetry()
         .setFullRewriteAllFiles(
             CompatiblePropertyUtil.propertyAsBoolean(
                 properties,

@@ -95,6 +95,18 @@ public class PaimonPrimaryKeyCompactionTask
     setInput(deserializeInput(inputBytes));
   }
 
+  // MyBatis restores the decoded output object. A ByteBuffer-only setter hides the inherited
+  // output field and causes argument type mismatch during recovery, including stale FULL outputs.
+  @Override
+  public PaimonPrimaryKeyCompactionOutput getOutput() {
+    return output;
+  }
+
+  public void setOutput(PaimonPrimaryKeyCompactionOutput output) {
+    this.output = output;
+    calculateSummary();
+  }
+
   public void setOutput(ByteBuffer outputBuffer) {
     ByteBuffer bytes = outputBuffer.slice();
     byte[] outputBytes = new byte[bytes.remaining()];

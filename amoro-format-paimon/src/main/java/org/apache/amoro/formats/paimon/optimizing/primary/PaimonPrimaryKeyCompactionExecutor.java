@@ -83,7 +83,7 @@ public class PaimonPrimaryKeyCompactionExecutor
     }
 
     if (shouldSkipStaleFull(table)) {
-      return noOpOutput();
+      return PaimonPrimaryKeyCompactionOutput.staleFull();
     }
 
     PaimonPrimaryKeySnapshotWriteRestore restore;
@@ -102,11 +102,15 @@ public class PaimonPrimaryKeyCompactionExecutor
     FileStoreTable refreshed =
         PaimonCompactionSchema.refresh(table, restore.requiredSchemaId(), restore.snapshotId());
 
-    // Paimon 1.4.2：writer 的 MergeTreeCompactManagerFactory#createCompactStrategy 会重新
-    // 从 options 创建 EarlyFullCompaction，只屏蔽 evaluator 无法约束执行端。
-    // 源码：paimon-core/src/main/java/org/apache/paimon/mergetree/compact/MergeTreeCompactManagerFactory.java
+    // In Paimon 1.4.2, the writer uses MergeTreeCompactManagerFactory#createCompactStrategy to
+    // recreate
+    // EarlyFullCompaction from options. Disabling it only in the evaluator does not constrain
+    // execution.
+    // Source:
+    // paimon-core/src/main/java/org/apache/paimon/mergetree/compact/MergeTreeCompactManagerFactory.java
     // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/mergetree/compact/MergeTreeCompactManagerFactory.java#L190-L224
-    // null 移除的原生依据见 compactionWriteOverrides；原表配置和显式 FULL 参数均保留。
+    // See compactionWriteOverrides for native null-removal semantics; preserve original table
+    // options and the explicit FULL argument.
     FileStoreTable compactTable =
         refreshed.copy(PaimonPrimaryKeyOptions.compactionWriteOverrides(table.options()));
     try (IOManager ioManager = IOManager.create(System.getProperty("java.io.tmpdir"));

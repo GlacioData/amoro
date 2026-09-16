@@ -279,6 +279,7 @@ class TestPaimonTablePendingInputEligibility {
 
     assertTrue(result.optimizingNecessary());
     assertPrimaryPendingInputBridge(result);
+    assertFalse(((PaimonPendingInput) result.optimizingPendingInput()).isFullCompactionPending());
   }
 
   @Test
@@ -303,6 +304,7 @@ class TestPaimonTablePendingInputEligibility {
 
     assertTrue(result.optimizingNecessary());
     assertPrimaryPendingInputBridge(result);
+    assertFalse(((PaimonPendingInput) result.optimizingPendingInput()).isFullCompactionPending());
   }
 
   @Test
@@ -387,6 +389,7 @@ class TestPaimonTablePendingInputEligibility {
 
     assertTrue(result.optimizingNecessary());
     assertPrimaryPendingInputBridge(result);
+    assertTrue(((PaimonPendingInput) result.optimizingPendingInput()).isFullCompactionPending());
   }
 
   @Test

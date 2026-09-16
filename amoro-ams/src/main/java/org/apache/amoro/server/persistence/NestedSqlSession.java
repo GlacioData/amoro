@@ -35,6 +35,11 @@ public final class NestedSqlSession implements Closeable {
   private boolean isRollingback = false;
   private SqlSession sqlSession;
 
+  /** Read-only guard for completion paths that require a real top-level commit. */
+  public static boolean hasActiveSession() {
+    return sessions.get() != null;
+  }
+
   public static NestedSqlSession openSession(Supplier<SqlSession> sessionSupplier) {
     NestedSqlSession session = sessions.get();
     if (session == null) {

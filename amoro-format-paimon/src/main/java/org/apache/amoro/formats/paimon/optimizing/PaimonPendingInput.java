@@ -23,6 +23,12 @@ import org.apache.amoro.table.FormatPendingInput;
 /** Paimon-specific pending input metrics collected during the refresh phase. */
 public class PaimonPendingInput implements FormatPendingInput {
 
+  @Override
+  public boolean canPlanWithoutSnapshotChange(
+      org.apache.amoro.optimizing.OptimizationContext context, long now) {
+    return fullCompactionPending && PaimonFullScheduling.isDue(context, now);
+  }
+
   // ---- Workload dimension ----
   private int dataFileCount;
   private long dataFileSize;
@@ -39,6 +45,18 @@ public class PaimonPendingInput implements FormatPendingInput {
 
   // ---- Health score ----
   private int healthScore = -1;
+
+  // Set only when the primary-key evaluator selects FULL; older pending_input JSON defaults to
+  // false.
+  private boolean fullCompactionPending;
+
+  public boolean isFullCompactionPending() {
+    return fullCompactionPending;
+  }
+
+  public void setFullCompactionPending(boolean fullCompactionPending) {
+    this.fullCompactionPending = fullCompactionPending;
+  }
 
   public PaimonPendingInput() {}
 

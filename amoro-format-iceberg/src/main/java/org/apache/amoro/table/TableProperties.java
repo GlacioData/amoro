@@ -126,6 +126,14 @@ public class TableProperties {
       "self-optimizing.full.trigger.interval";
   public static final int SELF_OPTIMIZING_FULL_TRIGGER_INTERVAL_DEFAULT = -1; // not trigger
 
+  public static final String SELF_OPTIMIZING_FULL_SKIP_RETRY_INITIAL_DELAY_MS =
+      "self-optimizing.full.skip-retry.initial-delay-ms";
+  public static final long SELF_OPTIMIZING_FULL_SKIP_RETRY_INITIAL_DELAY_MS_DEFAULT = 60_000L;
+
+  public static final String SELF_OPTIMIZING_FULL_SKIP_RETRY_MAX_DELAY_MS =
+      "self-optimizing.full.skip-retry.max-delay-ms";
+  public static final long SELF_OPTIMIZING_FULL_SKIP_RETRY_MAX_DELAY_MS_DEFAULT = 900_000L;
+
   public static final String SELF_OPTIMIZING_FULL_REWRITE_ALL_FILES =
       "self-optimizing.full.rewrite-all-files";
   public static final boolean SELF_OPTIMIZING_FULL_REWRITE_ALL_FILES_DEFAULT = true;

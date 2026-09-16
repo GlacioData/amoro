@@ -670,6 +670,7 @@ public class PaimonOptimizingPlanner implements TableOptimizingPlanner {
     private final long lastFullOptimizingTime;
     private final long lastMajorOptimizingTime;
     private final long lastOptimizedSnapshotId;
+    private final long fullRetryNotBefore;
 
     private RuntimeInputs(
         boolean runtimeAvailable,
@@ -680,7 +681,8 @@ public class PaimonOptimizingPlanner implements TableOptimizingPlanner {
         long lastMinorOptimizingTime,
         long lastFullOptimizingTime,
         long lastMajorOptimizingTime,
-        long lastOptimizedSnapshotId) {
+        long lastOptimizedSnapshotId,
+        long fullRetryNotBefore) {
       this.runtimeAvailable = runtimeAvailable;
       this.tableIdentifier = tableIdentifier;
       this.optimizingConfig = optimizingConfig;
@@ -690,6 +692,7 @@ public class PaimonOptimizingPlanner implements TableOptimizingPlanner {
       this.lastFullOptimizingTime = lastFullOptimizingTime;
       this.lastMajorOptimizingTime = lastMajorOptimizingTime;
       this.lastOptimizedSnapshotId = lastOptimizedSnapshotId;
+      this.fullRetryNotBefore = fullRetryNotBefore;
     }
 
     static RuntimeInputs capture(
@@ -708,7 +711,8 @@ public class PaimonOptimizingPlanner implements TableOptimizingPlanner {
             fallbackLastMinor,
             fallbackLastFull,
             fallbackLastMajor,
-            -1L);
+            -1L,
+            0L);
       }
       OptimizingConfig currentConfig = context.getOptimizingConfig();
       return new RuntimeInputs(
@@ -720,7 +724,13 @@ public class PaimonOptimizingPlanner implements TableOptimizingPlanner {
           context.getLastMinorOptimizingTime(),
           context.getLastFullOptimizingTime(),
           context.getLastMajorOptimizingTime(),
-          context.getLastOptimizedSnapshotId());
+          context.getLastOptimizedSnapshotId(),
+          context.getFullRetryNotBefore());
+    }
+
+    @Override
+    public long getFullRetryNotBefore() {
+      return fullRetryNotBefore;
     }
 
     OptimizationContext healthContext() {

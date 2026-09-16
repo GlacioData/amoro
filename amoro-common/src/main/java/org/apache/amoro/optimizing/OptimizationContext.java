@@ -21,6 +21,9 @@ package org.apache.amoro.optimizing;
 import org.apache.amoro.ServerTableIdentifier;
 import org.apache.amoro.config.OptimizingConfig;
 
+import java.util.Collections;
+import java.util.Map;
+
 /**
  * Read-only context provided to {@code AmoroTable.evaluatePendingInput()} during refresh
  * evaluation. Implemented by {@code DefaultTableRuntime} in amoro-ams.
@@ -31,6 +34,14 @@ public interface OptimizationContext {
 
   OptimizingConfig getOptimizingConfig();
 
+  /**
+   * Table configuration visible to this scheduling attempt, used by format policies to validate
+   * persisted demand.
+   */
+  default Map<String, String> getTableConfig() {
+    return Collections.emptyMap();
+  }
+
   boolean isIdle();
 
   long getLastPlanTime();
@@ -40,6 +51,11 @@ public interface OptimizationContext {
   long getLastFullOptimizingTime();
 
   long getLastMajorOptimizingTime();
+
+  /** Earliest allowed FULL retry after a safe skip; absent on older runtime implementations. */
+  default long getFullRetryNotBefore() {
+    return 0L;
+  }
 
   /** Return the existing optimizing checkpoint used by scheduling. */
   default long getLastOptimizedSnapshotId() {
