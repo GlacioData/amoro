@@ -104,6 +104,11 @@ public class PaimonTable implements AmoroTable<Table>, Serializable {
     return TableFormat.PAIMON;
   }
 
+  /** Returns immutable raw catalog options, including cache options omitted by properties(). */
+  public Map<String, String> catalogProperties() {
+    return catalogProperties;
+  }
+
   @Override
   public Map<String, String> properties() {
     Map<String, String> tableOptions = table.options();

@@ -65,6 +65,7 @@ final class PaimonPrimaryKeySnapshotWriteRestore implements WriteRestore {
 
   private final SnapshotManager snapshotManager;
   private final FileStoreScan scan;
+  private final PaimonPrimaryKeyManifestCache.ScanLease scanLease;
   private final IndexFileHandler indexFileHandler;
   private long latestKnownSnapshotId;
   private final Snapshot snapshot;
@@ -83,10 +84,19 @@ final class PaimonPrimaryKeySnapshotWriteRestore implements WriteRestore {
 
   PaimonPrimaryKeySnapshotWriteRestore(
       FileStoreTable table, long snapshotId, List<PaimonBucketCompactionUnit> units) {
+    this(table, snapshotId, units, null);
+  }
+
+  PaimonPrimaryKeySnapshotWriteRestore(
+      FileStoreTable table,
+      long snapshotId,
+      List<PaimonBucketCompactionUnit> units,
+      PaimonPrimaryKeyManifestCache.ScanLease scanLease) {
     this.snapshotManager = table.snapshotManager();
     this.latestKnownSnapshotId = snapshotId;
     FileStore<?> store = table.store();
-    this.scan = store.newScan();
+    this.scanLease = scanLease;
+    this.scan = scanLease == null ? store.newScan() : scanLease.scan();
     this.indexFileHandler = store.newIndexFileHandler();
     if (CoreOptions.fromMap(table.options()).manifestDeleteFileDropStats()) {
       this.scan.dropStats();
@@ -160,7 +170,9 @@ final class PaimonPrimaryKeySnapshotWriteRestore implements WriteRestore {
     // 此恢复 scan 不设置 value filter/limit，因而没有 KeyValueFileStoreScan 的 plan 后置过滤。
     // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/operation/AbstractFileStoreScan.java#L390-L433
     Iterator<ManifestEntry> entries =
-        scan.withSnapshot(snapshot).withPartitionBucket(partition, bucket).readFileIterator();
+        scanLease == null
+            ? scan.withSnapshot(snapshot).withPartitionBucket(partition, bucket).readFileIterator()
+            : scanLease.readFiles(snapshot, partition, bucket);
     Integer totalBuckets = extractDataFiles(entries, dataFiles);
 
     IndexFileMeta dynamicBucketIndex =

@@ -87,10 +87,11 @@ public class PaimonPrimaryKeyCompactionExecutor
     }
 
     PaimonPrimaryKeySnapshotWriteRestore restore;
-    try {
+    try (PaimonPrimaryKeyManifestCache.ScanLease scan =
+        PaimonPrimaryKeyManifestCache.acquire(input.getTable(), table)) {
       restore =
           new PaimonPrimaryKeySnapshotWriteRestore(
-              table, input.getTargetSnapshotId(), input.getUnits());
+              table, input.getTargetSnapshotId(), input.getUnits(), scan);
     } catch (RuntimeException e) {
       throw new IllegalStateException(
           "Failed to prepare Paimon compaction inputs: table="
