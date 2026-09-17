@@ -93,6 +93,24 @@ public interface TableProcessMapper {
       @Param("processParameters") Map<String, String> processParameters,
       @Param("summary") Map<String, String> summary);
 
+  @Update(
+      "UPDATE table_process SET status = 'CLOSED', process_stage = 'committing', "
+          + "finish_time = #{finishTime, typeHandler=org.apache.amoro.server.persistence.converter.Long2TsConverter}, "
+          + "fail_message = #{reason, jdbcType=LONGVARCHAR}, "
+          + "process_parameters = #{parameters,typeHandler=org.apache.amoro.server.persistence.converter.Map2StringConverter}, "
+          + "summary = #{summary,typeHandler=org.apache.amoro.server.persistence.converter.Map2StringConverter} "
+          + "WHERE table_id = #{tableId} AND process_id = #{processId} "
+          + "AND status = 'RUNNING' AND process_type = 'FULL' AND execution_engine = 'AMORO' "
+          + "AND process_stage = #{expectedStage}")
+  int closeSkippedFull(
+      @Param("tableId") long tableId,
+      @Param("processId") long processId,
+      @Param("expectedStage") String expectedStage,
+      @Param("finishTime") long finishTime,
+      @Param("reason") String reason,
+      @Param("parameters") Map<String, String> parameters,
+      @Param("summary") Map<String, String> summary);
+
   @Select(
       "SELECT process_id, table_id, external_process_identifier, status, process_type, process_stage, execution_engine, retry_number, "
           + "create_time, finish_time, fail_message, process_parameters, summary "

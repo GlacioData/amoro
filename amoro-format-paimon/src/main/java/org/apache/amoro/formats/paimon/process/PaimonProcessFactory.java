@@ -39,6 +39,7 @@ import org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeyCompac
 import org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeyTableCommit;
 import org.apache.amoro.optimizing.FormatTableAnalysis;
 import org.apache.amoro.optimizing.OptimizationContext;
+import org.apache.amoro.optimizing.OptimizingType;
 import org.apache.amoro.optimizing.TableOptimizingCommitter;
 import org.apache.amoro.optimizing.TableOptimizingPlanner;
 import org.apache.amoro.process.ProcessFactory;
@@ -50,6 +51,7 @@ import org.apache.amoro.utils.SnowflakeIdGenerator;
 import org.apache.paimon.table.AppendOnlyFileStoreTable;
 import org.apache.paimon.table.BucketMode;
 import org.apache.paimon.table.FileStoreTable;
+import org.apache.paimon.table.PrimaryKeyFileStoreTable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -60,6 +62,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Supplier;
 
 /**
  * {@link ProcessFactory} for Paimon BUCKET_UNAWARE (AppendOnly) compaction. Discovered via
@@ -71,6 +74,16 @@ import java.util.Set;
  * table into this factory — a clean kill-switch for grey-scale rollout.
  */
 public class PaimonProcessFactory implements ProcessFactory {
+
+  @Override
+  public boolean replanOnRecovery(Supplier<AmoroTable<?>> loader, OptimizingType type) {
+    if (type != OptimizingType.FULL) {
+      return false;
+    }
+    AmoroTable<?> table = loader.get();
+    return table instanceof PaimonTable
+        && table.originalTable() instanceof PrimaryKeyFileStoreTable;
+  }
 
   private static final Logger LOG = LoggerFactory.getLogger(PaimonProcessFactory.class);
 

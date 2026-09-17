@@ -26,6 +26,7 @@ import org.apache.amoro.api.BlockableOperation;
 import org.apache.amoro.api.OptimizingTaskId;
 import org.apache.amoro.api.OptimizingTaskResult;
 import org.apache.amoro.exception.OptimizingClosedException;
+import org.apache.amoro.exception.OptimizingCommitSkippedException;
 import org.apache.amoro.exception.PersistenceException;
 import org.apache.amoro.exception.TaskNotFoundException;
 import org.apache.amoro.optimizing.BaseOptimizingInput;
@@ -46,6 +47,7 @@ import org.apache.amoro.server.AmoroServiceConstants;
 import org.apache.amoro.server.catalog.CatalogManager;
 import org.apache.amoro.server.manager.MetricManager;
 import org.apache.amoro.server.optimizing.TaskRuntime.Status;
+import org.apache.amoro.server.persistence.NestedSqlSession;
 import org.apache.amoro.server.persistence.OptimizingPayloadException;
 import org.apache.amoro.server.persistence.OptimizingProcessState;
 import org.apache.amoro.server.persistence.PersistentBase;
@@ -60,6 +62,8 @@ import org.apache.amoro.server.resource.OptimizerInstance;
 import org.apache.amoro.server.resource.OptimizerThread;
 import org.apache.amoro.server.resource.QuotaProvider;
 import org.apache.amoro.server.table.DefaultTableRuntime;
+import org.apache.amoro.server.table.FullCompactionCompletion;
+import org.apache.amoro.server.table.OptimizingCommitGuard;
 import org.apache.amoro.server.table.OptimizingOwnerConflictException;
 import org.apache.amoro.server.table.blocker.TableBlocker;
 import org.apache.amoro.shade.guava32.com.google.common.annotations.VisibleForTesting;
@@ -184,6 +188,15 @@ public class OptimizingQueue extends PersistentBase {
 
   private void recoverOwnedTable(DefaultTableRuntime tableRuntime, String trigger) {
     long tableId = tableRuntime.getTableIdentifier().getId();
+    PendingRecovery pending = pendingRecoveries.get(tableId);
+    if (pending != null && pending.tableRuntime != tableRuntime) {
+      pendingRecoveries.remove(tableId, pending);
+      pending = null;
+    }
+    if (pending != null && pending.fullSkip) {
+      retryFullSkipCompletion(tableId, pending);
+      return;
+    }
     long expectedProcessId = -1L;
     RecoveryKey recoveryKey = null;
     try {
@@ -198,14 +211,31 @@ public class OptimizingQueue extends PersistentBase {
         return;
       }
       recoverOwnedTableInternal(tableRuntime, expectedProcessId, trigger);
-      pendingRecoveries.remove(tableId);
+      removePendingRecovery(tableRuntime);
     } catch (RuntimeException e) {
-      handleRecoveryFailure(tableRuntime, expectedProcessId, trigger, e);
+      PendingRecovery registered = pendingRecoveries.get(tableId);
+      if (registered == null || !registered.fullSkip) {
+        handleRecoveryFailure(tableRuntime, expectedProcessId, trigger, e);
+      }
     } finally {
       if (recoveryKey != null) {
         recoveryGate.exit(recoveryKey);
       }
     }
+  }
+
+  private static long tableId(DefaultTableRuntime runtime) {
+    return runtime.getTableIdentifier().getId();
+  }
+
+  private boolean requiresReplan(DefaultTableRuntime runtime, OptimizingType type) {
+    if (type != OptimizingType.FULL) {
+      return false;
+    }
+    return router
+        .forFormat(runtime.getFormat())
+        .replanOnRecovery(
+            () -> catalogManager.loadTable(runtime.getTableIdentifier().getIdentifier()), type);
   }
 
   private void recoverOwnedTableInternal(
@@ -233,11 +263,48 @@ public class OptimizingQueue extends PersistentBase {
       return;
     }
 
+    TableProcessMeta recoveryMeta = loadProcessMeta(expectedProcessId);
+    if (recoveryMeta != null
+        && recoveryMeta.getStatus() == ProcessStatus.RUNNING
+        && requiresReplan(tableRuntime, OptimizingType.valueOf(recoveryMeta.getProcessType()))) {
+      try {
+        OptimizingProcess attached = tableRuntime.getOptimizingProcess();
+        if (attached instanceof TableOptimizingProcess
+            && ((TableOptimizingProcess) attached).belongsTo(this)) {
+          ((TableOptimizingProcess) attached).closeForReplan();
+        } else {
+          // Fence the old commit before decoding payloads; decoding failures must not resume old
+          // tasks.
+          OptimizingCommitGuard.seal(tableId(tableRuntime), expectedProcessId);
+          OptimizingProcessState state =
+              getAs(
+                  OptimizingProcessMapper.class,
+                  mapper -> mapper.getProcessState(expectedProcessId));
+          TableOptimizingProcess recovered =
+              new TableOptimizingProcess(
+                  tableRuntime,
+                  recoveryMeta,
+                  state,
+                  tableRuntime.getOptimizingStatus() == OptimizingStatus.COMMITTING,
+                  false);
+          recovered.closeForReplan();
+        }
+      } catch (RuntimeException failure) {
+        registerPendingRecovery(tableRuntime, expectedProcessId, "FULL_SKIP_COMPLETION", failure);
+        throw failure;
+      }
+      return;
+    }
+
     OptimizingProcess localProcess = tableRuntime.getOptimizingProcess();
     if (localProcess instanceof TableOptimizingProcess
         && ((TableOptimizingProcess) localProcess).belongsTo(this)) {
+      TableOptimizingProcess process = (TableOptimizingProcess) localProcess;
+      if (process.fullSkipDecision != null) {
+        process.reconcileSkippedFull();
+        return;
+      }
       if (localProcess.getStatus() == ProcessStatus.RUNNING) {
-        TableOptimizingProcess process = (TableOptimizingProcess) localProcess;
         if (process.reconcileEligibility(trigger) == EligibilityReconciliationResult.ELIGIBLE) {
           resumeOwnedTable(tableRuntime, process, trigger);
         }
@@ -246,6 +313,14 @@ public class OptimizingQueue extends PersistentBase {
     }
 
     TableProcessMeta processMeta = loadProcessMeta(expectedProcessId);
+    if (FullCompactionCompletion.isSkipped(processMeta)
+        || (processMeta != null
+            && FullCompactionCompletion.isTerminal(processMeta)
+            && requiresReplan(
+                tableRuntime, OptimizingType.valueOf(processMeta.getProcessType())))) {
+      tableRuntime.completeSkippedFull(expectedProcessId, null, null);
+      return;
+    }
     TableOptimizingProcess process = null;
     if (isPersistedPaimonCommitReplay(tableRuntime, processMeta)) {
       process = loadProcess(tableRuntime, processMeta);
@@ -389,10 +464,13 @@ public class OptimizingQueue extends PersistentBase {
         pendingRecoveries.compute(
             tableId,
             (ignored, current) -> {
-              if (current == null || current.expectedProcessId != expectedProcessId) {
-                return PendingRecovery.first(tableRuntime, expectedProcessId);
+              if (current == null
+                  || current.tableRuntime != tableRuntime
+                  || current.expectedProcessId != expectedProcessId) {
+                return PendingRecovery.first(
+                    tableRuntime, expectedProcessId, "FULL_SKIP_COMPLETION".equals(trigger));
               }
-              return current.nextAttempt();
+              return current.nextAttempt("FULL_SKIP_COMPLETION".equals(trigger));
             });
     if (shouldLogRecoveryAttempt(pending.attempts)) {
       LOG.warn(
@@ -420,6 +498,10 @@ public class OptimizingQueue extends PersistentBase {
           if (pending.nextRetryAt > now) {
             return;
           }
+          if (pending.fullSkip) {
+            retryFullSkipCompletion(tableId, pending);
+            return;
+          }
           if (pending.expectedProcessId >= 0L) {
             try {
               long currentProcessId = pending.tableRuntime.getProcessId();
@@ -442,6 +524,56 @@ public class OptimizingQueue extends PersistentBase {
           }
           recoverOwnedTable(pending.tableRuntime, "PERIODIC_RETRY");
         });
+  }
+
+  private void retryFullSkipCompletion(long tableId, PendingRecovery pending) {
+    OptimizingOwnership ownership = ownershipGuard.apply(pending.tableRuntime);
+    if (ownership != OptimizingOwnership.OWNED) {
+      if (ownership == OptimizingOwnership.NOT_OWNED) {
+        pendingRecoveries.remove(tableId, pending);
+      }
+      return;
+    }
+    RecoveryKey key = recoveryGate.tryEnter(tableId, pending.expectedProcessId);
+    if (key == null) {
+      return;
+    }
+    try {
+      OptimizingProcess local = pending.tableRuntime.getOptimizingProcess();
+      if (local instanceof TableOptimizingProcess
+          && local.getProcessId() == pending.expectedProcessId
+          && ((TableOptimizingProcess) local).belongsTo(this)
+          && ((TableOptimizingProcess) local).fullSkipDecision != null) {
+        ((TableOptimizingProcess) local).reconcileSkippedFull();
+      } else {
+        // The released owner is expected after a successful DB commit with a lost response.
+        // Keep the old process id instead of dropping this recovery as an owner mismatch.
+        TableProcessMeta meta = loadProcessMeta(pending.expectedProcessId);
+        if (meta != null
+            && meta.getStatus() == ProcessStatus.RUNNING
+            && pending.tableRuntime.getProcessId() == pending.expectedProcessId) {
+          // The old in-memory decision was lost before commit. Restore the original process;
+          // its normal commit replay reconstructs the skip from persisted task outputs.
+          recoverOwnedTableInternal(
+              pending.tableRuntime, pending.expectedProcessId, "FULL_SKIP_RELOAD");
+        } else {
+          pending.tableRuntime.completeSkippedFull(pending.expectedProcessId, null, null);
+          tableQueue.removeIf(
+              process ->
+                  process.getTableId() == tableId
+                      && process.getProcessId() == pending.expectedProcessId);
+        }
+      }
+      pendingRecoveries.remove(tableId, pending);
+    } catch (RuntimeException failure) {
+      // persistSkippedFull already registers a local failure. Do not double the retry attempt.
+      if (pendingRecoveries.get(tableId) == pending) {
+        registerPendingRecovery(
+            pending.tableRuntime, pending.expectedProcessId, "FULL_SKIP_COMPLETION", failure);
+      }
+    } finally {
+      recoveryGate.exit(key);
+    }
   }
 
   @VisibleForTesting
@@ -654,6 +786,14 @@ public class OptimizingQueue extends PersistentBase {
 
       boolean recoverTaskQuotas =
           tableRuntime.getOptimizingProcess() == null && tableRuntime.getProcessId() != 0L;
+      if (recoverTaskQuotas) {
+        TableProcessMeta meta = loadProcessMeta(tableRuntime);
+        if (meta != null
+            && requiresReplan(tableRuntime, OptimizingType.valueOf(meta.getProcessType()))) {
+          recoverOwnedTable(tableRuntime, "CONFIG_CHANGED");
+          return;
+        }
+      }
       TableOptimizingProcess process = localRunningProcess(tableRuntime);
       EligibilityReconciliationResult result =
           process == null
@@ -760,12 +900,24 @@ public class OptimizingQueue extends PersistentBase {
     return true;
   }
 
+  private void removePendingRecovery(DefaultTableRuntime runtime) {
+    pendingRecoveries.computeIfPresent(
+        tableId(runtime), (ignored, pending) -> pending.tableRuntime == runtime ? null : pending);
+  }
+
   public void releaseTable(DefaultTableRuntime tableRuntime) {
+    removePendingRecovery(tableRuntime);
     scheduler.removeTable(tableRuntime);
     List<OptimizingProcess> processList =
         tableQueue.stream()
             .filter(process -> process.getTableId() == tableRuntime.getTableIdentifier().getId())
             .collect(Collectors.toList());
+    OptimizingProcess attached = tableRuntime.getOptimizingProcess();
+    if (attached instanceof TableOptimizingProcess
+        && ((TableOptimizingProcess) attached).belongsTo(this)
+        && !processList.contains(attached)) {
+      processList.add(attached);
+    }
     for (OptimizingProcess process : processList) {
       process.close(false);
       clearProcess(process);
@@ -777,6 +929,7 @@ public class OptimizingQueue extends PersistentBase {
   }
 
   public void detachTable(DefaultTableRuntime tableRuntime) {
+    removePendingRecovery(tableRuntime);
     scheduler.removeTable(tableRuntime);
     List<TableOptimizingProcess> localProcesses =
         tableQueue.stream()
@@ -784,14 +937,12 @@ public class OptimizingQueue extends PersistentBase {
             .collect(Collectors.toList());
     localProcesses.forEach(
         process -> {
-          clearProcess(process);
-          tableRuntime.detachOptimizingProcess(process);
+          process.detach();
         });
     OptimizingProcess attachedProcess = tableRuntime.getOptimizingProcess();
     if (attachedProcess instanceof TableOptimizingProcess
         && ((TableOptimizingProcess) attachedProcess).belongsTo(this)) {
-      clearProcess(attachedProcess);
-      tableRuntime.detachOptimizingProcess(attachedProcess);
+      ((TableOptimizingProcess) attachedProcess).detach();
     }
     LOG.info(
         "Detach table {} from queue {} without changing its persisted optimizing process",
@@ -1010,6 +1161,15 @@ public class OptimizingQueue extends PersistentBase {
 
       TableProcessMeta processMeta =
           getAs(TableProcessMapper.class, mapper -> mapper.getProcessMeta(ownerProcessId));
+      if (processMeta != null
+          && requiresReplan(tableRuntime, OptimizingType.valueOf(processMeta.getProcessType()))) {
+        recoverOwnedTable(tableRuntime, "BEFORE_PLANNING");
+        return false;
+      }
+      if (processMeta == null && requiresReplan(tableRuntime, OptimizingType.FULL)) {
+        // Missing process metadata does not prove that the old native call has stopped.
+        return false;
+      }
       if (processMeta == null || !isActiveProcess(processMeta.getStatus())) {
         if (tableRuntime.normalizeProcessOwner(ownerProcessId)) {
           LOG.info(
@@ -1165,7 +1325,7 @@ public class OptimizingQueue extends PersistentBase {
         if (!passPlanningFence(tableRuntime, "BEFORE_PROCESS_PERSIST")) {
           return null;
         }
-        return new TableOptimizingProcess(planResult, tableRuntime);
+        return new TableOptimizingProcess(planResult, tableRuntime, table);
       } else {
         tableRuntime.completeEmptyProcess();
         return null;
@@ -1400,30 +1560,39 @@ public class OptimizingQueue extends PersistentBase {
     private final long expectedProcessId;
     private final int attempts;
     private final long nextRetryAt;
+    private final boolean fullSkip;
 
     private PendingRecovery(
-        DefaultTableRuntime tableRuntime, long expectedProcessId, int attempts, long nextRetryAt) {
+        DefaultTableRuntime tableRuntime,
+        long expectedProcessId,
+        int attempts,
+        long nextRetryAt,
+        boolean fullSkip) {
       this.tableRuntime = tableRuntime;
       this.expectedProcessId = expectedProcessId;
       this.attempts = attempts;
       this.nextRetryAt = nextRetryAt;
+      this.fullSkip = fullSkip;
     }
 
-    private static PendingRecovery first(DefaultTableRuntime tableRuntime, long expectedProcessId) {
+    private static PendingRecovery first(
+        DefaultTableRuntime tableRuntime, long expectedProcessId, boolean fullSkip) {
       return new PendingRecovery(
           tableRuntime,
           expectedProcessId,
           1,
-          System.currentTimeMillis() + recoveryRetryDelayMillis(1));
+          System.currentTimeMillis() + recoveryRetryDelayMillis(1),
+          fullSkip);
     }
 
-    private PendingRecovery nextAttempt() {
-      int nextAttempts = attempts + 1;
+    private PendingRecovery nextAttempt(boolean skipped) {
+      int nextAttempts = attempts == Integer.MAX_VALUE ? attempts : attempts + 1;
       return new PendingRecovery(
           tableRuntime,
           expectedProcessId,
           nextAttempts,
-          System.currentTimeMillis() + recoveryRetryDelayMillis(nextAttempts));
+          System.currentTimeMillis() + recoveryRetryDelayMillis(nextAttempts),
+          fullSkip || skipped);
     }
   }
 
@@ -1492,6 +1661,10 @@ public class OptimizingQueue extends PersistentBase {
     private final long targetSnapshotId;
     private final long targetChangeSnapshotId;
     private final CommitMode commitMode;
+    private final boolean replanOnRecovery;
+    private volatile boolean detached;
+    private boolean closeAfterTaskCompletion;
+    private boolean completingTask;
     // Widened to StagedTaskDescriptor<?,?,?> so non-Iceberg formats (Paimon today, Mixed-Hive
     // tomorrow) share the same process/queue machinery without unchecked downcasts.
     private final Map<OptimizingTaskId, TaskRuntime<? extends StagedTaskDescriptor<?, ?, ?>>>
@@ -1505,6 +1678,7 @@ public class OptimizingQueue extends PersistentBase {
     private Map<String, Long> toSequence = Maps.newHashMap();
     private final Map<String, String> persistedSummaryOverride;
     private boolean hasCommitted = false;
+    private volatile FullCompactionCompletion.Decision fullSkipDecision;
 
     public TaskRuntime<?> poll(OptimizerThread thread, boolean needQuotaChecking) {
       try {
@@ -1512,7 +1686,7 @@ public class OptimizingQueue extends PersistentBase {
         if (lock.tryLock(10, TimeUnit.MILLISECONDS)) {
           try {
             TaskRuntime<?> task = null;
-            if (status != ProcessStatus.KILLED && status != ProcessStatus.FAILED) {
+            if (!detached && status == ProcessStatus.RUNNING) {
               int actualQuota = getActualQuota();
               int quotaLimit = getQuotaLimit();
               if (!needQuotaChecking || actualQuota < quotaLimit) {
@@ -1537,11 +1711,14 @@ public class OptimizingQueue extends PersistentBase {
     }
 
     public TableOptimizingProcess(
-        OptimizingPlanResult planResult, DefaultTableRuntime tableRuntime) {
+        OptimizingPlanResult planResult, DefaultTableRuntime tableRuntime, AmoroTable<?> table) {
       processId = planResult.getProcessId();
       this.tableRuntime = tableRuntime;
       this.format = tableRuntime.getFormat();
       optimizingType = planResult.getOptimizingType();
+      replanOnRecovery =
+          optimizingType == OptimizingType.FULL
+              && router.forFormat(format).replanOnRecovery(() -> table, optimizingType);
       planTime = planResult.getPlanTime();
       targetSnapshotId = planResult.getTargetSnapshotId();
       targetChangeSnapshotId = planResult.getTargetChangeSnapshotId();
@@ -1565,10 +1742,20 @@ public class OptimizingQueue extends PersistentBase {
         TableProcessMeta processMeta,
         OptimizingProcessState processState,
         boolean loadPayloads) {
+      this(tableRuntime, processMeta, processState, loadPayloads, true);
+    }
+
+    private TableOptimizingProcess(
+        DefaultTableRuntime tableRuntime,
+        TableProcessMeta processMeta,
+        OptimizingProcessState processState,
+        boolean loadPayloads,
+        boolean resume) {
       this.tableRuntime = tableRuntime;
       this.format = tableRuntime.getFormat();
       processId = processMeta.getProcessId();
       optimizingType = OptimizingType.valueOf(processMeta.getProcessType());
+      replanOnRecovery = requiresReplan(tableRuntime, optimizingType);
       targetSnapshotId = processState == null ? -1L : processState.getTargetSnapshotId();
       targetChangeSnapshotId =
           processState == null ? -1L : processState.getTargetChangeSnapshotId();
@@ -1586,14 +1773,16 @@ public class OptimizingQueue extends PersistentBase {
               ? null
               : new HashMap<>(processMeta.getSummary());
       if (loadPayloads) {
-        loadTaskRuntimes();
+        loadTaskRuntimes(resume);
         commitMode =
             resolveRecoveryCommitMode(
                 format, recoveredOptimizingStatus, status, allTasksPrepared());
         // Publish only after all descriptors and payloads have been decoded and validated. This
         // prevents a recovery exception from leaving a process attached to the runtime but absent
         // from tableQueue.
-        tableRuntime.recover(this);
+        if (resume) {
+          tableRuntime.recover(this);
+        }
       } else {
         loadTaskRuntimesWithoutPayload();
         commitMode = CommitMode.NORMAL;
@@ -1643,7 +1832,14 @@ public class OptimizingQueue extends PersistentBase {
     public void close(boolean needCommit) {
       lock.lock();
       try {
-        if (this.status != ProcessStatus.RUNNING) {
+        if (replanOnRecovery && !needCommit) {
+          if (status != ProcessStatus.RUNNING && fullSkipDecision == null) {
+            return;
+          }
+          closeForReplan();
+          return;
+        }
+        if (this.status != ProcessStatus.RUNNING || detached) {
           return;
         }
         if (tableRuntime.isAllowPartialCommit() && needCommit) {
@@ -1666,6 +1862,10 @@ public class OptimizingQueue extends PersistentBase {
       long startTime = System.currentTimeMillis();
       lock.lock();
       try {
+        if (replanOnRecovery) {
+          closeForReplan();
+          return;
+        }
         if (this.status != ProcessStatus.RUNNING) {
           LOG.debug(
               "Optimizing reconciliation trigger={} table={} processId={} eligibility={}"
@@ -1732,6 +1932,9 @@ public class OptimizingQueue extends PersistentBase {
       TaskRuntime<?> taskRuntime = getTaskRuntime(taskId);
       lock.lock();
       try {
+        if (detached || status != ProcessStatus.RUNNING) {
+          throw new OptimizingClosedException(processId);
+        }
         taskRuntime.ack(thread);
       } finally {
         lock.unlock();
@@ -1742,7 +1945,22 @@ public class OptimizingQueue extends PersistentBase {
       TaskRuntime<?> taskRuntime = getTaskRuntime(result.getTaskId());
       lock.lock();
       try {
-        taskRuntime.complete(thread, result);
+        if (detached || status != ProcessStatus.RUNNING) {
+          throw new OptimizingClosedException(processId);
+        }
+        completingTask = true;
+        try {
+          taskRuntime.complete(thread, result);
+        } catch (RuntimeException | Error failure) {
+          closeAfterTaskCompletion = false;
+          throw failure;
+        } finally {
+          completingTask = false;
+        }
+        if (closeAfterTaskCompletion) {
+          closeAfterTaskCompletion = false;
+          closeForReplan();
+        }
       } finally {
         lock.unlock();
       }
@@ -1767,6 +1985,11 @@ public class OptimizingQueue extends PersistentBase {
               }
               return v;
             });
+        // Late callbacks only release local counters; they must not change the new owner or a
+        // closed process.
+        if (detached || status != ProcessStatus.RUNNING) {
+          return;
+        }
         // task cancel means persistAndSetCompleted has been called and start/end may be absent.
         if (taskRuntime.getStatus() == TaskRuntime.Status.CANCELED) {
           return;
@@ -1814,6 +2037,10 @@ public class OptimizingQueue extends PersistentBase {
                   taskRuntime.getTaskId(),
                   processId);
               this.failedReason = taskRuntime.getFailReason();
+              if (replanOnRecovery) {
+                closeForReplan();
+                return;
+              }
               this.status = ProcessStatus.FAILED;
               this.endTime = taskRuntime.getEndTime();
               persistAndSetCompleted(false);
@@ -1828,6 +2055,9 @@ public class OptimizingQueue extends PersistentBase {
     private boolean beginCommittingIfEligible(String trigger) {
       lock.lock();
       try {
+        if (detached || status != ProcessStatus.RUNNING) {
+          return false;
+        }
         AtomicReference<PlanningFenceResult> fenceResult =
             new AtomicReference<>(PlanningFenceResult.UNKNOWN);
         tableRuntime
@@ -1930,6 +2160,9 @@ public class OptimizingQueue extends PersistentBase {
     private void resetTask(TaskRuntime<?> taskRuntime) {
       lock.lock();
       try {
+        if (detached || status != ProcessStatus.RUNNING) {
+          throw new OptimizingClosedException(processId);
+        }
         taskRuntime.reset();
         // Cast is safe: only descriptors that already entered the widened taskMap end up here; the
         // public retryTask(TaskRuntime<?>) entry point forwards whatever pollTask previously
@@ -2026,6 +2259,17 @@ public class OptimizingQueue extends PersistentBase {
 
       lock.lock();
       try {
+        if (detached) {
+          return;
+        }
+        if (replanOnRecovery) {
+          commitWithGuard();
+          return;
+        }
+        if (fullSkipDecision != null) {
+          persistSkippedFull();
+          return;
+        }
         if (hasCommitted) {
           LOG.warn("{} has already committed, give up", tableRuntime.getTableIdentifier());
           try {
@@ -2056,6 +2300,24 @@ public class OptimizingQueue extends PersistentBase {
           }
           endTime = System.currentTimeMillis();
           persistAndSetCompleted(status == ProcessStatus.SUCCESS);
+        } catch (OptimizingCommitSkippedException skipped) {
+          if (skipped.getReason() != OptimizingCommitSkippedException.Reason.STALE_FULL
+              || optimizingType != OptimizingType.FULL) {
+            status = ProcessStatus.FAILED;
+            failedReason = "Unsupported commit skip: " + skipped.getMessage();
+            endTime = System.currentTimeMillis();
+            persistAndSetCompleted(false);
+            return;
+          }
+          endTime = System.currentTimeMillis();
+          fullSkipDecision =
+              new FullCompactionCompletion.Decision(
+                  endTime,
+                  tableRuntime.getOptimizingConfig().getFullSkipRetryInitialDelayMs(),
+                  tableRuntime.getOptimizingConfig().getFullSkipRetryMaxDelayMs());
+          status = ProcessStatus.CLOSED;
+          failedReason = FullCompactionCompletion.REASON;
+          persistSkippedFull();
         } catch (PersistenceException e) {
           LOG.warn(
               "{} failed to persist process completed, will retry next commit",
@@ -2068,6 +2330,153 @@ public class OptimizingQueue extends PersistentBase {
           endTime = System.currentTimeMillis();
           persistAndSetCompleted(false);
         }
+      } finally {
+        lock.unlock();
+      }
+    }
+
+    private void detach() {
+      lock.lock();
+      try {
+        detached = true;
+        clearProcess(this);
+        tableRuntime.detachOptimizingProcess(this);
+        removePendingRecovery(tableRuntime);
+      } finally {
+        lock.unlock();
+      }
+    }
+
+    private void commitWithGuard() {
+      if (ownershipGuard.apply(tableRuntime) != OptimizingOwnership.OWNED) {
+        return;
+      }
+      if (fullSkipDecision != null) {
+        persistSkippedFull();
+        return;
+      }
+      if (status != ProcessStatus.RUNNING
+          || ownershipGuard.apply(tableRuntime) != OptimizingOwnership.OWNED) {
+        return;
+      }
+      try {
+        if (taskMap.values().stream().noneMatch(task -> task.getStatus() == Status.SUCCESS)) {
+          closeForReplan();
+          return;
+        }
+        TableOptimizingCommitter committer = buildCommit();
+        OptimizingCommitGuard.commit(
+            getTableId(), processId, () -> committer.commit(CommitMode.NORMAL));
+        status =
+            allTasksPrepared()
+                ? ProcessStatus.SUCCESS
+                : taskMap.values().stream().anyMatch(task -> task.getStatus() == Status.FAILED)
+                    ? ProcessStatus.FAILED
+                    : ProcessStatus.CLOSED;
+        endTime = System.currentTimeMillis();
+        persistAndSetCompleted(status == ProcessStatus.SUCCESS, true);
+      } catch (OptimizingCommitSkippedException skipped) {
+        if (skipped.isPublicationUncertain()) {
+          deferCommitRecovery(skipped);
+          return;
+        }
+        if (skipped.getReason() != OptimizingCommitSkippedException.Reason.STALE_FULL) {
+          throw new IllegalStateException("Unsupported FULL commit skip", skipped);
+        }
+        endTime = System.currentTimeMillis();
+        fullSkipDecision =
+            new FullCompactionCompletion.Decision(
+                endTime,
+                tableRuntime.getOptimizingConfig().getFullSkipRetryInitialDelayMs(),
+                tableRuntime.getOptimizingConfig().getFullSkipRetryMaxDelayMs());
+        status = ProcessStatus.CLOSED;
+        persistSkippedFull();
+      } catch (Exception failure) {
+        deferCommitRecovery(failure);
+      }
+    }
+
+    private void deferCommitRecovery(Exception failure) {
+      // Retain the durable owner and prevent executors holding old references from publishing
+      // again.
+      detached = true;
+      registerPendingRecovery(
+          tableRuntime,
+          processId,
+          "FULL_SKIP_COMPLETION",
+          failure instanceof RuntimeException
+              ? (RuntimeException) failure
+              : new IllegalStateException(failure));
+      clearProcess(this);
+      tableRuntime.detachOptimizingProcess(this);
+    }
+
+    private void closeForReplan() {
+      lock.lock();
+      try {
+        if (detached) {
+          return;
+        }
+        if (NestedSqlSession.hasActiveSession()) {
+          // Only task completion drains this intent after commit; reject other nested callers
+          // instead of silently skipping closure.
+          if (!completingTask) {
+            throw new PersistenceException("FULL replan requires a top-level transaction");
+          }
+          closeAfterTaskCompletion = true;
+          return;
+        }
+        if (FullCompactionCompletion.isSkipped(loadProcessMeta(processId))) {
+          tableRuntime.completeSkippedFull(processId, null, null);
+          detach();
+          return;
+        }
+        OptimizingCommitGuard.seal(getTableId(), processId);
+        if (fullSkipDecision == null) {
+          boolean published = false;
+          if (tableRuntime.getOptimizingStatus() == OptimizingStatus.COMMITTING
+              && taskMap.values().stream().anyMatch(task -> task.getStatus() == Status.SUCCESS)) {
+            published =
+                buildCommit().reconcile()
+                    == TableOptimizingCommitter.ReconciliationResult.PUBLISHED;
+          }
+          endTime = System.currentTimeMillis();
+          fullSkipDecision = FullCompactionCompletion.Decision.replan(endTime, published);
+        }
+        status = ProcessStatus.CLOSED;
+        persistSkippedFull();
+      } catch (Exception failure) {
+        RuntimeException cause =
+            failure instanceof RuntimeException
+                ? (RuntimeException) failure
+                : new IllegalStateException(failure);
+        registerPendingRecovery(tableRuntime, processId, "FULL_SKIP_COMPLETION", cause);
+        throw cause;
+      } finally {
+        lock.unlock();
+      }
+    }
+
+    private void persistSkippedFull() {
+      try {
+        tableRuntime.completeSkippedFull(processId, fullSkipDecision, summaryForPersistence());
+        // Tasks may be partial at close. Cancel only after the terminal decision is durable.
+        cancelTasks();
+        clearProcess(this);
+        tableRuntime.detachOptimizingProcess(this);
+      } catch (RuntimeException failure) {
+        registerPendingRecovery(tableRuntime, processId, "FULL_SKIP_COMPLETION", failure);
+        throw failure;
+      }
+    }
+
+    private void reconcileSkippedFull() {
+      lock.lock();
+      try {
+        if (detached) {
+          return;
+        }
+        persistSkippedFull();
       } finally {
         lock.unlock();
       }
@@ -2262,7 +2671,7 @@ public class OptimizingQueue extends PersistentBase {
       }
     }
 
-    private void loadTaskRuntimes() {
+    private void loadTaskRuntimes(boolean resume) {
       // Recovery is format-agnostic: descriptor and payload runtime types are restored first, and
       // no process is published until every row has passed validation.
       List<TaskRuntime<? extends StagedTaskDescriptor<? extends BaseOptimizingInput, ?, ?>>>
@@ -2311,8 +2720,11 @@ public class OptimizingQueue extends PersistentBase {
 
       for (TaskRuntime<? extends StagedTaskDescriptor<? extends BaseOptimizingInput, ?, ?>>
           taskRuntime : taskRuntimes) {
-        taskRuntime.getCompletedFuture().whenCompleted(() -> acceptResult(taskRuntime));
         taskMap.put(taskRuntime.getTaskId(), taskRuntime);
+        if (!resume) {
+          continue;
+        }
+        taskRuntime.getCompletedFuture().whenCompleted(() -> acceptResult(taskRuntime));
         if (taskRuntime.getStatus() == TaskRuntime.Status.PLANNED) {
           taskQueue.offer(taskRuntime);
         } else if (taskRuntime.getStatus() == TaskRuntime.Status.SCHEDULED

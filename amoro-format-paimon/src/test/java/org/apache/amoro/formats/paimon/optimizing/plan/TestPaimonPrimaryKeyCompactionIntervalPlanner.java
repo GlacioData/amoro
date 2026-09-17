@@ -91,7 +91,9 @@ class TestPaimonPrimaryKeyCompactionIntervalPlanner {
       long now = System.currentTimeMillis() + 86400000L;
       OptimizingConfig config =
           PaimonPrimaryKeyIntervalTestSupport.config().setFullTriggerInterval(1000);
-      assertFalse(evaluate(table, config, 0, 0, now).necessary(), "未配置 idle 不规划 FULL");
+      assertFalse(
+          evaluate(table, config, 0, 0, now).necessary(),
+          "FULL must not be planned without an idle interval");
       FileStoreTable idle =
           table.copy(
               Collections.singletonMap("paimon-optimizer.primary-key.partition-idle-time", "0s"));
@@ -156,6 +158,67 @@ class TestPaimonPrimaryKeyCompactionIntervalPlanner {
       FileStoreTable pressure =
           idle.copy(Collections.singletonMap("num-sorted-run.stop-trigger", "3"));
       assertEquals(OptimizingType.MAJOR, evaluate(pressure, config, now, 0, now).optimizingType());
+    }
+  }
+
+  @Test
+  void retryDeadlineGatesAllEvaluationEntriesAndPreservesMinorMajor(@TempDir Path warehouse)
+      throws Exception {
+    try (Catalog catalog = PaimonPrimaryKeyIntervalTestSupport.catalog(warehouse)) {
+      FileStoreTable base =
+          PaimonPrimaryKeyIntervalTestSupport.table(
+              catalog, "deadline", PaimonPrimaryKeyIntervalTestSupport.options(true));
+      PaimonPrimaryKeyIntervalTestSupport.history(base);
+      PaimonPrimaryKeyIntervalTestSupport.increments(base, 1, 1);
+      FileStoreTable table =
+          base.copy(
+              Collections.singletonMap("paimon-optimizer.primary-key.partition-idle-time", "0s"));
+      PaimonTable wrapped = PaimonPrimaryKeyIntervalTestSupport.wrap(table);
+      PaimonHealthEvaluationContext context =
+          PaimonHealthEvaluationContext.capture(table, wrapped.id().toString(), null);
+      OptimizingConfig config =
+          PaimonPrimaryKeyIntervalTestSupport.config().setFullTriggerInterval(1);
+      long now = System.currentTimeMillis() + 86400000L;
+      PaimonPrimaryKeyOptimizingEvaluation initial =
+          PaimonPrimaryKeyOptimizingEvaluator.evaluate(
+              table, table.name(), context, config, 0, 0, null, now);
+      assertEquals(OptimizingType.FULL, initial.optimizingType());
+      PaimonPrimaryKeySnapshotAnalysis analysis = initial.analysis().get();
+      for (long deadline : new long[] {now, now + 1}) {
+        for (PaimonPrimaryKeyOptimizingEvaluation evaluation :
+            Arrays.asList(
+                PaimonPrimaryKeyOptimizingEvaluator.evaluate(
+                    table, table.name(), config, 0, 0, null, now, deadline),
+                PaimonPrimaryKeyOptimizingEvaluator.evaluate(
+                    table, table.name(), context, config, 0, 0, null, now, deadline),
+                PaimonPrimaryKeyOptimizingEvaluator.evaluate(
+                    table, table.name(), context, analysis, config, 0, 0, null, now, deadline))) {
+          assertEquals(deadline == now, evaluation.necessary());
+        }
+      }
+      org.apache.amoro.optimizing.OptimizationContext runtime =
+          org.mockito.Mockito.mock(org.apache.amoro.optimizing.OptimizationContext.class);
+      org.mockito.Mockito.when(runtime.getOptimizingConfig()).thenReturn(config);
+      org.mockito.Mockito.when(runtime.getFullRetryNotBefore()).thenReturn(Long.MAX_VALUE);
+      for (PaimonPrimaryKeySnapshotAnalysis supplied : Arrays.asList(analysis, null)) {
+        PaimonPrimaryKeyOptimizingPlanner planner =
+            new PaimonPrimaryKeyOptimizingPlanner(
+                wrapped, 1, 2, 1, 64L * 1024 * 1024, config, 0, 0, 0, null, runtime, supplied);
+        assertFalse(planner.isNecessary());
+      }
+      PaimonPrimaryKeyIntervalTestSupport.increments(base, 2, 2);
+      assertEquals(
+          OptimizingType.MINOR,
+          PaimonPrimaryKeyOptimizingEvaluator.evaluate(
+                  table, table.name(), config, 0, 0, null, now, now + 1)
+              .optimizingType());
+      FileStoreTable pressure =
+          table.copy(Collections.singletonMap("num-sorted-run.stop-trigger", "3"));
+      assertEquals(
+          OptimizingType.MAJOR,
+          PaimonPrimaryKeyOptimizingEvaluator.evaluate(
+                  pressure, pressure.name(), config, now, 0, null, now, now + 1)
+              .optimizingType());
     }
   }
 

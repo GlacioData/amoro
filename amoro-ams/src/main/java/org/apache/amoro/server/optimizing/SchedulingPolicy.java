@@ -145,7 +145,11 @@ public class SchedulingPolicy {
     return tableRuntime.getOptimizingStatus() == OptimizingStatus.PENDING
         && (tableRuntime.getLastOptimizedSnapshotId() != tableRuntime.getCurrentSnapshotId()
             || tableRuntime.getLastOptimizedChangeSnapshotId()
-                != tableRuntime.getCurrentChangeSnapshotId());
+                != tableRuntime.getCurrentChangeSnapshotId()
+            || (tableRuntime.getPendingInput() != null
+                && tableRuntime
+                    .getPendingInput()
+                    .canPlanWithoutSnapshotChange(tableRuntime, System.currentTimeMillis())));
   }
 
   public void addTable(DefaultTableRuntime tableRuntime) {
@@ -166,7 +170,10 @@ public class SchedulingPolicy {
     }
   }
 
-  /** 在 tableLock 保护下复制当前表运行时列表，供指标采集等线程安全遍历。 快照仅隔离列表成员变化，列表中的运行时对象仍共享实时状态。 */
+  /**
+   * Copy the runtime list under tableLock for safe iteration by metrics collectors and other
+   * threads. The copy isolates membership changes; runtime objects still expose shared live state.
+   */
   public List<DefaultTableRuntime> snapshotTableRuntimes() {
     tableLock.lock();
     try {

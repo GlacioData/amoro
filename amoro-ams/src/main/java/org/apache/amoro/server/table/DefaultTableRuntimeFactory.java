@@ -131,13 +131,8 @@ public class DefaultTableRuntimeFactory implements TableRuntimeFactory {
     @Override
     public List<StateKey<?>> requiredStateKeys() {
       Map<String, StateKey<?>> merged = new LinkedHashMap<>();
-      merged.put(
-          DefaultTableRuntime.OPTIMIZING_STATE_KEY.getKey(),
-          DefaultTableRuntime.OPTIMIZING_STATE_KEY);
+      DefaultTableRuntime.REQUIRED_STATES.forEach(key -> merged.put(key.getKey(), key));
       merged.put("pending_input", createPendingInputKey(format));
-      merged.put(DefaultTableRuntime.PROCESS_ID_KEY.getKey(), DefaultTableRuntime.PROCESS_ID_KEY);
-      merged.put(
-          DefaultTableRuntime.CLEANUP_STATE_KEY.getKey(), DefaultTableRuntime.CLEANUP_STATE_KEY);
 
       Map<Action, ProcessFactory> byAction = factoriesByFormat.get(format);
       if (byAction != null) {

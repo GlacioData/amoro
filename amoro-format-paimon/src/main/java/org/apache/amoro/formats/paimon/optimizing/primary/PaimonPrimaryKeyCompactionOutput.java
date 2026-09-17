@@ -42,6 +42,10 @@ public class PaimonPrimaryKeyCompactionOutput implements TableOptimizing.Optimiz
   public static final String DASHBOARD_OUTPUT_DATA_FILES = "output-data-files";
   public static final String DASHBOARD_OUTPUT_DATA_SIZE = "output-data-size";
 
+  public static final String STALE_FULL_BEFORE_EXECUTE = "STALE_FULL_BEFORE_EXECUTE";
+
+  // Nullable for task outputs serialized by older optimizers.
+  private String skipReason;
   private List<byte[]> commitMessageBytesList;
   private int compactedBucketCount;
   private long compactedFileCount;
@@ -72,6 +76,16 @@ public class PaimonPrimaryKeyCompactionOutput implements TableOptimizing.Optimiz
 
   public List<byte[]> getCommitMessageBytesList() {
     return commitMessageBytesList == null ? Collections.emptyList() : commitMessageBytesList;
+  }
+
+  public static PaimonPrimaryKeyCompactionOutput staleFull() {
+    PaimonPrimaryKeyCompactionOutput output = new PaimonPrimaryKeyCompactionOutput();
+    output.skipReason = STALE_FULL_BEFORE_EXECUTE;
+    return output;
+  }
+
+  public String getSkipReason() {
+    return skipReason;
   }
 
   public int commitMessageCount() {

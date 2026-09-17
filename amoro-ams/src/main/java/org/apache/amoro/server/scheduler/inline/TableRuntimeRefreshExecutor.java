@@ -90,8 +90,17 @@ public class TableRuntimeRefreshExecutor extends PeriodicTableScheduler {
           keyBasedEvaluation && defaultTableRuntime.shouldEvaluateCurrentAnalysis();
       boolean retryUnoptimizedSnapshot =
           optimizingConfig.isEnabled() && defaultTableRuntime.isIdle() && snapshotChanged;
+      boolean formatEvaluation =
+          table.shouldEvaluatePendingInput(
+              defaultTableRuntime,
+              defaultTableRuntime.getOptimizingStatus()
+                  == org.apache.amoro.server.optimizing.OptimizingStatus.PENDING,
+              System.currentTimeMillis());
       boolean shouldEvaluate =
-          keyBasedEvaluation ? healthNeedsEvaluation || retryUnoptimizedSnapshot : snapshotChanged;
+          formatEvaluation
+              || (keyBasedEvaluation
+                  ? healthNeedsEvaluation || retryUnoptimizedSnapshot
+                  : snapshotChanged);
 
       boolean hasOptimizingDemand = false;
       if (shouldEvaluate) {

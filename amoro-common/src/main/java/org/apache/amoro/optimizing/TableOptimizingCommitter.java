@@ -27,6 +27,21 @@ import org.apache.amoro.exception.OptimizingCommitException;
  */
 public interface TableOptimizingCommitter {
 
+  /** Inspect existing publication only; REPLAN does not assert that publication never occurred. */
+  enum ReconciliationResult {
+    PUBLISHED,
+    REPLAN
+  }
+
+  /**
+   * After the caller fences old commits, reconcile results without publishing or deleting old
+   * outputs. Propagate I/O failures; callers must retain the process owner until reconciliation
+   * succeeds.
+   */
+  default ReconciliationResult reconcile() throws OptimizingCommitException {
+    throw new UnsupportedOperationException("Read-only commit reconciliation is not supported");
+  }
+
   /** Describes whether a commit is a normal first attempt or a replay after AMS recovery. */
   enum CommitMode {
     NORMAL,

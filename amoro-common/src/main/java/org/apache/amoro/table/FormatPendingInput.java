@@ -32,6 +32,14 @@ package org.apache.amoro.table;
  */
 public interface FormatPendingInput extends TableSummaryProvider {
 
+  /**
+   * Whether confirmed time-driven demand remains valid; inspect in-memory state without file I/O.
+   */
+  default boolean canPlanWithoutSnapshotChange(
+      org.apache.amoro.optimizing.OptimizationContext context, long now) {
+    return false;
+  }
+
   long getDataFileSize();
 
   int getDataFileCount();

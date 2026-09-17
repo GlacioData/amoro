@@ -71,6 +71,15 @@ public interface TableRuntimeMapper {
           + "WHERE table_id = #{tableId} AND bucket_id IS NULL")
   int updateBucketIdIfNull(@Param("tableId") Long tableId, @Param("bucketId") String bucketId);
 
+  /** Completes a skip without overwriting concurrently updated configuration or group. */
+  @Update(
+      "UPDATE table_runtime SET status_code = #{meta.statusCode}, "
+          + "status_code_update_time = #{meta.statusCodeUpdateTime, typeHandler=org.apache.amoro.server.persistence.converter.Long2TsConverter}, "
+          + "table_summary = #{meta.tableSummary,typeHandler=org.apache.amoro.server.persistence.converter.JsonObjectConverter} "
+          + "WHERE table_id = #{meta.tableId} AND status_code = #{expectedStatus}")
+  int completeSkippedRuntime(
+      @Param("meta") TableRuntimeMeta meta, @Param("expectedStatus") int expectedStatus);
+
   /* ---------- delete ---------- */
   @Delete("DELETE FROM " + TABLE_NAME + " WHERE table_id = #{tableId}")
   int deleteRuntime(@Param("tableId") Long tableId);
@@ -190,6 +199,14 @@ public interface TableRuntimeMapper {
       @Param("stateKey") String stateKey,
       @Param("expectedStateVersion") long expectedStateVersion,
       @Param("stateValue") String stateValue);
+
+  /**
+   * Lock one table commit state with a real increment so every database reports the matched row.
+   */
+  @Update(
+      "UPDATE table_runtime_state SET state_version = state_version + 1 "
+          + "WHERE table_id = #{tableId} AND state_key = #{stateKey}")
+  int lockCommitState(@Param("tableId") long tableId, @Param("stateKey") String stateKey);
 
   @Select(
       "SELECT state_id, table_id, state_key, state_value, state_version FROM "

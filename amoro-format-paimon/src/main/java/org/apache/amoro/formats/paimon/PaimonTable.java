@@ -22,6 +22,7 @@ import org.apache.amoro.AmoroTable;
 import org.apache.amoro.TableFormat;
 import org.apache.amoro.TableSnapshot;
 import org.apache.amoro.config.OptimizingConfig;
+import org.apache.amoro.formats.paimon.optimizing.PaimonFullScheduling;
 import org.apache.amoro.formats.paimon.optimizing.PaimonOptimizingEligibility;
 import org.apache.amoro.formats.paimon.optimizing.PaimonPendingInput;
 import org.apache.amoro.formats.paimon.optimizing.health.PaimonAppendSnapshotAnalysis;
@@ -33,6 +34,7 @@ import org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeyPendin
 import org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeySnapshotAnalysis;
 import org.apache.amoro.optimizing.FormatTableAnalysis;
 import org.apache.amoro.optimizing.OptimizationContext;
+import org.apache.amoro.optimizing.OptimizingType;
 import org.apache.amoro.optimizing.PendingInputResult;
 import org.apache.amoro.shade.guava32.com.google.common.collect.ImmutableMap;
 import org.apache.amoro.table.TableIdentifier;
@@ -246,6 +248,17 @@ public class PaimonTable implements AmoroTable<Table>, Serializable {
         analysis.pendingInput(), analysis.pendingInput(), optimizingNecessary, analysis);
   }
 
+  @Override
+  public boolean supportsPendingInputRefresh() {
+    return PaimonFullScheduling.isPrimaryKeyTable(this);
+  }
+
+  @Override
+  public boolean shouldEvaluatePendingInput(
+      OptimizationContext context, boolean pending, long now) {
+    return PaimonFullScheduling.shouldEvaluate(context, this, pending, now);
+  }
+
   private PendingInputResult evaluatePrimaryKey(
       FileStoreTable fileStoreTable,
       PaimonHealthEvaluationContext healthContext,
@@ -260,7 +273,8 @@ public class PaimonTable implements AmoroTable<Table>, Serializable {
             context == null ? 0L : context.getLastMinorOptimizingTime(),
             context == null ? 0L : context.getLastFullOptimizingTime(),
             null,
-            System.currentTimeMillis());
+            System.currentTimeMillis(),
+            context == null ? 0L : context.getFullRetryNotBefore());
     PaimonPrimaryKeySnapshotAnalysis analysis =
         evaluation
             .analysis()
@@ -276,11 +290,15 @@ public class PaimonTable implements AmoroTable<Table>, Serializable {
             && hashMode
             && analysis.validForPlanning()
             && evaluation.necessary();
-    return new PendingInputResult(
-        analysis.pendingInput(),
-        legacyPendingInput(analysis.pendingInput()),
-        optimizingNecessary,
-        analysis);
+    PaimonPendingInput pending = legacyPendingInput(analysis.pendingInput());
+    // Paimon 1.4.2: paimon-core/.../mergetree/MergeTreeWriter.compact(true) ->
+    // compact/MergeTreeCompactManager.triggerCompaction(true) ->
+    // CompactStrategy.pickFullCompaction.
+    // Propagate only FULL demand confirmed by this evaluator; native file selection and commit
+    // validation remain authoritative.
+    pending.setFullCompactionPending(
+        optimizingNecessary && evaluation.optimizingType() == OptimizingType.FULL);
+    return new PendingInputResult(analysis.pendingInput(), pending, optimizingNecessary, analysis);
   }
 
   private static PaimonPendingInput legacyPendingInput(PaimonPrimaryKeyPendingInput source) {

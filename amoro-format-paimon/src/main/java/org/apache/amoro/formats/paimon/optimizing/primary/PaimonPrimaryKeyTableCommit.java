@@ -19,6 +19,7 @@
 package org.apache.amoro.formats.paimon.optimizing.primary;
 
 import org.apache.amoro.exception.OptimizingCommitException;
+import org.apache.amoro.exception.OptimizingCommitSkippedException;
 import org.apache.amoro.formats.paimon.PaimonTable;
 import org.apache.amoro.optimizing.OptimizingType;
 import org.apache.amoro.optimizing.TableOptimizingCommitter;
@@ -32,6 +33,7 @@ import org.apache.paimon.table.sink.StreamTableCommit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.FileNotFoundException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -67,6 +69,8 @@ public class PaimonPrimaryKeyTableCommit implements TableOptimizingCommitter {
 
   private static final Logger LOG = LoggerFactory.getLogger(PaimonPrimaryKeyTableCommit.class);
 
+  static final int MAX_IDENTITY_SNAPSHOT_PROBES = 256;
+
   private final PaimonTable paimonTable;
   private final FileStoreTable table;
   private final Collection<PaimonPrimaryKeyCompactionTask> successTasks;
@@ -94,6 +98,35 @@ public class PaimonPrimaryKeyTableCommit implements TableOptimizingCommitter {
   }
 
   @Override
+  public ReconciliationResult reconcile() throws OptimizingCommitException {
+    if (successTasks == null || successTasks.isEmpty()) {
+      return ReconciliationResult.REPLAN;
+    }
+    CommitIdentity identity = extractCommitIdentity();
+    if (table == null || identity.optimizingType != OptimizingType.FULL) {
+      throw new OptimizingCommitException(
+          "Read-only reconciliation requires a FULL table process", false);
+    }
+    // Paimon 1.4.2 StreamTableCommit#filterAndCommit publishes unfiltered messages and is not
+    // read-only reconciliation.
+    // FileStoreCommitImpl#filterCommitted returns all messages when history expires and cannot
+    // prove non-publication.
+    // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/operation/FileStoreCommitImpl.java#L246-L284
+    try {
+      FullStatus status =
+          paimonTable == null
+              ? inspectFull(identity)
+              : paimonTable.doAs(() -> inspectFull(identity));
+      return status == FullStatus.ALREADY_PUBLISHED
+          ? ReconciliationResult.PUBLISHED
+          : ReconciliationResult.REPLAN;
+    } catch (RuntimeException failure) {
+      throw new OptimizingCommitException(
+          "Failed to reconcile Paimon FULL publication for table=" + name(), failure);
+    }
+  }
+
+  @Override
   public void commit(CommitMode mode) throws OptimizingCommitException {
     if (successTasks == null || successTasks.isEmpty()) {
       LOG.info("PaimonPrimaryKeyTableCommit: no success tasks for table={} - skip commit.", name());
@@ -106,19 +139,7 @@ public class PaimonPrimaryKeyTableCommit implements TableOptimizingCommitter {
 
     CommitIdentity identity = extractCommitIdentity();
     List<CommitMessage> messages = collectCommitMessages();
-    if (shouldSkipStaleFull(identity)) {
-      LOG.info(
-          "PaimonPrimaryKeyTableCommit: skip stale FULL commit for table={} targetSnapshotId={}.",
-          name(),
-          identity.targetSnapshotId);
-      return;
-    }
-    if (messages.isEmpty()) {
-      LOG.info(
-          "PaimonPrimaryKeyTableCommit: empty CommitMessage list for table={} - skip commit.",
-          name());
-      return;
-    }
+    boolean skippedBeforeExecute = hasSkippedOutput(identity);
     if (mode == null) {
       throw new OptimizingCommitException(
           "Paimon primary-key commit mode must not be null for table=" + name(), false);
@@ -126,11 +147,11 @@ public class PaimonPrimaryKeyTableCommit implements TableOptimizingCommitter {
 
     try {
       if (paimonTable == null) {
-        commitMessages(messages, identity.commitUser, identity.commitIdentifier, mode);
+        commitInScope(messages, identity, mode, skippedBeforeExecute);
       } else {
         paimonTable.doAs(
             () -> {
-              commitMessages(messages, identity.commitUser, identity.commitIdentifier, mode);
+              commitInScope(messages, identity, mode, skippedBeforeExecute);
               return null;
             });
       }
@@ -141,6 +162,53 @@ public class PaimonPrimaryKeyTableCommit implements TableOptimizingCommitter {
       throw new OptimizingCommitException(
           "Paimon primary-key commit failed for table=" + name(), e);
     }
+  }
+
+  private void commitInScope(
+      List<CommitMessage> messages,
+      CommitIdentity identity,
+      CommitMode mode,
+      boolean skippedBeforeExecute)
+      throws OptimizingCommitException {
+    FullStatus fullStatus = inspectFull(identity);
+    if (skippedBeforeExecute && fullStatus == FullStatus.ALREADY_PUBLISHED) {
+      throw new OptimizingCommitException(
+          "Paimon FULL output conflicts with its published identity: " + identity.commitIdentifier,
+          false);
+    }
+    if (skippedBeforeExecute
+        || (fullStatus != FullStatus.FRESH && fullStatus != FullStatus.ALREADY_PUBLISHED)) {
+      throw staleFull(
+          identity, skippedBeforeExecute ? "executor skipped a bucket" : fullStatus.name());
+    }
+    if (fullStatus == FullStatus.ALREADY_PUBLISHED) {
+      return;
+    }
+    if (messages.isEmpty()) {
+      LOG.info(
+          "PaimonPrimaryKeyTableCommit: empty CommitMessage list for table={} - no-op.", name());
+      return;
+    }
+    commitMessages(messages, identity.commitUser, identity.commitIdentifier, mode, identity);
+  }
+
+  private boolean hasSkippedOutput(CommitIdentity identity) throws OptimizingCommitException {
+    boolean skipped = false;
+    for (PaimonPrimaryKeyCompactionTask task : successTasks) {
+      PaimonPrimaryKeyCompactionOutput output = task.getOutput();
+      String reason = output.getSkipReason();
+      if (reason == null) {
+        continue;
+      }
+      if (!PaimonPrimaryKeyCompactionOutput.STALE_FULL_BEFORE_EXECUTE.equals(reason)
+          || identity.optimizingType != OptimizingType.FULL
+          || !output.getCommitMessageBytesList().isEmpty()) {
+        throw new OptimizingCommitException(
+            "Invalid Paimon primary-key skip output: " + reason, false);
+      }
+      skipped = true;
+    }
+    return skipped;
   }
 
   private List<CommitMessage> collectCommitMessages() throws OptimizingCommitException {
@@ -250,16 +318,100 @@ public class PaimonPrimaryKeyTableCommit implements TableOptimizingCommitter {
     return new CommitIdentity(commitUser, commitIdentifier, optimizingType, targetSnapshotId);
   }
 
-  private boolean shouldSkipStaleFull(CommitIdentity identity) {
-    if (identity.optimizingType != OptimizingType.FULL) {
-      return false;
+  /**
+   * Paimon 1.4.2 FileStoreCommitImpl#filterCommitted uses the latest user's identifier as a
+   * watermark, and returns unfiltered messages when the history has expired. Therefore it cannot
+   * prove an old FULL was published. SnapshotManager#latestSnapshotOfUser stops at a missing
+   * snapshot and propagates other I/O errors; retain that distinction with a bounded exact search.
+   * Source: https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/
+   * paimon-core/src/main/java/org/apache/paimon/operation/FileStoreCommitImpl.java#L246-L284 and
+   * utils/SnapshotManager.java#L599-L629. No abort: native abort can delete compactAfter files
+   * including level-up files (FileStoreCommitImpl#abort, L633), so cleanup belongs elsewhere.
+   *
+   * @return the freshness or bounded exact-identity result; never publishes messages
+   */
+  private FullStatus inspectFull(CommitIdentity identity) {
+    if (identity == null || identity.optimizingType != OptimizingType.FULL) {
+      return FullStatus.FRESH;
     }
-    Optional<Snapshot> latestSnapshot = table.latestSnapshot();
-    return !latestSnapshot.isPresent() || latestSnapshot.get().id() != identity.targetSnapshotId;
+    Optional<Snapshot> latest = table.latestSnapshot();
+    if (latest.isPresent() && latest.get().id() == identity.targetSnapshotId) {
+      return FullStatus.FRESH;
+    }
+    long latestId = latest.map(Snapshot::id).orElse(0L);
+    int probes = 0;
+    FullStatus result = FullStatus.NOT_FOUND;
+    for (long id = latestId;
+        id > identity.targetSnapshotId && probes < MAX_IDENTITY_SNAPSHOT_PROBES;
+        id--) {
+      probes++;
+      Snapshot snapshot;
+      try {
+        snapshot = id == latestId ? latest.get() : table.snapshotManager().tryGetSnapshot(id);
+      } catch (FileNotFoundException expired) {
+        result = FullStatus.EXPIRED;
+        break;
+      }
+      if (identity.commitUser.equals(snapshot.commitUser())
+          && identity.commitIdentifier == snapshot.commitIdentifier()) {
+        LOG.info(
+            "Paimon FULL already published: table={} user={} identifier={} snapshot={} probes={}",
+            name(),
+            identity.commitUser,
+            identity.commitIdentifier,
+            id,
+            probes);
+        return FullStatus.ALREADY_PUBLISHED;
+      }
+    }
+    if (probes == MAX_IDENTITY_SNAPSHOT_PROBES) {
+      result = FullStatus.BUDGET_EXHAUSTED;
+    }
+    LOG.info(
+        "Paimon FULL stale: table={} user={} identifier={} target={} latest={} probes={} result={}",
+        name(),
+        identity.commitUser,
+        identity.commitIdentifier,
+        identity.targetSnapshotId,
+        latestId,
+        probes,
+        result);
+    return result;
+  }
+
+  private enum FullStatus {
+    FRESH,
+    ALREADY_PUBLISHED,
+    NOT_FOUND,
+    EXPIRED,
+    BUDGET_EXHAUSTED
+  }
+
+  private OptimizingCommitSkippedException staleFull(CommitIdentity identity, String detail) {
+    return new OptimizingCommitSkippedException(
+        OptimizingCommitSkippedException.Reason.STALE_FULL,
+        "Paimon FULL skipped: table="
+            + name()
+            + " target="
+            + identity.targetSnapshotId
+            + " identifier="
+            + identity.commitIdentifier
+            + " reason="
+            + detail);
   }
 
   void commitMessages(
       List<CommitMessage> messages, String commitUser, long commitIdentifier, CommitMode mode)
+      throws OptimizingCommitException {
+    commitMessages(messages, commitUser, commitIdentifier, mode, null);
+  }
+
+  private void commitMessages(
+      List<CommitMessage> messages,
+      String commitUser,
+      long commitIdentifier,
+      CommitMode mode,
+      CommitIdentity identity)
       throws OptimizingCommitException {
     if (mode == CommitMode.RECOVERY_REPLAY) {
       try {
@@ -307,6 +459,22 @@ public class PaimonPrimaryKeyTableCommit implements TableOptimizingCommitter {
           failure);
     }
 
+    // A direct attempt may publish and then fail while closing, or race with another writer.
+    // Recheck under the same doAs before allowing native fallback to publish anything.
+    try {
+      FullStatus fullStatus = inspectFull(identity);
+      if (fullStatus == FullStatus.ALREADY_PUBLISHED) {
+        return;
+      }
+      if (fullStatus != FullStatus.FRESH) {
+        throw staleFull(identity, fullStatus.name());
+      }
+    } catch (OptimizingCommitSkippedException skipped) {
+      OptimizingCommitSkippedException unresolved =
+          new OptimizingCommitSkippedException(skipped.getReason(), skipped.getMessage(), true);
+      unresolved.addSuppressed(directFailure);
+      throw unresolved;
+    }
     try {
       filterAndCommitOnce(messages, commitUser, commitIdentifier, mode, "fallback");
     } catch (Exception fallbackFailure) {

@@ -35,6 +35,34 @@ public class TableRuntimeOptimizingState {
   private long lastFullOptimizingTime;
   private long lastMinorOptimizingTime;
 
+  private long fullStaleSkipCount;
+  private long fullRetryNotBefore;
+  private long lastFullStaleProcessId;
+
+  public long getFullStaleSkipCount() {
+    return fullStaleSkipCount;
+  }
+
+  public void setFullStaleSkipCount(long value) {
+    this.fullStaleSkipCount = value;
+  }
+
+  public long getFullRetryNotBefore() {
+    return fullRetryNotBefore;
+  }
+
+  public void setFullRetryNotBefore(long value) {
+    this.fullRetryNotBefore = value;
+  }
+
+  public long getLastFullStaleProcessId() {
+    return lastFullStaleProcessId;
+  }
+
+  public void setLastFullStaleProcessId(long value) {
+    this.lastFullStaleProcessId = value;
+  }
+
   public long getCurrentSnapshotId() {
     return currentSnapshotId;
   }

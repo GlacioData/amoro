@@ -24,6 +24,7 @@ import org.apache.amoro.AmoroTable;
 import org.apache.amoro.TableFormat;
 import org.apache.amoro.TableRuntime;
 import org.apache.amoro.optimizing.FormatTableAnalysis;
+import org.apache.amoro.optimizing.OptimizingType;
 import org.apache.amoro.optimizing.TableOptimizingCommitter;
 import org.apache.amoro.optimizing.TableOptimizingPlanner;
 import org.apache.amoro.shade.guava32.com.google.common.collect.Lists;
@@ -36,6 +37,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Supplier;
 
 /**
  * A factory to create a process. Normally, There will be default ProcessFactories for each action
@@ -43,6 +45,14 @@ import java.util.Set;
  * on external resources like Yarn.
  */
 public interface ProcessFactory extends ActivePlugin {
+
+  /**
+   * Reconcile and replan on takeover without resuming old tasks. Opting-in factories must provide a
+   * read-only committer.reconcile implementation.
+   */
+  default boolean replanOnRecovery(Supplier<AmoroTable<?>> table, OptimizingType type) {
+    return false;
+  }
 
   default List<StateKey<?>> requiredStates() {
     return Lists.newArrayList();

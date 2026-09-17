@@ -157,6 +157,23 @@ public class DefaultTableRuntimeStore extends PersistentBase implements TableRun
     }
   }
 
+  /** Publishes only already committed skip state, while holding the existing runtime lock. */
+  void publishSkippedCompletion(
+      TableRuntimeMeta committed, List<TableRuntimeState> committedStates) {
+    Preconditions.checkState(tableLock.isHeldByCurrentThread(), "runtime lock is required");
+    Preconditions.checkState(!NestedSqlSession.hasActiveSession(), "transaction must be closed");
+    OptimizingStatus previous = OptimizingStatus.ofCode(meta.getStatusCode());
+    meta.setStatusCode(committed.getStatusCode());
+    meta.setStatusCodeUpdateTime(committed.getStatusCodeUpdateTime());
+    meta.setTableSummary(committed.getTableSummary());
+    committedStates.forEach(state -> states.put(state.getStateKey(), state));
+    TableRuntimeHandler handler = runtimeHandler;
+    TableRuntime runtime = tableRuntime;
+    if (handler != null && runtime != null && previous != OptimizingStatus.IDLE) {
+      dispatchOrDeferRuntimeHandlerCallback(() -> handler.handleTableChanged(runtime, previous));
+    }
+  }
+
   private void dispatchOrDeferRuntimeHandlerCallback(Runnable callback) {
     if (callback != null) {
       deferredRuntimeHandlerCallbacks.get().addLast(callback);
@@ -225,11 +242,23 @@ public class DefaultTableRuntimeStore extends PersistentBase implements TableRun
             states.put(key.getKey(), stateMap.get(key.getKey()));
             stateMap.remove(key.getKey());
           } else {
-            doAs(
-                TableRuntimeMapper.class,
-                mapper ->
-                    mapper.saveState(
-                        tableIdentifier.getId(), key.getKey(), key.serializeDefault()));
+            try {
+              doAs(
+                  TableRuntimeMapper.class,
+                  mapper ->
+                      mapper.saveState(
+                          tableIdentifier.getId(), key.getKey(), key.serializeDefault()));
+            } catch (PersistenceException failure) {
+              // Concurrent AMS instances may initialize the new commit state; accept only an
+              // existing row for this table and key.
+              if (!OptimizingCommitGuard.STATE_KEY.getKey().equals(key.getKey())
+                  || getAs(
+                          TableRuntimeMapper.class,
+                          mapper -> mapper.getState(tableIdentifier.getId(), key.getKey()))
+                      == null) {
+                throw failure;
+              }
+            }
             TableRuntimeState state =
                 getAs(
                     TableRuntimeMapper.class,

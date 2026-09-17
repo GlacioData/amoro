@@ -76,6 +76,9 @@ public class OptimizingConfig {
   // self-optimizing.full.trigger.interval
   private int fullTriggerInterval;
 
+  private long fullSkipRetryInitialDelayMs = 60_000L;
+  private long fullSkipRetryMaxDelayMs = 900_000L;
+
   // self-optimizing.full.rewrite-all-files
   private boolean fullRewriteAllFiles;
 
@@ -269,6 +272,38 @@ public class OptimizingConfig {
     return this;
   }
 
+  public long getFullSkipRetryInitialDelayMs() {
+    return fullSkipRetryInitialDelayMs;
+  }
+
+  public OptimizingConfig setFullSkipRetryInitialDelayMs(long value) {
+    if (value <= 0L) {
+      throw new IllegalArgumentException("fullSkipRetryInitialDelayMs must be positive");
+    }
+    this.fullSkipRetryInitialDelayMs = value;
+    return this;
+  }
+
+  public long getFullSkipRetryMaxDelayMs() {
+    return fullSkipRetryMaxDelayMs;
+  }
+
+  public OptimizingConfig setFullSkipRetryMaxDelayMs(long value) {
+    if (value <= 0L) {
+      throw new IllegalArgumentException("fullSkipRetryMaxDelayMs must be positive");
+    }
+    this.fullSkipRetryMaxDelayMs = value;
+    return this;
+  }
+
+  public OptimizingConfig validateFullSkipRetry() {
+    if (fullSkipRetryInitialDelayMs <= 0L
+        || fullSkipRetryMaxDelayMs < fullSkipRetryInitialDelayMs) {
+      throw new IllegalArgumentException("FULL skip retry requires 0 < initial delay <= max delay");
+    }
+    return this;
+  }
+
   public boolean isFullRewriteAllFiles() {
     return fullRewriteAllFiles;
   }
@@ -390,6 +425,8 @@ public class OptimizingConfig {
         && minorLeastFileCount == that.minorLeastFileCount
         && minorLeastInterval == that.minorLeastInterval
         && Double.compare(that.majorDuplicateRatio, majorDuplicateRatio) == 0
+        && fullSkipRetryInitialDelayMs == that.fullSkipRetryInitialDelayMs
+        && fullSkipRetryMaxDelayMs == that.fullSkipRetryMaxDelayMs
         && fullTriggerInterval == that.fullTriggerInterval
         && fullRewriteAllFiles == that.fullRewriteAllFiles
         && Objects.equal(filter, that.filter)
@@ -424,6 +461,8 @@ public class OptimizingConfig {
         minorLeastFileCount,
         minorLeastInterval,
         majorDuplicateRatio,
+        fullSkipRetryInitialDelayMs,
+        fullSkipRetryMaxDelayMs,
         fullTriggerInterval,
         fullRewriteAllFiles,
         filter,
@@ -455,6 +494,8 @@ public class OptimizingConfig {
         .add("minorLeastFileCount", minorLeastFileCount)
         .add("minorLeastInterval", minorLeastInterval)
         .add("majorDuplicateRatio", majorDuplicateRatio)
+        .add("fullSkipRetryInitialDelayMs", fullSkipRetryInitialDelayMs)
+        .add("fullSkipRetryMaxDelayMs", fullSkipRetryMaxDelayMs)
         .add("fullTriggerInterval", fullTriggerInterval)
         .add("fullRewriteAllFiles", fullRewriteAllFiles)
         .add("filter", filter)

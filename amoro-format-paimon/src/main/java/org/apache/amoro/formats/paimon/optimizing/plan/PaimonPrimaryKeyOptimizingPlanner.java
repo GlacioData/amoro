@@ -216,7 +216,8 @@ public class PaimonPrimaryKeyOptimizingPlanner implements TableOptimizingPlanner
                 runtimeInputs.lastMinorOptimizingTime(),
                 runtimeInputs.lastFullOptimizingTime(),
                 partitionFilter,
-                planTime)
+                planTime,
+                runtimeInputs.getFullRetryNotBefore())
             : fallbackEvaluation(table, healthContext, runtimeInputs);
     usedAnalysis = evaluation.analysis().orElse(null);
     targetSnapshotId = evaluation.targetSnapshotId();
@@ -375,7 +376,8 @@ public class PaimonPrimaryKeyOptimizingPlanner implements TableOptimizingPlanner
         runtimeInputs.lastMinorOptimizingTime(),
         runtimeInputs.lastFullOptimizingTime(),
         partitionFilter,
-        planTime);
+        planTime,
+        runtimeInputs.getFullRetryNotBefore());
   }
 
   private boolean cache(

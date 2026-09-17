@@ -29,6 +29,20 @@ import java.util.Optional;
 
 public interface AmoroTable<T> {
 
+  /**
+   * Whether refresh may replace demand that has not started executing; AMS validates status and
+   * ownership.
+   */
+  default boolean supportsPendingInputRefresh() {
+    return false;
+  }
+
+  /** Format hook for time-driven evaluation. Inspect existing state without reading lake files. */
+  default boolean shouldEvaluatePendingInput(
+      OptimizationContext context, boolean pending, long now) {
+    return false;
+  }
+
   /** Returns the {@link TableIdentifier} of this table */
   TableIdentifier id();
 

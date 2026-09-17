@@ -54,6 +54,7 @@ import org.apache.amoro.utils.SnowflakeIdGenerator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -91,7 +92,8 @@ public class DefaultTableRuntime extends AbstractTableRuntime implements Optimiz
       StateKey.stateKey("process_id").longType().defaultValue(0L);
 
   public static final List<StateKey<?>> REQUIRED_STATES =
-      Lists.newArrayList(OPTIMIZING_STATE_KEY, PROCESS_ID_KEY, CLEANUP_STATE_KEY);
+      Lists.newArrayList(
+          OPTIMIZING_STATE_KEY, PROCESS_ID_KEY, CLEANUP_STATE_KEY, OptimizingCommitGuard.STATE_KEY);
   private final TableOptimizingMetrics optimizingMetrics;
   private final TableOrphanFilesCleaningMetrics orphanFilesCleaningMetrics;
   protected final TableSummaryMetrics tableSummaryMetrics;
@@ -151,6 +153,27 @@ public class DefaultTableRuntime extends AbstractTableRuntime implements Optimiz
 
   public TableOrphanFilesCleaningMetrics getOrphanFilesCleaningMetrics() {
     return orphanFilesCleaningMetrics;
+  }
+
+  @Override
+  public long getFullRetryNotBefore() {
+    return store().getState(OPTIMIZING_STATE_KEY).getFullRetryNotBefore();
+  }
+
+  public void completeSkippedFull(
+      long processId, FullCompactionCompletion.Decision decision, Map<String, String> summary) {
+    if (!(store() instanceof DefaultTableRuntimeStore)) {
+      throw new IllegalStateException("FULL skip requires a persisted runtime");
+    }
+    store()
+        .synchronizedInvoke(
+            () -> {
+              new FullCompactionCompletion()
+                  .complete((DefaultTableRuntimeStore) store(), processId, decision, summary);
+              if (getProcessId() == 0L) {
+                invalidateCurrentAnalysisKey();
+              }
+            });
   }
 
   public long getCurrentSnapshotId() {
@@ -362,8 +385,14 @@ public class DefaultTableRuntime extends AbstractTableRuntime implements Optimiz
   public boolean evaluatePendingInputAndTransition(
       AmoroTable<?> table, int maxPendingPartitions, boolean forceHealthEvaluation) {
     OptimizingConfig config = getOptimizingConfig();
+    Map<String, String> refreshableConfig =
+        table.supportsPendingInputRefresh() ? new HashMap<>(getTableConfig()) : null;
+    long evaluationPlanTime = getLastPlanTime();
 
     if (!config.isEnabled() && !config.isTableSummaryEnabled()) {
+      if (refreshableConfig != null) {
+        return applyRefreshableEvaluation(Optional.empty(), refreshableConfig, evaluationPlanTime);
+      }
       clearTableAnalysis();
       clearPendingSummary();
       return false;
@@ -380,6 +409,9 @@ public class DefaultTableRuntime extends AbstractTableRuntime implements Optimiz
       throw throwable;
     }
     if (!result.isPresent()) {
+      if (refreshableConfig != null) {
+        return applyRefreshableEvaluation(result, refreshableConfig, evaluationPlanTime);
+      }
       clearTableAnalysis();
       boolean idle = isIdle();
       if (config.isEnabled() && idle) {
@@ -416,6 +448,10 @@ public class DefaultTableRuntime extends AbstractTableRuntime implements Optimiz
       return !isIdle();
     }
 
+    if (refreshableConfig != null) {
+      return applyRefreshableEvaluation(result, refreshableConfig, evaluationPlanTime);
+    }
+
     if (!config.isEnabled()) {
       persistEvaluationSummaryAndClear(evalResult, true);
       return false;
@@ -433,6 +469,67 @@ public class DefaultTableRuntime extends AbstractTableRuntime implements Optimiz
       optimizingNotNecessary();
       return false;
     }
+  }
+
+  /**
+   * Recheck state after scanning so refresh cannot revoke a concurrently planned or running
+   * process.
+   */
+  private boolean applyRefreshableEvaluation(
+      Optional<PendingInputResult> result,
+      Map<String, String> evaluatedConfig,
+      long evaluatedPlanTime) {
+    AtomicBoolean necessary = new AtomicBoolean(!isIdle());
+    store()
+        .synchronizedInvoke(
+            () -> {
+              OptimizingStatus status = getOptimizingStatus();
+              if (!evaluatedConfig.equals(getTableConfig())
+                  || (result.isPresent()
+                      && !analysisMatchesCurrentOrLegacy(
+                          result.get().tableAnalysis().orElse(null)))) {
+                return;
+              }
+              if ((status != OptimizingStatus.IDLE && status != OptimizingStatus.PENDING)
+                  || getProcessId() != 0L
+                  || evaluatedPlanTime != getLastPlanTime()) {
+                // Process state only blocks demand changes; health facts for the same analysis key
+                // use the existing publication path.
+                result.ifPresent(this::persistEvaluationSummaryAndClear);
+                return;
+              }
+              if (result.isPresent()) {
+                PendingInputResult evaluation = result.get();
+                if (getOptimizingConfig().isEnabled() && evaluation.optimizingNecessary()) {
+                  necessary.set(transitionToPending(evaluation, true));
+                  return;
+                }
+                persistEvaluationSummaryAndClear(evaluation, true);
+              }
+              clearTableAnalysis();
+              store()
+                  .begin()
+                  .updateState(pendingInputKey, ignored -> pendingInputKey.getDefaultValue())
+                  .updateState(
+                      OPTIMIZING_STATE_KEY,
+                      state -> {
+                        if (getOptimizingConfig().isEnabled()) {
+                          state.setLastOptimizedSnapshotId(state.getCurrentSnapshotId());
+                          state.setLastOptimizedChangeSnapshotId(
+                              state.getCurrentChangeSnapshotId());
+                        }
+                        return state;
+                      })
+                  .updateTableSummary(
+                      summary -> {
+                        summary.setPendingFileSize(0L);
+                        summary.setPendingFileCount(0);
+                      })
+                  .updateStatusCode(ignored -> OptimizingStatus.IDLE.getCode())
+                  .commit();
+              necessary.set(false);
+            });
+    return necessary.get();
   }
 
   public long getProcessId() {
@@ -672,6 +769,10 @@ public class DefaultTableRuntime extends AbstractTableRuntime implements Optimiz
                 state.setLastMajorOptimizingTime(planTime);
               } else if (processType == OptimizingType.FULL) {
                 state.setLastFullOptimizingTime(planTime);
+                if (success) {
+                  state.setFullStaleSkipCount(0L);
+                  state.setFullRetryNotBefore(0L);
+                }
               }
               return state;
             })
@@ -831,13 +932,18 @@ public class DefaultTableRuntime extends AbstractTableRuntime implements Optimiz
   }
 
   private boolean transitionToPending(PendingInputResult evalResult) {
+    return transitionToPending(evalResult, false);
+  }
+
+  private boolean transitionToPending(PendingInputResult evalResult, boolean refreshPending) {
     AtomicBoolean transitioned = new AtomicBoolean(false);
     FormatTableAnalysis analysis = evalResult.tableAnalysis().orElse(null);
     try {
       store()
           .synchronizedInvoke(
               () -> {
-                if (!isIdle()) {
+                if (!isIdle()
+                    && !(refreshPending && getOptimizingStatus() == OptimizingStatus.PENDING)) {
                   if (!analysisMatchesCurrentOrLegacy(analysis)) {
                     return;
                   }
