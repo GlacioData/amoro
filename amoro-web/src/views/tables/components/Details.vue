@@ -17,21 +17,28 @@ limitations under the License.
 / -->
 
 <script setup lang="ts">
-import { computed, reactive, shallowReactive, watch } from 'vue'
+import { computed, onBeforeUnmount, reactive, shallowReactive } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter } from 'vue-router'
 import type { ColumnProps } from 'ant-design-vue/es/table'
+import { requestEpoch, snapshotTableKey } from './snapshot-page-state'
 import type { DetailColumnItem, IBaseDetailInfo, IColumns, IMap, PartitionColumnItem } from '@/types/common.type'
 import { getTableDetail } from '@/services/table.service'
 import { dateFormat } from '@/utils'
 
 const emit = defineEmits<{
+  (e: 'initializationError', message: string): void
   (e: 'setBaseDetailInfo', data: IBaseDetailInfo): void
   (e: 'tableNotFound', info: { catalog: string, db: string, table: string }): void
 }>()
 const { t } = useI18n()
 const route = useRoute()
 const router = useRouter()
+
+const requests = requestEpoch()
+let loadingIdentity = ''
+const tableIdentity = () => snapshotTableKey(route.query)
+onBeforeUnmount(() => requests.invalidate())
 
 const STORAGE_TABLE_KEY = 'easylake-menu-catalog-db-table'
 
@@ -41,12 +48,6 @@ const params = computed(() => {
   }
 })
 
-watch(
-  () => route.query,
-  (val) => {
-    val?.catalog && route.path === '/tables' && getTableDetails()
-  },
-)
 const commonMetricMap = {
   fileCount: 'File Count',
   totalSize: 'Total Size',
@@ -66,6 +67,7 @@ const changeMetricsMap: IMap<string | number> = {
 const state = reactive({
   detailLoading: false,
   baseDetailInfo: {
+    boundedSnapshotRead: null,
     optimizingStatus: '',
     records: '',
     tableType: '',
@@ -93,7 +95,8 @@ const state = reactive({
 })
 
 async function getTableDetails() {
-  if (state.detailLoading) {
+  const identity = tableIdentity()
+  if (state.detailLoading && loadingIdentity === identity) {
     return
   }
   const requestParams = { ...params.value }
@@ -101,15 +104,26 @@ async function getTableDetails() {
   if (!catalog || !db || !table) {
     return
   }
+  const ticket = requests.begin()
+  loadingIdentity = identity
+  const isCurrent = () => requests.current(ticket) && tableIdentity() === identity
+  // Vue 3.5 async watchers need stale-result guards even when cancellation cannot stop server IO.
+  // https://vuejs.org/guide/essentials/watchers.html#side-effect-cleanup
   try {
     state.detailLoading = true
     const result = await getTableDetail({
       ...requestParams,
     })
+    if (!isCurrent())
+      return
+    if (typeof result.boundedSnapshotRead !== 'boolean')
+      throw new Error(t('snapshotVersionMismatch'))
+    emit('initializationError', '')
     const { pkList = [], tableType, partitionColumnList = [], properties, changeMetrics, schema, createTime, tableIdentifier, baseMetrics, tableSummary, comment } = result
     const primaryKeys = pkList || []
     state.baseDetailInfo = {
       ...tableSummary,
+      boundedSnapshotRead: result.boundedSnapshotRead,
       tableType,
       tableName: `${tableIdentifier?.catalog || ''}.${tableIdentifier?.database || ''}.${tableIdentifier?.tableName || ''}`,
       createTime: createTime ? dateFormat(createTime) : '',
@@ -133,7 +147,7 @@ async function getTableDetails() {
     state.baseMetrics = Object.keys(baseMetricsMap || {}).map((key) => {
       return {
         metric: baseMetricsMap[key],
-        value: key === 'lastCommitTime' || key === 'baseWatermark' ? ((baseMetrics || {})[key] ? dateFormat((baseMetrics || {})[key]) : '') : (baseMetrics || {})[key],
+        value: key === 'lastCommitTime' || key === 'baseWatermark' ? ((baseMetrics || {})[key] ? dateFormat((baseMetrics || {})[key]) : '—') : ((baseMetrics || {})[key] ?? '—'),
       }
     })
     state.properties = Object.keys(properties || {}).map((key) => {
@@ -145,6 +159,9 @@ async function getTableDetails() {
     setBaseDetailInfo()
   }
   catch (error) {
+    if (!isCurrent())
+      return
+    emit('initializationError', (error as Error)?.message || t('snapshotInitializationFailed'))
     const errorMessage = (error as Error)?.message || ''
     const isNotFoundError = /not exist|not found/i.test(errorMessage)
 
@@ -161,7 +178,8 @@ async function getTableDetails() {
     }
   }
   finally {
-    state.detailLoading = false
+    if (isCurrent())
+      state.detailLoading = false
   }
 
   function setBaseDetailInfo() {

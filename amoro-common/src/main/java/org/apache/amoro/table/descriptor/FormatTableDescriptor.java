@@ -43,6 +43,17 @@ public interface FormatTableDescriptor {
   /** Get the table metadata information of the {@link AmoroTable}. */
   ServerTableMeta getTableDetail(AmoroTable<?> amoroTable);
 
+  /** Whether snapshot pages are read on demand without materializing the full history. */
+  default boolean supportsBoundedSnapshotRead() {
+    return false;
+  }
+
+  /** Read raw changes without falling back to the unlimited legacy detail method. */
+  default SnapshotDetailPage getSnapshotDetailPage(
+      AmoroTable<?> table, String snapshotId, String ref, int limit, String cursor) {
+    throw new UnsupportedOperationException("Bounded snapshot detail is not supported");
+  }
+
   /** Get the snapshot information of the {@link AmoroTable}. */
   Pair<List<AmoroSnapshotsOfTable>, Long> getSnapshots(
       AmoroTable<?> amoroTable,

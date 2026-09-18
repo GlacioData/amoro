@@ -165,9 +165,13 @@ public class DashboardServer {
                     new InputStreamReader(inputStream, StandardCharsets.UTF_8);
                 BufferedReader br = new BufferedReader(isr)) {
               StringBuilder sb = new StringBuilder();
-              String line;
-              while ((line = br.readLine()) != null) {
-                sb.append(line);
+              // readLine() removes terminators and can break inline JavaScript and comments.
+              // Preserve UTF-8 text exactly, including CR/LF and significant HTML whitespace.
+              // https://docs.oracle.com/javase/8/docs/api/java/io/BufferedReader.html#readLine--
+              char[] buffer = new char[4096];
+              int count;
+              while ((count = br.read(buffer)) != -1) {
+                sb.append(buffer, 0, count);
               }
               indexHtml = sb.toString();
             }

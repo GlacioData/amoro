@@ -18,14 +18,18 @@
 
 package org.apache.amoro.table.descriptor;
 
+import javax.annotation.Nullable;
+
 public class ConsumerInfo {
 
   private final String consumerId;
   private final long nextSnapshotId;
-  private final AmoroSnapshotsOfTable amoroCurrentSnapshotsOfTable;
+  @Nullable private final AmoroSnapshotsOfTable amoroCurrentSnapshotsOfTable;
 
   public ConsumerInfo(
-      String consumerId, long nextSnapshotId, AmoroSnapshotsOfTable amoroCurrentSnapshotsOfTable) {
+      String consumerId,
+      long nextSnapshotId,
+      @Nullable AmoroSnapshotsOfTable amoroCurrentSnapshotsOfTable) {
     this.consumerId = consumerId;
     this.nextSnapshotId = nextSnapshotId;
     this.amoroCurrentSnapshotsOfTable = amoroCurrentSnapshotsOfTable;
@@ -39,6 +43,8 @@ public class ConsumerInfo {
     return nextSnapshotId;
   }
 
+  /** Missing metadata does not change consumer progress or imply a specific expiration cause. */
+  @Nullable
   public AmoroSnapshotsOfTable getAmoroCurrentSnapshotsOfTable() {
     return amoroCurrentSnapshotsOfTable;
   }

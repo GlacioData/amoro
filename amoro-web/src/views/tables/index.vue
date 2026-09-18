@@ -28,6 +28,7 @@ import UProcess from './components/Process.vue'
 import UHealthScore from './components/HealthScoreDetails.vue'
 import TableExplorer from './components/TableExplorer.vue'
 import HiveDetails from './components/HiveDetails.vue'
+import { snapshotTableKey } from './components/snapshot-page-state'
 import useStore from '@/store/index'
 import type { IBaseDetailInfo } from '@/types/common.type'
 import { usePageScroll } from '@/hooks/usePageScroll'
@@ -120,6 +121,7 @@ export default defineComponent({
       activeKey: 'Details',
       isSecondaryNav: false,
       baseInfo: {
+        boundedSnapshotRead: null,
         optimizingStatus: '',
         records: '',
         tableType: '',
@@ -136,6 +138,7 @@ export default defineComponent({
         comment: '',
       } as IBaseDetailInfo,
       detailLoaded: false,
+      snapshotInitializationError: '',
     })
 
     const isIceberg = computed(() => {
@@ -153,6 +156,7 @@ export default defineComponent({
 
     const handleTableNotFound = () => {
       state.baseInfo = {
+        boundedSnapshotRead: null,
         optimizingStatus: '',
         records: '',
         tableType: '',
@@ -189,6 +193,7 @@ export default defineComponent({
         || !hasSelectedTable.value
         || isHiveTable.value
         || isHiveUpgrade.value
+        || (state.baseInfo.boundedSnapshotRead === null && !!state.snapshotInitializationError)
       ) {
         return
       }
@@ -206,14 +211,14 @@ export default defineComponent({
     watch(
       () => route.query,
       (value, oldVal) => {
-        const { catalog, db, table, type } = value
-        const { catalog: oldCatalog, db: oldDb, table: oldTable, type: oldType } = oldVal
         if (isHiveTable.value || isHiveUpgrade.value) {
           state.activeKey = (value.tab as string) || 'Details'
           return
         }
-        if (`${catalog}${db}${table}${type}` !== `${oldCatalog}${oldDb}${oldTable}${oldType}`) {
-          state.activeKey = 'Details'
+        if (snapshotTableKey(value) !== snapshotTableKey(oldVal)) {
+          handleTableNotFound()
+          state.snapshotInitializationError = ''
+          state.activeKey = (value.tab as string) || 'Details'
           nextTick(() => {
             if (detailRef.value) {
               detailRef.value.getTableDetails()
@@ -260,6 +265,7 @@ export default defineComponent({
     return {
       ...toRefs(state),
       detailRef,
+      tableKey: computed(() => snapshotTableKey(route.query)),
       tabConfigs,
       store,
       isIceberg,
@@ -267,6 +273,7 @@ export default defineComponent({
       isHiveTable,
       isHiveUpgrade,
       setBaseDetailInfo,
+      refreshVisibleTableDetails,
       handleTableNotFound,
       goBack,
       onChangeTab,
@@ -322,13 +329,19 @@ export default defineComponent({
             <div class="tables-main-body">
               <a-tabs v-model:activeKey="activeKey" destroy-inactive-tab-pane @change="onChangeTab">
                 <a-tab-pane key="Details" :tab="$t('details')" force-render>
-                  <UDetails ref="detailRef" @set-base-detail-info="setBaseDetailInfo" @table-not-found="handleTableNotFound" />
+                  <UDetails :key="tableKey" ref="detailRef" @set-base-detail-info="setBaseDetailInfo" @table-not-found="handleTableNotFound" @initialization-error="snapshotInitializationError = $event" />
                 </a-tab-pane>
                 <a-tab-pane v-if="detailLoaded" key="Files" :tab="$t('files')">
                   <UFiles :has-partition="baseInfo.hasPartition" :table-format="baseInfo.tableFormat" />
                 </a-tab-pane>
                 <a-tab-pane v-for="tab in tabConfigs" :key="tab.key" :tab="$t(tab.label)">
-                  <component :is="`U${tab.key}`" />
+                  <USnapshots
+                    v-if="tab.key === 'Snapshots'"
+                    :bounded-snapshot-read="baseInfo.boundedSnapshotRead"
+                    :initialization-error="snapshotInitializationError"
+                    @retry-initialization="detailRef?.getTableDetails()"
+                  />
+                  <component :is="`U${tab.key}`" v-else />
                 </a-tab-pane>
               </a-tabs>
             </div>

@@ -17,7 +17,7 @@
   */
 
 // import { IOptions } from '@/types/common.type'
-import type { ICatalogItem, IMap } from '@/types/common.type'
+import type { ICatalogItem, IMap, SnapshotItem } from '@/types/common.type'
 import request from '@/utils/request'
 
 export function getCatalogList(): Promise<ICatalogItem[]> {
@@ -117,9 +117,10 @@ export function getSnapshots(
     operation: string
     lastSnapshot?: string
   },
-) {
+  handleError = true,
+): Promise<{ list: SnapshotItem[], total: number }> {
   const { catalog, db, table, page, pageSize, token, ref, operation, lastSnapshot } = params
-  return request.get(`api/ams/v1/tables/catalogs/${catalog}/dbs/${db}/tables/${table}/snapshots`, { params: { page, pageSize, token, ref, operation, lastSnapshot } })
+  return request.get(`api/ams/v1/tables/catalogs/${catalog}/dbs/${db}/tables/${table}/snapshots`, { handleError, params: { page, pageSize, token, ref, operation, lastSnapshot } })
 }
 
 // get Snapshot detail
@@ -138,6 +139,20 @@ export function getDetailBySnapshotId(
   const { catalog, db, table, snapshotId, page, pageSize, ref, token } = params
   return request.get(`api/ams/v1/tables/catalogs/${catalog}/dbs/${db}/tables/${table}/snapshots/${snapshotId}/detail`, { params: { page, pageSize, ref, token } })
 }
+// The bounded protocol deliberately has no page/offset field.
+export function getSnapshotDetailPage(params: {
+  catalog: string
+  db: string
+  table: string
+  ref: string
+  snapshotId: string
+  pageSize: number
+  cursor?: string
+}) {
+  const { catalog, db, table, snapshotId, ref, pageSize, cursor } = params
+  return request.get(`api/ams/v1/tables/catalogs/${catalog}/dbs/${db}/tables/${table}/snapshots/${snapshotId}/detail`, { handleError: false, params: { ref, pageSize, cursor } })
+}
+
 // get operations
 export function getOperations(
   params: {

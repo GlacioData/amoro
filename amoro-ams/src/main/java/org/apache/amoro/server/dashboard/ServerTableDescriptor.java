@@ -25,6 +25,7 @@ import org.apache.amoro.config.Configurations;
 import org.apache.amoro.process.ProcessStatus;
 import org.apache.amoro.server.catalog.CatalogManager;
 import org.apache.amoro.server.catalog.ServerCatalog;
+import org.apache.amoro.server.dashboard.response.PageResult;
 import org.apache.amoro.server.optimizing.OptimizingTaskMeta;
 import org.apache.amoro.server.persistence.PersistentBase;
 import org.apache.amoro.server.table.TableManager;
@@ -38,6 +39,7 @@ import org.apache.amoro.table.descriptor.OptimizingTaskInfo;
 import org.apache.amoro.table.descriptor.PartitionBaseInfo;
 import org.apache.amoro.table.descriptor.PartitionFileBaseInfo;
 import org.apache.amoro.table.descriptor.ServerTableMeta;
+import org.apache.amoro.table.descriptor.SnapshotReadException;
 import org.apache.amoro.table.descriptor.TagOrBranchInfo;
 import org.apache.commons.lang3.tuple.Pair;
 import org.apache.iceberg.util.ThreadPools;
@@ -49,10 +51,14 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.ServiceLoader;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Semaphore;
+import java.util.function.Supplier;
 
 public class ServerTableDescriptor extends PersistentBase {
 
   private final Map<TableFormat, FormatTableDescriptor> formatDescriptorMap = new HashMap<>();
+
+  private final Semaphore snapshotReadPermit = new Semaphore(1);
 
   private final CatalogManager catalogManager;
   private final TableManager tableManager;
@@ -78,7 +84,9 @@ public class ServerTableDescriptor extends PersistentBase {
   public ServerTableMeta getTableDetail(TableIdentifier tableIdentifier) {
     AmoroTable<?> amoroTable = loadTable(tableIdentifier);
     FormatTableDescriptor formatTableDescriptor = formatDescriptorMap.get(amoroTable.format());
-    return formatTableDescriptor.getTableDetail(amoroTable);
+    ServerTableMeta result = formatTableDescriptor.getTableDetail(amoroTable);
+    result.setBoundedSnapshotRead(formatTableDescriptor.supportsBoundedSnapshotRead());
+    return result;
   }
 
   public Pair<List<AmoroSnapshotsOfTable>, Long> getSnapshots(
@@ -90,8 +98,12 @@ public class ServerTableDescriptor extends PersistentBase {
       String lastSnapshot) {
     AmoroTable<?> amoroTable = loadTable(tableIdentifier);
     FormatTableDescriptor formatTableDescriptor = formatDescriptorMap.get(amoroTable.format());
-    return formatTableDescriptor.getSnapshots(
-        amoroTable, ref, operationType, limit, offset, lastSnapshot);
+    // List statistics now stream delta manifest lists, sharing admission with detail reads.
+    return snapshotRead(
+        formatTableDescriptor,
+        () ->
+            formatTableDescriptor.getSnapshots(
+                amoroTable, ref, operationType, limit, offset, lastSnapshot));
   }
 
   public List<PartitionFileBaseInfo> getSnapshotDetail(
@@ -99,6 +111,96 @@ public class ServerTableDescriptor extends PersistentBase {
     AmoroTable<?> amoroTable = loadTable(tableIdentifier);
     FormatTableDescriptor formatTableDescriptor = formatDescriptorMap.get(amoroTable.format());
     return formatTableDescriptor.getSnapshotDetail(amoroTable, snapshotId, ref);
+  }
+
+  /** Preserve legacy defaults while selecting the bounded protocol from the loaded descriptor. */
+  public PageResult<AmoroSnapshotsOfTable> getSnapshotListResponse(
+      TableIdentifier identifier,
+      String ref,
+      OperationType operation,
+      Integer page,
+      Integer pageSize,
+      String lastSnapshot) {
+    AmoroTable<?> table = loadTable(identifier);
+    FormatTableDescriptor descriptor = formatDescriptorMap.get(table.format());
+    int limit = pageSize == null ? (descriptor.supportsBoundedSnapshotRead() ? 25 : 20) : pageSize;
+    int offset = snapshotOffset(page == null ? 1 : page, limit);
+    Pair<List<AmoroSnapshotsOfTable>, Long> result =
+        snapshotRead(
+            descriptor,
+            () -> descriptor.getSnapshots(table, ref, operation, limit, offset, lastSnapshot));
+    return PageResult.of(result.getLeft(), result.getRight());
+  }
+
+  /** Explicit protocol dispatch against the same loaded table and descriptor. */
+  public Object getSnapshotDetailResponse(
+      TableIdentifier identifier,
+      String snapshotId,
+      String ref,
+      Integer page,
+      Integer pageSize,
+      String cursor,
+      boolean hasOffset) {
+    AmoroTable<?> table = loadTable(identifier);
+    FormatTableDescriptor descriptor = formatDescriptorMap.get(table.format());
+    if (descriptor.supportsBoundedSnapshotRead()) {
+      if (page != null || hasOffset) {
+        throw new SnapshotReadException(
+            SnapshotReadException.Reason.INVALID_REQUEST,
+            "Use cursor pagination for this table; refresh the dashboard");
+      }
+      int limit = pageSize == null ? 25 : pageSize;
+      if (limit < 1
+          || limit > 25
+          || (cursor != null && (cursor.isEmpty() || cursor.length() > 4096))) {
+        throw new SnapshotReadException(
+            SnapshotReadException.Reason.INVALID_REQUEST,
+            "Invalid cursor or pageSize (expected 1..25)");
+      }
+      return snapshotRead(
+          descriptor,
+          () -> descriptor.getSnapshotDetailPage(table, snapshotId, ref, limit, cursor));
+    }
+    if (cursor != null || hasOffset) {
+      throw new SnapshotReadException(
+          SnapshotReadException.Reason.INVALID_REQUEST,
+          "Cursor pagination is not supported for this table");
+    }
+    int limit = pageSize == null ? 20 : pageSize;
+    int offset = snapshotOffset(page == null ? 1 : page, limit);
+    return PageResult.of(descriptor.getSnapshotDetail(table, snapshotId, ref), offset, limit);
+  }
+
+  public static int snapshotOffset(int page, int pageSize) {
+    if (page < 1 || pageSize < 1) {
+      throw new SnapshotReadException(
+          SnapshotReadException.Reason.INVALID_REQUEST, "page and pageSize must be positive");
+    }
+    long offset = ((long) page - 1) * pageSize;
+    if (offset > Integer.MAX_VALUE) {
+      throw new SnapshotReadException(
+          SnapshotReadException.Reason.INVALID_REQUEST,
+          "Snapshot page exceeds the supported range");
+    }
+    return (int) offset;
+  }
+
+  private <T> T snapshotRead(FormatTableDescriptor descriptor, Supplier<T> read) {
+    if (!descriptor.supportsBoundedSnapshotRead()) {
+      return read.get();
+    }
+    // Non-blocking admission, not a worker queue. Keep ownership through reader cleanup.
+    // Java 8 Semaphore.tryAcquire:
+    // https://docs.oracle.com/javase/8/docs/api/java/util/concurrent/Semaphore.html#tryAcquire--
+    if (!snapshotReadPermit.tryAcquire()) {
+      throw new SnapshotReadException(
+          SnapshotReadException.Reason.BUSY, "Another snapshot read is running; retry manually");
+    }
+    try {
+      return read.get();
+    } finally {
+      snapshotReadPermit.release();
+    }
   }
 
   public List<DDLInfo> getTableOperations(TableIdentifier tableIdentifier) {
@@ -135,7 +237,8 @@ public class ServerTableDescriptor extends PersistentBase {
   public List<ConsumerInfo> getTableConsumersInfos(TableIdentifier tableIdentifier) {
     AmoroTable<?> amoroTable = loadTable(tableIdentifier);
     FormatTableDescriptor formatTableDescriptor = formatDescriptorMap.get(amoroTable.format());
-    return formatTableDescriptor.getTableConsumerInfos(amoroTable);
+    return snapshotRead(
+        formatTableDescriptor, () -> formatTableDescriptor.getTableConsumerInfos(amoroTable));
   }
 
   public Pair<List<OptimizingProcessInfo>, Integer> getOptimizingProcessesInfo(

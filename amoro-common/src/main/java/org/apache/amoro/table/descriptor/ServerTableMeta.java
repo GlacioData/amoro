@@ -28,6 +28,16 @@ import java.util.Objects;
 /** ams table meta. */
 public class ServerTableMeta {
   private String tableType;
+  private boolean boundedSnapshotRead;
+
+  public boolean isBoundedSnapshotRead() {
+    return boundedSnapshotRead;
+  }
+
+  public void setBoundedSnapshotRead(boolean boundedSnapshotRead) {
+    this.boundedSnapshotRead = boundedSnapshotRead;
+  }
+
   private TableIdentifier tableIdentifier;
   private List<AMSColumnInfo> schema;
   private List<AMSColumnInfo> pkList;

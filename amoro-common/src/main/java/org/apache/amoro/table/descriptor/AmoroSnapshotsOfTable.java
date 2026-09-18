@@ -25,8 +25,8 @@ import java.util.Map;
 
 public class AmoroSnapshotsOfTable {
   private String snapshotId;
-  private int fileCount;
-  private long fileSize;
+  private Long fileCount;
+  private Long fileSize;
   private long records;
   private long commitTime;
   private String operation;
@@ -41,7 +41,7 @@ public class AmoroSnapshotsOfTable {
 
   public AmoroSnapshotsOfTable(
       String snapshotId,
-      int fileCount,
+      long fileCount,
       long fileSize,
       long records,
       long commitTime,
@@ -58,23 +58,23 @@ public class AmoroSnapshotsOfTable {
     this.summary = summary;
   }
 
-  public int getFileCount() {
+  public Long getFileCount() {
     return fileCount;
   }
 
-  public void setFileCount(int fileCount) {
+  public void setFileCount(Long fileCount) {
     this.fileCount = fileCount;
   }
 
   public String getFileSize() {
-    return CommonUtil.byteToXB(fileSize);
+    return fileSize == null ? null : CommonUtil.byteToXB(fileSize);
   }
 
-  public void setFileSize(long fileSize) {
+  public void setFileSize(Long fileSize) {
     this.fileSize = fileSize;
   }
 
-  public long getOriginalFileSize() {
+  public Long getOriginalFileSize() {
     return fileSize;
   }
 
@@ -151,8 +151,8 @@ public class AmoroSnapshotsOfTable {
       return false;
     }
     AmoroSnapshotsOfTable that = (AmoroSnapshotsOfTable) o;
-    return fileCount == that.fileCount
-        && fileSize == that.fileSize
+    return Objects.equal(fileCount, that.fileCount)
+        && Objects.equal(fileSize, that.fileSize)
         && records == that.records
         && commitTime == that.commitTime
         && Objects.equal(snapshotId, that.snapshotId)
