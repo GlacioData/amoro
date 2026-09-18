@@ -16,7 +16,22 @@
   * limitations under the License.
   */
 
+const nativeSnapshotRecords = {
+  'total-records': 'Total records',
+  'delta-records': 'Delta records',
+  'changelog-records': 'Changelog records',
+}
+
 export default {
+  ...nativeSnapshotRecords,
+  snapshotVersionMismatch: 'Incompatible dashboard/server versions: snapshot capability is missing. Refresh or contact an administrator.',
+  snapshotInitializationFailed: 'Table metadata failed to load. Snapshot reads are unavailable.',
+  snapshotWaiting: 'Waiting for table read capabilities…',
+  snapshotPrevious: 'Previous',
+  consumerSnapshotUnavailable: 'Snapshot information unavailable',
+  snapshotNext: 'Next',
+  snapshotRetry: 'Retry',
+  snapshotReadFailed: 'Snapshot read failed. Retry manually.',
   last1h: 'Last 1 h',
   last12h: 'Last 12 h',
   last24h: 'Last 24 h',
@@ -215,6 +230,10 @@ export default {
   tasks: 'Tasks',
   recordChartTitle: 'Table record count',
   fileChartTitle: 'Table file count',
+  fileChangeChartTitle: 'File changes',
+  addedFiles: 'Added files',
+  deletedFiles: 'Deleted files',
+  netFileChange: 'Net file change',
   totalRecords: 'total-records',
   totalEqualityDeletes: 'eq-delete-records',
   totalPositionDeletes: 'pos-delete-records',

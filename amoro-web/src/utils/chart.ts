@@ -39,7 +39,7 @@ function sortLineChartDataByKey(obj: ILineChartOriginalData = {}, sortCallback: 
 
 /**
  * Generate a line chart option based on the original data
- * @param titleText chart title text, needs to be internationalized
+ * @param _titleText chart title text, needs to be internationalized
  * @param data
  * @returns Echarts options
  */
@@ -79,7 +79,7 @@ export function generateLineChartOption(_titleText: string, data: ILineChartOrig
       containLabel: true,
     },
   }
-  const legendMap: Record<string, number[]> = {}
+  const legendMap: Record<string, (number | null)[]> = {}
   Object.values(data).forEach((val) => {
     const keys = Object.keys(val)
     keys.forEach((key) => {

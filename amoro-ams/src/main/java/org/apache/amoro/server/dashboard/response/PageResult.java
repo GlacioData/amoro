@@ -28,23 +28,23 @@ import java.util.stream.Collectors;
 public class PageResult<R> {
   private static final PageResult<?> EMPTY = new PageResult<>(0);
   private List<R> list;
-  private int total;
+  private long total;
 
-  private PageResult(List<R> list, int total) {
+  private PageResult(List<R> list, long total) {
     this.list = list;
     this.total = total;
   }
 
-  private PageResult(int total) {
+  private PageResult(long total) {
     this.list = Collections.emptyList();
     this.total = total;
   }
 
-  public int getTotal() {
+  public long getTotal() {
     return total;
   }
 
-  public void setTotal(int total) {
+  public void setTotal(long total) {
     this.total = total;
   }
 
@@ -67,7 +67,7 @@ public class PageResult<R> {
    * @param total original size
    * @return response contains paging information response
    */
-  public static <R> PageResult<R> of(List<R> list, int total) {
+  public static <R> PageResult<R> of(List<R> list, long total) {
     return new PageResult<>(list, total);
   }
 

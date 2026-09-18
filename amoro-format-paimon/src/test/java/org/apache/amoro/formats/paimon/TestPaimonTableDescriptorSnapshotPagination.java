@@ -18,10 +18,14 @@
 
 package org.apache.amoro.formats.paimon;
 
-import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -29,207 +33,278 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import org.apache.amoro.AmoroTable;
+import org.apache.amoro.table.descriptor.AmoroSnapshotsOfTable;
 import org.apache.amoro.table.descriptor.OperationType;
+import org.apache.amoro.table.descriptor.SnapshotReadException;
 import org.apache.commons.lang3.tuple.Pair;
 import org.apache.paimon.Snapshot;
+import org.apache.paimon.fs.FileIO;
+import org.apache.paimon.fs.Path;
 import org.apache.paimon.table.FileStoreTable;
+import org.apache.paimon.tag.Tag;
 import org.apache.paimon.utils.BranchManager;
 import org.apache.paimon.utils.SnapshotManager;
+import org.apache.paimon.utils.TagManager;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.util.ArrayList;
+import java.io.FileNotFoundException;
 import java.util.List;
-import java.util.concurrent.Executors;
+import java.util.Map;
+import java.util.Optional;
 
-/**
- * Pins down the total-count computation inside {@link PaimonTableDescriptor#getSnapshots}.
- *
- * <p>Before JSTP-2356 the method computed {@code total = latestSnapshotId() - earliestSnapshotId()}
- * which had three distinct bugs:
- *
- * <ul>
- *   <li>NPE on a freshly-created table because {@code latestSnapshotId()} returns {@code null}
- *       there — the unboxed subtraction crashed before any empty-table early-return could fire.
- *   <li>Off-by-one: the subtraction is a range width, not a count, so it reported {@code count - 1}
- *       even on non-empty tables.
- *   <li>Ignored {@code operationType}: the subtraction never looked at commit kinds, so OPTIMIZING
- *       / NON_OPTIMIZING pagination totals were identical to the unfiltered total.
- * </ul>
- *
- * <p>The fix short-circuits on {@code latestSnapshotId() == null}, uses Paimon's O(1) {@code
- * SnapshotManager#snapshotCount()} for the unfiltered {@code ALL} path (directory listing only, no
- * JSON reads), and iterates {@code SnapshotManager#snapshots()} to apply the same predicate the
- * paginator uses for {@code OPTIMIZING} / {@code NON_OPTIMIZING}. These tests lock each of those
- * three behaviours independently and use Mockito {@code verify} to prove the cheap path is actually
- * taken for the common {@code ALL} query.
- */
 class TestPaimonTableDescriptorSnapshotPagination {
+  private final FileIO io = mock(FileIO.class);
+  private final SnapshotManager manager = mock(SnapshotManager.class);
+  private final FileStoreTable table = mock(FileStoreTable.class);
+  private final AmoroTable<?> amoro = mock(AmoroTable.class);
+  private final PaimonTableDescriptor descriptor = new PaimonTableDescriptor();
 
-  private static final String MAIN_BRANCH = "main";
-
-  /**
-   * Wires an {@link AmoroTable} whose {@code originalTable()} is a {@link FileStoreTable} whose
-   * {@code snapshotManager().copyWithBranch(main)} returns the supplied mock. The branch-exists
-   * check is stubbed to {@code false} so {@link BranchManager#isMainBranch} decides the path.
-   */
-  private static AmoroTable<?> mockAmoroTable(SnapshotManager snapshotManager) {
-    FileStoreTable table = mock(FileStoreTable.class);
-    SnapshotManager base = mock(SnapshotManager.class);
-    when(base.copyWithBranch(MAIN_BRANCH)).thenReturn(snapshotManager);
-    when(table.snapshotManager()).thenReturn(base);
-
-    BranchManager branchManager = mock(BranchManager.class);
-    when(branchManager.branchExists(any())).thenReturn(false);
-    when(table.branchManager()).thenReturn(branchManager);
-
-    AmoroTable<?> amoroTable = mock(AmoroTable.class);
-    when(((AmoroTable) amoroTable).originalTable()).thenReturn(table);
-    return amoroTable;
+  @BeforeEach
+  void setup() throws Exception {
+    doReturn(table).when(amoro).originalTable();
+    when(table.snapshotManager()).thenReturn(manager);
+    when(manager.copyWithBranch("main")).thenReturn(manager);
+    when(manager.fileIO()).thenReturn(io);
+    when(manager.snapshotDirectory()).thenReturn(new Path("/table/snapshot"));
+    when(manager.snapshotPath(anyLong()))
+        .thenAnswer(i -> new Path("/table/snapshot/snapshot-" + i.getArgument(0)));
+    when(io.exists(any())).thenReturn(true);
+    hints(1L, 50L);
+    when(manager.tryGetSnapshot(anyLong()))
+        .thenAnswer(
+            i -> {
+              long id = i.getArgument(0);
+              Snapshot snapshot = mock(Snapshot.class);
+              when(snapshot.id()).thenReturn(id);
+              when(snapshot.commitKind()).thenReturn(Snapshot.CommitKind.APPEND);
+              return snapshot;
+            });
   }
 
-  /**
-   * {@link PaimonTableDescriptor#getSnapshots} shells every per-snapshot detail load onto an {@link
-   * java.util.concurrent.ExecutorService} that is injected via {@link
-   * PaimonTableDescriptor#withIoExecutor}. Without wiring one up, {@code CompletableFuture
-   * .supplyAsync(task, null)} NPEs before we ever reach the pagination return. We only exercise the
-   * non-empty happy paths here, so a same-thread direct executor is sufficient.
-   */
-  private static PaimonTableDescriptor newDescriptorWithExecutor() {
-    PaimonTableDescriptor descriptor = new PaimonTableDescriptor();
-    descriptor.withIoExecutor(Executors.newSingleThreadExecutor());
-    return descriptor;
+  private void hints(Long min, Long max) throws Exception {
+    when(io.readOverwrittenFileUtf8(new Path("/table/snapshot/EARLIEST")))
+        .thenReturn(Optional.ofNullable(min).map(Object::toString));
+    when(io.readOverwrittenFileUtf8(new Path("/table/snapshot/LATEST")))
+        .thenReturn(Optional.ofNullable(max).map(Object::toString));
   }
 
-  private static Snapshot snapshotWithKind(long id, Snapshot.CommitKind kind) {
-    Snapshot s = mock(Snapshot.class);
-    when(s.id()).thenReturn(id);
-    when(s.commitKind()).thenReturn(kind);
-    return s;
-  }
-
-  /**
-   * These tests only care about the {@code total} computation. Arming {@code snapshotsWithinRange}
-   * with an empty iterator short-circuits the downstream pagination loop so we never reach {@code
-   * table.store()} (which would need its own deep mock stack) or the per-snapshot {@link
-   * java.util.concurrent.CompletableFuture} fan-out. The pagination still terminates cleanly and
-   * returns {@code (emptyList, total)} — exactly what we want to assert on.
-   */
-  private static void armEmptyPagination(SnapshotManager manager) {
-    when(manager.snapshotsWithinRange(any(), any()))
-        .thenAnswer(inv -> new ArrayList<Snapshot>().iterator());
+  private Pair<List<AmoroSnapshotsOfTable>, Long> page(OperationType operation, int offset) {
+    return descriptor.getSnapshots(amoro, null, operation, 25, offset, null);
   }
 
   @Test
-  void emptyTableReturnsZeroWithoutNpe() throws Exception {
-    // latestSnapshotId() == null simulates a brand-new table. The old code NPE'd here
-    // because it unboxed the null. The fix must return (empty, 0L) before touching
-    // any of the counting APIs, so snapshotCount() / snapshots() must NOT be invoked.
-    SnapshotManager manager = mock(SnapshotManager.class);
-    when(manager.latestSnapshotId()).thenReturn(null);
-    AmoroTable<?> amoroTable = mockAmoroTable(manager);
-
-    PaimonTableDescriptor descriptor = new PaimonTableDescriptor();
-    Pair<? extends List<?>, Long> result =
-        assertDoesNotThrow(
-            () -> descriptor.getSnapshots(amoroTable, MAIN_BRANCH, OperationType.ALL, 10, 0, null));
-
-    assertTrue(result.getLeft().isEmpty(), "empty table must yield empty list");
-    assertEquals(0L, result.getRight(), "empty table must yield zero total");
+  void fixedCandidateRangeHasNoManifestOrHistoryScan() throws Exception {
+    Pair<List<AmoroSnapshotsOfTable>, Long> first = page(OperationType.ALL, 0);
+    assertEquals(50L, first.getRight());
+    assertEquals(25, first.getLeft().size());
+    assertEquals("50", first.getLeft().get(0).getSnapshotId());
+    assertEquals("26", first.getLeft().get(24).getSnapshotId());
+    assertEquals(0L, first.getLeft().get(0).getFileCount());
+    assertNull(first.getLeft().get(0).getFileSize());
+    assertEquals("25", page(OperationType.ALL, 25).getLeft().get(0).getSnapshotId());
+    verify(manager, times(50)).tryGetSnapshot(anyLong());
     verify(manager, never()).snapshotCount();
     verify(manager, never()).snapshots();
+    verify(manager, never()).latestSnapshotId();
+    verify(manager, never()).earliestSnapshotId();
+    verify(table, never()).store();
+    verify(io, never()).listStatus(any());
   }
 
   @Test
-  void allOperationTypeUsesSnapshotCount() throws Exception {
-    // operationType == ALL must hit the cheap kernel path. We prove this by verifying
-    // snapshotCount() is called exactly once and snapshots() is never called — the
-    // latter would indicate a full iteration which the ALL path must not do.
-    // Build snapshot mocks BEFORE any when(manager.xxx()) stubbing so the inner when(s.id())
-    // stubs don't interleave with the outer stubbing on manager (Mockito UnfinishedStubbing).
-    List<Snapshot> all = new ArrayList<>();
-    for (long id = 1; id <= 10; id++) {
-      all.add(snapshotWithKind(id, Snapshot.CommitKind.APPEND));
-    }
-    Snapshot earliest = snapshotWithKind(1L, Snapshot.CommitKind.APPEND);
+  void expandedMetadataUsesOnlySnapshotJsonAndPreservesChartKeys() throws Exception {
+    Snapshot snapshot = mock(Snapshot.class);
+    when(snapshot.id()).thenReturn(50L);
+    when(snapshot.commitKind()).thenReturn(Snapshot.CommitKind.APPEND);
+    when(snapshot.schemaId()).thenReturn(7L);
+    when(snapshot.watermark()).thenReturn(1789603200000L);
+    when(snapshot.changelogRecordCount()).thenReturn(12L);
+    when(snapshot.baseManifestListSize()).thenReturn(2048L);
+    when(snapshot.deltaManifestListSize()).thenReturn(4096L);
+    when(snapshot.changelogManifestListSize()).thenReturn(1024L);
+    when(manager.tryGetSnapshot(50L)).thenReturn(snapshot);
 
-    SnapshotManager manager = mock(SnapshotManager.class);
-    when(manager.latestSnapshotId()).thenReturn(10L);
-    when(manager.earliestSnapshot()).thenReturn(earliest);
-    when(manager.snapshotCount()).thenReturn(10L);
-    armEmptyPagination(manager);
-
-    AmoroTable<?> amoroTable = mockAmoroTable(manager);
-    PaimonTableDescriptor descriptor = newDescriptorWithExecutor();
-
-    Pair<?, Long> result =
-        descriptor.getSnapshots(amoroTable, MAIN_BRANCH, OperationType.ALL, 5, 0, null);
-
-    assertEquals(10L, result.getRight(), "ALL path must report snapshotCount() verbatim");
-    verify(manager, times(1)).snapshotCount();
-    verify(manager, never()).snapshots();
+    AmoroSnapshotsOfTable row = page(OperationType.ALL, 0).getLeft().get(0);
+    Map<String, String> summary = row.getSummary();
+    assertEquals("7", summary.get("schemaId"));
+    assertEquals("1789603200000", summary.get("watermark"));
+    assertEquals("12", summary.get("changelogRecordCount"));
+    assertEquals("2048", summary.get("baseManifestListSize"));
+    assertEquals("4096", summary.get("deltaManifestListSize"));
+    assertEquals("1024", summary.get("changelogManifestListSize"));
+    assertEquals("12", row.getRecordsSummaryForChart().get("changelog-records"));
+    assertFalse(summary.containsKey("changelog-records"));
+    verify(snapshot, never()).baseManifestList();
+    verify(snapshot).deltaManifestList();
+    verify(snapshot, never()).changelogManifestList();
+    verify(table, never()).store();
+    verify(manager, times(25)).tryGetSnapshot(anyLong());
   }
 
   @Test
-  void filteredOperationTypeIteratesSnapshots() throws Exception {
-    // operationType != ALL has no kernel shortcut; the fix must iterate snapshots()
-    // and apply the same predicate the paginator uses. We assemble 5 APPEND + 5
-    // COMPACT snapshots and expect OPTIMIZING (COMPACT) to surface exactly 5.
-    List<Snapshot> all = new ArrayList<>();
-    for (long id = 1; id <= 5; id++) {
-      all.add(snapshotWithKind(id, Snapshot.CommitKind.APPEND));
+  void missingMetadataIsUnknownButZeroIsPresent() {
+    Snapshot snapshot = mock(Snapshot.class);
+    when(snapshot.commitKind()).thenReturn(Snapshot.CommitKind.APPEND);
+    when(snapshot.watermark()).thenReturn(null);
+    when(snapshot.changelogRecordCount()).thenReturn(null);
+    when(snapshot.baseManifestListSize()).thenReturn(null);
+    when(snapshot.deltaManifestListSize()).thenReturn(null);
+    when(snapshot.changelogManifestListSize()).thenReturn(null);
+    Map<String, String> missing = PaimonSnapshotMetadata.summary(snapshot).getSummary();
+    assertEquals("0", missing.get("schemaId"));
+    for (String key :
+        new String[] {
+          "watermark", "changelogRecordCount", "baseManifestListSize", "deltaManifestListSize"
+        }) {
+      assertEquals("—", missing.get(key));
     }
-    for (long id = 6; id <= 10; id++) {
-      all.add(snapshotWithKind(id, Snapshot.CommitKind.COMPACT));
+    assertFalse(missing.containsKey("changelogManifestListSize"));
+
+    when(snapshot.watermark()).thenReturn(0L);
+    when(snapshot.changelogRecordCount()).thenReturn(0L);
+    when(snapshot.baseManifestListSize()).thenReturn(0L);
+    when(snapshot.deltaManifestListSize()).thenReturn(0L);
+    when(snapshot.changelogManifestListSize()).thenReturn(0L);
+    Map<String, String> present = PaimonSnapshotMetadata.summary(snapshot).getSummary();
+    for (String key :
+        new String[] {
+          "watermark",
+          "changelogRecordCount",
+          "baseManifestListSize",
+          "deltaManifestListSize",
+          "changelogManifestListSize"
+        }) {
+      assertEquals("0", present.get(key));
     }
-    Snapshot earliest = snapshotWithKind(1L, Snapshot.CommitKind.APPEND);
+  }
 
-    SnapshotManager manager = mock(SnapshotManager.class);
-    when(manager.latestSnapshotId()).thenReturn(10L);
-    when(manager.earliestSnapshot()).thenReturn(earliest);
-    when(manager.snapshots()).thenReturn(all.iterator());
-    armEmptyPagination(manager);
+  @Test
+  void filterAndExpiredHoleNeverRefill() throws Exception {
+    when(manager.tryGetSnapshot(49)).thenThrow(new FileNotFoundException());
+    Pair<List<AmoroSnapshotsOfTable>, Long> page = page(OperationType.OPTIMIZING, 0);
+    assertEquals(50L, page.getRight());
+    assertTrue(page.getLeft().isEmpty());
+    verify(manager, times(25)).tryGetSnapshot(anyLong());
+    verify(manager, never()).tryGetSnapshot(25);
+  }
 
-    AmoroTable<?> amoroTable = mockAmoroTable(manager);
-    PaimonTableDescriptor descriptor = newDescriptorWithExecutor();
-
-    Pair<?, Long> result =
-        descriptor.getSnapshots(amoroTable, MAIN_BRANCH, OperationType.OPTIMIZING, 5, 0, null);
-
+  @Test
+  void emptyRequiresAbsentDirectory() throws Exception {
+    hints(null, null);
+    when(io.exists(new Path("/table/snapshot"))).thenReturn(false);
+    assertEquals(0L, page(OperationType.ALL, 0).getRight());
+    when(io.exists(new Path("/table/snapshot"))).thenReturn(true);
     assertEquals(
-        5L,
-        result.getRight(),
-        "OPTIMIZING must count only COMPACT commits (5 of 10), not the full set");
-    verify(manager, times(1)).snapshots();
-    verify(manager, never()).snapshotCount();
+        SnapshotReadException.Reason.UNAVAILABLE,
+        assertThrows(SnapshotReadException.class, () -> page(OperationType.ALL, 0)).getReason());
   }
 
   @Test
-  void snapshotCountIsOffByOneFromRange() throws Exception {
-    // Regression guard for the off-by-one: latest=10, earliest=1 yielded total=9
-    // under the old arithmetic (range width, not element count). snapshotCount()=10
-    // is the correct answer because both endpoints are inclusive in the count.
-    List<Snapshot> all = new ArrayList<>();
-    for (long id = 1; id <= 10; id++) {
-      all.add(snapshotWithKind(id, Snapshot.CommitKind.APPEND));
+  void missingEarliestOnlyUsesSnapshotOneAndNeverLists() throws Exception {
+    hints(null, 50L);
+    when(io.exists(new Path("/table/snapshot/EARLIEST"))).thenReturn(false);
+    assertEquals(50L, page(OperationType.ALL, 0).getRight());
+    when(io.exists(new Path("/table/snapshot/snapshot-1"))).thenReturn(false);
+    assertThrows(SnapshotReadException.class, () -> page(OperationType.ALL, 0));
+    verify(io, never()).listStatus(any());
+  }
+
+  @Test
+  void invalidOrStaleHintsFailClosed() throws Exception {
+    for (Long[] pair : new Long[][] {{0L, 50L}, {51L, 50L}, {1L, null}, {null, null}}) {
+      hints(pair[0], pair[1]);
+      assertThrows(SnapshotReadException.class, () -> page(OperationType.ALL, 0));
     }
-    Snapshot earliest = snapshotWithKind(1L, Snapshot.CommitKind.APPEND);
+    hints(1L, 50L);
+    when(io.exists(new Path("/table/snapshot/snapshot-50"))).thenReturn(false);
+    assertThrows(SnapshotReadException.class, () -> page(OperationType.ALL, 0));
+    verify(manager, never()).tryGetSnapshot(anyLong());
+  }
 
-    SnapshotManager manager = mock(SnapshotManager.class);
-    when(manager.latestSnapshotId()).thenReturn(10L);
-    when(manager.earliestSnapshotId()).thenReturn(1L);
-    when(manager.earliestSnapshot()).thenReturn(earliest);
-    when(manager.snapshotCount()).thenReturn(10L);
-    armEmptyPagination(manager);
+  @Test
+  void longTotalAndOutOfRangePages() throws Exception {
+    hints(1L, Long.MAX_VALUE);
+    assertEquals(Long.MAX_VALUE, page(OperationType.ALL, 0).getRight());
+    hints(1L, 10L);
+    assertTrue(page(OperationType.ALL, 25).getLeft().isEmpty());
+    assertThrows(
+        SnapshotReadException.class,
+        () -> descriptor.getSnapshots(amoro, "main", OperationType.ALL, 26, 0, null));
+  }
 
-    AmoroTable<?> amoroTable = mockAmoroTable(manager);
-    PaimonTableDescriptor descriptor = newDescriptorWithExecutor();
-
-    Pair<?, Long> result =
-        descriptor.getSnapshots(amoroTable, MAIN_BRANCH, OperationType.ALL, 5, 0, null);
-
+  @Test
+  void tagUsesOnlyItsPinnedSnapshotAndRequiresMatchingDetailId() throws Exception {
+    BranchManager branches = mock(BranchManager.class);
+    TagManager tags = mock(TagManager.class);
+    when(table.branchManager()).thenReturn(branches);
+    when(table.tagManager()).thenReturn(tags);
+    Snapshot pinned = manager.tryGetSnapshot(7);
+    Tag tag = mock(Tag.class);
+    when(tag.trimToSnapshot()).thenReturn(pinned);
+    when(tags.get("retained")).thenReturn(Optional.of(tag));
     assertEquals(
-        10L,
-        result.getRight(),
-        "fix must report 10 (snapshotCount), not 9 (latest - earliest range width)");
+        "7",
+        descriptor
+            .getSnapshots(amoro, "retained", OperationType.ALL, 25, 0, null)
+            .getLeft()
+            .get(0)
+            .getSnapshotId());
+    assertTrue(
+        descriptor
+            .getSnapshots(amoro, "retained", OperationType.ALL, 25, 25, null)
+            .getLeft()
+            .isEmpty());
+    assertEquals(
+        pinned,
+        PaimonSnapshotMetadata.resolve(table, "retained", 7, new PaimonSnapshotReadDeadline()));
+    assertEquals(
+        SnapshotReadException.Reason.INVALID_REQUEST,
+        assertThrows(
+                SnapshotReadException.class,
+                () ->
+                    PaimonSnapshotMetadata.resolve(
+                        table, "retained", 8, new PaimonSnapshotReadDeadline()))
+            .getReason());
+    when(tags.get("retained")).thenReturn(Optional.empty());
+    assertEquals(
+        SnapshotReadException.Reason.NOT_FOUND,
+        assertThrows(
+                SnapshotReadException.class,
+                () ->
+                    PaimonSnapshotMetadata.resolve(
+                        table, "retained", 7, new PaimonSnapshotReadDeadline()))
+            .getReason());
+    verify(table, never()).store();
+    verify(io, never()).listStatus(any());
+  }
+
+  @Test
+  void namedBranchUsesItsOwnManagerAndInvalidRefsAreRejected() throws Exception {
+    BranchManager branches = mock(BranchManager.class);
+    when(table.branchManager()).thenReturn(branches);
+    when(branches.branchExists("branch-a")).thenReturn(true);
+    SnapshotManager branch = mock(SnapshotManager.class);
+    when(manager.copyWithBranch("branch-a")).thenReturn(branch);
+    Snapshot snapshot = mock(Snapshot.class);
+    when(branch.tryGetSnapshot(3)).thenReturn(snapshot);
+    assertEquals(
+        snapshot,
+        PaimonSnapshotMetadata.resolve(table, "branch-a", 3, new PaimonSnapshotReadDeadline()));
+    verify(manager, never()).tryGetSnapshot(anyLong());
+    for (String invalid :
+        new String[] {"", " ", ".", "..", "../main", "branch/main", "branch\\main"}) {
+      assertThrows(SnapshotReadException.class, () -> PaimonSnapshotMetadata.ref(invalid));
+    }
+  }
+
+  @Test
+  void unreadableEarliestHintCannotBeTreatedAsMissing() throws Exception {
+    hints(null, 50L);
+    when(io.exists(new Path("/table/snapshot/EARLIEST"))).thenReturn(true);
+    assertEquals(
+        SnapshotReadException.Reason.UNAVAILABLE,
+        assertThrows(SnapshotReadException.class, () -> page(OperationType.ALL, 0)).getReason());
+    verify(manager, never()).tryGetSnapshot(anyLong());
   }
 }

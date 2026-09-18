@@ -20,7 +20,8 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import vm from 'node:vm'
 
-const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8')
+// Optional local HTTP capture verifies the same listener after AMS HTML processing.
+const html = readFileSync(process.argv[2] || new URL('../index.html', import.meta.url), 'utf8')
 const inlineScripts = [...html.matchAll(/<script(?![^>]*type=["']module["'])[^>]*>([\s\S]*?)<\/script>/gi)]
 const recoveryScripts = inlineScripts.filter(match => match[1].includes('vite:preloadError'))
 

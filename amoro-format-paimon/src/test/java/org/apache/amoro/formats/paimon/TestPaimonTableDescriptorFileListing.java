@@ -170,6 +170,8 @@ class TestPaimonTableDescriptorFileListing {
   private static AmoroTable<?> wrap(FileStoreTable table) {
     AmoroTable<?> amoroTable = mock(AmoroTable.class);
     when(((AmoroTable) amoroTable).originalTable()).thenReturn(table);
+    when(amoroTable.id())
+        .thenReturn(org.apache.amoro.table.TableIdentifier.of("catalog", DB, "table"));
     return amoroTable;
   }
 
@@ -488,7 +490,9 @@ class TestPaimonTableDescriptorFileListing {
     long snapshotId = table.store().snapshotManager().latestSnapshot().id();
 
     List<PartitionFileBaseInfo> details =
-        descriptor.getSnapshotDetail(wrap(table), String.valueOf(snapshotId), "main");
+        descriptor
+            .getSnapshotDetailPage(wrap(table), String.valueOf(snapshotId), "main", 25, null)
+            .getList();
 
     assertFalse(details.isEmpty());
     details.forEach(

@@ -20,7 +20,7 @@ package org.apache.amoro.table.descriptor;
 
 /** Table summary for page of details */
 public class TableSummary {
-  private long file;
+  private Long file;
   private String size;
   private String averageFile;
   private String tableFormat;
@@ -59,8 +59,12 @@ public class TableSummary {
   }
 
   /** Total file nums. */
-  public long getFile() {
+  public Long getFile() {
     return file;
+  }
+
+  public void setFile(Long file) {
+    this.file = file;
   }
 
   /** Total records of table. */

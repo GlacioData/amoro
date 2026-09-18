@@ -68,7 +68,6 @@ import org.apache.amoro.table.TableIdentifier;
 import org.apache.amoro.table.TableMetaStore;
 import org.apache.amoro.table.TableProperties;
 import org.apache.amoro.table.descriptor.AMSColumnInfo;
-import org.apache.amoro.table.descriptor.AmoroSnapshotsOfTable;
 import org.apache.amoro.table.descriptor.ConsumerInfo;
 import org.apache.amoro.table.descriptor.DDLInfo;
 import org.apache.amoro.table.descriptor.OperationType;
@@ -524,31 +523,22 @@ public class TableController {
    * @param ctx - context for handling the request and response
    */
   public void getTableSnapshots(Context ctx) {
-    String catalog = ctx.pathParam("catalog");
-    String database = ctx.pathParam("db");
-    String tableName = ctx.pathParam("table");
-    Integer page = ctx.queryParamAsClass("page", Integer.class).getOrDefault(1);
-    Integer pageSize = ctx.queryParamAsClass("pageSize", Integer.class).getOrDefault(20);
-    // ref means tag/branch
-    String ref = ctx.queryParamAsClass("ref", String.class).getOrDefault(null);
-    String operation =
-        ctx.queryParamAsClass("operation", String.class)
-            .getOrDefault(OperationType.ALL.displayName());
-    String lastSnapshot = ctx.queryParam("lastSnapshot");
-    OperationType operationType = OperationType.of(operation);
-    int offset = (page - 1) * pageSize;
-    int limit = pageSize;
-    Pair<List<AmoroSnapshotsOfTable>, Long> snapshotsOfTables =
-        tableDescriptor.getSnapshots(
-            TableIdentifier.of(catalog, database, tableName).buildTableIdentifier(),
-            ref,
-            operationType,
-            limit,
-            offset,
-            lastSnapshot);
-    PageResult<AmoroSnapshotsOfTable> pageResult =
-        PageResult.of(snapshotsOfTables.getLeft(), snapshotsOfTables.getRight().intValue());
-    ctx.json(OkResponse.of(pageResult));
+    SnapshotRequestErrors.respond(
+        ctx,
+        () -> {
+          Integer requestedPage = SnapshotRequestErrors.integer(ctx, "page");
+          Integer requestedSize = SnapshotRequestErrors.integer(ctx, "pageSize");
+          String operation = ctx.queryParam("operation");
+          return tableDescriptor.getSnapshotListResponse(
+              TableIdentifier.of(
+                      ctx.pathParam("catalog"), ctx.pathParam("db"), ctx.pathParam("table"))
+                  .buildTableIdentifier(),
+              ctx.queryParam("ref"),
+              operation == null ? OperationType.ALL : OperationType.of(operation),
+              requestedPage,
+              requestedSize,
+              ctx.queryParam("lastSnapshot"));
+        });
   }
 
   /**
@@ -557,22 +547,19 @@ public class TableController {
    * @param ctx - context for handling the request and response
    */
   public void getSnapshotDetail(Context ctx) {
-    String catalog = ctx.pathParam("catalog");
-    String database = ctx.pathParam("db");
-    String tableName = ctx.pathParam("table");
-    String snapshotId = ctx.pathParam("snapshotId");
-    Integer page = ctx.queryParamAsClass("page", Integer.class).getOrDefault(1);
-    Integer pageSize = ctx.queryParamAsClass("pageSize", Integer.class).getOrDefault(20);
-    String ref = ctx.queryParamAsClass("ref", String.class).getOrDefault(null);
-
-    List<PartitionFileBaseInfo> result =
-        tableDescriptor.getSnapshotDetail(
-            TableIdentifier.of(catalog, database, tableName).buildTableIdentifier(),
-            snapshotId,
-            ref);
-    int offset = (page - 1) * pageSize;
-    PageResult<PartitionFileBaseInfo> amsPageResult = PageResult.of(result, offset, pageSize);
-    ctx.json(OkResponse.of(amsPageResult));
+    SnapshotRequestErrors.respond(
+        ctx,
+        () ->
+            tableDescriptor.getSnapshotDetailResponse(
+                TableIdentifier.of(
+                        ctx.pathParam("catalog"), ctx.pathParam("db"), ctx.pathParam("table"))
+                    .buildTableIdentifier(),
+                ctx.pathParam("snapshotId"),
+                ctx.queryParam("ref"),
+                SnapshotRequestErrors.integer(ctx, "page"),
+                SnapshotRequestErrors.integer(ctx, "pageSize"),
+                ctx.queryParam("cursor"),
+                ctx.queryParam("offset") != null));
   }
 
   /**
@@ -777,17 +764,22 @@ public class TableController {
   }
 
   public void getTableConsumerInfos(Context ctx) {
-    String catalog = ctx.pathParam("catalog");
-    String database = ctx.pathParam("db");
-    String table = ctx.pathParam("table");
-    Integer page = ctx.queryParamAsClass("page", Integer.class).getOrDefault(1);
-    Integer pageSize = ctx.queryParamAsClass("pageSize", Integer.class).getOrDefault(20);
-    List<ConsumerInfo> consumerInfos =
-        tableDescriptor.getTableConsumersInfos(
-            TableIdentifier.of(catalog, database, table).buildTableIdentifier());
-    int offset = (page - 1) * pageSize;
-    PageResult<ConsumerInfo> amsPageResult = PageResult.of(consumerInfos, offset, pageSize);
-    ctx.json(OkResponse.of(amsPageResult));
+    SnapshotRequestErrors.respond(
+        ctx,
+        () -> {
+          Integer requestedPage = SnapshotRequestErrors.integer(ctx, "page");
+          Integer requestedSize = SnapshotRequestErrors.integer(ctx, "pageSize");
+          int limit = requestedSize == null ? 20 : requestedSize;
+          int offset =
+              ServerTableDescriptor.snapshotOffset(
+                  requestedPage == null ? 1 : requestedPage, limit);
+          List<ConsumerInfo> consumers =
+              tableDescriptor.getTableConsumersInfos(
+                  TableIdentifier.of(
+                          ctx.pathParam("catalog"), ctx.pathParam("db"), ctx.pathParam("table"))
+                      .buildTableIdentifier());
+          return PageResult.of(consumers, offset, limit);
+        });
   }
 
   /**

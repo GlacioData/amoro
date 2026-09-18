@@ -83,13 +83,14 @@ export interface TableHealthDetails {
 }
 
 export interface IBaseDetailInfo {
+  boundedSnapshotRead: boolean | null
   optimizingStatus: string
   records: string
   tableType: string
   tableName: string
   createTime: string
   size: string
-  file: string
+  file: string | number | null
   averageFile: string
   tableFormat: string
   hasPartition: boolean
@@ -218,24 +219,19 @@ export interface BreadcrumbOptimizingItem {
   properties: Record<string, string>
 }
 
-export interface SnapshotItemSummary {
-  'total-data-files': number
-  'total-delete-files': number
-  'total-records': number
-  'total-position-deletes': number
-  'total-equality-deletes': number
-}
+// AmoroSnapshotsOfTable uses Map<String, String>, with format-specific keys.
+export type SnapshotItemSummary = Record<string, string | null>
 
 export interface SnapshotItem {
   snapshotId: string
   operation: string
   producer: string
-  fileCount: number
+  fileCount: number | null
   records: number
   commitTime: string
   summary: SnapshotItemSummary
-  filesSummaryForChart: Record<string, number>
-  recordsSummaryForChart: Record<string, number>
+  filesSummaryForChart: SnapshotItemSummary | null
+  recordsSummaryForChart: SnapshotItemSummary | null
 }
 
 export interface OverviwOperationItem {
@@ -406,7 +402,7 @@ export enum tableTypeIconMap {
   PAIMON = 'paimon',
 }
 
-export type ILineChartOriginalData = Record<string, Record<string, number>>
+export type ILineChartOriginalData = Record<string, Record<string, number | null>>
 
 export enum branchTypeMap {
   BRANCH = 'branch',
@@ -418,7 +414,7 @@ export interface IBranchItem {
   value: string
   label: string
   type: branchTypeMap
-  amoroCurrentSnapshotsOfTable?: SnapshotItem
+  amoroCurrentSnapshotsOfTable?: SnapshotItem | null
 }
 
 export interface IServiceBranchItem {
@@ -429,7 +425,7 @@ export interface IServiceBranchItem {
   maxRefAgeMs: number | null
   type: branchTypeMap
   consumerId: string
-  amoroCurrentSnapshotsOfTable: SnapshotItem
+  amoroCurrentSnapshotsOfTable: SnapshotItem | null
 }
 
 export enum operationMap {

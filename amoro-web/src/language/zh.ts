@@ -16,7 +16,22 @@
   * limitations under the License.
   */
 
+const nativeSnapshotRecords = {
+  'total-records': '总数据行数',
+  'delta-records': '变更数据行数',
+  'changelog-records': 'Changelog 数据行数',
+}
+
 export default {
+  ...nativeSnapshotRecords,
+  snapshotVersionMismatch: '前后端版本不兼容：缺少 Snapshot 读取能力字段，请刷新或联系管理员。',
+  snapshotInitializationFailed: '表信息加载失败，暂时无法读取 Snapshot。',
+  snapshotWaiting: '正在等待表读取能力信息…',
+  snapshotPrevious: '上一页',
+  consumerSnapshotUnavailable: '快照信息不可用',
+  snapshotNext: '下一页',
+  snapshotRetry: '重试',
+  snapshotReadFailed: 'Snapshot 读取失败，请手动重试。',
   last1h: '最近 1 小时',
   last12h: '最近 12 小时',
   last24h: '最近 24 小时',
@@ -215,6 +230,10 @@ export default {
   tasks: '任务',
   recordChartTitle: '表记录总数',
   fileChartTitle: '表文件总数',
+  fileChangeChartTitle: '文件变化趋势',
+  addedFiles: '新增文件数',
+  deletedFiles: '删除文件数',
+  netFileChange: '文件净变化',
   totalRecords: '总数据行数',
   totalEqualityDeletes: 'Equality 删除文件数据行数',
   totalPositionDeletes: 'Position 删除文件数据行数',

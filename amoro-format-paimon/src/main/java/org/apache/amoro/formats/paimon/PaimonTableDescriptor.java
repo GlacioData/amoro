@@ -20,7 +20,6 @@ package org.apache.amoro.formats.paimon;
 
 import org.apache.amoro.AmoroTable;
 import org.apache.amoro.TableFormat;
-import org.apache.amoro.api.CommitMetaProducer;
 import org.apache.amoro.formats.paimon.utils.SnapShotsScanUtils;
 import org.apache.amoro.process.ProcessStatus;
 import org.apache.amoro.process.ProcessTaskStatus;
@@ -62,22 +61,17 @@ import org.apache.paimon.manifest.ManifestList;
 import org.apache.paimon.table.DataTable;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.types.RowType;
-import org.apache.paimon.utils.BranchManager;
 import org.apache.paimon.utils.FileStorePathFactory;
 import org.apache.paimon.utils.InternalRowPartitionComputer;
 import org.apache.paimon.utils.PartitionPathUtils;
 import org.apache.paimon.utils.SnapshotManager;
-import org.jetbrains.annotations.NotNull;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.IOException;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -85,10 +79,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.SortedMap;
 import java.util.concurrent.Callable;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
-import java.util.function.BiFunction;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -111,11 +102,9 @@ public class PaimonTableDescriptor implements FormatTableDescriptor {
    */
   private static final Pattern BUCKET_PATTERN = Pattern.compile("bucket-(-?\\d+)$");
 
-  private ExecutorService executor;
-
   @Override
   public void withIoExecutor(ExecutorService ioExecutor) {
-    this.executor = ioExecutor;
+    // Snapshot reads stay on the request thread to preserve UGI and avoid queued work.
   }
 
   @Override
@@ -124,11 +113,19 @@ public class PaimonTableDescriptor implements FormatTableDescriptor {
   }
 
   @Override
-  public ServerTableMeta getTableDetail(AmoroTable<?> amoroTable) {
-    return doAs(amoroTable, () -> getTableDetailInternal(amoroTable));
+  public boolean supportsBoundedSnapshotRead() {
+    return true;
   }
 
-  private ServerTableMeta getTableDetailInternal(AmoroTable<?> amoroTable) {
+  @Override
+  public ServerTableMeta getTableDetail(AmoroTable<?> amoroTable) {
+    PaimonSnapshotReadDeadline deadline = new PaimonSnapshotReadDeadline();
+    return deadline.call(
+        () -> doAs(amoroTable, () -> getTableDetailInternal(amoroTable, deadline)));
+  }
+
+  private ServerTableMeta getTableDetailInternal(
+      AmoroTable<?> amoroTable, PaimonSnapshotReadDeadline deadline) {
     FileStoreTable table = getTable(amoroTable);
     FileStore<?> store = table.store();
 
@@ -169,16 +166,16 @@ public class PaimonTableDescriptor implements FormatTableDescriptor {
     if (table.comment().isPresent()) {
       serverTableMeta.setComment(table.comment().get());
     }
-    Snapshot snapshot = store.snapshotManager().latestSnapshot();
+    Snapshot snapshot = PaimonSnapshotMetadata.latest(store.snapshotManager(), deadline);
     if (snapshot != null) {
-      long fileCount = currentDataFileCount(store, snapshot);
       Long totalRecordCount = snapshot.totalRecordCount();
       long records = totalRecordCount == null ? 0L : totalRecordCount;
 
-      tableSummary = new TableSummary(fileCount, null, null, records, "paimon");
+      tableSummary = new TableSummary(0, null, null, records, "paimon");
+      tableSummary.setFile(null);
 
       baseMetric.put("totalSize", null);
-      baseMetric.put("fileCount", fileCount);
+      baseMetric.put("fileCount", null);
       baseMetric.put("averageFileSize", null);
       baseMetric.put("lastCommitTime", snapshot.timeMillis());
       Long watermark = snapshot.watermark();
@@ -198,13 +195,6 @@ public class PaimonTableDescriptor implements FormatTableDescriptor {
     return serverTableMeta;
   }
 
-  private long currentDataFileCount(FileStore<?> store, Snapshot snapshot) {
-    ManifestList manifestList = store.manifestListFactory().create();
-    return manifestList.readDataManifests(snapshot).stream()
-        .mapToLong(manifest -> manifest.numAddedFiles() - manifest.numDeletedFiles())
-        .sum();
-  }
-
   @Override
   public Pair<List<AmoroSnapshotsOfTable>, Long> getSnapshots(
       AmoroTable<?> amoroTable,
@@ -213,178 +203,72 @@ public class PaimonTableDescriptor implements FormatTableDescriptor {
       int limit,
       int offset,
       String lastSnapshot) {
-    return doAs(
-        amoroTable,
-        () -> getSnapshotsInternal(amoroTable, ref, operationType, limit, offset, lastSnapshot));
-  }
-
-  private Pair<List<AmoroSnapshotsOfTable>, Long> getSnapshotsInternal(
-      AmoroTable<?> amoroTable,
-      String ref,
-      OperationType operationType,
-      int limit,
-      int offset,
-      String lastSnapshot) {
-    FileStoreTable table = getTable(amoroTable);
-    long total = 0;
-    if (table.branchManager().branchExists(ref) || BranchManager.isMainBranch(ref)) {
-      SnapshotManager snapshotManager = table.snapshotManager().copyWithBranch(ref);
-      // Guard empty table: a freshly created Paimon table has no snapshots and
-      // latestSnapshotId() returns null. The previous unboxed subtraction NPE'd.
-      Long latestId = snapshotManager.latestSnapshotId();
-      if (latestId == null) {
-        return Pair.of(Collections.emptyList(), 0L);
-      }
-      // Compute the correct total. The previous (latest - earliest) expression
-      // was off-by-one (ignores the earliest id itself) and ignored operationType
-      // entirely, so OPTIMIZING / NON_OPTIMIZING pagination totals were lifted
-      // straight from the unfiltered id range. For the unfiltered path we use
-      // the kernel's snapshotCount() which is an O(1) directory listing (see
-      // SnapshotManager#snapshotIdStream — it only lists the snapshot dir, does
-      // not parse any snapshot JSON). For filtered paths we must iterate and
-      // apply the same predicate the paginator uses; no cheaper kernel shortcut
-      // exists and correctness matters more than speed for the non-default view.
-      if (operationType == null || operationType == OperationType.ALL) {
-        try {
-          total = snapshotManager.snapshotCount();
-        } catch (IOException e) {
-          throw new RuntimeException(
-              "Failed to count snapshots for branch " + ref + " of " + amoroTable.id(), e);
-        }
-      } else {
-        try {
-          Iterator<Snapshot> it = snapshotManager.snapshots();
-          long filtered = 0;
-          while (it.hasNext()) {
-            Snapshot s = it.next();
-            if (matchesOperationType(s, operationType)) {
-              filtered++;
-            }
-          }
-          total = filtered;
-        } catch (IOException e) {
-          throw new RuntimeException(
-              "Failed to iterate snapshots for branch " + ref + " of " + amoroTable.id(), e);
-        }
-      }
-      // Parse lastSnapshot if provided
-      Long lastSnapshotId =
-          (lastSnapshot != null && !lastSnapshot.trim().isEmpty())
-              ? Long.valueOf(lastSnapshot)
-              : null;
-
-      // Use the enhanced pagination method to get snapshots with filtering
-      // The pagination method already handles operation type filtering internally
-      Pair<List<Snapshot>, Integer> result =
-          SnapShotsScanUtils.getSnapshotsWithPaginationForGeneral(
-              snapshotManager, null, operationType, limit, offset, lastSnapshotId);
-      List<Snapshot> snapshots = result.getLeft();
-
-      // Convert to AmoroSnapshotsOfTable in parallel with improved error handling
-      FileStore<?> store = table.store();
-      List<CompletableFuture<AmoroSnapshotsOfTable>> futures = new ArrayList<>();
-
-      for (Snapshot snapshot : snapshots) {
-        futures.add(
-            CompletableFuture.supplyAsync(
-                () -> doAs(amoroTable, () -> getSnapshotsOfTable(store, snapshot)), executor));
-      }
-
-      // Collect results and maintain order with better error handling
-      List<AmoroSnapshotsOfTable> snapshotsOfTables = new ArrayList<>();
-      for (CompletableFuture<AmoroSnapshotsOfTable> future : futures) {
-        try {
-          AmoroSnapshotsOfTable resultSnapshot = future.get();
-          if (resultSnapshot != null) {
-            snapshotsOfTables.add(resultSnapshot);
-          }
-        } catch (InterruptedException e) {
-          Thread.currentThread().interrupt();
-          throw new RuntimeException("Snapshot processing interrupted", e);
-        } catch (ExecutionException e) {
-          throw new RuntimeException("Failed to process snapshot", e.getCause());
-        }
-      }
-      // The snapshots are already in correct order from the pagination method
-      return Pair.of(snapshotsOfTables, total);
-    } else {
-      // Handle tag-based snapshots - simplified single snapshot processing
-      Snapshot tagSnapshot = table.tagManager().getOrThrow(ref).trimToSnapshot();
-      FileStore<?> store = table.store();
-      AmoroSnapshotsOfTable snapshotOfTable = getSnapshotsOfTable(store, tagSnapshot);
-
-      // Apply operation type filter for single snapshot
-      if (operationType == OperationType.ALL) {
-        return Pair.of(Collections.singletonList(snapshotOfTable), 1L);
-      } else if (operationType == OperationType.OPTIMIZING) {
-        return tagSnapshot.commitKind() == Snapshot.CommitKind.COMPACT
-            ? Pair.of(Collections.singletonList(snapshotOfTable), 1L)
-            : Pair.of(Collections.emptyList(), 0L);
-      } else { // NON_OPTIMIZING
-        return tagSnapshot.commitKind() != Snapshot.CommitKind.COMPACT
-            ? Pair.of(Collections.singletonList(snapshotOfTable), 1L)
-            : Pair.of(Collections.emptyList(), 0L);
-      }
-    }
-  }
-
-  /**
-   * Mirrors the predicate used inside {@link SnapShotsScanUtils} so that the total count computed
-   * here for filtered views stays consistent with the paginated result. {@code OPTIMIZING} maps to
-   * COMPACT commits; {@code NON_OPTIMIZING} maps to everything else; {@code ALL} and {@code null}
-   * match everything.
-   */
-  private static boolean matchesOperationType(Snapshot snapshot, OperationType operationType) {
-    if (operationType == null || operationType == OperationType.ALL) {
-      return true;
-    }
-    if (operationType == OperationType.OPTIMIZING) {
-      return snapshot.commitKind() == Snapshot.CommitKind.COMPACT;
-    }
-    // NON_OPTIMIZING
-    return snapshot.commitKind() != Snapshot.CommitKind.COMPACT;
+    PaimonSnapshotReadDeadline deadline = new PaimonSnapshotReadDeadline();
+    String normalizedRef = PaimonSnapshotMetadata.ref(ref);
+    return deadline.call(
+        () ->
+            doAs(
+                amoroTable,
+                () ->
+                    PaimonSnapshotMetadata.page(
+                        getTable(amoroTable),
+                        normalizedRef,
+                        operationType,
+                        limit,
+                        offset,
+                        deadline)));
   }
 
   @Override
   public List<PartitionFileBaseInfo> getSnapshotDetail(
       AmoroTable<?> amoroTable, String snapshotId, String ref) {
-    return doAs(amoroTable, () -> getSnapshotDetailInternal(amoroTable, snapshotId, ref));
+    throw new org.apache.amoro.table.descriptor.SnapshotReadException(
+        org.apache.amoro.table.descriptor.SnapshotReadException.Reason.INVALID_REQUEST,
+        "Use cursor-based snapshot detail; refresh the dashboard");
   }
 
-  private List<PartitionFileBaseInfo> getSnapshotDetailInternal(
-      AmoroTable<?> amoroTable, String snapshotId, String ref) {
-    FileStoreTable table = getTable(amoroTable);
-    List<PartitionFileBaseInfo> amsDataFileInfos = new ArrayList<>();
-    long commitId = Long.parseLong(snapshotId);
-    Snapshot snapshot;
-    if (BranchManager.isMainBranch(ref) || table.branchManager().branchExists(ref)) {
-      snapshot = table.snapshotManager().copyWithBranch(ref).snapshot(commitId);
-    } else {
-      snapshot = table.tagManager().getOrThrow(ref).trimToSnapshot();
+  @Override
+  public org.apache.amoro.table.descriptor.SnapshotDetailPage getSnapshotDetailPage(
+      AmoroTable<?> amoroTable, String snapshotId, String ref, int limit, String cursor) {
+    PaimonSnapshotReadDeadline deadline = new PaimonSnapshotReadDeadline();
+    String normalizedRef = PaimonSnapshotMetadata.ref(ref);
+    final long id;
+    try {
+      id = Long.parseLong(snapshotId);
+    } catch (NumberFormatException e) {
+      throw new org.apache.amoro.table.descriptor.SnapshotReadException(
+          org.apache.amoro.table.descriptor.SnapshotReadException.Reason.INVALID_REQUEST,
+          "Invalid snapshot ID",
+          e);
     }
-
-    FileStore<?> store = table.store();
-    FileStorePathFactory fileStorePathFactory = store.pathFactory();
-    ManifestList manifestList = store.manifestListFactory().create();
-    ManifestFile manifestFile = store.manifestFileFactory().create();
-
-    List<ManifestFileMeta> manifestFileMetas = manifestList.readDeltaManifests(snapshot);
-    for (ManifestFileMeta manifestFileMeta : manifestFileMetas) {
-      List<ManifestEntry> manifestEntries = manifestFile.read(manifestFileMeta.fileName());
-      for (ManifestEntry entry : manifestEntries) {
-        amsDataFileInfos.add(
-            new PartitionFileBaseInfo(
-                null,
-                "BASE_FILE",
-                getFileCreationTimeMillis(entry),
-                canonicalPartitionBucket(entry.partition(), entry.bucket(), fileStorePathFactory),
-                fullFilePath(store, entry),
-                entry.file().fileSize(),
-                entry.kind().name()));
-      }
-    }
-
-    return amsDataFileInfos;
+    return deadline.call(
+        () ->
+            doAs(
+                amoroTable,
+                () -> {
+                  FileStoreTable table = getTable(amoroTable);
+                  Snapshot snapshot =
+                      PaimonSnapshotMetadata.resolve(table, normalizedRef, id, deadline);
+                  FileStore<?> store = table.store();
+                  return new PaimonSnapshotDetailReader(deadline)
+                      .read(
+                          store,
+                          snapshot,
+                          amoroTable.id().toString() + "|" + table.location(),
+                          normalizedRef,
+                          limit,
+                          cursor,
+                          entry ->
+                              new PartitionFileBaseInfo(
+                                  null,
+                                  "BASE_FILE",
+                                  getFileCreationTimeMillis(entry),
+                                  canonicalPartitionBucket(
+                                      entry.partition(), entry.bucket(), store.pathFactory()),
+                                  fullFilePath(store, entry),
+                                  entry.file().fileSize(),
+                                  entry.kind().name()));
+                }));
   }
 
   @Override
@@ -787,55 +671,6 @@ public class PaimonTableDescriptor implements FormatTableDescriptor {
     long lastCommitTime = 0;
   }
 
-  @NotNull
-  private AmoroSnapshotsOfTable getSnapshotsOfTable(FileStore<?> store, Snapshot snapshot) {
-    Map<String, String> summary = new HashMap<>();
-    summary.put("commitUser", snapshot.commitUser());
-    summary.put("commitIdentifier", String.valueOf(snapshot.commitIdentifier()));
-    if (snapshot.watermark() != null) {
-      summary.put("watermark", String.valueOf(snapshot.watermark()));
-    }
-
-    // record number
-    summary.put("total-records", String.valueOf(snapshot.totalRecordCount()));
-    summary.put("delta-records", String.valueOf(snapshot.deltaRecordCount()));
-    if (snapshot.changelogRecordCount() != null) {
-      summary.put("changelog-records", String.valueOf(snapshot.changelogRecordCount()));
-    }
-
-    // file number
-    AmoroSnapshotsOfTable deltaSnapshotsOfTable =
-        manifestListInfo(store, snapshot, ManifestList::readDeltaManifests);
-    int deltaFileCount = deltaSnapshotsOfTable.getFileCount();
-    int dataFileCount =
-        manifestListInfo(store, snapshot, ManifestList::readDataManifests).getFileCount();
-    long changeLogFileCount =
-        manifestListInfo(store, snapshot, ManifestList::readChangelogManifests).getFileCount();
-    summary.put("delta-files", String.valueOf(deltaFileCount));
-    summary.put("data-files", String.valueOf(dataFileCount));
-    summary.put("changelogs", String.valueOf(changeLogFileCount));
-
-    // Summary in chart
-    Map<String, String> recordsSummaryForChat =
-        extractSummary(summary, "total-records", "delta-records", "changelog-records");
-    deltaSnapshotsOfTable.setRecordsSummaryForChart(recordsSummaryForChat);
-
-    Map<String, String> filesSummaryForChat =
-        extractSummary(summary, "delta-files", "data-files", "changelogs");
-    deltaSnapshotsOfTable.setFilesSummaryForChart(filesSummaryForChat);
-
-    deltaSnapshotsOfTable.setSummary(summary);
-    return deltaSnapshotsOfTable;
-  }
-
-  @NotNull
-  private static Map<String, String> extractSummary(Map<String, String> summary, String... keys) {
-    Set<String> keySet = new HashSet<>(Arrays.asList(keys));
-    return summary.entrySet().stream()
-        .filter(e -> keySet.contains(e.getKey()))
-        .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
-  }
-
   @Override
   public List<TagOrBranchInfo> getTableTags(AmoroTable<?> amoroTable) {
     return doAs(amoroTable, () -> getTableTagsInternal(amoroTable));
@@ -873,68 +708,54 @@ public class PaimonTableDescriptor implements FormatTableDescriptor {
 
   @Override
   public List<ConsumerInfo> getTableConsumerInfos(AmoroTable<?> amoroTable) {
-    return doAs(amoroTable, () -> getTableConsumerInfosInternal(amoroTable));
+    PaimonSnapshotReadDeadline deadline = new PaimonSnapshotReadDeadline();
+    return deadline.call(
+        () -> doAs(amoroTable, () -> getTableConsumerInfosInternal(amoroTable, deadline)));
   }
 
-  private List<ConsumerInfo> getTableConsumerInfosInternal(AmoroTable<?> amoroTable) {
+  private List<ConsumerInfo> getTableConsumerInfosInternal(
+      AmoroTable<?> amoroTable, PaimonSnapshotReadDeadline deadline) {
     FileStoreTable table = getTable(amoroTable);
-    FileStore<?> store = table.store();
     ConsumerManager consumerManager = new ConsumerManager(table.fileIO(), table.location());
     List<ConsumerInfo> consumerInfos = new ArrayList<>();
-    try {
-      consumerManager
-          .consumers()
-          .forEach(
-              (consumerId, nextSnapshotId) -> {
-                long currentSnapshotId = nextSnapshotId;
-                if (!table.snapshotManager().snapshotExists(currentSnapshotId)) {
-                  // if not exits,maybe steaming scan is running,so need to nextSnapshotId -1
-                  currentSnapshotId = nextSnapshotId - 1;
-                }
-                Snapshot snapshot = table.snapshotManager().snapshot(currentSnapshotId);
-                AmoroSnapshotsOfTable amoroSnapshotsOfTable = getSnapshotsOfTable(store, snapshot);
-                consumerInfos.add(
-                    new ConsumerInfo(consumerId, nextSnapshotId, amoroSnapshotsOfTable));
-              });
-    } catch (IOException e) {
-      throw new RuntimeException(e);
-    }
+    deadline
+        .call(consumerManager::consumers)
+        .forEach(
+            (consumerId, nextSnapshotId) -> {
+              Snapshot snapshot =
+                  consumerSnapshot(table.snapshotManager(), nextSnapshotId, deadline);
+              if (snapshot == null && nextSnapshotId > Snapshot.FIRST_SNAPSHOT_ID) {
+                snapshot = consumerSnapshot(table.snapshotManager(), nextSnapshotId - 1, deadline);
+              }
+              Snapshot selected = snapshot;
+              AmoroSnapshotsOfTable amoroSnapshotsOfTable =
+                  deadline.call(
+                      () -> selected == null ? null : PaimonSnapshotMetadata.summary(selected));
+              consumerInfos.add(
+                  new ConsumerInfo(consumerId, nextSnapshotId, amoroSnapshotsOfTable));
+            });
     return consumerInfos;
   }
 
-  private AmoroSnapshotsOfTable manifestListInfo(
-      FileStore<?> store,
-      Snapshot snapshot,
-      BiFunction<ManifestList, Snapshot, List<ManifestFileMeta>> biFunction) {
-    ManifestList manifestList = store.manifestListFactory().create();
-    ManifestFile manifestFile = store.manifestFileFactory().create();
-    List<ManifestFileMeta> manifestFileMetas = biFunction.apply(manifestList, snapshot);
-    int fileCount = 0;
-    long fileSize = 0;
-    for (ManifestFileMeta manifestFileMeta : manifestFileMetas) {
-      List<ManifestEntry> manifestEntries = manifestFile.read(manifestFileMeta.fileName());
-      for (ManifestEntry entry : manifestEntries) {
-        if (entry.kind() == FileKind.ADD) {
-          fileSize += entry.file().fileSize();
-          fileCount++;
-        } else {
-          fileSize -= entry.file().fileSize();
-          fileCount--;
-        }
-      }
-    }
-    Long totalRecordCount = snapshot.totalRecordCount();
-    return new AmoroSnapshotsOfTable(
-        String.valueOf(snapshot.id()),
-        fileCount,
-        fileSize,
-        totalRecordCount == null ? 0L : totalRecordCount,
-        snapshot.timeMillis(),
-        snapshot.commitKind().toString(),
-        snapshot.commitKind() == Snapshot.CommitKind.COMPACT
-            ? CommitMetaProducer.OPTIMIZE.name()
-            : CommitMetaProducer.INGESTION.name(),
-        new HashMap<>());
+  private Snapshot consumerSnapshot(
+      SnapshotManager manager, long snapshotId, PaimonSnapshotReadDeadline deadline) {
+    return deadline.call(
+        () -> {
+          if (snapshotId < Snapshot.FIRST_SNAPSHOT_ID) {
+            throw new IllegalArgumentException("Invalid consumer snapshot ID");
+          }
+          if (!manager.snapshotExists(snapshotId)) {
+            return null;
+          }
+          try {
+            return manager.tryGetSnapshot(snapshotId);
+          } catch (java.io.FileNotFoundException missing) {
+            // Paimon 1.4.2 may lose the snapshot between exists() and tryGetSnapshot().
+            // Catch only explicit absence before deadline.call wraps other failures.
+            // https://github.com/apache/paimon/blob/release-1.4.2/paimon-core/src/main/java/org/apache/paimon/utils/SnapshotManager.java
+            return null;
+          }
+        });
   }
 
   /**

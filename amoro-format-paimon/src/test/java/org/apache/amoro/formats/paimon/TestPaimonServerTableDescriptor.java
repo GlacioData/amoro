@@ -28,7 +28,6 @@ import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.data.BinaryString;
 import org.apache.paimon.data.GenericRow;
-import org.apache.paimon.manifest.ManifestFileMeta;
 import org.apache.paimon.schema.SchemaChange;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.Table;
@@ -148,7 +147,7 @@ public class TestPaimonServerTableDescriptor extends TestServerTableDescriptor {
   }
 
   @Test
-  public void getTableDetailUsesSnapshotSummaryAndManifestMetaOnly() throws Exception {
+  public void getTableDetailUsesSnapshotOnly() throws Exception {
     Identifier identifier = Identifier.create(TEST_DB, TEST_TABLE);
     Table table = getCatalog().getTable(identifier);
     writeRecords(table);
@@ -156,19 +155,13 @@ public class TestPaimonServerTableDescriptor extends TestServerTableDescriptor {
     FileStore<?> store = ((FileStoreTable) table).store();
     Snapshot snapshot = store.snapshotManager().latestSnapshot();
     long expectedRecords = snapshot != null ? snapshot.totalRecordCount() : 0;
-    List<ManifestFileMeta> manifestFileMetas =
-        store.manifestListFactory().create().readDataManifests(snapshot);
-    long expectedFileCount =
-        manifestFileMetas.stream().mapToLong(ManifestFileMeta::numAddedFiles).sum()
-            - manifestFileMetas.stream().mapToLong(ManifestFileMeta::numDeletedFiles).sum();
 
     ServerTableMeta tableMeta =
         getTableDescriptor().getTableDetail(getAmoroCatalog().loadTable(TEST_DB, TEST_TABLE));
 
     Assert.assertEquals(expectedRecords, tableMeta.getTableSummary().getRecords());
-    Assert.assertEquals(expectedFileCount, tableMeta.getTableSummary().getFile());
-    Assert.assertEquals(
-        expectedFileCount, ((Number) tableMeta.getBaseMetrics().get("fileCount")).longValue());
+    Assert.assertNull(tableMeta.getTableSummary().getFile());
+    Assert.assertNull(tableMeta.getBaseMetrics().get("fileCount"));
     Assert.assertNull(tableMeta.getBaseMetrics().get("totalSize"));
     Assert.assertNull(tableMeta.getBaseMetrics().get("averageFileSize"));
     Assert.assertNull(tableMeta.getTableSummary().getSize());
