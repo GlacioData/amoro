@@ -24,6 +24,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.anyInt;
 import static org.mockito.Mockito.anyList;
 import static org.mockito.Mockito.anySet;
 import static org.mockito.Mockito.doReturn;
@@ -52,9 +53,6 @@ import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.data.BinaryString;
 import org.apache.paimon.data.GenericRow;
 import org.apache.paimon.data.Timestamp;
-import org.apache.paimon.deletionvectors.BitmapDeletionVector;
-import org.apache.paimon.deletionvectors.DeletionVector;
-import org.apache.paimon.deletionvectors.DeletionVectorsIndexFile;
 import org.apache.paimon.index.IndexFileHandler;
 import org.apache.paimon.index.IndexFileMeta;
 import org.apache.paimon.io.DataFileMeta;
@@ -117,18 +115,15 @@ class TestPaimonPrimaryKeyOptimizingEvaluator {
     IndexFileHandler handler = mock(IndexFileHandler.class);
     doReturn(handler).when(store).newIndexFileHandler();
     doReturn(store).when(fixture.table).store();
-    DeletionVectorsIndexFile dvIndexFile = mock(DeletionVectorsIndexFile.class);
-    when(handler.dvIndex(any(BinaryRow.class), eq(0))).thenReturn(dvIndexFile);
+    java.util.LinkedHashMap<String, org.apache.paimon.index.DeletionVectorMeta> ranges =
+        new java.util.LinkedHashMap<>();
+    String dataFile = entries.get(0).file().fileName();
+    ranges.put(dataFile, new org.apache.paimon.index.DeletionVectorMeta(dataFile, 1, 20, 1L));
+    IndexFileMeta index = new IndexFileMeta("DELETION_VECTORS", "dv", 21L, 1L, ranges, null);
     when(handler.scan(eq(fixture.snapshot), eq("DELETION_VECTORS"), anySet()))
-        .thenReturn(Collections.<Pair<BinaryRow, Integer>, List<IndexFileMeta>>emptyMap());
-    BitmapDeletionVector deletionVector = new BitmapDeletionVector();
-    for (int position = 0; position < 1; position++) {
-      deletionVector.delete(position);
-    }
-    Map<String, DeletionVector> deletionVectors = new HashMap<>();
-    deletionVectors.put(entries.get(0).file().fileName(), deletionVector);
-    when(handler.readAllDeletionVectors(any(BinaryRow.class), eq(0), anyList()))
-        .thenReturn(deletionVectors);
+        .thenReturn(
+            Collections.singletonMap(
+                Pair.of(entries.get(0).partition(), 0), Collections.singletonList(index)));
 
     PaimonPrimaryKeyOptimizingEvaluation evaluation =
         evaluateWithHealth(fixture, defaultConfig(), 0L, 0L, now());
@@ -162,6 +157,8 @@ class TestPaimonPrimaryKeyOptimizingEvaluator {
     verify(fixture.reader).withSnapshot(fixture.snapshot);
     verify(fixture.reader).readFileIterator();
     verify(handler).scan(eq(fixture.snapshot), eq("DELETION_VECTORS"), anySet());
+    verify(handler, never()).readAllDeletionVectors(any(BinaryRow.class), anyInt(), anyList());
+    verify(handler, never()).dvIndex(any(BinaryRow.class), anyInt());
   }
 
   @Test
@@ -267,11 +264,7 @@ class TestPaimonPrimaryKeyOptimizingEvaluator {
     assertEquals(2, analysis.pendingInput().getDataFileCount());
     assertEquals(200L, analysis.pendingInput().getDataFileSize());
     assertEquals("2", analysis.healthDetails().getMetrics().get("maxSortedRunCount"));
-    assertTrue(
-        analysis
-            .healthDetails()
-            .getReasonCodes()
-            .contains(PaimonPrimaryKeyHealthEvaluator.SNAPSHOT_SCAN_FAILED));
+    assertTrue(analysis.healthDetails().getReasonCodes().contains("DELETE_METADATA_READ_FAILED"));
   }
 
   @Test
@@ -414,6 +407,60 @@ class TestPaimonPrimaryKeyOptimizingEvaluator {
     assertEquals(
         fileNames(forwardAnalysis.bucketFacts().get(0)),
         fileNames(reverseAnalysis.bucketFacts().get(0)));
+  }
+
+  @Test
+  void historicalHealthDropsPlanningFactsButPreservesNativeValidation(@TempDir Path warehouse)
+      throws Exception {
+    Catalog catalog = fsCatalog(warehouse);
+    List<ManifestEntry> entries =
+        java.util.Arrays.asList(
+            entry(BinaryRow.EMPTY_ROW, 0, file("l0", 101L, 11L, 0, 2, 2L)),
+            entry(BinaryRow.EMPTY_ROW, 0, file("l1-b", 200L, 20L, 1, 3, 3L)),
+            entry(BinaryRow.EMPTY_ROW, 0, file("l1-a", 200L, 20L, 1, 1, 1L)));
+    HealthFixture fixture =
+        healthFixture(
+            catalog,
+            "history_planning_facts",
+            primaryKeyOptions(),
+            entries,
+            false,
+            BucketMode.HASH_FIXED);
+    when(fixture.reader.readFileIterator()).thenAnswer(ignored -> entries.iterator());
+    PaimonPrimaryKeySnapshotAnalysis planned =
+        PaimonPrimaryKeySnapshotAnalysis.analyze(fixture.table, fixture.context);
+    PaimonPrimaryKeySnapshotAnalysis historical =
+        PaimonPrimaryKeySnapshotAnalysis.analyzeHealth(fixture.table, fixture.context);
+    assertEquals(
+        planned.pendingInput().getHealthScore(), historical.pendingInput().getHealthScore());
+    org.apache.amoro.shade.jackson2.com.fasterxml.jackson.databind.ObjectMapper json =
+        new org.apache.amoro.shade.jackson2.com.fasterxml.jackson.databind.ObjectMapper();
+    org.apache.amoro.shade.jackson2.com.fasterxml.jackson.databind.node.ObjectNode expected =
+        json.valueToTree(planned.healthDetails());
+    org.apache.amoro.shade.jackson2.com.fasterxml.jackson.databind.node.ObjectNode actual =
+        json.valueToTree(historical.healthDetails());
+    assertTrue(expected.path("structure").path("evaluatedAtMillis").asLong() > 0);
+    assertTrue(actual.path("structure").path("evaluatedAtMillis").asLong() > 0);
+    ((org.apache.amoro.shade.jackson2.com.fasterxml.jackson.databind.node.ObjectNode)
+            expected.get("structure"))
+        .remove("evaluatedAtMillis");
+    ((org.apache.amoro.shade.jackson2.com.fasterxml.jackson.databind.node.ObjectNode)
+            actual.get("structure"))
+        .remove("evaluatedAtMillis");
+    assertEquals(expected, actual);
+    assertFalse(planned.bucketFacts().isEmpty());
+    assertTrue(historical.bucketFacts().isEmpty());
+    assertFalse(historical.validForPlanning());
+
+    List<ManifestEntry> overlapping =
+        java.util.Arrays.asList(
+            entry(BinaryRow.EMPTY_ROW, 0, file("overlap-a", 100L, 10L, 1, 1, 1L)),
+            entry(BinaryRow.EMPTY_ROW, 0, file("overlap-b", 100L, 10L, 1, 1, 2L)));
+    when(fixture.reader.readFileIterator()).thenAnswer(ignored -> overlapping.iterator());
+    PaimonPrimaryKeySnapshotAnalysis invalid =
+        PaimonPrimaryKeySnapshotAnalysis.analyzeHealth(fixture.table, fixture.context);
+    assertEquals(-1, invalid.pendingInput().getHealthScore());
+    assertTrue(invalid.healthDetails().getReasonCodes().contains("SNAPSHOT_SCAN_FAILED"));
   }
 
   @Test

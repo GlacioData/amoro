@@ -34,6 +34,7 @@ import java.util.function.Function;
 
 public class StateKey<T> {
   private final String key;
+  private final boolean optimisticConcurrency;
   private final T defaultValue;
 
   private final Function<T, String> serializer;
@@ -59,6 +60,17 @@ public class StateKey<T> {
       Function<T, String> serializer,
       Function<String, T> deserializer,
       BiFunction<T, T, Boolean> valueComparator) {
+    this(key, defaultValue, serializer, deserializer, valueComparator, false);
+  }
+
+  private StateKey(
+      String key,
+      T defaultValue,
+      Function<T, String> serializer,
+      Function<String, T> deserializer,
+      BiFunction<T, T, Boolean> valueComparator,
+      boolean optimisticConcurrency) {
+    this.optimisticConcurrency = optimisticConcurrency;
     Preconditions.checkArgument(
         !StringUtils.isEmpty(key), "TableRuntime state key cannot be null or empty");
     Preconditions.checkNotNull(defaultValue, "TableRuntime state default value cannot be null");
@@ -67,6 +79,15 @@ public class StateKey<T> {
     this.serializer = serializer;
     this.deserializer = deserializer;
     this.valueComparator = valueComparator;
+  }
+
+  /** Opt in to fresh database reads and version-fenced updates without changing legacy keys. */
+  public StateKey<T> withOptimisticConcurrency() {
+    return new StateKey<>(key, defaultValue, serializer, deserializer, valueComparator, true);
+  }
+
+  public boolean usesOptimisticConcurrency() {
+    return optimisticConcurrency;
   }
 
   public String getKey() {

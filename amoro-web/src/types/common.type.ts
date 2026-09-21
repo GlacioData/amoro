@@ -70,7 +70,51 @@ export interface TableHealthComponent {
   metrics: Record<string, string>
 }
 
+export interface TableHealthBand {
+  code: string
+  lowerBound: string | null
+  upperBound: string | null
+  fileCount: string
+  fileSize: string
+  sortedRuns: string | null
+}
+
+export interface TableHealthProblem {
+  partition: string
+  bucket: number | null
+  code: string
+  severity: string
+  fileCount: string
+  fileSize: string
+  sortedRuns: string
+  bands: TableHealthBand[]
+}
+
+export interface TableHealthStructure {
+  tableShape: string
+  availability: string
+  evaluatedAtMillis: number
+  snapshotTimeMillis: number
+  totalUnits: string
+  affectedUnits: string
+  severeUnits: string
+  bands: TableHealthBand[]
+  problems: TableHealthProblem[]
+}
+
+export interface TableHealthEvaluation {
+  status: string
+  stale: boolean
+  currentSnapshotId: string | null
+  attemptedSnapshotId: string | null
+  attemptedAtMillis: number
+  retryable: boolean
+  reasonCodes: string[]
+}
+
 export interface TableHealthDetails {
+  structure?: TableHealthStructure | null
+  evaluation?: TableHealthEvaluation | null
   formulaVersion: string
   snapshotId: string | null
   changeSnapshotId: string | null
@@ -80,6 +124,19 @@ export interface TableHealthDetails {
   components: TableHealthComponent[]
   metrics: Record<string, string>
   reasonCodes: string[]
+}
+
+export interface TableHealthComparison {
+  processId: string
+  optimizingType: string | null
+  status: string
+  reason: string | null
+  concurrentChanges: boolean
+  beforeScore: number
+  afterScore: number
+  before: TableHealthDetails | null
+  after: TableHealthDetails | null
+  completedAtMillis: number
 }
 
 export interface IBaseDetailInfo {
@@ -100,6 +157,7 @@ export interface IBaseDetailInfo {
   equalityDeleteScore: number
   positionalDeleteScore: number
   healthDetails: TableHealthDetails | null
+  healthComparison?: TableHealthComparison | null
   comment: string
 }
 

@@ -179,6 +179,41 @@ class TestPaimonAppendFileScanner {
   }
 
   @Test
+  void unawareDeletionMetadataValidatesOnlyTheLastRangeForEachFile() {
+    org.apache.paimon.Snapshot snapshot = mock(org.apache.paimon.Snapshot.class);
+    IndexFileHandler handler = mock(IndexFileHandler.class);
+    BinaryRow partition = partition("p1");
+    IndexManifestEntry legacy = unawareIndexEntry(partition, "data", 1, 2, null, "old");
+    IndexManifestEntry current = unawareIndexEntry(partition, "data", 1, 2, 7L, "new");
+    when(handler.filePath(current)).thenReturn(new org.apache.paimon.fs.Path("file:/tmp/new"));
+    when(handler.scan(snapshot, "DELETION_VECTORS"))
+        .thenReturn(java.util.Arrays.asList(legacy, current));
+    PaimonAppendFileScanner.DeletionMetadataLookup lookup =
+        PaimonAppendFileScanner.DeletionMetadataLookup.load(
+            handler, snapshot, org.apache.paimon.table.BucketMode.BUCKET_UNAWARE);
+    assertFalse(lookup.incomplete(partition));
+    assertEquals(7L, lookup.unawareDeletionFile(partition, "data").cardinality());
+    verify(handler, never()).filePath(legacy);
+
+    when(handler.scan(snapshot, "DELETION_VECTORS"))
+        .thenReturn(java.util.Arrays.asList(current, legacy));
+    lookup =
+        PaimonAppendFileScanner.DeletionMetadataLookup.load(
+            handler, snapshot, org.apache.paimon.table.BucketMode.BUCKET_UNAWARE);
+    assertTrue(lookup.incomplete(partition));
+    assertEquals(null, lookup.unawareDeletionFile(partition, "data"));
+
+    IndexManifestEntry other = unawareIndexEntry(partition, "other", 1, 2, null, "other");
+    when(handler.scan(snapshot, "DELETION_VECTORS"))
+        .thenReturn(java.util.Arrays.asList(legacy, other, current));
+    lookup =
+        PaimonAppendFileScanner.DeletionMetadataLookup.load(
+            handler, snapshot, org.apache.paimon.table.BucketMode.BUCKET_UNAWARE);
+    assertTrue(lookup.incomplete(partition));
+    assertEquals(7L, lookup.unawareDeletionFile(partition, "data").cardinality());
+  }
+
+  @Test
   void manifestFailureMarksEveryPartitionIncomplete() {
     org.apache.paimon.Snapshot snapshot = mock(org.apache.paimon.Snapshot.class);
     IndexFileHandler handler = mock(IndexFileHandler.class);
@@ -275,12 +310,12 @@ class TestPaimonAppendFileScanner {
     assertEquals(-1, analysis.pendingInput().getHealthScore());
     assertEquals("1", analysis.healthDetails().getMetrics().get("totalFileCount"));
     assertEquals("N/A", analysis.healthDetails().getMetrics().get("deleteRecordCount"));
-    assertTrue(analysis.healthDetails().getReasonCodes().contains("DELETE_METADATA_INCOMPLETE"));
+    assertTrue(analysis.healthDetails().getReasonCodes().contains("DELETE_METADATA_READ_FAILED"));
     assertFalse(analysis.plannerFactsAvailable());
   }
 
   @Test
-  void bucketedLookupRestoresActualBitmapCardinality(@TempDir Path warehouse) throws Exception {
+  void bucketedLookupReadsOnlyLegacyMissingCardinality(@TempDir Path warehouse) throws Exception {
     Catalog catalog = fsCatalog(warehouse);
     Map<String, String> options = new HashMap<>();
     options.put("bucket", "2");
@@ -299,7 +334,11 @@ class TestPaimonAppendFileScanner {
         PaimonHealthEvaluationContext.capture(appendTable, "db1.t_bucketed_dv", null);
     org.apache.paimon.Snapshot snapshot = captured.snapshot().orElseThrow(AssertionError::new);
     ManifestEntry dataEntry = firstAddEntry(appendTable, snapshot);
-    IndexFileMeta indexFile = indexFile("bucket-dv", null);
+    LinkedHashMap<String, DeletionVectorMeta> ranges = new LinkedHashMap<>();
+    ranges.put(
+        dataEntry.file().fileName(),
+        new DeletionVectorMeta(dataEntry.file().fileName(), 1, 20, null));
+    IndexFileMeta indexFile = indexFile("bucket-dv", ranges);
     IndexManifestEntry indexEntry =
         new IndexManifestEntry(FileKind.ADD, dataEntry.partition(), dataEntry.bucket(), indexFile);
     IndexFileHandler handler = mock(IndexFileHandler.class);
@@ -311,10 +350,11 @@ class TestPaimonAppendFileScanner {
     deletionVector.delete(5L);
     Map<String, DeletionVector> deletionVectors = new HashMap<>();
     deletionVectors.put(dataEntry.file().fileName(), deletionVector);
-    when(handler.readAllDeletionVectors(any(BinaryRow.class), eq(dataEntry.bucket()), anyList()))
-        .thenReturn(deletionVectors);
     DeletionVectorsIndexFile dvIndex = mock(DeletionVectorsIndexFile.class);
     when(handler.dvIndex(any(BinaryRow.class), eq(dataEntry.bucket()))).thenReturn(dvIndex);
+    when(dvIndex.path(indexFile)).thenReturn(new org.apache.paimon.fs.Path("file:/tmp/bucket-dv"));
+    when(dvIndex.readDeletionVector(org.mockito.ArgumentMatchers.<Map<String, DeletionFile>>any()))
+        .thenReturn(deletionVectors);
 
     PaimonAppendSnapshotAnalysis analysis =
         new PaimonAppendFileScanner(
@@ -323,8 +363,9 @@ class TestPaimonAppendFileScanner {
             .analysis();
 
     assertTrue(captured.deletionVectorsEnabled());
-    verify(handler, times(1))
-        .readAllDeletionVectors(any(BinaryRow.class), eq(dataEntry.bucket()), anyList());
+    verify(handler, never()).readAllDeletionVectors(any(BinaryRow.class), anyInt(), anyList());
+    verify(dvIndex)
+        .readDeletionVector(org.mockito.ArgumentMatchers.<Map<String, DeletionFile>>any());
     verify(handler, times(1)).dvIndex(any(BinaryRow.class), eq(dataEntry.bucket()));
     assertEquals("3", analysis.healthDetails().getMetrics().get("deleteRecordCount"));
     assertTrue(analysis.pendingInput().getHealthScore() >= 0);
@@ -575,6 +616,45 @@ class TestPaimonAppendFileScanner {
     PaimonAppendFileScanner.ScanResult afterCompactScan =
         new PaimonAppendFileScanner(afterCompact, context(afterCompact, 100_000), null).scan();
     Set<String> scannedFileNames = fileNames(afterCompactScan);
+    org.apache.amoro.optimizing.FormatTableAnalysis historical =
+        org.apache.amoro.formats.paimon.optimizing.health.PaimonHistoricalHealth.evaluate(
+            afterCompact, id.toString(), beforeCompact.snapshotId());
+    assertEquals(
+        beforeCompact.analysis().pendingInput().getDataFileCount(),
+        historical.pendingInput().getDataFileCount());
+    assertEquals(
+        Long.valueOf(beforeCompact.snapshotId()), historical.healthDetails().getSnapshotId());
+    assertEquals(
+        beforeCompact.analysis().pendingInput().getHealthScore(),
+        historical.pendingInput().getHealthScore());
+    assertEquals(
+        beforeCompact.analysis().healthDetails().getMetrics(),
+        historical.healthDetails().getMetrics());
+    PaimonAppendSnapshotAnalysis historicalAppend = (PaimonAppendSnapshotAnalysis) historical;
+    assertTrue(historicalAppend.plannerFiles().isEmpty());
+    assertFalse(historicalAppend.plannerFactsAvailable());
+    assertEquals(null, historicalAppend.snapshot());
+    PaimonHealthEvaluationContext historicalContext =
+        PaimonHealthEvaluationContext.capture(afterCompact, id.toString(), null);
+    PaimonAppendSnapshotAnalysis failed =
+        PaimonAppendSnapshotAnalysis.invalid(historicalContext, "SNAPSHOT_SCAN_FAILED")
+            .withoutPlannerFacts();
+    assertEquals(null, failed.snapshot());
+    assertFalse(failed.plannerFactsAvailable());
+    assertEquals(-1, failed.pendingInput().getHealthScore());
+    assertEquals(
+        Collections.singletonList("SNAPSHOT_SCAN_FAILED"), failed.healthDetails().getReasonCodes());
+    assertEquals(1, historicalAppend.fullSnapshotScanCount());
+    org.apache.paimon.Snapshot committed = afterCompact.snapshotManager().latestSnapshot();
+    assertEquals(
+        committed.id(),
+        org.apache.amoro.formats.paimon.optimizing.health.PaimonHistoricalHealth.findCommit(
+                afterCompact,
+                beforeCompact.snapshotId(),
+                committed.commitUser(),
+                committed.commitIdentifier())
+            .snapshot()
+            .id());
 
     assertTrue(
         Collections.disjoint(compactedFileNames, scannedFileNames),

@@ -23,6 +23,7 @@ import org.apache.amoro.TableRuntime;
 import org.apache.amoro.config.TableConfiguration;
 import org.apache.amoro.exception.AmoroRuntimeException;
 import org.apache.amoro.exception.PersistenceException;
+import org.apache.amoro.exception.RuntimeStateConflictException;
 import org.apache.amoro.server.optimizing.OptimizingStatus;
 import org.apache.amoro.server.persistence.NestedSqlSession;
 import org.apache.amoro.server.persistence.PersistentBase;
@@ -42,6 +43,7 @@ import org.slf4j.LoggerFactory;
 
 import java.util.ArrayDeque;
 import java.util.Deque;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -251,7 +253,9 @@ public class DefaultTableRuntimeStore extends PersistentBase implements TableRun
             } catch (PersistenceException failure) {
               // Concurrent AMS instances may initialize the new commit state; accept only an
               // existing row for this table and key.
-              if (!OptimizingCommitGuard.STATE_KEY.getKey().equals(key.getKey())
+              if ((!OptimizingCommitGuard.STATE_KEY.getKey().equals(key.getKey())
+                      && !key.usesOptimisticConcurrency())
+                  || (key.usesOptimisticConcurrency() && !isDuplicateState(failure))
                   || getAs(
                           TableRuntimeMapper.class,
                           mapper -> mapper.getState(tableIdentifier.getId(), key.getKey()))
@@ -278,11 +282,27 @@ public class DefaultTableRuntimeStore extends PersistentBase implements TableRun
     }
   }
 
+  private static boolean isDuplicateState(Throwable failure) {
+    for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
+      if (cause instanceof java.sql.SQLException) {
+        java.sql.SQLException sql = (java.sql.SQLException) cause;
+        // MySQL duplicate key; Derby's duplicate SQLState is retained for the existing test
+        // fixture.
+        if (sql.getErrorCode() == 1062 || "23505".equals(sql.getSQLState())) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
   private class TableRuntimeOperationImpl implements TableRuntimeOperation {
 
     private TableRuntimeMeta oldMeta;
     private final List<Runnable> operations = Lists.newArrayList();
     private final Set<String> stateKeys = Sets.newHashSet();
+    private final Set<String> optimisticKeys = Sets.newHashSet();
+    private final Map<String, Long> expectedVersions = new HashMap<>();
     private final Map<String, String> oldStates = new ConcurrentHashMap<>();
     private boolean metaOperation = false;
 
@@ -294,6 +314,9 @@ public class DefaultTableRuntimeStore extends PersistentBase implements TableRun
     @Override
     public <T> TableRuntimeOperation updateState(StateKey<T> key, Function<T, T> updater) {
       stateKeys.add(key.getKey());
+      if (key.usesOptimisticConcurrency()) {
+        optimisticKeys.add(key.getKey());
+      }
       operations.add(
           () -> {
             Preconditions.checkNotNull(key, "TableRuntime state key cannot be null");
@@ -375,7 +398,11 @@ public class DefaultTableRuntimeStore extends PersistentBase implements TableRun
           session.commit();
           makeVisible();
         } catch (Throwable t) {
-          LOG.error("failed to commit operations", t);
+          if (t instanceof RuntimeStateConflictException) {
+            LOG.debug("Version-fenced runtime state update conflicted: {}", t.getMessage());
+          } else {
+            LOG.error("failed to commit operations", t);
+          }
           session.rollback();
           throw AmoroRuntimeException.wrap(t, PersistenceException::new);
         } finally {
@@ -392,6 +419,15 @@ public class DefaultTableRuntimeStore extends PersistentBase implements TableRun
       oldMeta = meta.copy();
       oldStates.clear();
       states.forEach((key, state) -> oldStates.put(key, state.getStateValue()));
+      expectedVersions.clear();
+      for (String key : optimisticKeys) {
+        TableRuntimeState fresh =
+            getAs(
+                TableRuntimeMapper.class, mapper -> mapper.getState(tableIdentifier.getId(), key));
+        Preconditions.checkNotNull(fresh, "TableRuntime state %s not initialized", key);
+        oldStates.put(key, fresh.getStateValue());
+        expectedVersions.put(key, fresh.getStateVersion());
+      }
     }
 
     private void persist() {
@@ -404,7 +440,16 @@ public class DefaultTableRuntimeStore extends PersistentBase implements TableRun
             stateKeys.forEach(
                 key -> {
                   String storedValue = oldStates.get(key);
-                  mapper.setStateValue(tableIdentifier.getId(), key, storedValue);
+                  if (optimisticKeys.contains(key)) {
+                    int updated =
+                        mapper.setStateValueIfVersion(
+                            tableIdentifier.getId(), key, expectedVersions.get(key), storedValue);
+                    if (updated != 1) {
+                      throw new RuntimeStateConflictException(tableIdentifier.getId(), key);
+                    }
+                  } else {
+                    mapper.setStateValue(tableIdentifier.getId(), key, storedValue);
+                  }
                 });
           });
     }
@@ -421,6 +466,9 @@ public class DefaultTableRuntimeStore extends PersistentBase implements TableRun
           key -> {
             TableRuntimeState state = states.get(key);
             state.setStateValue(oldStates.get(key));
+            if (optimisticKeys.contains(key)) {
+              state.setStateVersion(expectedVersions.get(key) + 1);
+            }
           });
     }
 

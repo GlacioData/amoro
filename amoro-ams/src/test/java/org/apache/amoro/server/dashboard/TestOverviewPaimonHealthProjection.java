@@ -31,6 +31,7 @@ import org.apache.amoro.server.table.RuntimeHealthSnapshot;
 import org.apache.amoro.server.table.TableService;
 import org.apache.amoro.table.TableSummary;
 import org.apache.amoro.table.health.TableHealthDetails;
+import org.apache.amoro.table.health.TableHealthEvaluation;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
@@ -45,7 +46,13 @@ class TestOverviewPaimonHealthProjection {
     DefaultTableRuntime runtime = mock(DefaultTableRuntime.class);
     TableHealthDetails details = healthDetails("runtime-key");
     when(runtime.getRuntimeHealthSnapshot())
-        .thenReturn(Optional.of(new RuntimeHealthSnapshot(72, details)));
+        .thenReturn(
+            Optional.of(
+                new RuntimeHealthSnapshot(
+                    72,
+                    details,
+                    new TableHealthEvaluation(
+                        "SUCCESS", false, "1", "1", 1L, false, Collections.emptyList()))));
     when(tableService.getRuntime(17L)).thenReturn(runtime);
     OverviewManager manager = new OverviewManager(10, Duration.ZERO, () -> tableService);
 
@@ -77,6 +84,75 @@ class TestOverviewPaimonHealthProjection {
             .get();
 
     assertEquals(-1, item.getHealthScore());
+  }
+
+  @Test
+  void doesNotPublishHistoricalScoresAsCurrentHealth() {
+    TableService service = mock(TableService.class);
+    DefaultTableRuntime runtime = mock(DefaultTableRuntime.class);
+    when(service.getRuntime(17L)).thenReturn(runtime);
+    OverviewManager manager = new OverviewManager(10, Duration.ZERO, () -> service);
+    for (String status : java.util.Arrays.asList("FAILED", "STALE", "PARTIAL")) {
+      RuntimeHealthSnapshot historical =
+          new RuntimeHealthSnapshot(
+              100,
+              healthDetails("old"),
+              new TableHealthEvaluation(status, true, "2", "2", 2L, true, Collections.emptyList()));
+      when(runtime.getRuntimeHealthSnapshot()).thenReturn(Optional.of(historical));
+      assertEquals(
+          -1,
+          manager
+              .toTopTableItem(
+                  ServerTableIdentifier.of(17L, "c", "d", "t", TableFormat.PAIMON),
+                  runtimeMeta(100, 7, 700))
+              .get()
+              .getHealthScore());
+      assertEquals(100, historical.getHealthScore());
+    }
+  }
+
+  @Test
+  void cachedStatisticsCannotKeepAStaleScoreAlive() throws Exception {
+    TableService service = mock(TableService.class);
+    DefaultTableRuntime runtime = mock(DefaultTableRuntime.class);
+    when(service.getRuntime(17L)).thenReturn(runtime);
+    OverviewManager manager = new OverviewManager(10, Duration.ZERO, () -> service);
+    OverviewTopTableItem paimon = new OverviewTopTableItem("c.d.paimon");
+    paimon.setFileCount(7);
+    paimon.setHealthScore(72);
+    OverviewTopTableItem iceberg = new OverviewTopTableItem("c.d.iceberg");
+    iceberg.setHealthScore(91);
+    java.lang.reflect.Field cache = OverviewManager.class.getDeclaredField("allTopTableItem");
+    cache.setAccessible(true);
+    cache.set(
+        manager,
+        java.util.Arrays.asList(
+            new OverviewManager.CachedTopTableItem(paimon, 17L),
+            new OverviewManager.CachedTopTableItem(iceberg, null)));
+    when(runtime.getRuntimeHealthSnapshot())
+        .thenReturn(
+            Optional.of(
+                new RuntimeHealthSnapshot(
+                    72,
+                    healthDetails("old"),
+                    new TableHealthEvaluation(
+                        "SUCCESS", false, "1", "1", 1L, false, Collections.emptyList()))));
+    assertEquals(72, manager.getAllTopTableItem().get(0).getHealthScore());
+    when(runtime.getRuntimeHealthSnapshot())
+        .thenReturn(
+            Optional.of(
+                new RuntimeHealthSnapshot(
+                    72,
+                    healthDetails("old"),
+                    new TableHealthEvaluation(
+                        "STALE", true, "2", "1", 1L, false, Collections.emptyList()))));
+    java.util.List<OverviewTopTableItem> projected = manager.getAllTopTableItem();
+    assertEquals(-1, projected.get(0).getHealthScore());
+    assertEquals(7, projected.get(0).getFileCount());
+    assertEquals(91, projected.get(1).getHealthScore());
+    assertEquals(72, paimon.getHealthScore());
+    when(runtime.getRuntimeHealthSnapshot()).thenReturn(Optional.empty());
+    assertEquals(-1, manager.getAllTopTableItem().get(0).getHealthScore());
   }
 
   @Test

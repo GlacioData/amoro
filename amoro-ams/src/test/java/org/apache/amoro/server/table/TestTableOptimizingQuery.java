@@ -28,8 +28,10 @@ import org.apache.amoro.TableFormat;
 import org.apache.amoro.server.persistence.TableRuntimeMeta;
 import org.apache.amoro.table.TableSummary;
 import org.apache.amoro.table.health.TableHealthDetails;
+import org.apache.amoro.table.health.TableHealthEvaluation;
 import org.junit.jupiter.api.Test;
 
+import java.util.Collections;
 import java.util.Optional;
 
 public class TestTableOptimizingQuery {
@@ -76,7 +78,13 @@ public class TestTableOptimizingQuery {
     DefaultTableRuntime runtime = mock(DefaultTableRuntime.class);
     TableHealthDetails details = mock(TableHealthDetails.class);
     when(runtime.getRuntimeHealthSnapshot())
-        .thenReturn(Optional.of(new RuntimeHealthSnapshot(72, details)));
+        .thenReturn(
+            Optional.of(
+                new RuntimeHealthSnapshot(
+                    72,
+                    details,
+                    new TableHealthEvaluation(
+                        "SUCCESS", false, "1", "1", 1L, false, Collections.emptyList()))));
     when(tableService.getRuntime(17L)).thenReturn(runtime);
 
     TableRuntimeMeta runtimeMeta = new TableRuntimeMeta();
@@ -107,5 +115,25 @@ public class TestTableOptimizingQuery {
             ServerTableIdentifier.of(
                 17L, "catalog", "database", "paimon_table", TableFormat.PAIMON),
             runtimeMeta));
+  }
+
+  @Test
+  void staleScoresAreUnavailableForOptimizingListsAndScoreRanges() {
+    TableService service = mock(TableService.class);
+    DefaultTableRuntime runtime = mock(DefaultTableRuntime.class);
+    when(service.getRuntime(17L)).thenReturn(runtime);
+    RuntimeHealthSnapshot historical =
+        new RuntimeHealthSnapshot(
+            100,
+            mock(TableHealthDetails.class),
+            new TableHealthEvaluation("FAILED", true, "2", "2", 2L, true, Collections.emptyList()));
+    when(runtime.getRuntimeHealthSnapshot()).thenReturn(Optional.of(historical));
+    int score =
+        DefaultTableManager.resolveHealthScore(
+            service,
+            ServerTableIdentifier.of(17L, "c", "d", "t", TableFormat.PAIMON),
+            new TableRuntimeMeta());
+    assertEquals(-1, score);
+    assertEquals(100, historical.getHealthScore());
   }
 }

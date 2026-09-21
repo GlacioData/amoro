@@ -31,6 +31,15 @@ public class TableSummary {
   private int equalityDeleteScore = 0;
   private int positionalDeleteScore = 0;
   private TableHealthDetailsView healthDetails;
+  private TableHealthComparisonView healthComparison;
+
+  public TableHealthComparisonView getHealthComparison() {
+    return healthComparison;
+  }
+
+  public void setHealthComparison(TableHealthComparisonView value) {
+    healthComparison = value;
+  }
 
   public TableSummary() {}
 

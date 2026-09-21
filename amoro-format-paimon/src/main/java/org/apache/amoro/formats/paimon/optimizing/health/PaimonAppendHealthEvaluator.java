@@ -30,7 +30,7 @@ import java.util.Objects;
 /** Pure APPEND-table health formula over bounded per-unit aggregates. */
 public final class PaimonAppendHealthEvaluator {
 
-  public static final String FORMULA_VERSION = "paimon-append-health-v2";
+  public static final String FORMULA_VERSION = "paimon-append-health-v3";
   public static final String EMPTY_TABLE = "EMPTY_TABLE";
   public static final String INVALID_SCORING_CONFIG = "INVALID_SCORING_CONFIG";
   public static final String DELETE_METADATA_INCOMPLETE = "DELETE_METADATA_INCOMPLETE";
@@ -81,7 +81,7 @@ public final class PaimonAppendHealthEvaluator {
     if (deleteScore < 0) {
       return Result.invalid(DELETE_METADATA_INCOMPLETE);
     }
-    int baseScore = ScoreUtil.clampScore(Math.round(0.80D * fileScore + 0.20D * deleteScore));
+    int baseScore = Math.min(fileScore, deleteScore);
     PaimonActivityHealth.Result activity =
         PaimonActivityHealth.evaluate(activityInput.withBaseScore(baseScore));
     List<String> reasonCodes = new ArrayList<>(activity.reasonCodes());
@@ -356,7 +356,7 @@ public final class PaimonAppendHealthEvaluator {
       this.reasonCodes = Collections.unmodifiableList(new ArrayList<>(reasonCodes));
     }
 
-    private static Result invalid(String reasonCode) {
+    public static Result invalid(String reasonCode) {
       return new Result(
           -1,
           -1,

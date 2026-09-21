@@ -19,22 +19,44 @@
 package org.apache.amoro.server.table;
 
 import org.apache.amoro.table.health.TableHealthDetails;
+import org.apache.amoro.table.health.TableHealthEvaluation;
 
 import java.util.Objects;
 
 /** Immutable health result available only for the lifetime of one AMS table runtime. */
 public final class RuntimeHealthSnapshot {
 
+  private final TableHealthEvaluation evaluation;
   private final int healthScore;
   private final TableHealthDetails healthDetails;
 
   public RuntimeHealthSnapshot(int healthScore, TableHealthDetails healthDetails) {
+    this(healthScore, healthDetails, null);
+  }
+
+  public RuntimeHealthSnapshot(
+      int healthScore, TableHealthDetails healthDetails, TableHealthEvaluation evaluation) {
+    this.evaluation = evaluation;
     this.healthScore = healthScore;
     this.healthDetails = Objects.requireNonNull(healthDetails, "Health details must not be null");
   }
 
+  public TableHealthEvaluation getEvaluation() {
+    return evaluation;
+  }
+
   public int getHealthScore() {
     return healthScore;
+  }
+
+  /** A historical score must not participate in current-score lists or filters. */
+  public int getCurrentHealthScore() {
+    return evaluation != null
+            && !evaluation.isStale()
+            && "SUCCESS".equals(evaluation.getStatus())
+            && isSuccessful()
+        ? healthScore
+        : -1;
   }
 
   public TableHealthDetails getHealthDetails() {

@@ -59,6 +59,36 @@ public class TestDefaultTableRuntimePendingInputEvaluation extends AMSTableTestB
   }
 
   @Test
+  public void testPaimonRefreshAndHistoricalBuildShareBoundedScanBudget() throws Exception {
+    DefaultTableRuntime runtime = paimonRuntime();
+    runtime.completeEmptyProcess();
+    AmoroTable<?> table = mock(AmoroTable.class);
+    java.util.concurrent.CountDownLatch entered = new java.util.concurrent.CountDownLatch(1);
+    java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+    when(table.evaluatePendingInput(any(), anyInt()))
+        .thenAnswer(
+            invocation -> {
+              entered.countDown();
+              Assert.assertTrue(release.await(10, java.util.concurrent.TimeUnit.SECONDS));
+              return Optional.empty();
+            });
+    java.util.concurrent.CompletableFuture<Boolean> scan =
+        java.util.concurrent.CompletableFuture.supplyAsync(
+            () -> runtime.evaluatePendingInputAndTransition(table, MAX_PENDING_PARTITIONS));
+    try {
+      Assert.assertTrue(entered.await(10, java.util.concurrent.TimeUnit.SECONDS));
+      Assert.assertFalse(runtime.evaluatePendingInputAndTransition(table, MAX_PENDING_PARTITIONS));
+      Assert.assertFalse(
+          runtime.runHealthComparison(() -> Assert.fail("Overlapping health scans")));
+    } finally {
+      release.countDown();
+    }
+    scan.get(10, java.util.concurrent.TimeUnit.SECONDS);
+    Assert.assertTrue(runtime.runHealthComparison(() -> {}));
+    verify(table, org.mockito.Mockito.times(1)).evaluatePendingInput(any(), anyInt());
+  }
+
+  @Test
   public void testEvaluatePendingInputReceivesConfiguredMaxPendingPartitions() {
     DefaultTableRuntime runtime = getDefaultTableRuntime(serverTableIdentifier().getId());
     runtime.completeEmptyProcess();
@@ -308,7 +338,7 @@ public class TestDefaultTableRuntimePendingInputEvaluation extends AMSTableTestB
 
   @Test
   public void testPaimonAnalysisWithoutCurrentPreflightCannotPublishPending() {
-    DefaultTableRuntime runtime = getDefaultTableRuntime(serverTableIdentifier().getId());
+    DefaultTableRuntime runtime = paimonRuntime();
     runtime.completeEmptyProcess();
     TableAnalysisKey key = analysisKey(40L, TableFormat.PAIMON);
     FormatTableAnalysis analysis = analysis(key, new AbstractOptimizingEvaluator.PendingInput());
@@ -452,6 +482,18 @@ public class TestDefaultTableRuntimePendingInputEvaluation extends AMSTableTestB
     properties.put("self-optimizing.enabled", "false");
     properties.put("table-summary.enabled", String.valueOf(summaryEnabled));
     return properties;
+  }
+
+  private DefaultTableRuntime paimonRuntime() {
+    // Select the format at construction, as production does, rather than changing a spy's format.
+    org.apache.amoro.table.TableRuntimeStore store =
+        org.mockito.Mockito.spy(getDefaultTableRuntime(serverTableIdentifier().getId()).store());
+    org.apache.amoro.ServerTableIdentifier id =
+        org.apache.amoro.ServerTableIdentifier.of(
+            serverTableIdentifier().getIdentifier(), TableFormat.PAIMON);
+    id.setId(serverTableIdentifier().getId());
+    org.mockito.Mockito.doReturn(id).when(store).getTableIdentifier();
+    return new DefaultTableRuntime(store, () -> mock(AmoroTable.class));
   }
 
   private TableAnalysisKey analysisKey(long snapshotId) {

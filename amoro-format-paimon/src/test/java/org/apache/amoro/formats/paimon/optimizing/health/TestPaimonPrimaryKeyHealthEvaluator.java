@@ -40,7 +40,7 @@ public class TestPaimonPrimaryKeyHealthEvaluator {
   @Test
   public void defaultSortedRunAnchorsMatchSpecification() {
     int[] sortedRuns = {1, 4, 5, 6, 7, 8, 9, 10, 11};
-    int[] expectedScores = {100, 100, 73, 67, 60, 44, 30, 15, 0};
+    int[] expectedScores = {100, 100, 73, 67, 60, 45, 30, 15, 0};
 
     for (int index = 0; index < sortedRuns.length; index++) {
       PaimonPrimaryKeyHealthEvaluator evaluator = evaluator(5, 8, 6);
@@ -68,8 +68,44 @@ public class TestPaimonPrimaryKeyHealthEvaluator {
             PaimonActivityHealth.Input.withoutBaseline(0),
             EvaluationMode.HASH);
 
-    assertEquals(50, result.runScore());
-    assertEquals(50, result.healthScore());
+    assertEquals(51, result.runScore());
+    assertEquals(51, result.healthScore());
+  }
+
+  @Test
+  public void tinySevereBucketDoesNotCapWholeTableScore() {
+    PaimonPrimaryKeyHealthEvaluator evaluator = evaluator(5, 8, 6);
+    UnitAccumulator severe = evaluator.newUnitAccumulator();
+    for (int i = 0; i < 8; i++) {
+      severe.addFile(1, 10, 0L, 0L);
+    }
+    Result result =
+        evaluator.evaluate(
+            Arrays.asList(severe.snapshot(8), healthyUnit(evaluator, 1, 7992)),
+            PaimonActivityHealth.Input.withoutBaseline(0),
+            EvaluationMode.HASH);
+    assertEquals(100, result.runScore());
+    assertEquals(8, result.maxSortedRunCount());
+  }
+
+  @Test
+  public void runPressureIsMonotonicIncludingZeroByteFallback() {
+    PaimonPrimaryKeyHealthEvaluator evaluator = evaluator(5, 8, 6);
+    for (long bytes : new long[] {0, 1000}) {
+      int previous = 100;
+      for (int runs = 1; runs <= 100; runs++) {
+        int score =
+            evaluator
+                .evaluate(
+                    Collections.singletonList(healthyUnit(evaluator, runs, bytes)),
+                    PaimonActivityHealth.Input.withoutBaseline(0),
+                    EvaluationMode.HASH)
+                .healthScore();
+        assertTrue(score <= previous && score >= 0);
+        previous = score;
+      }
+      assertEquals(0, previous);
+    }
   }
 
   @Test
@@ -185,7 +221,7 @@ public class TestPaimonPrimaryKeyHealthEvaluator {
   }
 
   @Test
-  public void activityOnlyAmplifiesExistingStructuralDebt() {
+  public void activityDoesNotChangeStructuralDebt() {
     PaimonPrimaryKeyHealthEvaluator evaluator = evaluator(5, 8, 6);
     UnitStatistics unit = healthyUnit(evaluator, 7, 900L);
 
@@ -196,7 +232,7 @@ public class TestPaimonPrimaryKeyHealthEvaluator {
             EvaluationMode.HASH);
 
     assertEquals(60, result.baseScore());
-    assertEquals(50, result.healthScore());
+    assertEquals(60, result.healthScore());
   }
 
   @Test
@@ -215,8 +251,8 @@ public class TestPaimonPrimaryKeyHealthEvaluator {
     assertEquals(hash.runScore(), keyDynamic.runScore());
     assertEquals(hash.materializedDeleteScore(), keyDynamic.materializedDeleteScore());
     assertEquals(hash.baseScore(), keyDynamic.baseScore());
-    assertEquals(50, hash.healthScore());
-    assertEquals(50, keyDynamic.healthScore());
+    assertEquals(60, hash.healthScore());
+    assertEquals(60, keyDynamic.healthScore());
     assertEquals(
         Arrays.asList(
             PaimonPrimaryKeyHealthEvaluator.KEY_DYNAMIC_LOCAL_INDEX_NOT_EVALUATED,

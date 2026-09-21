@@ -19,7 +19,6 @@
 package org.apache.amoro.server.table;
 
 import org.apache.amoro.AmoroTable;
-import org.apache.amoro.TableFormat;
 import org.apache.amoro.api.BlockableOperation;
 import org.apache.amoro.config.OptimizingConfig;
 import org.apache.amoro.config.TableConfiguration;
@@ -50,6 +49,7 @@ import org.apache.amoro.table.TableRuntimeStore;
 import org.apache.amoro.table.TableSummary;
 import org.apache.amoro.table.health.TableAnalysisKey;
 import org.apache.amoro.table.health.TableHealthDetails;
+import org.apache.amoro.table.health.TableHealthSupport;
 import org.apache.amoro.utils.SnowflakeIdGenerator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -102,7 +102,11 @@ public class DefaultTableRuntime extends AbstractTableRuntime implements Optimiz
   private volatile boolean latestEvaluatedNeedOptimizing = true;
   private volatile TableAnalysisKey currentAnalysisKey;
   private final AtomicReference<FormatTableAnalysis> tableAnalysisSlot = new AtomicReference<>();
-  private final RuntimeHealthState runtimeHealthState = new RuntimeHealthState();
+  private final RuntimeHealthState runtimeHealthState;
+  private final TableHealthSupport healthSupport;
+  private final java.util.concurrent.locks.ReentrantLock healthEvaluationLock =
+      new java.util.concurrent.locks.ReentrantLock();
+  private final ThreadLocal<Long> healthAttempt = new ThreadLocal<>();
   protected volatile OptimizingProcess optimizingProcess;
   private final List<TaskRuntime.TaskQuota> taskQuotas = new CopyOnWriteArrayList<>();
 
@@ -125,6 +129,8 @@ public class DefaultTableRuntime extends AbstractTableRuntime implements Optimiz
     }
     this.orphanFilesCleaningMetrics =
         new TableOrphanFilesCleaningMetrics(store.getTableIdentifier());
+    this.healthSupport = TableHealthSupports.forFormat(store.getTableIdentifier().getFormat());
+    this.runtimeHealthState = new RuntimeHealthState(healthSupport);
     this.tableSummaryMetrics = new TableSummaryMetrics(store.getTableIdentifier());
     this.loader = loader;
   }
@@ -282,9 +288,22 @@ public class DefaultTableRuntime extends AbstractTableRuntime implements Optimiz
     return Optional.of(analysis);
   }
 
-  /** Returns the Paimon health result produced during this runtime process, if any. */
+  /** Shares the per-table scan budget with background historical health evaluation. */
+  boolean runHealthComparison(Runnable work) {
+    if (!healthEvaluationLock.tryLock()) {
+      return false;
+    }
+    try {
+      work.run();
+      return true;
+    } finally {
+      healthEvaluationLock.unlock();
+    }
+  }
+
+  /** Returns the format health result produced during this runtime process, if any. */
   public Optional<RuntimeHealthSnapshot> getRuntimeHealthSnapshot() {
-    return runtimeHealthState.snapshot();
+    return runtimeHealthState.snapshot(currentAnalysisKey);
   }
 
   /**
@@ -320,7 +339,7 @@ public class DefaultTableRuntime extends AbstractTableRuntime implements Optimiz
               persistFullTableSummary(
                   analysis.pendingInput(), analysis.healthDetails(), clearPendingSummary);
               if (recordRuntimeHealth(analysis)) {
-                tableSummaryMetrics.refresh(analysis.pendingInput());
+                refreshSummaryMetrics(analysis.pendingInput(), analysis);
               }
               updated.set(true);
             });
@@ -384,6 +403,31 @@ public class DefaultTableRuntime extends AbstractTableRuntime implements Optimiz
    */
   public boolean evaluatePendingInputAndTransition(
       AmoroTable<?> table, int maxPendingPartitions, boolean forceHealthEvaluation) {
+    if (!healthSupport.enabled()) {
+      return evaluatePendingInputAndTransitionInternal(
+          table, maxPendingPartitions, forceHealthEvaluation);
+    }
+    // A refresh already in flight owns this pass; the normal scheduler retries the latest input.
+    if (!healthEvaluationLock.tryLock()) {
+      return !isIdle();
+    }
+    healthAttempt.set(runtimeHealthState.beginAttempt());
+    TableAnalysisKey attemptedKey = currentAnalysisKey;
+    try {
+      return evaluatePendingInputAndTransitionInternal(
+          table, maxPendingPartitions, forceHealthEvaluation);
+    } catch (RuntimeException failure) {
+      runtimeHealthState.fail(attemptedKey, healthAttempt.get());
+      throw failure;
+    } finally {
+      healthAttempt.remove();
+      healthEvaluationLock.unlock();
+    }
+  }
+
+  private boolean evaluatePendingInputAndTransitionInternal(
+      AmoroTable<?> table, int maxPendingPartitions, boolean forceHealthEvaluation) {
+    TableAnalysisKey expectedKey = currentAnalysisKey;
     OptimizingConfig config = getOptimizingConfig();
     Map<String, String> refreshableConfig =
         table.supportsPendingInputRefresh() ? new HashMap<>(getTableConfig()) : null;
@@ -431,19 +475,18 @@ public class DefaultTableRuntime extends AbstractTableRuntime implements Optimiz
       throw throwable;
     }
 
-    TableAnalysisKey expectedKey = currentAnalysisKey;
     if (expectedKey != null) {
       refreshCurrentAnalysisKey(table);
       if (!tableAnalysis.isPresent()
           || !Objects.equals(expectedKey, currentAnalysisKey)
           || !expectedKey.equals(tableAnalysis.get().key())) {
+        // Keep a complete scanned snapshot as historical display data, never as planner input.
+        tableAnalysis.ifPresent(this::recordRuntimeHealth);
         clearTableAnalysis();
         return !isIdle();
       }
     }
-    if (tableAnalysis.isPresent()
-        && tableAnalysis.get().key().getTableFormat() == TableFormat.PAIMON
-        && currentAnalysisKey == null) {
+    if (tableAnalysis.isPresent() && healthSupport.enabled() && currentAnalysisKey == null) {
       clearTableAnalysis();
       return !isIdle();
     }
@@ -951,7 +994,7 @@ public class DefaultTableRuntime extends AbstractTableRuntime implements Optimiz
                       evalResult.pendingInput(),
                       analysis == null ? null : analysis.healthDetails());
                   if (recordRuntimeHealth(analysis)) {
-                    tableSummaryMetrics.refresh(evalResult.pendingInput());
+                    refreshSummaryMetrics(evalResult.pendingInput(), analysis);
                   }
                   return;
                 }
@@ -979,7 +1022,7 @@ public class DefaultTableRuntime extends AbstractTableRuntime implements Optimiz
                           })
                       .commit();
                   if (recordRuntimeHealth(analysis)) {
-                    tableSummaryMetrics.refresh(evalResult.pendingInput());
+                    refreshSummaryMetrics(evalResult.pendingInput(), analysis);
                   }
                   transitioned.set(true);
                 } catch (Throwable throwable) {
@@ -1003,9 +1046,7 @@ public class DefaultTableRuntime extends AbstractTableRuntime implements Optimiz
   private void persistEvaluationSummary(
       PendingInputResult evalResult, boolean clearPendingSummary) {
     Optional<FormatTableAnalysis> analysis = evalResult.tableAnalysis();
-    if (analysis.isPresent()
-        && (analysis.get().key().getTableFormat() == TableFormat.PAIMON
-            || currentAnalysisKey != null)) {
+    if (analysis.isPresent() && (healthSupport.enabled() || currentAnalysisKey != null)) {
       boolean summaryUpdated = updateTableSummaryIfCurrent(analysis.get(), clearPendingSummary);
       if (!summaryUpdated && clearPendingSummary) {
         // Disabling optimization must retain the legacy unconditional pending-summary clear even
@@ -1025,21 +1066,32 @@ public class DefaultTableRuntime extends AbstractTableRuntime implements Optimiz
     if (key != null) {
       return analysis != null && key.equals(analysis.key());
     }
-    return analysis == null || analysis.key().getTableFormat() != TableFormat.PAIMON;
+    return analysis == null || !healthSupport.enabled();
+  }
+
+  private void refreshSummaryMetrics(FormatPendingInput input, FormatTableAnalysis analysis) {
+    tableSummaryMetrics.refresh(
+        input,
+        analysis == null
+            || !healthSupport.enabled()
+            || input.getHealthScore() >= 0
+            || analysis.healthDetails().getStructure() != null);
   }
 
   private boolean recordRuntimeHealth(FormatTableAnalysis analysis) {
-    if (analysis == null || analysis.key().getTableFormat() != TableFormat.PAIMON) {
+    if (analysis == null || !healthSupport.enabled()) {
       return true;
     }
 
-    if (runtimeHealthState.update(analysis)) {
+    Long attempt = healthAttempt.get();
+    if (runtimeHealthState.update(
+        analysis, attempt == null ? runtimeHealthState.beginAttempt() : attempt)) {
       return true;
     }
 
     TableHealthDetails details = analysis.healthDetails();
     LOG.warn(
-        "Retain previous successful Paimon health result for {} after evaluation {} failed with {}",
+        "Retain previous successful format health result for {} after evaluation {} failed with {}",
         getTableIdentifier(),
         details.getEvaluationKey(),
         details.getReasonCodes());
@@ -1094,9 +1146,23 @@ public class DefaultTableRuntime extends AbstractTableRuntime implements Optimiz
 
   private void updateFullSummary(
       TableSummary summary, FormatPendingInput tableSummary, TableHealthDetails healthDetails) {
+    // A failed format health read cannot replace a previously verified summary with zero
+    // placeholders.
+    if (healthDetails != null
+        && healthSupport.enabled()
+        && tableSummary.getHealthScore() < 0
+        && summary.getHealthDetails() != null
+        && summary.getHealthScore() >= 0) {
+      return;
+    }
     summary.setHealthScore(tableSummary.getHealthScore());
-    summary.setTotalFileCount(tableSummary.getTotalFileCount());
-    summary.setTotalFileSize(tableSummary.getTotalFileSize());
+    boolean unknown =
+        healthDetails != null
+            && healthSupport.enabled()
+            && tableSummary.getHealthScore() < 0
+            && healthDetails.getStructure() == null;
+    summary.setTotalFileCount(unknown ? -1 : tableSummary.getTotalFileCount());
+    summary.setTotalFileSize(unknown ? -1 : tableSummary.getTotalFileSize());
     summary.setHealthDetails(healthDetails);
     if (tableSummary instanceof AbstractOptimizingEvaluator.PendingInput) {
       AbstractOptimizingEvaluator.PendingInput iceInput =

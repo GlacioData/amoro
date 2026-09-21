@@ -415,7 +415,7 @@ public class DefaultTableManager extends PersistentBase implements TableManager 
     }
     return ((DefaultTableRuntime) runtime)
         .getRuntimeHealthSnapshot()
-        .map(RuntimeHealthSnapshot::getHealthScore)
+        .map(RuntimeHealthSnapshot::getCurrentHealthScore)
         .orElse(-1);
   }
 

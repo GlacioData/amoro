@@ -227,7 +227,10 @@ public class TestOptimizingPlanningEligibilityFence extends AMSTableTestBase {
               return OptimizingOwnership.OWNED;
             });
 
-    TaskRuntime<?> recoveredTask = queue.pollTask(optimizerThread, POLL_WAIT_MILLIS);
+    // This case includes asynchronous planning and persisted-process recovery. Use the same
+    // bounded wait as the other asynchronous cases; 500 ms can expire during Derby recovery.
+    TaskRuntime<?> recoveredTask =
+        queue.pollTask(optimizerThread, TimeUnit.SECONDS.toMillis(TIMEOUT_SECONDS));
 
     Assert.assertNotNull(recoveredTask);
     Assert.assertTrue(finalFenceAttempts.get() >= 2);

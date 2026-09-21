@@ -47,7 +47,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
-import java.util.ArrayList;
 import java.util.Deque;
 import java.util.List;
 import java.util.Map;
@@ -72,7 +71,7 @@ public class OverviewManager extends PersistentBase {
   public static final String STATUS_COMMITTING = "Committing";
 
   private static final Logger LOG = LoggerFactory.getLogger(OverviewManager.class);
-  private final List<OverviewTopTableItem> allTopTableItem = new ArrayList<>();
+  private volatile List<CachedTopTableItem> allTopTableItem = ImmutableList.of();
   private final Map<String, Long> optimizingStatusCountMap = new ConcurrentHashMap<>();
   private final ConcurrentLinkedDeque<OverviewResourceUsageItem> resourceUsageHistory =
       new ConcurrentLinkedDeque<>();
@@ -126,7 +125,20 @@ public class OverviewManager extends PersistentBase {
   }
 
   public List<OverviewTopTableItem> getAllTopTableItem() {
-    return ImmutableList.copyOf(allTopTableItem);
+    ImmutableList.Builder<OverviewTopTableItem> result = ImmutableList.builder();
+    for (CachedTopTableItem cached : allTopTableItem) {
+      OverviewTopTableItem source = cached.statistics;
+      OverviewTopTableItem projected = new OverviewTopTableItem(source.getTableName());
+      projected.setTableSize(source.getTableSize());
+      projected.setFileCount(source.getFileCount());
+      projected.setAverageFileSize(source.getAverageFileSize());
+      projected.setHealthScore(
+          cached.runtimeHealthTableId == null
+              ? source.getHealthScore()
+              : runtimeHealthScore(cached.runtimeHealthTableId).orElse(-1));
+      result.add(projected);
+    }
+    return result.build();
   }
 
   public int getTotalCatalog() {
@@ -192,7 +204,7 @@ public class OverviewManager extends PersistentBase {
 
     AtomicLong totalDataSize = new AtomicLong();
     AtomicInteger totalFileCounts = new AtomicInteger();
-    Map<String, OverviewTopTableItem> topTableItemMap = Maps.newHashMap();
+    Map<String, CachedTopTableItem> topTableItemMap = Maps.newHashMap();
     Map<String, Long> optimizingStatusMap = Maps.newHashMap();
     for (TableRuntimeMeta meta : metas) {
       ServerTableIdentifier identifier = tableIdentifierMap.get(meta.getTableId());
@@ -202,7 +214,11 @@ public class OverviewManager extends PersistentBase {
       Optional<OverviewTopTableItem> optItem = toTopTableItem(identifier, meta);
       optItem.ifPresent(
           tableItem -> {
-            topTableItemMap.put(tableItem.getTableName(), tableItem);
+            topTableItemMap.put(
+                tableItem.getTableName(),
+                new CachedTopTableItem(
+                    tableItem,
+                    identifier.getFormat() == TableFormat.PAIMON ? identifier.getId() : null));
             totalDataSize.addAndGet(tableItem.getTableSize());
             totalFileCounts.addAndGet(tableItem.getFileCount());
           });
@@ -217,8 +233,7 @@ public class OverviewManager extends PersistentBase {
     this.totalCatalog.set(totalCatalogs);
     this.totalTableCount.set(topTableItemMap.size());
     this.totalDataSize.set(totalDataSize.get());
-    this.allTopTableItem.clear();
-    this.allTopTableItem.addAll(topTableItemMap.values());
+    this.allTopTableItem = ImmutableList.copyOf(topTableItemMap.values());
     addAndCheck(new OverviewDataSizeItem(ts, this.totalDataSize.get()));
     resetStatusMap();
     this.optimizingStatusCountMap.putAll(optimizingStatusMap);
@@ -245,6 +260,16 @@ public class OverviewManager extends PersistentBase {
     return Optional.of(tableItem);
   }
 
+  static final class CachedTopTableItem {
+    private final OverviewTopTableItem statistics;
+    private final Long runtimeHealthTableId;
+
+    CachedTopTableItem(OverviewTopTableItem statistics, Long runtimeHealthTableId) {
+      this.statistics = statistics;
+      this.runtimeHealthTableId = runtimeHealthTableId;
+    }
+  }
+
   private Optional<Integer> runtimeHealthScore(long tableId) {
     TableService tableService = tableServiceSupplier.get();
     if (tableService == null) {
@@ -256,7 +281,7 @@ public class OverviewManager extends PersistentBase {
     }
     return ((DefaultTableRuntime) runtime)
         .getRuntimeHealthSnapshot()
-        .map(RuntimeHealthSnapshot::getHealthScore);
+        .map(RuntimeHealthSnapshot::getCurrentHealthScore);
   }
 
   private String statusToMetricString(OptimizingStatus status) {

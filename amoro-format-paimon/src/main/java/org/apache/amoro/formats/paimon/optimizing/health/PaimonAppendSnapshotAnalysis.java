@@ -23,6 +23,7 @@ import org.apache.amoro.optimizing.FormatTableAnalysis;
 import org.apache.amoro.table.health.TableAnalysisKey;
 import org.apache.amoro.table.health.TableHealthComponent;
 import org.apache.amoro.table.health.TableHealthDetails;
+import org.apache.amoro.table.health.TableHealthStructure;
 import org.apache.paimon.Snapshot;
 import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.io.DataFileMeta;
@@ -67,6 +68,31 @@ public final class PaimonAppendSnapshotAnalysis implements FormatTableAnalysis {
     this.snapshot = snapshot;
     this.fullSnapshotFileCount = fullSnapshotFileCount;
     this.fullSnapshotScanCount = fullSnapshotScanCount;
+  }
+
+  /** Historical diagnostics must not retain a snapshot or files for planner reuse. */
+  public PaimonAppendSnapshotAnalysis withoutPlannerFacts() {
+    return new PaimonAppendSnapshotAnalysis(
+        key,
+        pendingInput,
+        healthDetails,
+        Collections.emptyList(),
+        false,
+        null,
+        fullSnapshotFileCount,
+        fullSnapshotScanCount);
+  }
+
+  public PaimonAppendSnapshotAnalysis withStructure(TableHealthStructure structure) {
+    return new PaimonAppendSnapshotAnalysis(
+        key,
+        pendingInput,
+        healthDetails.withStructure(structure),
+        plannerFiles,
+        plannerFactsAvailable,
+        snapshot,
+        fullSnapshotFileCount,
+        fullSnapshotScanCount);
   }
 
   /** Create an analysis after the scanner has exhausted the fixed-snapshot iterator. */
@@ -141,12 +167,11 @@ public final class PaimonAppendSnapshotAnalysis implements FormatTableAnalysis {
       List<String> reasonCodes) {
     int fileScore = structuralResult == null ? -1 : structuralResult.fileScore();
     int deleteScore = result == null ? -1 : result.deleteScore();
-    int activityScore = result == null ? -1 : result.healthScore();
     List<TableHealthComponent> components =
         Arrays.asList(
-            component("FILE_ORGANIZATION", fileScore, 80, "SUM"),
-            component("MATERIALIZED_DELETE", deleteScore, 20, "SUM"),
-            component("SNAPSHOT_ACTIVITY", activityScore, null, "DEBT_AMPLIFIER"));
+            component("FILE_ORGANIZATION", fileScore, null, "MIN"),
+            component("MATERIALIZED_DELETE", deleteScore, null, "MIN"),
+            component("SNAPSHOT_ACTIVITY", -1, null, "CONTEXT"));
 
     boolean structuralFactsAvailable = structuralResult != null;
     LinkedHashMap<String, String> metrics = new LinkedHashMap<>();

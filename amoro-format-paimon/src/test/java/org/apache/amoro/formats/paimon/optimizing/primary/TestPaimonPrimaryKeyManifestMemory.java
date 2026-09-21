@@ -213,7 +213,18 @@ class TestPaimonPrimaryKeyManifestMemory {
           PaimonPrimaryKeySnapshotAnalysis.analyze(raw, context);
       assertTrue(expected.validForPlanning());
       assertEquals(expected.key(), actual.key());
-      assertEquals(expected.healthDetails(), actual.healthDetails());
+      // Independent scans have different evaluation times but must retain identical facts.
+      assertEquals(
+          expected.healthDetails().withStructure(null), actual.healthDetails().withStructure(null));
+      assertEquals(
+          expected.healthDetails().getStructure().getBands(),
+          actual.healthDetails().getStructure().getBands());
+      assertEquals(
+          expected.healthDetails().getStructure().getProblems(),
+          actual.healthDetails().getStructure().getProblems());
+      assertEquals(
+          expected.healthDetails().getStructure().getTotalUnits(),
+          actual.healthDetails().getStructure().getTotalUnits());
       assertEquals(
           originals.size(),
           actual.bucketFacts().stream().mapToInt(fact -> fact.files().size()).sum());

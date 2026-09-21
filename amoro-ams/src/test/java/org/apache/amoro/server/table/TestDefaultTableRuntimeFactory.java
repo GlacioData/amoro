@@ -28,6 +28,22 @@ import java.util.Collections;
 public class TestDefaultTableRuntimeFactory {
 
   @Test
+  public void testLegacyFormatsKeepTheirOriginalStateSet() {
+    DefaultTableRuntimeFactory factory = new DefaultTableRuntimeFactory();
+    for (TableFormat format :
+        new TableFormat[] {
+          TableFormat.ICEBERG, TableFormat.MIXED_ICEBERG, TableFormat.MIXED_HIVE
+        }) {
+      ServerTableIdentifier id = ServerTableIdentifier.of("catalog", "database", "table", format);
+      java.util.List<org.apache.amoro.table.StateKey<?>> states =
+          factory.accept(id, Collections.emptyMap()).get().requiredStateKeys();
+      Assert.assertFalse(
+          states.stream().anyMatch(key -> key.getKey().equals("paimon_health_comparison_v1")));
+      Assert.assertTrue(states.stream().anyMatch(key -> key.getKey().equals("pending_input")));
+    }
+  }
+
+  @Test
   public void testAcceptPaimonWithoutProcessFactory() {
     DefaultTableRuntimeFactory factory = new DefaultTableRuntimeFactory();
     ServerTableIdentifier identifier =

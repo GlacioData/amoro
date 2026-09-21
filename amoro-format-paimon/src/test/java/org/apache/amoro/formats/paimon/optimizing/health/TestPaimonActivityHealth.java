@@ -73,7 +73,8 @@ public class TestPaimonActivityHealth {
     assertEquals(
         PaimonAppendHealthEvaluator.FORMULA_VERSION + "+" + PaimonActivityHealth.FORMULA_VERSION,
         context.formulaVersion());
-    assertTrue(context.scoringConfigFingerprint().matches("[0-9a-f]{64}"));
+    assertTrue(
+        context.scoringConfigFingerprint().matches("paimon-health-v1:[0-9a-f]{64}:[0-9a-f]{64}"));
     assertFalse(context.configurationError().isPresent());
     assertEquals(TableAnalysisKey.NO_CHANGE_SNAPSHOT, context.key().getChangeSnapshotId());
     assertEquals(context.key(), new TableAnalysisKey(context.key()));
@@ -381,14 +382,14 @@ public class TestPaimonActivityHealth {
     assertEquals(100, evaluateWithSnapshotPressure(100, 0.5D).healthScore());
     assertEquals(100, evaluateWithSnapshotPressure(100, 1.0D).healthScore());
     assertEquals(90, evaluateWithSnapshotPressure(90, 0.0D).healthScore());
-    assertEquals(89, evaluateWithSnapshotPressure(90, 0.5D).healthScore());
-    assertEquals(88, evaluateWithSnapshotPressure(90, 1.0D).healthScore());
+    assertEquals(90, evaluateWithSnapshotPressure(90, 0.5D).healthScore());
+    assertEquals(90, evaluateWithSnapshotPressure(90, 1.0D).healthScore());
     assertEquals(75, evaluateWithSnapshotPressure(75, 0.0D).healthScore());
-    assertEquals(72, evaluateWithSnapshotPressure(75, 0.5D).healthScore());
-    assertEquals(69, evaluateWithSnapshotPressure(75, 1.0D).healthScore());
+    assertEquals(75, evaluateWithSnapshotPressure(75, 0.5D).healthScore());
+    assertEquals(75, evaluateWithSnapshotPressure(75, 1.0D).healthScore());
     assertEquals(50, evaluateWithSnapshotPressure(50, 0.0D).healthScore());
-    assertEquals(44, evaluateWithSnapshotPressure(50, 0.5D).healthScore());
-    assertEquals(38, evaluateWithSnapshotPressure(50, 1.0D).healthScore());
+    assertEquals(50, evaluateWithSnapshotPressure(50, 0.5D).healthScore());
+    assertEquals(50, evaluateWithSnapshotPressure(50, 1.0D).healthScore());
     assertEquals(0, evaluateWithSnapshotPressure(0, 0.0D).healthScore());
     assertEquals(0, evaluateWithSnapshotPressure(0, 0.5D).healthScore());
     assertEquals(0, evaluateWithSnapshotPressure(0, 1.0D).healthScore());
@@ -403,14 +404,14 @@ public class TestPaimonActivityHealth {
               PaimonActivityHealth.Input.withBaseline(75, 100 + newSnapshotCount, 100L));
       assertEquals(newSnapshotCount, result.newSnapshotCount());
       assertEquals(newSnapshotCount / 10.0D, result.snapshotPressure(), 0.000_001D);
-      assertTrue(result.healthScore() <= previousScore);
+      assertEquals(previousScore, result.healthScore());
       previousScore = result.healthScore();
     }
 
     PaimonActivityHealth.Result saturated =
         PaimonActivityHealth.evaluate(PaimonActivityHealth.Input.withBaseline(75, 1_000L, 100L));
     assertEquals(1.0D, saturated.snapshotPressure(), 0.0D);
-    assertEquals(69, saturated.healthScore());
+    assertEquals(75, saturated.healthScore());
   }
 
   @Test
@@ -452,7 +453,7 @@ public class TestPaimonActivityHealth {
     PaimonActivityHealth.Result result =
         PaimonActivityHealth.evaluate(PaimonActivityHealth.Input.withBaseline(75, 9L, 0L));
 
-    assertEquals(-1, result.healthScore());
+    assertEquals(75, result.healthScore());
     assertEquals(PaimonActivityHealth.SUCCESS_BASELINE_INVALID, result.reasonCodes().get(0));
   }
 

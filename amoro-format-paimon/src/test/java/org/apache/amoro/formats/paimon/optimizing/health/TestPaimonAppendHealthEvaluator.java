@@ -75,10 +75,20 @@ public class TestPaimonAppendHealthEvaluator {
         evaluator().evaluate(Collections.singletonList(unit.snapshot()), neutralActivity(100));
 
     assertEquals(60, result.deleteScore());
-    assertEquals(92, result.baseScore());
-    assertEquals(92, result.healthScore());
+    assertEquals(60, result.baseScore());
+    assertEquals(60, result.healthScore());
     assertEquals(200L, result.totalRecordCount());
     assertEquals(50L, result.deleteRecordCount());
+  }
+
+  @Test
+  public void fullyDeletedTargetFileIsNeverHealthy() {
+    PaimonAppendHealthEvaluator.UnitAccumulator unit = evaluator().newUnitAccumulator();
+    unit.addFile(TARGET_SIZE, 100, 100L);
+    PaimonAppendHealthEvaluator.Result result =
+        evaluator().evaluate(Collections.singletonList(unit.snapshot()), neutralActivity(100));
+    assertEquals(100, result.fileScore());
+    assertEquals(0, result.healthScore());
   }
 
   @Test
@@ -133,14 +143,14 @@ public class TestPaimonAppendHealthEvaluator {
   }
 
   @Test
-  public void activityAmplifiesOnlyExistingAppendDebt() {
+  public void activityDoesNotChangeAppendDebt() {
     PaimonAppendHealthEvaluator.UnitStatistics fragmented = unit(10_000, 500L);
     PaimonActivityHealth.Input saturated = PaimonActivityHealth.Input.withBaseline(0, 110L, 100L);
 
     PaimonAppendHealthEvaluator.Result result =
         evaluator().evaluate(Collections.singletonList(fragmented), saturated);
 
-    assertEquals(36, result.baseScore());
+    assertEquals(20, result.baseScore());
     assertEquals(20, result.fileScore());
     assertEquals(100, result.deleteScore());
     assertEquals(20, result.healthScore());

@@ -182,6 +182,18 @@ class TestPaimonPrimaryKeyTableCommit {
     assertEquals(snapshotBefore + 1, snapshot.id());
     assertEquals(Snapshot.CommitKind.COMPACT, snapshot.commitKind());
     assertEquals(7L, snapshot.commitIdentifier());
+    org.apache.amoro.optimizing.FormatTableAnalysis historical =
+        org.apache.amoro.formats.paimon.optimizing.health.PaimonHistoricalHealth.evaluate(
+            afterCommit, id.toString(), snapshotBefore);
+    assertEquals(Long.valueOf(snapshotBefore), historical.healthDetails().getSnapshotId());
+    assertTrue(historical.pendingInput().getHealthScore() >= 0);
+    assertEquals(
+        snapshot.id(),
+        org.apache.amoro.formats.paimon.optimizing.health.PaimonHistoricalHealth.findCommit(
+                afterCommit, snapshotBefore, snapshot.commitUser(), 7L)
+            .snapshot()
+            .id());
+
     assertEquals(rowsBefore, readRows(afterCommit));
     assertTrue(insideDoAs.get());
     verify(paimonTable).doAs(any());

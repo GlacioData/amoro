@@ -172,6 +172,7 @@ class TestPaimonTableDescriptorFileListing {
     when(((AmoroTable) amoroTable).originalTable()).thenReturn(table);
     when(amoroTable.id())
         .thenReturn(org.apache.amoro.table.TableIdentifier.of("catalog", DB, "table"));
+    when(amoroTable.format()).thenReturn(org.apache.amoro.TableFormat.PAIMON);
     return amoroTable;
   }
 
@@ -225,6 +226,18 @@ class TestPaimonTableDescriptorFileListing {
   }
 
   // ---- T1: single-field canonical partition list -----------------------
+
+  @Test
+  void missingManifestMetricsDoNotHideSchemaAndHealthPage() throws Exception {
+    FileStoreTable table = createTable("missing_metrics", appendSchema());
+    writeRows(table, row(1, "2026-09-16"));
+    table.fileIO().delete(new org.apache.paimon.fs.Path(table.location(), "manifest"), true);
+    org.apache.amoro.table.descriptor.ServerTableMeta detail =
+        descriptor.getTableDetail(wrap(table));
+    assertNull(detail.getTableSummary().getFile());
+    assertNull(detail.getBaseMetrics().get("fileCount"));
+    assertFalse(detail.getSchema().isEmpty());
+  }
 
   @Test
   void partitionListUsesCanonicalSingleSlashIdentifier() throws Exception {
@@ -461,6 +474,7 @@ class TestPaimonTableDescriptorFileListing {
 
     AmoroTable<?> amoroTable = mock(AmoroTable.class);
     when(((AmoroTable) amoroTable).originalTable()).thenReturn(table);
+    when(amoroTable.format()).thenReturn(org.apache.amoro.TableFormat.PAIMON);
 
     List<PartitionFileBaseInfo> files =
         descriptor.getTableFiles(amoroTable, "dt=2026-01-22/bucket-0", 0);

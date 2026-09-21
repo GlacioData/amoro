@@ -21,7 +21,9 @@ package org.apache.amoro.formats.paimon.optimizing.primary;
 import static org.apache.paimon.deletionvectors.DeletionVectorsIndexFile.DELETION_VECTORS_INDEX;
 
 import org.apache.amoro.formats.paimon.optimizing.health.PaimonActivityHealth;
+import org.apache.amoro.formats.paimon.optimizing.health.PaimonDeletionVectorCounts;
 import org.apache.amoro.formats.paimon.optimizing.health.PaimonHealthEvaluationContext;
+import org.apache.amoro.formats.paimon.optimizing.health.PaimonHealthStructureCollector;
 import org.apache.amoro.formats.paimon.optimizing.health.PaimonPrimaryKeyHealthEvaluator;
 import org.apache.amoro.formats.paimon.optimizing.health.PaimonPrimaryKeyHealthEvaluator.EvaluationMode;
 import org.apache.amoro.formats.paimon.optimizing.health.PaimonPrimaryKeyHealthEvaluator.Result;
@@ -31,11 +33,10 @@ import org.apache.amoro.optimizing.FormatTableAnalysis;
 import org.apache.amoro.table.health.TableAnalysisKey;
 import org.apache.amoro.table.health.TableHealthComponent;
 import org.apache.amoro.table.health.TableHealthDetails;
+import org.apache.amoro.table.health.TableHealthStructure;
 import org.apache.paimon.KeyValueFileStore;
 import org.apache.paimon.Snapshot;
 import org.apache.paimon.data.BinaryRow;
-import org.apache.paimon.deletionvectors.BucketedDvMaintainer;
-import org.apache.paimon.deletionvectors.DeletionVector;
 import org.apache.paimon.index.IndexFileHandler;
 import org.apache.paimon.index.IndexFileMeta;
 import org.apache.paimon.io.DataFileMeta;
@@ -112,6 +113,24 @@ public final class PaimonPrimaryKeySnapshotAnalysis implements FormatTableAnalys
   /** Analyze the exact {@link Snapshot} already captured by the metadata-only context. */
   public static PaimonPrimaryKeySnapshotAnalysis analyze(
       FileStoreTable table, PaimonHealthEvaluationContext context) {
+    return analyze(table, context, true);
+  }
+
+  /** Keep native Levels validation, but do not retain a historical snapshot's planning graph. */
+  public static PaimonPrimaryKeySnapshotAnalysis analyzeHealth(
+      FileStoreTable table, PaimonHealthEvaluationContext context) {
+    PaimonPrimaryKeySnapshotAnalysis result = analyze(table, context, false);
+    return new PaimonPrimaryKeySnapshotAnalysis(
+        result.key,
+        result.pendingInput,
+        result.healthDetails,
+        Collections.emptyList(),
+        result.activePartitionCount,
+        false);
+  }
+
+  private static PaimonPrimaryKeySnapshotAnalysis analyze(
+      FileStoreTable table, PaimonHealthEvaluationContext context, boolean retainPlannerFacts) {
     Objects.requireNonNull(table, "Paimon table must not be null");
     Objects.requireNonNull(context, "Paimon health context must not be null");
 
@@ -141,7 +160,8 @@ public final class PaimonPrimaryKeySnapshotAnalysis implements FormatTableAnalys
       Result result =
           healthEvaluator.evaluate(
               Collections.emptyList(), context.activityInput(0), evaluationMode(bucketMode));
-      return create(context, result, Collections.emptyList(), 0, true);
+      return create(context, result, Collections.emptyList(), 0, true)
+          .withStructure(new PaimonHealthStructureCollector(table, context).finish(true));
     }
 
     try {
@@ -151,7 +171,8 @@ public final class PaimonPrimaryKeySnapshotAnalysis implements FormatTableAnalys
           snapshot.get(),
           (KeyValueFileStore) store,
           healthEvaluator,
-          evaluationMode(bucketMode));
+          evaluationMode(bucketMode),
+          retainPlannerFacts);
     } catch (RuntimeException e) {
       LOG.warn(
           "Failed to scan Paimon primary-key table [{}] at snapshot [{}] for health evaluation.",
@@ -168,7 +189,8 @@ public final class PaimonPrimaryKeySnapshotAnalysis implements FormatTableAnalys
       Snapshot snapshot,
       KeyValueFileStore store,
       PaimonPrimaryKeyHealthEvaluator healthEvaluator,
-      EvaluationMode mode) {
+      EvaluationMode mode,
+      boolean retainPlannerFacts) {
     // Paimon 1.4.2 PojoDataFileMeta#copyWithoutStats 仅裁剪 valueStats/valueStatsCols。
     // 健康与候选评估保留 key/level/schema/行数；这些元数据不用于 Optimizer 提交。
     // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/io/PojoDataFileMeta.java#L308-L330
@@ -194,19 +216,35 @@ public final class PaimonPrimaryKeySnapshotAnalysis implements FormatTableAnalys
           return partitionOrder != 0 ? partitionOrder : Integer.compare(left.bucket, right.bucket);
         });
 
+    PaimonHealthStructureCollector collector = new PaimonHealthStructureCollector(table, context);
     List<BucketFacts> facts = new ArrayList<>(orderedBuckets.size());
     for (MutableBucket bucket : orderedBuckets) {
-      bucket.files.sort(STABLE_FILE_ORDER);
+      if (retainPlannerFacts) {
+        bucket.files.sort(STABLE_FILE_ORDER);
+      }
+      for (DataFileMeta file : bucket.files) {
+        collector.addFile(
+            bucket.partition, bucket.bucket, file, file.deleteRowCount().orElse(null));
+      }
       Levels levels = new Levels(store.newKeyComparator(), bucket.files, context.numLevels());
       int sortedRunCount = Math.toIntExact(levels.numberOfSortedRuns());
-      facts.add(bucket.toFacts(levels, sortedRunCount));
+      facts.add(bucket.toFacts(levels, sortedRunCount, retainPlannerFacts));
     }
 
     try {
       Result result =
           evaluateHealth(
-              context, snapshot, store, healthEvaluator, mode, orderedBuckets, partitions, facts);
-      return create(context, result, facts, partitions.size(), true);
+              context,
+              snapshot,
+              store,
+              healthEvaluator,
+              mode,
+              orderedBuckets,
+              partitions,
+              facts,
+              collector);
+      return create(context, result, facts, partitions.size(), true)
+          .withStructure(collector.finish(result.healthScore() >= 0));
     } catch (RuntimeException e) {
       LOG.warn(
           "Failed to evaluate Paimon primary-key table [{}] at snapshot [{}] after collecting [{}] bucket facts.",
@@ -214,12 +252,8 @@ public final class PaimonPrimaryKeySnapshotAnalysis implements FormatTableAnalys
           snapshot.id(),
           facts.size(),
           e);
-      return invalidHealth(
-          context,
-          PaimonPrimaryKeyHealthEvaluator.SNAPSHOT_SCAN_FAILED,
-          facts,
-          partitions.size(),
-          true);
+      return invalidHealth(context, "DELETE_METADATA_READ_FAILED", facts, partitions.size(), true)
+          .withStructure(collector.finish(false));
     }
   }
 
@@ -231,7 +265,8 @@ public final class PaimonPrimaryKeySnapshotAnalysis implements FormatTableAnalys
       EvaluationMode mode,
       List<MutableBucket> orderedBuckets,
       Set<BinaryRow> partitions,
-      List<BucketFacts> facts) {
+      List<BucketFacts> facts,
+      PaimonHealthStructureCollector collector) {
     Map<BucketKey, List<IndexFileMeta>> deletionVectorFiles = Collections.emptyMap();
     IndexFileHandler indexFileHandler = null;
     if (context.deletionVectorsEnabled()) {
@@ -250,33 +285,25 @@ public final class PaimonPrimaryKeySnapshotAnalysis implements FormatTableAnalys
     int index = 0;
     for (MutableBucket bucket : orderedBuckets) {
       UnitAccumulator accumulator = healthEvaluator.newUnitAccumulator();
-      BucketedDvMaintainer dvMaintainer =
+      Map<String, Long> deletionCounts =
           context.deletionVectorsEnabled()
-              ? BucketedDvMaintainer.factory(indexFileHandler)
-                  .create(
-                      bucket.partition,
-                      bucket.bucket,
-                      deletionVectorFiles.getOrDefault(
-                          new BucketKey(bucket.partition, bucket.bucket), Collections.emptyList()))
-              : null;
+              ? PaimonDeletionVectorCounts.read(
+                  indexFileHandler,
+                  bucket.partition,
+                  bucket.bucket,
+                  deletionVectorFiles.getOrDefault(
+                      new BucketKey(bucket.partition, bucket.bucket), Collections.emptyList()))
+              : Collections.emptyMap();
       for (DataFileMeta file : bucket.files) {
         Long tombstoneCount = file.deleteRowCount().orElse(null);
-        Long deletionVectorCount = deletionVectorCardinality(dvMaintainer, file.fileName());
+        Long deletionVectorCount = deletionCounts.getOrDefault(file.fileName(), 0L);
         accumulator.addFile(file.fileSize(), file.rowCount(), tombstoneCount, deletionVectorCount);
+        collector.observeDeletionVector(bucket.partition, bucket.bucket, deletionVectorCount);
       }
       statistics.add(accumulator.snapshot(Math.toIntExact(facts.get(index).sortedRunCount())));
       index++;
     }
     return healthEvaluator.evaluate(statistics, context.activityInput(0), mode);
-  }
-
-  private static long deletionVectorCardinality(
-      @Nullable BucketedDvMaintainer maintainer, String fileName) {
-    if (maintainer == null) {
-      return 0L;
-    }
-    Optional<DeletionVector> deletionVector = maintainer.deletionVectorOf(fileName);
-    return deletionVector.isPresent() ? deletionVector.get().getCardinality() : 0L;
   }
 
   private static EvaluationMode evaluationMode(BucketMode bucketMode) {
@@ -359,15 +386,14 @@ public final class PaimonPrimaryKeySnapshotAnalysis implements FormatTableAnalys
       int activePartitionCount,
       List<String> reasonCodes,
       StructuralSummary structural) {
-    int runScore = result == null ? -1 : result.runScore();
+    int runScore = result == null ? structuralRunScore(context, bucketFacts) : result.runScore();
     int deleteScore = result == null ? -1 : result.materializedDeleteScore();
-    int activityScore = result == null ? -1 : result.healthScore();
     List<TableHealthComponent> components =
         Arrays.asList(
-            component("SORTED_RUN", runScore, "MULTIPLY"),
-            component("MATERIALIZED_DELETE", deleteScore, "MULTIPLY"),
+            component("SORTED_RUN", runScore, "MIN"),
+            component("MATERIALIZED_DELETE", deleteScore, "MIN"),
             component("FILE_SIZE_AUXILIARY", -1, "AUXILIARY"),
-            component("SNAPSHOT_ACTIVITY", activityScore, "DEBT_AMPLIFIER"));
+            component("SNAPSHOT_ACTIVITY", -1, "CONTEXT"));
     Map<String, String> metrics =
         metrics(context, result, bucketFacts, activePartitionCount, structural);
     TableAnalysisKey key = context.key();
@@ -381,6 +407,31 @@ public final class PaimonPrimaryKeySnapshotAnalysis implements FormatTableAnalys
         components,
         metrics,
         reasonCodes);
+  }
+
+  private static int structuralRunScore(
+      PaimonHealthEvaluationContext context, List<BucketFacts> facts) {
+    if (facts.isEmpty()) {
+      return -1;
+    }
+    PaimonPrimaryKeyHealthEvaluator evaluator =
+        new PaimonPrimaryKeyHealthEvaluator(
+            context.compactionTrigger(),
+            context.stopTrigger(),
+            context.numLevels(),
+            context.targetFileSize(),
+            context.compactionFileSize());
+    List<UnitStatistics> units = new ArrayList<>();
+    for (BucketFacts bucket : facts) {
+      UnitAccumulator accumulator = evaluator.newUnitAccumulator();
+      for (DataFileMeta file : bucket.files()) {
+        accumulator.addFile(file.fileSize(), file.rowCount(), 0L, 0L);
+      }
+      units.add(accumulator.snapshot(Math.toIntExact(bucket.sortedRunCount())));
+    }
+    return evaluator
+        .evaluate(units, context.activityInput(0), evaluationMode(context.bucketMode()))
+        .runScore();
   }
 
   private static TableHealthComponent component(String code, int score, String combination) {
@@ -457,6 +508,23 @@ public final class PaimonPrimaryKeySnapshotAnalysis implements FormatTableAnalys
       metrics.put("timePressure", "N/A");
       metrics.put("activityPressure", "N/A");
     }
+    if (!structuralFactsAvailable) {
+      for (String name :
+          Arrays.asList(
+              "activePartitionCount",
+              "effectiveUnitCount",
+              "totalFileCount",
+              "totalFileSize",
+              "averageFileSize",
+              "smallFileCount",
+              "smallFileSize",
+              "totalRecordCount",
+              "maxSortedRunCount",
+              "sortedRunDistribution",
+              "worstBuckets")) {
+        metrics.put(name, "N/A");
+      }
+    }
     return metrics;
   }
 
@@ -472,7 +540,17 @@ public final class PaimonPrimaryKeySnapshotAnalysis implements FormatTableAnalys
   }
 
   private static String worstBuckets(List<BucketFacts> bucketFacts) {
-    List<BucketFacts> sorted = new ArrayList<>(bucketFacts);
+    java.util.PriorityQueue<BucketFacts> top =
+        new java.util.PriorityQueue<>(MAX_WORST_BUCKETS, WORST_BUCKET_ORDER.reversed());
+    for (BucketFacts facts : bucketFacts) {
+      if (top.size() < MAX_WORST_BUCKETS) {
+        top.add(facts);
+      } else if (WORST_BUCKET_ORDER.compare(facts, top.peek()) < 0) {
+        top.poll();
+        top.add(facts);
+      }
+    }
+    List<BucketFacts> sorted = new ArrayList<>(top);
     sorted.sort(WORST_BUCKET_ORDER);
     StringBuilder builder = new StringBuilder();
     int maximum = Math.min(MAX_WORST_BUCKETS, sorted.size());
@@ -527,6 +605,16 @@ public final class PaimonPrimaryKeySnapshotAnalysis implements FormatTableAnalys
     return Integer.compare(left.length, right.length);
   }
 
+  private PaimonPrimaryKeySnapshotAnalysis withStructure(TableHealthStructure structure) {
+    return new PaimonPrimaryKeySnapshotAnalysis(
+        key,
+        pendingInput,
+        healthDetails.withStructure(structure),
+        bucketFacts,
+        activePartitionCount,
+        validForPlanning);
+  }
+
   @Override
   public TableAnalysisKey key() {
     return key;
@@ -568,12 +656,14 @@ public final class PaimonPrimaryKeySnapshotAnalysis implements FormatTableAnalys
         int bucket,
         List<DataFileMeta> files,
         Levels levels,
-        PaimonBucketCompactionUnit unit) {
+        PaimonBucketCompactionUnit unit,
+        boolean retainPlannerFacts) {
       this.partition = partition.copy();
       this.partitionBytes = Arrays.copyOf(partitionBytes, partitionBytes.length);
       this.bucket = bucket;
-      this.files = Collections.unmodifiableList(new ArrayList<>(files));
-      this.levels = levels;
+      this.files =
+          Collections.unmodifiableList(retainPlannerFacts ? new ArrayList<>(files) : files);
+      this.levels = retainPlannerFacts ? levels : null;
       this.unit = unit;
     }
 
@@ -685,7 +775,7 @@ public final class PaimonPrimaryKeySnapshotAnalysis implements FormatTableAnalys
       lastFileCreationTime = Math.max(lastFileCreationTime, file.creationTimeEpochMillis());
     }
 
-    private BucketFacts toFacts(Levels levels, int sortedRunCount) {
+    private BucketFacts toFacts(Levels levels, int sortedRunCount, boolean retainPlannerFacts) {
       PaimonBucketCompactionUnit unit =
           new PaimonBucketCompactionUnit(
               partitionBytes,
@@ -695,7 +785,8 @@ public final class PaimonPrimaryKeySnapshotAnalysis implements FormatTableAnalys
               fileSize,
               recordCount,
               lastFileCreationTime);
-      return new BucketFacts(partition, partitionBytes, bucket, files, levels, unit);
+      return new BucketFacts(
+          partition, partitionBytes, bucket, files, levels, unit, retainPlannerFacts);
     }
   }
 

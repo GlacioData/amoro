@@ -119,6 +119,25 @@ public final class PaimonHealthEvaluationContext {
       String tableId,
       @Nullable OptimizationContext context,
       @Nullable Map<String, String> eligibilityTableOptions) {
+    return captureFixed(table, tableId, context, eligibilityTableOptions, null);
+  }
+
+  /** Evaluate the supplied snapshot directly, without consulting latestSnapshot. */
+  public static PaimonHealthEvaluationContext forSnapshot(
+      FileStoreTable table, String tableId, Snapshot snapshot) {
+    Objects.requireNonNull(snapshot, "Historical snapshot must not be null");
+    if (table.schema().id() != snapshot.schemaId()) {
+      throw new IllegalArgumentException("Historical table schema does not match snapshot schema");
+    }
+    return captureFixed(table, tableId, null, null, snapshot);
+  }
+
+  private static PaimonHealthEvaluationContext captureFixed(
+      FileStoreTable table,
+      String tableId,
+      @Nullable OptimizationContext context,
+      @Nullable Map<String, String> eligibilityTableOptions,
+      @Nullable Snapshot fixedSnapshot) {
     Objects.requireNonNull(table, "Paimon table must not be null");
     Objects.requireNonNull(tableId, "Table id must not be null");
 
@@ -155,7 +174,8 @@ public final class PaimonHealthEvaluationContext {
     Map<String, String> eligibilityOptions =
         eligibilityTableOptions == null ? rawOptions : safeOptions(eligibilityTableOptions);
 
-    Snapshot snapshot = table.snapshotManager().latestSnapshot();
+    Snapshot snapshot =
+        fixedSnapshot == null ? table.snapshotManager().latestSnapshot() : fixedSnapshot;
     long snapshotId = snapshot == null ? TableAnalysisKey.NO_SNAPSHOT : snapshot.id();
     long snapshotTimeMillis = snapshot == null ? 0L : snapshot.timeMillis();
     long baselineId =
@@ -188,6 +208,15 @@ public final class PaimonHealthEvaluationContext {
             eligibilityOptions,
             optimizingConfig,
             configurationError);
+    // Keep the full planning digest in the key, but identify structural diagnostics separately.
+    // The versioned pair stays opaque to other formats and to the public key implementation.
+    if (configurationError == null) {
+      fingerprint =
+          "paimon-health-v1:"
+              + healthFingerprint(shape, bucketMode, schemaId, formulaVersion, effectiveOptions)
+              + ":"
+              + fingerprint;
+    }
     return new PaimonHealthEvaluationContext(
         tableId,
         shape,
@@ -202,6 +231,45 @@ public final class PaimonHealthEvaluationContext {
         formulaVersion,
         fingerprint,
         configurationError);
+  }
+
+  /** Legacy digests stay distinct until their facts have been evaluated under this identity. */
+  static String healthIdentity(String fingerprint) {
+    String prefix = "paimon-health-v1:";
+    int healthEnd = prefix.length() + 64;
+    if (fingerprint.startsWith(prefix)
+        && fingerprint.length() == healthEnd + 65
+        && fingerprint.charAt(healthEnd) == ':') {
+      return fingerprint.substring(0, healthEnd);
+    }
+    return fingerprint;
+  }
+
+  private static String healthFingerprint(
+      TableShape shape,
+      BucketMode bucketMode,
+      long schemaId,
+      String formulaVersion,
+      EffectiveOptions options) {
+    FingerprintBuilder builder =
+        new FingerprintBuilder()
+            .add("tableShape", shape.name())
+            .add("bucketMode", bucketMode.name())
+            .add("schemaId", schemaId)
+            .add("formulaVersion", formulaVersion)
+            .add("targetFileSize", options.targetFileSize)
+            .add("compactionFileSize", options.compactionFileSize)
+            .add("deletionVectorsEnabled", options.deletionVectorsEnabled);
+    if (shape == TableShape.APPEND) {
+      builder.add("smallFileBoundary", options.smallFileBoundary);
+    } else if (shape == TableShape.PRIMARY_KEY) {
+      builder
+          .add("compactionTrigger", options.compactionTrigger)
+          .add("stopTrigger", options.stopTrigger)
+          .add("numLevels", options.numLevels)
+          .add("pkClusteringOverride", options.pkClusteringOverride);
+    }
+    return builder.digest();
   }
 
   private static Map<String, String> safeOptions(@Nullable Map<String, String> options) {
