@@ -32,6 +32,7 @@ import org.apache.amoro.table.TableRuntimeStore;
 import org.apache.amoro.table.descriptor.TableHealthComparisonView;
 import org.apache.amoro.table.descriptor.TableHealthDetailsView;
 import org.apache.amoro.table.health.TableAnalysisKey;
+import org.apache.amoro.table.health.TableFileStatisticsSnapshot;
 import org.apache.amoro.table.health.TableHealthDetails;
 import org.apache.amoro.table.health.TableHealthSupport;
 import org.apache.paimon.Snapshot;
@@ -42,11 +43,34 @@ import org.slf4j.LoggerFactory;
 import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.function.Consumer;
 
 /** Read-only commit observation and background comparison; never invoked from the commit lock. */
 public final class PaimonHealthSupport implements TableHealthSupport {
   private static final Logger LOG = LoggerFactory.getLogger(PaimonHealthSupport.class);
+
+  @Override
+  public Optional<TableFileStatisticsSnapshot> extractFileStatistics(TableHealthDetails details) {
+    if (details == null
+        || details.getStructure() == null
+        || details.getSchemaId() == null
+        || (details.getSnapshotId() == null
+            && !"COMPLETE".equals(details.getStructure().getAvailability()))) {
+      return Optional.empty();
+    }
+    try {
+      return Optional.of(
+          new TableFileStatisticsSnapshot(
+              details.getSnapshotId(),
+              details.getSchemaId(),
+              Long.parseLong(details.getMetrics().get("totalFileCount")),
+              Long.parseLong(details.getMetrics().get("totalFileSize")),
+              details.getStructure().getEvaluatedAtMillis()));
+    } catch (IllegalArgumentException invalidStatistics) {
+      return Optional.empty();
+    }
+  }
 
   @Override
   public boolean enabled() {

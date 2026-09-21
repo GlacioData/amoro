@@ -81,6 +81,7 @@ import org.apache.amoro.table.descriptor.TableSummary;
 import org.apache.amoro.table.descriptor.TagOrBranchInfo;
 import org.apache.amoro.table.health.TableHealthDetails;
 import org.apache.amoro.utils.CatalogUtil;
+import org.apache.amoro.utils.CompatiblePropertyUtil;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.tuple.Pair;
 import org.apache.hadoop.hive.metastore.api.FieldSchema;
@@ -184,6 +185,8 @@ public class TableController {
         Optional.ofNullable(
             tableManager.getServerTableIdentifier(
                 TableIdentifier.of(catalog, database, tableName).buildTableIdentifier()));
+    DefaultTableRuntime runtime = null;
+    Optional<RuntimeHealthSnapshot> runtimeHealth = Optional.empty();
     if (serverTableIdentifier.isPresent()) {
       ServerTableIdentifier identifier = serverTableIdentifier.get();
       TableRuntimeMeta tableRuntimeMeta = tableManager.getTableRuntimeMata(identifier);
@@ -201,10 +204,35 @@ public class TableController {
           tableSummary.setPositionalDeleteScore(runtimeSummary.getPositionalDeleteScore());
         }
       }
+      runtime = currentRuntime(identifier);
+      if (runtime != null
+          && org.apache.amoro.server.table.TableHealthSupports.forFormat(identifier.getFormat())
+              .enabled()) {
+        runtimeHealth = runtime.getRuntimeHealthSnapshot();
+      }
       projectHealthDetails(
-          tableSummary, runtimeSummary, identifier.getFormat(), currentRuntime(identifier));
+          tableSummary, runtimeSummary, identifier.getFormat(), runtime, runtimeHealth);
     } else {
       tableSummary.setOptimizingStatus(OptimizingStatus.IDLE.name());
+    }
+    if ("PAIMON".equalsIgnoreCase(serverTableMeta.getTableType())
+        || (serverTableIdentifier.isPresent()
+            && serverTableIdentifier.get().getFormat() == TableFormat.PAIMON)) {
+      Boolean collectionEnabled = null;
+      if (runtime != null) {
+        Map<String, String> config = runtime.getTableConfig();
+        collectionEnabled =
+            CompatiblePropertyUtil.propertyAsBoolean(
+                    config,
+                    TableProperties.ENABLE_SELF_OPTIMIZING,
+                    TableProperties.ENABLE_SELF_OPTIMIZING_DEFAULT)
+                || CompatiblePropertyUtil.propertyAsBoolean(
+                    config,
+                    TableProperties.TABLE_SUMMARY_ENABLED,
+                    TableProperties.TABLE_SUMMARY_ENABLED_DEFAULT);
+      }
+      TableFileStatisticsProjection.apply(
+          serverTableMeta, runtimeHealth.orElse(null), runtime != null, collectionEnabled);
     }
     ctx.json(OkResponse.of(serverTableMeta));
   }
@@ -222,12 +250,11 @@ public class TableController {
       TableSummary target,
       org.apache.amoro.table.TableSummary source,
       TableFormat format,
-      DefaultTableRuntime runtime) {
+      DefaultTableRuntime runtime,
+      Optional<RuntimeHealthSnapshot> runtimeHealth) {
     if (org.apache.amoro.server.table.TableHealthSupports.forFormat(format).enabled()) {
       target.setHealthComparison(
           org.apache.amoro.server.table.TableHealthComparisonService.instance().view(runtime));
-      Optional<RuntimeHealthSnapshot> runtimeHealth =
-          runtime == null ? Optional.empty() : runtime.getRuntimeHealthSnapshot();
       if (!runtimeHealth.isPresent()) {
         target.setHealthScore(-1);
         target.setHealthDetails(null);

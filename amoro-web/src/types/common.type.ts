@@ -112,6 +112,21 @@ export interface TableHealthEvaluation {
   reasonCodes: string[]
 }
 
+export interface TableFileStatistics {
+  status: string
+  source: string
+  snapshotId: string | null
+  schemaId: string | null
+  observedSnapshotId: string | null
+  observedSchemaId: string | null
+  fileCount: string | null
+  totalSizeBytes: string | null
+  averageFileSizeBytes: string | null
+  evaluatedAtMillis: number | null
+  collectionEnabled: boolean | null
+  reasonCodes: string[]
+}
+
 export interface TableHealthDetails {
   structure?: TableHealthStructure | null
   evaluation?: TableHealthEvaluation | null

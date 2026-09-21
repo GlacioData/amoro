@@ -20,10 +20,10 @@ limitations under the License.
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { TableHealthComparison } from '@/types/common.type'
-import { bytesToSize } from '@/utils'
+import { bytesToSize, dateFormat } from '@/utils'
 
 const props = defineProps<{ comparison?: TableHealthComparison | null }>()
-const { t, locale } = useI18n()
+const { t } = useI18n()
 const rows = computed(() => {
   const before = props.comparison?.before
   const after = props.comparison?.after
@@ -72,7 +72,7 @@ function score(raw: number): string {
       {{ t('healthComparisonEmpty') }}
     </p>
     <template v-else>
-      <p>{{ comparison.optimizingType }} · {{ t('healthComparisonProcess') }} {{ comparison.processId }}<span v-if="comparison.completedAtMillis"> · {{ new Date(comparison.completedAtMillis).toLocaleString(locale) }}</span></p>
+      <p>{{ comparison.optimizingType }} · {{ t('healthComparisonProcess') }} {{ comparison.processId }}<span v-if="comparison.completedAtMillis"> · {{ dateFormat(comparison.completedAtMillis) }}</span></p>
       <p v-if="comparison.status === 'PREPARING'" role="status">
         {{ t('healthComparisonPreparing') }}
       </p>

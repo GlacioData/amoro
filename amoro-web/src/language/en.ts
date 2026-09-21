@@ -23,6 +23,26 @@ const nativeSnapshotRecords = {
 }
 
 export default {
+  fileStatisticsCurrent: 'File statistics are current',
+  fileStatisticsStale: 'Previous file statistics · awaiting update',
+  fileStatisticsUnknown: 'File statistics are unknown or inconsistent with this observation · refresh pending',
+  fileStatisticsPending: 'Awaiting file statistics',
+  fileStatisticsUnavailable: 'File statistics unavailable',
+  fileStatisticsEmpty: 'Empty table: no data files',
+  fileStatisticsCollectionDisabled: 'Automatic statistics collection is disabled',
+  fileStatisticsNotManaged: 'No table runtime statistics are available',
+  fileStatisticsHealthUnavailable: 'Health evaluation is incomplete; file statistics are shown independently',
+  fileStatisticsNoValidStatistics: 'No complete, valid file statistics have been collected.',
+  fileStatisticsWaiting: 'Waiting for background statistics collection.',
+  fileStatisticsObservationMismatch: 'The statistics snapshot or schema differs from this observation.',
+  fileStatisticsAsOf: 'Statistics collected: {time}',
+  fileStatisticsFailedAt: 'Latest health evaluation issue: {time}',
+  fileStatisticsScope: 'Statistics cover file count, total size and average file size only. Commit time and watermark refer to the latest snapshot observed by this request.',
+  fileStatisticsSourceSnapshot: 'Statistics snapshot',
+  fileStatisticsObservedSnapshot: 'Observed snapshot',
+  fileStatisticsExplanation: 'About these statistics',
+  fileStatisticsRefreshFailed: 'Details refresh failed; previously displayed results are retained.',
+
   ...nativeSnapshotRecords,
   snapshotVersionMismatch: 'Incompatible dashboard/server versions: snapshot capability is missing. Refresh or contact an administrator.',
   snapshotInitializationFailed: 'Table metadata failed to load. Snapshot reads are unavailable.',
