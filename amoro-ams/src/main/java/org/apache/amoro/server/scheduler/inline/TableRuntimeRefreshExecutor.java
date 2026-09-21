@@ -112,6 +112,9 @@ public class TableRuntimeRefreshExecutor extends PeriodicTableScheduler {
             "{} has no new table analysis input", defaultTableRuntime.getTableIdentifier());
       }
 
+      org.apache.amoro.server.table.TableHealthComparisonService.instance()
+          .refresh(defaultTableRuntime, table);
+
       // Update adaptive interval according to evaluated result.
       // Skip adaptive interval for table-summary-only mode to maintain fixed collection interval.
       if (!tableSummaryOnly

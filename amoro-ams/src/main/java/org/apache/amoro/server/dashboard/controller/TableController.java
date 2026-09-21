@@ -223,7 +223,9 @@ public class TableController {
       org.apache.amoro.table.TableSummary source,
       TableFormat format,
       DefaultTableRuntime runtime) {
-    if (format == TableFormat.PAIMON) {
+    if (org.apache.amoro.server.table.TableHealthSupports.forFormat(format).enabled()) {
+      target.setHealthComparison(
+          org.apache.amoro.server.table.TableHealthComparisonService.instance().view(runtime));
       Optional<RuntimeHealthSnapshot> runtimeHealth =
           runtime == null ? Optional.empty() : runtime.getRuntimeHealthSnapshot();
       if (!runtimeHealth.isPresent()) {
@@ -233,7 +235,8 @@ public class TableController {
       }
       RuntimeHealthSnapshot snapshot = runtimeHealth.get();
       target.setHealthScore(snapshot.getHealthScore());
-      target.setHealthDetails(TableHealthDetailsView.from(snapshot.getHealthDetails()));
+      target.setHealthDetails(
+          TableHealthDetailsView.from(snapshot.getHealthDetails(), snapshot.getEvaluation()));
       return;
     }
 

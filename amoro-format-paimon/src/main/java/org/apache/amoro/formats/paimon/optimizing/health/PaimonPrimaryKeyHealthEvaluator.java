@@ -30,7 +30,7 @@ import java.util.TreeSet;
 /** Pure primary-key health formula over fixed-snapshot per-bucket aggregates. */
 public final class PaimonPrimaryKeyHealthEvaluator {
 
-  public static final String FORMULA_VERSION = "paimon-primary-key-health-v2";
+  public static final String FORMULA_VERSION = "paimon-primary-key-health-v3";
   public static final String EMPTY_TABLE = "EMPTY_TABLE";
   public static final String INVALID_SCORING_CONFIG = "INVALID_SCORING_CONFIG";
   public static final String DELETE_METADATA_INCOMPLETE = "DELETE_METADATA_INCOMPLETE";
@@ -92,8 +92,7 @@ public final class PaimonPrimaryKeyHealthEvaluator {
     if (materializedDeleteScore < 0) {
       return Result.invalid(SNAPSHOT_SCAN_FAILED);
     }
-    int baseScore =
-        ScoreUtil.clampScore(Math.round((double) runScore * materializedDeleteScore / 100.0D));
+    int baseScore = Math.min(runScore, materializedDeleteScore);
     PaimonActivityHealth.Result activity =
         PaimonActivityHealth.evaluate(activityInput.withBaseScore(baseScore));
 
@@ -135,15 +134,8 @@ public final class PaimonPrimaryKeyHealthEvaluator {
       byteSevereExposure = aggregate.byteWeightedSeverePressure.value() / aggregate.totalFileSize;
     }
 
-    double baseExposure = Math.max(equalBaseExposure, byteBaseExposure);
-    double severeExposure = Math.max(equalSevereExposure, byteSevereExposure);
-    double score;
-    if (aggregate.hasSevereUnit) {
-      score = Math.min(59.0D, 99.0D - 40.0D * baseExposure - 59.0D * severeExposure);
-      score = clamp(score, 0.0D, 59.0D);
-    } else {
-      score = clamp(100.0D - 40.0D * baseExposure, 60.0D, 100.0D);
-    }
+    // Whole-table exposure follows physical bytes; severe buckets are diagnosed separately.
+    double score = clamp(100.0D - 40.0D * byteBaseExposure - 60.0D * byteSevereExposure, 0, 100);
     return ScoreUtil.clampScore(Math.round(score));
   }
 
@@ -327,7 +319,6 @@ public final class PaimonPrimaryKeyHealthEvaluator {
     private long deletionVectorRecordCount;
     private int effectiveUnitCount;
     private int maxSortedRunCount;
-    private boolean hasSevereUnit;
     private boolean deleteMetadataIncomplete;
     private final CompensatedSum materializedHealthyRowWeight = new CompensatedSum();
     private final CompensatedSum basePressureSum = new CompensatedSum();
@@ -366,7 +357,6 @@ public final class PaimonPrimaryKeyHealthEvaluator {
       }
 
       maxSortedRunCount = Math.max(maxSortedRunCount, unit.sortedRunCount);
-      hasSevereUnit |= unit.sortedRunCount >= stopTrigger;
       materializedHealthyRowWeight.add(unit.materializedHealthyRowWeight);
       basePressureSum.add(pressure.base);
       severePressureSum.add(pressure.severe);

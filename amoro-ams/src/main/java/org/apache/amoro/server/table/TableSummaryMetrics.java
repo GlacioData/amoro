@@ -135,6 +135,9 @@ public class TableSummaryMetrics extends AbstractTableMetrics {
 
   public TableSummaryMetrics(ServerTableIdentifier identifier) {
     super(identifier);
+    if (TableHealthSupports.forFormat(identifier.getFormat()).enabled()) {
+      refresh(commonSummary, false);
+    }
   }
 
   @Override
@@ -209,6 +212,40 @@ public class TableSummaryMetrics extends AbstractTableMetrics {
 
       globalRegistry = registry;
     }
+  }
+
+  /** Unknown format health structure is represented by -1, never by empty-table zero values. */
+  public void refresh(FormatPendingInput tableSummary, boolean structureKnown) {
+    if (structureKnown) {
+      refresh(tableSummary);
+      return;
+    }
+    this.commonSummary =
+        new FormatPendingInput() {
+          public long getDataFileSize() {
+            return -1;
+          }
+
+          public int getDataFileCount() {
+            return -1;
+          }
+
+          public long getTotalFileSize() {
+            return -1;
+          }
+
+          public int getTotalFileCount() {
+            return -1;
+          }
+
+          public long getTotalFileRecords() {
+            return -1;
+          }
+
+          public int getHealthScore() {
+            return -1;
+          }
+        };
   }
 
   public void refresh(FormatPendingInput tableSummary) {

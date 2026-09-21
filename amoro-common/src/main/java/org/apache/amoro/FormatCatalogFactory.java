@@ -19,6 +19,7 @@
 package org.apache.amoro;
 
 import org.apache.amoro.table.TableMetaStore;
+import org.apache.amoro.table.health.TableHealthSupport;
 
 import java.util.Map;
 
@@ -39,6 +40,11 @@ public interface FormatCatalogFactory {
       String metastoreType,
       Map<String, String> properties,
       TableMetaStore metaStore);
+
+  /** Optional health capabilities owned by this format, independent of optimizer enablement. */
+  default TableHealthSupport healthSupport() {
+    return TableHealthSupport.NONE;
+  }
 
   /** format of this catalog factory */
   TableFormat format();

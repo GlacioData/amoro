@@ -20,6 +20,8 @@ package org.apache.amoro.table.descriptor;
 
 import org.apache.amoro.table.health.TableHealthComponent;
 import org.apache.amoro.table.health.TableHealthDetails;
+import org.apache.amoro.table.health.TableHealthEvaluation;
+import org.apache.amoro.table.health.TableHealthStructure;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -30,6 +32,8 @@ import java.util.Map;
 /** REST-safe projection of table health details. Long identifiers are rendered as strings. */
 public final class TableHealthDetailsView {
 
+  private final TableHealthEvaluation evaluation;
+  private final TableHealthStructure structure;
   private final String formulaVersion;
   private final String snapshotId;
   private final String changeSnapshotId;
@@ -40,7 +44,9 @@ public final class TableHealthDetailsView {
   private final Map<String, String> metrics;
   private final List<String> reasonCodes;
 
-  private TableHealthDetailsView(TableHealthDetails details) {
+  private TableHealthDetailsView(TableHealthDetails details, TableHealthEvaluation evaluation) {
+    this.evaluation = evaluation;
+    this.structure = details.getStructure();
     this.formulaVersion = details.getFormulaVersion();
     this.snapshotId = decimalString(details.getSnapshotId());
     this.changeSnapshotId = decimalString(details.getChangeSnapshotId());
@@ -57,7 +63,20 @@ public final class TableHealthDetailsView {
   }
 
   public static TableHealthDetailsView from(TableHealthDetails details) {
-    return details == null ? null : new TableHealthDetailsView(details);
+    return details == null ? null : new TableHealthDetailsView(details, null);
+  }
+
+  public static TableHealthDetailsView from(
+      TableHealthDetails details, TableHealthEvaluation evaluation) {
+    return details == null ? null : new TableHealthDetailsView(details, evaluation);
+  }
+
+  public TableHealthEvaluation getEvaluation() {
+    return evaluation;
+  }
+
+  public TableHealthStructure getStructure() {
+    return structure;
   }
 
   public String getFormulaVersion() {

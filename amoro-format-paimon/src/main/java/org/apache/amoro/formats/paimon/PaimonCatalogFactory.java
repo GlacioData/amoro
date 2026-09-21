@@ -20,9 +20,11 @@ package org.apache.amoro.formats.paimon;
 
 import org.apache.amoro.FormatCatalogFactory;
 import org.apache.amoro.TableFormat;
+import org.apache.amoro.formats.paimon.optimizing.health.PaimonHealthSupport;
 import org.apache.amoro.properties.CatalogMetaProperties;
 import org.apache.amoro.shade.guava32.com.google.common.collect.Maps;
 import org.apache.amoro.table.TableMetaStore;
+import org.apache.amoro.table.health.TableHealthSupport;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.CatalogContext;
@@ -48,6 +50,11 @@ public class PaimonCatalogFactory implements FormatCatalogFactory {
   public static final String PAIMON_OSS_ACCESS_KEY = "fs.oss.accessKeyId";
   public static final String PAIMON_OSS_SECRET_KEY = "fs.oss.accessKeySecret";
   public static final String PAIMON_OSS_ENDPOINT = "fs.oss.endpoint";
+
+  @Override
+  public TableHealthSupport healthSupport() {
+    return new PaimonHealthSupport();
+  }
 
   @Override
   public PaimonCatalog create(

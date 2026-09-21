@@ -112,6 +112,40 @@ public class TestTableHealthModels {
   }
 
   @Test
+  void testStructuredDiagnosticsAreImmutableAndRestSafe() {
+    List<TableHealthStructure.Band> bands = new ArrayList<>();
+    bands.add(
+        new TableHealthStructure.Band(
+            "L0",
+            null,
+            null,
+            "9007199254740993",
+            Long.toString(Long.MAX_VALUE),
+            "9007199254740993"));
+    TableHealthStructure structure =
+        new TableHealthStructure(
+            "PRIMARY_KEY", "COMPLETE", 123, 100, "1", "1", "1", bands, Collections.emptyList());
+    TableHealthDetails details =
+        new TableHealthDetails("v3", Long.MAX_VALUE, null, 1L, "config", "key", null, null, null)
+            .withStructure(structure);
+    bands.clear();
+    String json = JacksonUtil.toJSONString(details);
+    assertEquals(details, JacksonUtil.parseObject(json, TableHealthDetails.class));
+    String view =
+        JacksonUtil.toJSONString(
+            org.apache.amoro.table.descriptor.TableHealthDetailsView.from(details));
+    org.junit.jupiter.api.Assertions.assertTrue(
+        view.contains("\"fileCount\":\"9007199254740993\""));
+    assertEquals(1, structure.getBands().size());
+    assertThrows(UnsupportedOperationException.class, () -> structure.getBands().clear());
+    TableHealthDetails legacy =
+        new TableHealthDetails("v2", 1L, null, 1L, "config", "key", null, null, null);
+    org.junit.jupiter.api.Assertions.assertNull(
+        JacksonUtil.parseObject(JacksonUtil.toJSONString(legacy), TableHealthDetails.class)
+            .getStructure());
+  }
+
+  @Test
   void testHealthScoreRangeIncludesUnavailableZeroAndHealthy() {
     new TableHealthComponent("UNAVAILABLE", -1, null, null, null);
     new TableHealthComponent("SEVERE", 0, null, null, null);

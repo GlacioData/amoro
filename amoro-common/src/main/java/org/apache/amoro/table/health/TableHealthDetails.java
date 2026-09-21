@@ -31,6 +31,7 @@ import java.util.Objects;
 /** Immutable format-agnostic explanation of a health score for one analysis key. */
 public final class TableHealthDetails {
 
+  private final TableHealthStructure structure;
   private final String formulaVersion;
   private final Long snapshotId;
   private final Long changeSnapshotId;
@@ -40,6 +41,47 @@ public final class TableHealthDetails {
   private final List<TableHealthComponent> components;
   private final Map<String, String> metrics;
   private final List<String> reasonCodes;
+
+  public TableHealthDetails(
+      String formulaVersion,
+      Long snapshotId,
+      Long changeSnapshotId,
+      Long schemaId,
+      String scoringConfigFingerprint,
+      String evaluationKey,
+      List<TableHealthComponent> components,
+      Map<String, String> metrics,
+      List<String> reasonCodes) {
+    this(
+        formulaVersion,
+        snapshotId,
+        changeSnapshotId,
+        schemaId,
+        scoringConfigFingerprint,
+        evaluationKey,
+        components,
+        metrics,
+        reasonCodes,
+        null);
+  }
+
+  public TableHealthDetails withStructure(TableHealthStructure value) {
+    return new TableHealthDetails(
+        formulaVersion,
+        snapshotId,
+        changeSnapshotId,
+        schemaId,
+        scoringConfigFingerprint,
+        evaluationKey,
+        components,
+        metrics,
+        reasonCodes,
+        value);
+  }
+
+  public TableHealthStructure getStructure() {
+    return structure;
+  }
 
   @JsonCreator
   public TableHealthDetails(
@@ -51,7 +93,9 @@ public final class TableHealthDetails {
       @JsonProperty("evaluationKey") String evaluationKey,
       @JsonProperty("components") List<TableHealthComponent> components,
       @JsonProperty("metrics") Map<String, String> metrics,
-      @JsonProperty("reasonCodes") List<String> reasonCodes) {
+      @JsonProperty("reasonCodes") List<String> reasonCodes,
+      @JsonProperty("structure") TableHealthStructure structure) {
+    this.structure = structure;
     this.formulaVersion = requireNonEmpty(formulaVersion, "Formula version must not be empty");
     this.snapshotId = snapshotId;
     this.changeSnapshotId = changeSnapshotId;
@@ -142,7 +186,8 @@ public final class TableHealthDetails {
       return false;
     }
     TableHealthDetails that = (TableHealthDetails) other;
-    return formulaVersion.equals(that.formulaVersion)
+    return Objects.equals(structure, that.structure)
+        && formulaVersion.equals(that.formulaVersion)
         && Objects.equals(snapshotId, that.snapshotId)
         && Objects.equals(changeSnapshotId, that.changeSnapshotId)
         && Objects.equals(schemaId, that.schemaId)
@@ -156,6 +201,7 @@ public final class TableHealthDetails {
   @Override
   public int hashCode() {
     return Objects.hash(
+        structure,
         formulaVersion,
         snapshotId,
         changeSnapshotId,

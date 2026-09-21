@@ -18,22 +18,19 @@
 
 package org.apache.amoro.formats.paimon.optimizing.health;
 
-import org.apache.amoro.utils.ScoreUtil;
-
 import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 
-/** Pure activity-debt formula shared by Paimon health evaluators. */
+/** Contextual activity metrics; snapshot churn never changes structural health. */
 public final class PaimonActivityHealth {
 
-  public static final String FORMULA_VERSION = "paimon-activity-v2";
+  public static final String FORMULA_VERSION = "paimon-activity-v3";
   public static final String SUCCESS_BASELINE_UNAVAILABLE = "SUCCESS_BASELINE_UNAVAILABLE";
   public static final String SUCCESS_BASELINE_INVALID = "SUCCESS_BASELINE_INVALID";
   public static final String INVALID_SCORING_CONFIG = "INVALID_SCORING_CONFIG";
 
   private static final int SNAPSHOT_SATURATION_COUNT = 10;
-  private static final double MAX_DEBT_AMPLIFICATION = 0.25D;
 
   private PaimonActivityHealth() {}
 
@@ -50,19 +47,14 @@ public final class PaimonActivityHealth {
     if (!input.hasCompleteBaseline()
         || input.latestSnapshotId < 1
         || input.baselineSnapshotId < 1) {
-      return Result.invalid(input.baseScore, SUCCESS_BASELINE_INVALID);
+      return Result.neutral(input.baseScore, SUCCESS_BASELINE_INVALID);
     }
 
     long newSnapshotCount = nonNegativeDifference(input.latestSnapshotId, input.baselineSnapshotId);
     double snapshotPressure = Math.min(1.0D, (double) newSnapshotCount / SNAPSHOT_SATURATION_COUNT);
     double activityPressure = snapshotPressure;
-    double baseDebt = 1.0D - input.baseScore / 100.0D;
-    double finalDebt =
-        Math.min(1.0D, baseDebt * (1.0D + MAX_DEBT_AMPLIFICATION * activityPressure));
-    int healthScore = ScoreUtil.clampScore(Math.round(100.0D * (1.0D - finalDebt)));
-
     return new Result(
-        healthScore,
+        input.baseScore,
         input.baseScore,
         newSnapshotCount,
         snapshotPressure,

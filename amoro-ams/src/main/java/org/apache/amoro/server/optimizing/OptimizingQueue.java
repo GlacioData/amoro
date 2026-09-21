@@ -1325,6 +1325,8 @@ public class OptimizingQueue extends PersistentBase {
         if (!passPlanningFence(tableRuntime, "BEFORE_PROCESS_PERSIST")) {
           return null;
         }
+        org.apache.amoro.server.table.TableHealthComparisonService.instance()
+            .capture(tableRuntime, table, planResult, planner.tableAnalysis().orElse(null));
         return new TableOptimizingProcess(planResult, tableRuntime, table);
       } else {
         tableRuntime.completeEmptyProcess();

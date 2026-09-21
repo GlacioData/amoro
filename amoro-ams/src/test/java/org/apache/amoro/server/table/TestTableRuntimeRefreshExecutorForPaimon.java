@@ -588,7 +588,7 @@ public class TestTableRuntimeRefreshExecutorForPaimon extends AMSServiceTestBase
   }
 
   @Test
-  public void sameKeyRetriesOnlySnapshotScanFailure() {
+  public void sameKeyReadFailureIsThrottledAndDeterministicFailureIsTerminal() {
     TableAnalysisKey retryKey = analysisKey(510L);
     PaimonPendingInput retryInput = pendingInput(1, 10L, -1);
     FormatTableAnalysis retryAnalysis =
@@ -600,7 +600,7 @@ public class TestTableRuntimeRefreshExecutorForPaimon extends AMSServiceTestBase
     retryExecutor.execute(paimonRuntime);
     retryExecutor.execute(paimonRuntime);
 
-    verify(retryTable, times(2)).evaluatePendingInput(any(), anyInt(), eq(true));
+    verify(retryTable, times(1)).evaluatePendingInput(any(), anyInt(), eq(true));
 
     TableAnalysisKey deterministicKey = analysisKey(511L);
     PaimonPendingInput deterministicInput = pendingInput(1, 10L, -1);

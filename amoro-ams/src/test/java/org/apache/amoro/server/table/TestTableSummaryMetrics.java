@@ -225,6 +225,9 @@ public class TestTableSummaryMetrics extends AMSTableTestBase {
     TableSummaryMetrics summaryMetrics = new TableSummaryMetrics(identifier);
     summaryMetrics.register(registry);
 
+    Assertions.assertEquals(
+        -1L, getMetric(registry.getMetrics(), identifier, TABLE_SUMMARY_TOTAL_FILES).getValue());
+
     FormatPendingInput summary = Mockito.mock(FormatPendingInput.class);
     Mockito.when(summary.getTotalFileCount()).thenReturn(7);
     Mockito.when(summary.getTotalFileSize()).thenReturn(700L);
@@ -255,6 +258,14 @@ public class TestTableSummaryMetrics extends AMSTableTestBase {
         8L, getMetric(registry.getMetrics(), identifier, TABLE_SUMMARY_TOTAL_FILES).getValue());
     Assertions.assertEquals(
         -1L, getMetric(registry.getMetrics(), identifier, TABLE_SUMMARY_HEALTH_SCORE).getValue());
+    summaryMetrics.refresh(unknownHealthSummary, false);
+    Assertions.assertEquals(
+        -1L, getMetric(registry.getMetrics(), identifier, TABLE_SUMMARY_TOTAL_FILES).getValue());
+    Assertions.assertEquals(
+        -1L,
+        getMetric(registry.getMetrics(), identifier, TABLE_SUMMARY_TOTAL_FILES_SIZE).getValue());
+    Assertions.assertEquals(
+        -1L, getMetric(registry.getMetrics(), identifier, TABLE_SUMMARY_TOTAL_RECORDS).getValue());
   }
 
   @Test

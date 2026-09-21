@@ -112,6 +112,13 @@ public interface TableProcessMapper {
       @Param("summary") Map<String, String> summary);
 
   @Select(
+      "SELECT process_id, process_type, finish_time FROM table_process WHERE process_id = "
+          + "(SELECT MAX(process_id) FROM table_process WHERE table_id = #{tableId} "
+          + "AND status = 'SUCCESS' AND process_type IN ('MINOR', 'MAJOR', 'FULL'))")
+  @ResultMap("tableProcessMap")
+  TableProcessMeta latestSuccessfulOptimizingProcess(@Param("tableId") long tableId);
+
+  @Select(
       "SELECT process_id, table_id, external_process_identifier, status, process_type, process_stage, execution_engine, retry_number, "
           + "create_time, finish_time, fail_message, process_parameters, summary "
           + "FROM table_process WHERE process_id = #{processId}")
