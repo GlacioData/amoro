@@ -27,10 +27,18 @@ import org.apache.amoro.table.descriptor.TableHealthComparisonView;
 
 import java.util.Collections;
 import java.util.List;
+import java.util.Optional;
 
 /** Optional format-owned health semantics; the default preserves legacy summaries. */
 public interface TableHealthSupport {
   TableHealthSupport NONE = new TableHealthSupport() {};
+
+  /**
+   * Extract only complete, already collected aggregates. Never perform IO or traverse file facts.
+   */
+  default Optional<TableFileStatisticsSnapshot> extractFileStatistics(TableHealthDetails details) {
+    return Optional.empty();
+  }
 
   default boolean enabled() {
     return false;

@@ -57,6 +57,14 @@ public class TableSummary {
     return size;
   }
 
+  public void setSize(String size) {
+    this.size = size;
+  }
+
+  public void setAverageFile(String averageFile) {
+    this.averageFile = averageFile;
+  }
+
   /** Average file size in human readable */
   public String getAverageFile() {
     return averageFile;

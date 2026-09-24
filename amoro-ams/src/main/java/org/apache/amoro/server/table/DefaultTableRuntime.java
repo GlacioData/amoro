@@ -1085,7 +1085,9 @@ public class DefaultTableRuntime extends AbstractTableRuntime implements Optimiz
 
     Long attempt = healthAttempt.get();
     if (runtimeHealthState.update(
-        analysis, attempt == null ? runtimeHealthState.beginAttempt() : attempt)) {
+        analysis,
+        attempt == null ? runtimeHealthState.beginAttempt() : attempt,
+        currentAnalysisKey)) {
       return true;
     }
 

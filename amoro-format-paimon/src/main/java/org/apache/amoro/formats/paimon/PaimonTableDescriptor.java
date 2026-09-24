@@ -41,6 +41,7 @@ import org.apache.amoro.table.descriptor.OptimizingTaskInfo;
 import org.apache.amoro.table.descriptor.PartitionBaseInfo;
 import org.apache.amoro.table.descriptor.PartitionFileBaseInfo;
 import org.apache.amoro.table.descriptor.ServerTableMeta;
+import org.apache.amoro.table.descriptor.TableDetailObservation;
 import org.apache.amoro.table.descriptor.TableSummary;
 import org.apache.amoro.table.descriptor.TagOrBranchInfo;
 import org.apache.commons.lang3.StringUtils;
@@ -167,6 +168,8 @@ public class PaimonTableDescriptor implements FormatTableDescriptor {
       serverTableMeta.setComment(table.comment().get());
     }
     Snapshot snapshot = PaimonSnapshotMetadata.latest(store.snapshotManager(), deadline);
+    serverTableMeta.setDetailObservation(
+        new TableDetailObservation(snapshot == null ? null : snapshot.id(), table.schema().id()));
     if (snapshot != null) {
       Long totalRecordCount = snapshot.totalRecordCount();
       long records = totalRecordCount == null ? 0L : totalRecordCount;

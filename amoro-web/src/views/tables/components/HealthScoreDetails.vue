@@ -24,7 +24,7 @@ import { useI18n } from 'vue-i18n'
 import PaimonHealthStructure from './PaimonHealthStructure.vue'
 import PaimonHealthComparison from './PaimonHealthComparison.vue'
 import type { IBaseDetailInfo, TableHealthComponent } from '@/types/common.type'
-import { bytesToSize } from '@/utils'
+import { bytesToSize, dateFormat } from '@/utils'
 
 interface DisplayComponent extends TableHealthComponent {
   maxScore: number
@@ -34,7 +34,7 @@ const props = defineProps<{
   baseInfo: IBaseDetailInfo
 }>()
 
-const { t, locale } = useI18n()
+const { t } = useI18n()
 const modalVisible = ref(false)
 
 const ICEBERG_TABLE_TYPES = new Set(['ICEBERG', 'MIXED_HIVE', 'MIXED_ICEBERG'])
@@ -206,10 +206,6 @@ const scoreGrade = computed(() => details.value?.evaluation?.stale
     : props.baseInfo.healthScore >= 80
       ? t('healthGradeHealthy')
       : props.baseInfo.healthScore >= 60 ? t('healthGradeAttention') : t('healthGradeOptimize'))
-function dateTime(value: number): string {
-  return new Date(value).toLocaleString(locale.value)
-}
-
 function legacyComponent(code: string, score: number, weight: number): DisplayComponent {
   return {
     code,
@@ -290,7 +286,7 @@ function metricValue(code: string, value: string): string {
     return `${Math.round(number * 100)}%`
   if (code === 'latestSnapshotTimeMillis') {
     const date = new Date(number)
-    return Number.isNaN(date.getTime()) ? value : date.toLocaleString(locale.value)
+    return Number.isNaN(date.getTime()) ? value : dateFormat(number)
   }
   return value
 }
@@ -347,10 +343,10 @@ function showHealthScoreDetail() {
             {{ t('healthRetryNotice') }}
           </p>
           <p v-if="details?.structure?.evaluatedAtMillis">
-            {{ t('healthEvaluatedAt') }}: {{ dateTime(details.structure.evaluatedAtMillis) }}
+            {{ t('healthEvaluatedAt') }}: {{ dateFormat(details.structure.evaluatedAtMillis) }}
           </p>
           <p v-if="details?.evaluation?.attemptedAtMillis">
-            {{ t('healthAttemptedAt') }}: {{ dateTime(details.evaluation.attemptedAtMillis) }}
+            {{ t('healthAttemptedAt') }}: {{ dateFormat(details.evaluation.attemptedAtMillis) }}
           </p>
           <p v-if="details?.evaluation?.currentSnapshotId">
             {{ t('healthCurrentSnapshot') }}: {{ details.evaluation.currentSnapshotId }}

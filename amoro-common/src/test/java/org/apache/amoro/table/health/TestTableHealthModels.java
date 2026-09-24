@@ -36,6 +36,31 @@ import java.util.Map;
 public class TestTableHealthModels {
 
   @Test
+  void fileStatisticsPreserveLongValuesAndRejectUnknownOrInconsistentCounts() {
+    TableFileStatisticsSnapshot value =
+        new TableFileStatisticsSnapshot(9L, 0L, 9007199254740993L, Long.MAX_VALUE, 1000L);
+    assertEquals(9007199254740993L, value.getFileCount());
+    assertEquals(1023L, value.getAverageFileSizeBytes());
+    assertEquals(
+        0L, new TableFileStatisticsSnapshot(null, 0L, 0L, 0L, 1L).getAverageFileSizeBytes());
+    assertEquals(0L, new TableFileStatisticsSnapshot(1L, 0L, 3L, 0L, 1L).getAverageFileSizeBytes());
+    assertThrows(
+        IllegalArgumentException.class, () -> new TableFileStatisticsSnapshot(1L, 0, 0, 1, 1));
+    assertThrows(
+        IllegalArgumentException.class, () -> new TableFileStatisticsSnapshot(null, 0, 1, 1, 1));
+    assertThrows(
+        IllegalArgumentException.class, () -> new TableFileStatisticsSnapshot(0L, 0, 0, 0, 1));
+    assertThrows(
+        IllegalArgumentException.class, () -> new TableFileStatisticsSnapshot(1L, -1, 1, 1, 1));
+    assertThrows(
+        IllegalArgumentException.class, () -> new TableFileStatisticsSnapshot(1L, 0, -1, 1, 1));
+    assertThrows(
+        IllegalArgumentException.class, () -> new TableFileStatisticsSnapshot(1L, 0, 1, -1, 1));
+    assertThrows(
+        IllegalArgumentException.class, () -> new TableFileStatisticsSnapshot(1L, 0, 1, 1, 0));
+  }
+
+  @Test
   void testAnalysisKeyUsesAllFieldsAndCollisionSafeEncoding() {
     TableAnalysisKey first =
         new TableAnalysisKey(

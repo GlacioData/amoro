@@ -19,15 +19,152 @@
 package org.apache.amoro.formats.paimon.optimizing.health;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 
 import org.apache.amoro.formats.paimon.optimizing.health.PaimonHealthComparisonState.Entry;
+import org.apache.amoro.table.health.TableFileStatisticsSnapshot;
+import org.apache.amoro.table.health.TableHealthDetails;
+import org.apache.amoro.table.health.TableHealthStructure;
 import org.junit.jupiter.api.Test;
 
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
 
 class TestPaimonHealthSupport {
   @org.junit.jupiter.api.io.TempDir java.nio.file.Path warehouse;
+
+  @Test
+  void extractsCompleteFileStatisticsDespitePartialHealthEvaluation() {
+    TableHealthDetails details = fileDetails(101L, 0L, "3", "10", "PARTIAL", 1234);
+    TableFileStatisticsSnapshot statistics =
+        new PaimonHealthSupport().extractFileStatistics(details).get();
+    assertEquals(Long.valueOf(101), statistics.getSnapshotId());
+    assertEquals(0, statistics.getSchemaId());
+    assertEquals(3, statistics.getFileCount());
+    assertEquals(10, statistics.getTotalSizeBytes());
+    assertEquals(3, statistics.getAverageFileSizeBytes());
+    assertEquals(1234, statistics.getEvaluatedAtMillis());
+  }
+
+  @Test
+  void rejectsMissingStructureAndInvalidFileMetrics() {
+    PaimonHealthSupport support = new PaimonHealthSupport();
+    assertFalse(support.extractFileStatistics(null).isPresent());
+    assertFalse(
+        support
+            .extractFileStatistics(
+                fileDetails(1L, 0L, "1", "10", "COMPLETE", 1234).withStructure(null))
+            .isPresent());
+    for (String invalid : new String[] {null, "", "N/A", "-1", "1.5", "9223372036854775808"}) {
+      assertFalse(
+          support
+              .extractFileStatistics(fileDetails(1L, 0L, invalid, "10", "COMPLETE", 1234))
+              .isPresent(),
+          "Invalid file count: " + invalid);
+      assertFalse(
+          support
+              .extractFileStatistics(fileDetails(1L, 0L, "1", invalid, "COMPLETE", 1234))
+              .isPresent(),
+          "Invalid file size: " + invalid);
+    }
+    assertFalse(
+        support.extractFileStatistics(fileDetails(1L, 0L, "0", "1", "COMPLETE", 1234)).isPresent());
+  }
+
+  @Test
+  void rejectsUnknownOrInvalidSnapshotSchemaAndEvaluationTime() {
+    PaimonHealthSupport support = new PaimonHealthSupport();
+    for (Long snapshot : new Long[] {null, 0L, -1L}) {
+      assertFalse(
+          support
+              .extractFileStatistics(fileDetails(snapshot, 0L, "1", "10", "COMPLETE", 1234))
+              .isPresent());
+    }
+    for (Long schema : new Long[] {null, -1L}) {
+      assertFalse(
+          support
+              .extractFileStatistics(fileDetails(1L, schema, "1", "10", "COMPLETE", 1234))
+              .isPresent());
+    }
+    for (long evaluatedAt : new long[] {0, -1}) {
+      assertFalse(
+          support
+              .extractFileStatistics(fileDetails(1L, 0L, "1", "10", "COMPLETE", evaluatedAt))
+              .isPresent());
+    }
+  }
+
+  @Test
+  void acceptsNullSnapshotOnlyForCompleteEmptyStatistics() {
+    PaimonHealthSupport support = new PaimonHealthSupport();
+    TableFileStatisticsSnapshot statistics =
+        support.extractFileStatistics(fileDetails(null, 0L, "0", "0", "COMPLETE", 1234)).get();
+    assertNull(statistics.getSnapshotId());
+    assertEquals(0, statistics.getFileCount());
+    assertEquals(0, statistics.getTotalSizeBytes());
+    assertEquals(0, statistics.getAverageFileSizeBytes());
+    for (String availability : new String[] {null, "PARTIAL", "UNAVAILABLE"}) {
+      assertFalse(
+          support
+              .extractFileStatistics(fileDetails(null, 0L, "0", "0", availability, 1234))
+              .isPresent());
+    }
+    for (Long snapshot : new Long[] {0L, -1L}) {
+      assertFalse(
+          support
+              .extractFileStatistics(fileDetails(snapshot, 0L, "0", "0", "COMPLETE", 1234))
+              .isPresent());
+    }
+    assertFalse(
+        support
+            .extractFileStatistics(fileDetails(null, null, "0", "0", "COMPLETE", 1234))
+            .isPresent());
+    assertFalse(
+        support.extractFileStatistics(fileDetails(null, 0L, "0", "0", "COMPLETE", 0)).isPresent());
+  }
+
+  @Test
+  void preservesRawLongStatisticsAndAllowsZeroByteFiles() {
+    PaimonHealthSupport support = new PaimonHealthSupport();
+    TableFileStatisticsSnapshot large =
+        support
+            .extractFileStatistics(
+                fileDetails(1L, 0L, "9007199254740993", "9223372036854775807", "COMPLETE", 1234))
+            .get();
+    assertEquals(9007199254740993L, large.getFileCount());
+    assertEquals(Long.MAX_VALUE, large.getTotalSizeBytes());
+    assertEquals(Long.MAX_VALUE / 9007199254740993L, large.getAverageFileSizeBytes());
+    TableFileStatisticsSnapshot zeroBytes =
+        support.extractFileStatistics(fileDetails(1L, 0L, "1", "0", "PARTIAL", 1234)).get();
+    assertEquals(1, zeroBytes.getFileCount());
+    assertEquals(0, zeroBytes.getTotalSizeBytes());
+    assertEquals(0, zeroBytes.getAverageFileSizeBytes());
+  }
+
+  private static TableHealthDetails fileDetails(
+      Long snapshot,
+      Long schema,
+      String count,
+      String bytes,
+      String availability,
+      long evaluatedAt) {
+    Map<String, String> metrics = new HashMap<>();
+    if (count != null) {
+      metrics.put("totalFileCount", count);
+    }
+    if (bytes != null) {
+      metrics.put("totalFileSize", bytes);
+    }
+    metrics.put("averageFileSize", "999");
+    return new TableHealthDetails(
+            "test", snapshot, null, schema, "config", "evaluation", null, metrics, null)
+        .withStructure(
+            new TableHealthStructure(
+                "APPEND", availability, evaluatedAt, 100, "0", "0", "0", null, null));
+  }
 
   @Test
   void oneTimeCaptureMergeRetriesAConflictWithoutLosingThePreviousResult() {
@@ -192,6 +329,18 @@ class TestPaimonHealthSupport {
       org.apache.amoro.optimizing.FormatTableAnalysis after =
           org.apache.amoro.formats.paimon.optimizing.health.PaimonHistoricalHealth.evaluate(
               table, "t", 2);
+      TableFileStatisticsSnapshot statistics =
+          new PaimonHealthSupport().extractFileStatistics(after.healthDetails()).get();
+      assertEquals(Long.valueOf(2), statistics.getSnapshotId());
+      assertEquals(table.schema().id(), statistics.getSchemaId());
+      assertEquals(2, statistics.getFileCount());
+      assertEquals(
+          Long.parseLong(after.healthDetails().getMetrics().get("totalFileSize")),
+          statistics.getTotalSizeBytes());
+      assertEquals(statistics.getTotalSizeBytes() / 2, statistics.getAverageFileSizeBytes());
+      assertEquals(
+          after.healthDetails().getStructure().getEvaluatedAtMillis(),
+          statistics.getEvaluatedAtMillis());
       org.apache.paimon.Snapshot committed = table.snapshotManager().snapshot(2);
       Entry entry = new Entry();
       entry.setInputSnapshotId(1);

@@ -20,9 +20,11 @@ limitations under the License.
 import { computed, onBeforeUnmount, reactive, shallowReactive } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter } from 'vue-router'
+import { QuestionCircleOutlined } from '@ant-design/icons-vue'
 import type { ColumnProps } from 'ant-design-vue/es/table'
 import { requestEpoch, snapshotTableKey } from './snapshot-page-state'
-import type { DetailColumnItem, IBaseDetailInfo, IColumns, IMap, PartitionColumnItem } from '@/types/common.type'
+import { fileStatisticsPresentation } from './file-statistics-view'
+import type { DetailColumnItem, IBaseDetailInfo, IColumns, IMap, PartitionColumnItem, TableFileStatistics } from '@/types/common.type'
 import { getTableDetail } from '@/services/table.service'
 import { dateFormat } from '@/utils'
 
@@ -66,6 +68,8 @@ const changeMetricsMap: IMap<string | number> = {
 
 const state = reactive({
   detailLoading: false,
+  detailRefreshFailed: false,
+  fileStatistics: null as TableFileStatistics | null,
   baseDetailInfo: {
     boundedSnapshotRead: null,
     optimizingStatus: '',
@@ -94,6 +98,18 @@ const state = reactive({
   schema: [] as DetailColumnItem[],
 })
 
+const fileStatisticsView = computed(() => fileStatisticsPresentation(
+  state.baseDetailInfo.tableFormat || state.baseDetailInfo.tableType,
+  state.fileStatistics,
+  state.baseDetailInfo.healthDetails?.evaluation,
+))
+const fileStatisticsNotices = computed(() => fileStatisticsView.value?.reasons.filter(key => [
+  'fileStatisticsCollectionDisabled',
+  'fileStatisticsNotManaged',
+  'fileStatisticsNoValidStatistics',
+  'fileStatisticsHealthUnavailable',
+].includes(key)) ?? [])
+
 async function getTableDetails() {
   const identity = tableIdentity()
   if (state.detailLoading && loadingIdentity === identity) {
@@ -119,6 +135,8 @@ async function getTableDetails() {
     if (typeof result.boundedSnapshotRead !== 'boolean')
       throw new Error(t('snapshotVersionMismatch'))
     emit('initializationError', '')
+    state.detailRefreshFailed = false
+    state.fileStatistics = result.fileStatistics ?? null
     const { pkList = [], tableType, partitionColumnList = [], properties, changeMetrics, schema, createTime, tableIdentifier, baseMetrics, tableSummary, comment } = result
     const primaryKeys = pkList || []
     state.baseDetailInfo = {
@@ -147,7 +165,11 @@ async function getTableDetails() {
     state.baseMetrics = Object.keys(baseMetricsMap || {}).map((key) => {
       return {
         metric: baseMetricsMap[key],
-        value: key === 'lastCommitTime' || key === 'baseWatermark' ? ((baseMetrics || {})[key] ? dateFormat((baseMetrics || {})[key]) : '—') : ((baseMetrics || {})[key] ?? '—'),
+        value: key === 'lastCommitTime' || key === 'baseWatermark'
+          ? ((baseMetrics || {})[key] ? dateFormat((baseMetrics || {})[key]) : '—')
+          : (key === 'fileCount' && fileStatisticsView.value && state.fileStatistics
+              ? (fileStatisticsView.value.count ?? '—')
+              : ((baseMetrics || {})[key] ?? '—')),
       }
     })
     state.properties = Object.keys(properties || {}).map((key) => {
@@ -161,6 +183,7 @@ async function getTableDetails() {
   catch (error) {
     if (!isCurrent())
       return
+    state.detailRefreshFailed = true
     emit('initializationError', (error as Error)?.message || t('snapshotInitializationFailed'))
     const errorMessage = (error as Error)?.message || ''
     const isNotFoundError = /not exist|not found/i.test(errorMessage)
@@ -267,6 +290,42 @@ const propertiesColumns: IColumns[] = shallowReactive([
           :data-source="state.baseMetrics"
           :pagination="false"
         />
+        <div v-if="fileStatisticsView" class="file-statistics-note" role="status" aria-live="polite" data-testid="file-statistics">
+          <div class="file-statistics-header">
+            <span
+              class="file-statistics-status"
+              :class="{
+                'is-current': state.fileStatistics?.status === 'CURRENT',
+                'is-awaiting': state.fileStatistics?.status === 'STALE' || state.fileStatistics?.status === 'PENDING',
+              }"
+            >{{ $t(fileStatisticsView.statusKey) }}</span>
+            <a-tooltip :trigger="['hover', 'focus']">
+              <template #title>
+                <p>{{ $t('fileStatisticsScope') }}</p>
+                <p v-if="fileStatisticsView.evaluatedAtMillis">
+                  {{ $t('fileStatisticsAsOf', { time: dateFormat(fileStatisticsView.evaluatedAtMillis) }) }}
+                </p>
+                <p>{{ $t('fileStatisticsSourceSnapshot') }}: {{ fileStatisticsView.sourceSnapshotId ?? '—' }}</p>
+                <p>{{ $t('fileStatisticsObservedSnapshot') }}: {{ fileStatisticsView.observedSnapshotId ?? '—' }}</p>
+                <p v-for="reason in fileStatisticsView.reasons" :key="reason">
+                  {{ $t(reason) }}
+                </p>
+              </template>
+              <button type="button" class="file-statistics-explanation" :aria-label="$t('fileStatisticsExplanation')">
+                <QuestionCircleOutlined />
+              </button>
+            </a-tooltip>
+          </div>
+          <p v-for="notice in fileStatisticsNotices" :key="notice">
+            {{ $t(notice) }}
+          </p>
+          <p v-if="fileStatisticsView.attemptedAtMillis">
+            {{ $t('fileStatisticsFailedAt', { time: dateFormat(fileStatisticsView.attemptedAtMillis) }) }}
+          </p>
+          <p v-if="state.detailRefreshFailed">
+            {{ $t('fileStatisticsRefreshFailed') }}
+          </p>
+        </div>
       </div>
       <div class="table-attrs">
         <p class="attr-title">
@@ -284,6 +343,42 @@ const propertiesColumns: IColumns[] = shallowReactive([
 </template>
 
 <style lang="less" scoped>
+.file-statistics-note {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 12px;
+  font-size: 12px;
+  line-height: 1.7;
+
+  p { margin: 0; }
+}
+.file-statistics-status {
+  font-weight: 500;
+
+  &.is-current { color: #237804; }
+  &.is-awaiting { color: #ad6800; }
+}
+.file-statistics-explanation {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 4px;
+  padding: 3px;
+  border: 0;
+  background: transparent;
+  color: #667085;
+  font-size: 14px;
+  vertical-align: middle;
+  cursor: help;
+
+  &:focus-visible {
+    border-radius: 2px;
+    outline: 2px solid #1890ff;
+    outline-offset: 2px;
+  }
+}
+
 .table-detail {
   display: flex;
   column-gap: 24px;

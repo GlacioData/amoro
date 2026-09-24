@@ -19,6 +19,8 @@
 package org.apache.amoro.table.descriptor;
 
 import org.apache.amoro.shade.guava32.com.google.common.base.MoreObjects;
+import org.apache.amoro.shade.jackson2.com.fasterxml.jackson.annotation.JsonIgnore;
+import org.apache.amoro.shade.jackson2.com.fasterxml.jackson.annotation.JsonInclude;
 import org.apache.amoro.table.TableIdentifier;
 
 import java.util.List;
@@ -28,6 +30,27 @@ import java.util.Objects;
 /** ams table meta. */
 public class ServerTableMeta {
   private String tableType;
+  private TableDetailObservation detailObservation;
+  private TableFileStatisticsView fileStatistics;
+
+  @JsonIgnore
+  public TableDetailObservation getDetailObservation() {
+    return detailObservation;
+  }
+
+  public void setDetailObservation(TableDetailObservation value) {
+    detailObservation = value;
+  }
+
+  @JsonInclude(JsonInclude.Include.NON_NULL)
+  public TableFileStatisticsView getFileStatistics() {
+    return fileStatistics;
+  }
+
+  public void setFileStatistics(TableFileStatisticsView value) {
+    fileStatistics = value;
+  }
+
   private boolean boundedSnapshotRead;
 
   public boolean isBoundedSnapshotRead() {

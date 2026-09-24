@@ -19,9 +19,12 @@
 package org.apache.amoro.server.dashboard;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -38,12 +41,17 @@ import org.apache.amoro.server.table.DefaultTableRuntime;
 import org.apache.amoro.server.table.RuntimeHealthSnapshot;
 import org.apache.amoro.server.table.TableManager;
 import org.apache.amoro.server.table.TableService;
+import org.apache.amoro.shade.jackson2.com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.amoro.table.TableProperties;
 import org.apache.amoro.table.descriptor.ServerTableMeta;
+import org.apache.amoro.table.descriptor.TableDetailObservation;
 import org.apache.amoro.table.descriptor.TableHealthDetailsView;
 import org.apache.amoro.table.descriptor.TableSummary;
 import org.apache.amoro.table.health.TableAnalysisKey;
+import org.apache.amoro.table.health.TableFileStatisticsSnapshot;
 import org.apache.amoro.table.health.TableHealthComponent;
 import org.apache.amoro.table.health.TableHealthDetails;
+import org.apache.amoro.table.health.TableHealthEvaluation;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -256,6 +264,182 @@ class TestTableHealthDetailsProjection {
     assertEquals(Collections.singletonList("SNAPSHOT_SCAN_FAILED"), view.getReasonCodes());
     assertEquals("paimon-primary-key-health-v2", view.getFormulaVersion());
     assertEquals("fingerprint", view.getScoringConfigFingerprint());
+  }
+
+  @Test
+  void fileStatisticsKeepHealthAndLatestCommitIndependentAcrossRepeatedReads() throws Exception {
+    serverTableMeta.setTableType("PAIMON");
+    serverTableMeta.setDetailObservation(new TableDetailObservation(102L, 1));
+    Map<String, Object> base = new LinkedHashMap<>();
+    base.put("lastCommitTime", 123456L);
+    base.put("baseWatermark", 120000L);
+    serverTableMeta.setBaseMetrics(base);
+    DefaultTableRuntime runtime = runtimeWithHealth(88, details(analysisKey(100), 100L));
+    TableHealthEvaluation evaluation =
+        new TableHealthEvaluation(
+            "FAILED",
+            true,
+            "102",
+            "102",
+            2000,
+            true,
+            Collections.singletonList("SNAPSHOT_SCAN_FAILED"));
+    when(runtime.getRuntimeHealthSnapshot())
+        .thenReturn(
+            Optional.of(
+                new RuntimeHealthSnapshot(
+                    88,
+                    details(analysisKey(100), 100L),
+                    evaluation,
+                    new TableFileStatisticsSnapshot(101L, 1, 4, 80, 1000))));
+    when(tableService.getRuntime(TABLE_ID)).thenReturn(runtime);
+    TableController controller = controllerWithRuntime();
+    for (int i = 0; i < 100; i++) {
+      controller.getTableDetail(context);
+    }
+    assertEquals(Long.valueOf(4), base.get("fileCount"));
+    assertEquals("80.00B", base.get("totalSize"));
+    assertEquals("20.00B", base.get("averageFileSize"));
+    assertEquals(123456L, base.get("lastCommitTime"));
+    assertEquals(120000L, base.get("baseWatermark"));
+    assertEquals(Long.valueOf(4), serverTableMeta.getTableSummary().getFile());
+    assertEquals("80.00B", serverTableMeta.getTableSummary().getSize());
+    assertEquals("20.00B", serverTableMeta.getTableSummary().getAverageFile());
+    assertEquals(88, serverTableMeta.getTableSummary().getHealthScore());
+    assertEquals("100", serverTableMeta.getTableSummary().getHealthDetails().getSnapshotId());
+    assertEquals("101", serverTableMeta.getFileStatistics().getSnapshotId());
+    assertEquals("102", serverTableMeta.getFileStatistics().getObservedSnapshotId());
+    verify(runtime, times(100)).getRuntimeHealthSnapshot();
+    verify(tableManager, times(100)).getTableRuntimeMata(identifier);
+    verify(runtime, never()).takeTableAnalysis(any());
+    org.apache.amoro.shade.jackson2.com.fasterxml.jackson.databind.JsonNode json =
+        new ObjectMapper().valueToTree(serverTableMeta);
+    assertFalse(json.get("fileStatistics").has("evaluation"));
+    assertEquals(
+        "102", json.at("/tableSummary/healthDetails/evaluation/attemptedSnapshotId").asText());
+  }
+
+  @Test
+  void collectionFlagsMatchExistingOptimizingOrSummaryConfiguration() {
+    serverTableMeta.setTableType("PAIMON");
+    serverTableMeta.setDetailObservation(new TableDetailObservation(1L, 0));
+    DefaultTableRuntime runtime = mock(DefaultTableRuntime.class);
+    when(runtime.getRuntimeHealthSnapshot()).thenReturn(Optional.empty());
+    when(tableService.getRuntime(TABLE_ID)).thenReturn(runtime);
+    Map<String, String> config = new LinkedHashMap<>();
+    // Unrelated invalid numeric configuration must not affect this display-only projection.
+    config.put(TableProperties.SELF_OPTIMIZING_MAX_FILE_CNT, "invalid");
+    when(runtime.getTableConfig()).thenReturn(config);
+    for (boolean optimize : new boolean[] {false, true}) {
+      for (boolean summary : new boolean[] {false, true}) {
+        config.put(TableProperties.ENABLE_SELF_OPTIMIZING, Boolean.toString(optimize));
+        config.put(TableProperties.TABLE_SUMMARY_ENABLED, Boolean.toString(summary));
+        controllerWithRuntime().getTableDetail(context);
+        assertEquals(
+            optimize || summary, serverTableMeta.getFileStatistics().getCollectionEnabled());
+        assertEquals(
+            optimize || summary ? "PENDING" : "UNAVAILABLE",
+            serverTableMeta.getFileStatistics().getStatus().name());
+        assertNull(serverTableMeta.getBaseMetrics().get("fileCount"));
+      }
+    }
+  }
+
+  @Test
+  void detailResponseScenariosPreserveLegacyFieldsAndCanBeReplayedInBrowser() throws Exception {
+    String[] scenarios = {
+      "current", "stale", "partial", "failed", "unknown", "pending", "empty", "disabled", "iceberg"
+    };
+    String[] statuses = {
+      "CURRENT", "STALE", "CURRENT", "STALE", "UNKNOWN", "PENDING", "CURRENT", "STALE", null
+    };
+    for (int i = 0; i < scenarios.length; i++) {
+      setUp();
+      String scenario = scenarios[i];
+      boolean empty = "empty".equals(scenario);
+      boolean pending = "pending".equals(scenario);
+      boolean failed = "failed".equals(scenario) || "partial".equals(scenario);
+      boolean legacy = "iceberg".equals(scenario);
+      long observed =
+          "current".equals(scenario) || "partial".equals(scenario)
+              ? 101
+              : "unknown".equals(scenario) ? 100 : 102;
+      serverTableMeta.setBoundedSnapshotRead(true);
+      serverTableMeta.setTableType(legacy ? "ICEBERG" : "PAIMON");
+      serverTableMeta.setTableIdentifier(
+          org.apache.amoro.table.TableIdentifier.of("catalog", "database", scenario));
+      serverTableMeta.setComment("Local file statistics verification");
+      serverTableMeta.setProperties(Collections.singletonMap("owner", "local-test"));
+      serverTableMeta.setSchema(Collections.emptyList());
+      serverTableMeta.setDetailObservation(new TableDetailObservation(empty ? null : observed, 1));
+      serverTableMeta.setTableSummary(
+          new TableSummary(3, "3.00KB", "1.00KB", 1200, legacy ? "iceberg" : "paimon"));
+      Map<String, Object> base = new LinkedHashMap<>();
+      base.put("lastCommitTime", empty ? null : 1790000600000L);
+      base.put("baseWatermark", empty ? null : 1790000500000L);
+      base.put("fileCount", 3L);
+      base.put("totalSize", "3.00KB");
+      base.put("averageFileSize", "1.00KB");
+      serverTableMeta.setBaseMetrics(base);
+      DefaultTableRuntime runtime = mock(DefaultTableRuntime.class);
+      when(runtime.getTableConfig())
+          .thenReturn(
+              Collections.singletonMap(
+                  TableProperties.ENABLE_SELF_OPTIMIZING,
+                  Boolean.toString(!"disabled".equals(scenario))));
+      Map<String, String> flags = new LinkedHashMap<>(runtime.getTableConfig());
+      flags.put(
+          TableProperties.TABLE_SUMMARY_ENABLED, Boolean.toString(!"disabled".equals(scenario)));
+      when(runtime.getTableConfig()).thenReturn(flags);
+      TableHealthEvaluation evaluation =
+          new TableHealthEvaluation(
+              failed ? "FAILED" : "SUCCESS",
+              failed,
+              Long.toString(observed),
+              Long.toString(observed),
+              1790000400000L,
+              failed,
+              failed
+                  ? Collections.singletonList("DELETE_METADATA_READ_FAILED")
+                  : Collections.emptyList());
+      when(runtime.getRuntimeHealthSnapshot())
+          .thenReturn(
+              pending || empty
+                  ? Optional.empty()
+                  : Optional.of(
+                      new RuntimeHealthSnapshot(
+                          failed ? -1 : 90,
+                          details(analysisKey(101), 101L),
+                          evaluation,
+                          new TableFileStatisticsSnapshot(
+                              101L, 1, 100, 104857600, 1790000000000L))));
+      when(tableService.getRuntime(TABLE_ID)).thenReturn(runtime);
+      if (legacy) {
+        identifier.setFormat(TableFormat.ICEBERG);
+      }
+      controllerWithRuntime().getTableDetail(context);
+      if (legacy) {
+        assertNull(serverTableMeta.getFileStatistics());
+        assertEquals(3L, base.get("fileCount"));
+      } else {
+        assertEquals(statuses[i], serverTableMeta.getFileStatistics().getStatus().name());
+        assertEquals(
+            pending ? null : empty ? "0" : "100",
+            serverTableMeta.getFileStatistics().getFileCount());
+        assertEquals(serverTableMeta.getTableSummary().getFile(), base.get("fileCount"));
+      }
+      assertEquals(empty ? null : 1790000600000L, base.get("lastCommitTime"));
+      assertEquals(1200, serverTableMeta.getTableSummary().getRecords());
+      String evidence = System.getProperty("fileStatistics.evidenceDirectory");
+      if (evidence != null) {
+        java.nio.file.Path directory = java.nio.file.Paths.get(evidence);
+        java.nio.file.Files.createDirectories(directory);
+        new ObjectMapper()
+            .writeValue(
+                directory.resolve(scenario + ".json").toFile(),
+                org.apache.amoro.server.dashboard.response.OkResponse.of(serverTableMeta));
+      }
+    }
   }
 
   private TableController controllerWithRuntime() {

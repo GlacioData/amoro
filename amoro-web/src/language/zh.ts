@@ -23,6 +23,26 @@ const nativeSnapshotRecords = {
 }
 
 export default {
+  fileStatisticsCurrent: '文件统计已更新',
+  fileStatisticsStale: '上次文件统计 · 待更新',
+  fileStatisticsUnknown: '文件统计状态未知或与本次观察不一致 · 待刷新',
+  fileStatisticsPending: '文件指标待统计',
+  fileStatisticsUnavailable: '文件统计暂不可用',
+  fileStatisticsEmpty: '空表：暂无数据文件',
+  fileStatisticsCollectionDisabled: '自动统计已停用',
+  fileStatisticsNotManaged: '暂无可用的表运行时统计',
+  fileStatisticsHealthUnavailable: '健康评估部分不可用，文件统计独立展示',
+  fileStatisticsNoValidStatistics: '尚未取得完整有效的文件统计。',
+  fileStatisticsWaiting: '等待后台采集文件统计。',
+  fileStatisticsObservationMismatch: '统计对应的快照或 Schema 与本次观察不一致。',
+  fileStatisticsAsOf: '统计时间：{time}',
+  fileStatisticsFailedAt: '最近健康评估异常时间：{time}',
+  fileStatisticsScope: '文件统计仅对应文件数、总大小及平均文件大小；提交时间与 Watermark 来自本次观察的最新快照。',
+  fileStatisticsSourceSnapshot: '统计快照',
+  fileStatisticsObservedSnapshot: '本次观察快照',
+  fileStatisticsExplanation: '统计说明',
+  fileStatisticsRefreshFailed: '详情刷新失败，当前保留上次显示结果。',
+
   ...nativeSnapshotRecords,
   snapshotVersionMismatch: '前后端版本不兼容：缺少 Snapshot 读取能力字段，请刷新或联系管理员。',
   snapshotInitializationFailed: '表信息加载失败，暂时无法读取 Snapshot。',

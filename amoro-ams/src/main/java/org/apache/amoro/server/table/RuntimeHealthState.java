@@ -20,9 +20,12 @@ package org.apache.amoro.server.table;
 
 import org.apache.amoro.optimizing.FormatTableAnalysis;
 import org.apache.amoro.table.health.TableAnalysisKey;
+import org.apache.amoro.table.health.TableFileStatisticsSnapshot;
 import org.apache.amoro.table.health.TableHealthDetails;
 import org.apache.amoro.table.health.TableHealthEvaluation;
 import org.apache.amoro.table.health.TableHealthSupport;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.Objects;
 import java.util.Optional;
@@ -32,8 +35,9 @@ import java.util.function.LongSupplier;
 /** Atomic in-process format health result and evaluation-attempt state. */
 final class RuntimeHealthState {
 
+  private static final Logger LOG = LoggerFactory.getLogger(RuntimeHealthState.class);
   private final TableHealthSupport support;
-  private static final State EMPTY = new State(null, null, 0);
+  private static final State EMPTY = new State(null, null, 0, null);
 
   private final AtomicReference<State> state = new AtomicReference<>(EMPTY);
   private final LongSupplier clock;
@@ -84,7 +88,11 @@ final class RuntimeHealthState {
             attempt.outcome == EvaluationOutcome.RETRYABLE_FAILURE,
             attempt.details.getReasonCodes());
     return Optional.of(
-        new RuntimeHealthSnapshot(result.getHealthScore(), result.getHealthDetails(), evaluation));
+        new RuntimeHealthSnapshot(
+            result.getHealthScore(),
+            result.getHealthDetails(),
+            evaluation,
+            current.fileStatistics));
   }
 
   Optional<RuntimeHealthSnapshot> snapshot() {
@@ -106,7 +114,16 @@ final class RuntimeHealthState {
 
   /** Reject completions from an older attempt or a cleared runtime generation. */
   synchronized boolean update(FormatTableAnalysis analysis, long sequence) {
-    return update(analysis.healthDetails(), analysis.pendingInput().getHealthScore(), sequence);
+    return update(analysis, sequence, null);
+  }
+
+  synchronized boolean update(
+      FormatTableAnalysis analysis, long sequence, TableAnalysisKey observed) {
+    return update(
+        analysis.healthDetails(),
+        analysis.pendingInput().getHealthScore(),
+        sequence,
+        observed != null && observed.equals(analysis.key()));
   }
 
   synchronized void fail(TableAnalysisKey key, long sequence) {
@@ -123,13 +140,24 @@ final class RuntimeHealthState {
               null,
               java.util.Collections.singletonList(support.readFailureReason())),
           -1,
-          sequence);
+          sequence,
+          false);
     }
   }
 
-  private boolean update(TableHealthDetails details, int healthScore, long sequence) {
+  private boolean update(
+      TableHealthDetails details, int healthScore, long sequence, boolean currentInput) {
     if (sequence <= generationFloor || sequence < state.get().sequence) {
       return false;
+    }
+    TableFileStatisticsSnapshot candidate = null;
+    try {
+      candidate = support.extractFileStatistics(details).orElse(null);
+    } catch (RuntimeException invalidStatistics) {
+      // Display enrichment must never turn a completed health evaluation into a failure.
+      LOG.warn(
+          "Unable to extract complete file statistics; retaining previous aggregates",
+          invalidStatistics);
     }
     boolean successful = healthScore >= 0 && healthScore <= 100;
     EvaluationOutcome outcome =
@@ -152,10 +180,23 @@ final class RuntimeHealthState {
           successful || current.snapshot == null || !current.snapshot.isSuccessful();
       RuntimeHealthSnapshot nextSnapshot =
           replaceSnapshot ? new RuntimeHealthSnapshot(healthScore, details) : current.snapshot;
-      if (state.compareAndSet(current, new State(nextSnapshot, attempt, sequence))) {
+      TableFileStatisticsSnapshot nextFiles = current.fileStatistics;
+      if (candidate != null
+          && (nextFiles == null
+              || currentInput
+              || snapshotId(candidate) >= snapshotId(nextFiles))) {
+        nextFiles = candidate;
+      }
+      if (state.compareAndSet(current, new State(nextSnapshot, attempt, sequence, nextFiles))) {
         return replaceSnapshot;
       }
     }
+  }
+
+  private static long snapshotId(TableFileStatisticsSnapshot statistics) {
+    return statistics.getSnapshotId() == null
+        ? TableAnalysisKey.NO_SNAPSHOT
+        : statistics.getSnapshotId();
   }
 
   synchronized void clear() {
@@ -192,8 +233,14 @@ final class RuntimeHealthState {
     private final RuntimeHealthSnapshot snapshot;
     private final EvaluationAttempt attempt;
     private final long sequence;
+    private final TableFileStatisticsSnapshot fileStatistics;
 
-    private State(RuntimeHealthSnapshot snapshot, EvaluationAttempt attempt, long sequence) {
+    private State(
+        RuntimeHealthSnapshot snapshot,
+        EvaluationAttempt attempt,
+        long sequence,
+        TableFileStatisticsSnapshot fileStatistics) {
+      this.fileStatistics = fileStatistics;
       this.sequence = sequence;
       this.snapshot = snapshot;
       this.attempt = attempt;
