@@ -68,7 +68,7 @@ public final class TableHealthComparisonService extends PersistentBase {
       AmoroTable<?> table,
       OptimizingPlanResult<?> plan,
       FormatTableAnalysis analysis) {
-    TableHealthSupport support = TableHealthSupports.forFormat(runtime.getFormat());
+    TableHealthSupport support = TableFormatSupports.instance().healthSupport(runtime.getFormat());
     if (!support.enabled()) {
       return;
     }
@@ -84,7 +84,7 @@ public final class TableHealthComparisonService extends PersistentBase {
    * Work runs on the existing background refresh executor, never on dashboard or commit threads.
    */
   public void refresh(DefaultTableRuntime runtime, AmoroTable<?> table) {
-    TableHealthSupport support = TableHealthSupports.forFormat(runtime.getFormat());
+    TableHealthSupport support = TableFormatSupports.instance().healthSupport(runtime.getFormat());
     if (!support.enabled()) {
       return;
     }
@@ -162,6 +162,8 @@ public final class TableHealthComparisonService extends PersistentBase {
   public TableHealthComparisonView view(DefaultTableRuntime runtime) {
     return runtime == null
         ? null
-        : TableHealthSupports.forFormat(runtime.getFormat()).comparisonView(runtime.store());
+        : TableFormatSupports.instance()
+            .healthSupport(runtime.getFormat())
+            .comparisonView(runtime.store());
   }
 }

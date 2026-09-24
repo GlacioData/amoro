@@ -42,6 +42,7 @@ import org.apache.amoro.table.descriptor.PartitionBaseInfo;
 import org.apache.amoro.table.descriptor.PartitionFileBaseInfo;
 import org.apache.amoro.table.descriptor.ServerTableMeta;
 import org.apache.amoro.table.descriptor.TableDetailObservation;
+import org.apache.amoro.table.descriptor.TableModel;
 import org.apache.amoro.table.descriptor.TableSummary;
 import org.apache.amoro.table.descriptor.TagOrBranchInfo;
 import org.apache.commons.lang3.StringUtils;
@@ -133,6 +134,10 @@ public class PaimonTableDescriptor implements FormatTableDescriptor {
     ServerTableMeta serverTableMeta = new ServerTableMeta();
     serverTableMeta.setTableIdentifier(amoroTable.id());
     serverTableMeta.setTableType(amoroTable.format().name());
+    String bucketMode = store.bucketMode().name();
+    serverTableMeta.setTableModel(new TableModel(TableModel.BUCKET_MODE, bucketMode));
+    // Preserve the existing response field for older dashboard clients.
+    serverTableMeta.setBucketMode(bucketMode);
 
     // schema
     serverTableMeta.setSchema(

@@ -24,6 +24,7 @@ import org.apache.amoro.formats.paimon.optimizing.health.PaimonHealthSupport;
 import org.apache.amoro.properties.CatalogMetaProperties;
 import org.apache.amoro.shade.guava32.com.google.common.collect.Maps;
 import org.apache.amoro.table.TableMetaStore;
+import org.apache.amoro.table.TableRuntimeSupport;
 import org.apache.amoro.table.health.TableHealthSupport;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.paimon.catalog.Catalog;
@@ -54,6 +55,11 @@ public class PaimonCatalogFactory implements FormatCatalogFactory {
   @Override
   public TableHealthSupport healthSupport() {
     return new PaimonHealthSupport();
+  }
+
+  @Override
+  public Optional<TableRuntimeSupport> runtimeSupport() {
+    return Optional.of(new PaimonRuntimeSupport());
   }
 
   @Override

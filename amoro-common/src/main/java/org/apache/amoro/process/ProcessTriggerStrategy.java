@@ -31,12 +31,30 @@ public final class ProcessTriggerStrategy {
   private final boolean triggerOnNewSnapshot;
 
   private final int triggerParallelism;
+  private final Duration initialDelay;
 
   public ProcessTriggerStrategy(
       Duration triggerInterval, boolean triggerOnNewSnapshot, int triggerParallelism) {
+    this(triggerInterval, triggerOnNewSnapshot, triggerParallelism, null);
+  }
+
+  /** A null initial delay preserves the table-specific periodic interval on startup. */
+  public ProcessTriggerStrategy(
+      Duration triggerInterval,
+      boolean triggerOnNewSnapshot,
+      int triggerParallelism,
+      Duration initialDelay) {
+    if (initialDelay != null && initialDelay.isNegative()) {
+      throw new IllegalArgumentException("Initial delay must not be negative");
+    }
     this.triggerInterval = triggerInterval;
     this.triggerOnNewSnapshot = triggerOnNewSnapshot;
     this.triggerParallelism = triggerParallelism;
+    this.initialDelay = initialDelay;
+  }
+
+  public Duration getInitialDelay() {
+    return initialDelay;
   }
 
   public static ProcessTriggerStrategy triggerAtFixRate(Duration triggerInterval) {

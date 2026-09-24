@@ -129,7 +129,8 @@ public class DefaultTableRuntime extends AbstractTableRuntime implements Optimiz
     }
     this.orphanFilesCleaningMetrics =
         new TableOrphanFilesCleaningMetrics(store.getTableIdentifier());
-    this.healthSupport = TableHealthSupports.forFormat(store.getTableIdentifier().getFormat());
+    this.healthSupport =
+        TableFormatSupports.instance().healthSupport(store.getTableIdentifier().getFormat());
     this.runtimeHealthState = new RuntimeHealthState(healthSupport);
     this.tableSummaryMetrics = new TableSummaryMetrics(store.getTableIdentifier());
     this.loader = loader;

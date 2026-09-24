@@ -20,7 +20,9 @@ process-factories:
     enabled: true
     priority: 100
     properties:
-      sync-table-meta.enabled: false
+      sync-table-meta.enabled: true
+      # Additional delay after the scheduler's 10-second startup grace period.
+      sync-table-meta.initial-delay: 0s
       sync-table-meta.interval: 48h
       sync-table-meta.trigger-parallelism: 2
       expire-snapshots.enabled: true

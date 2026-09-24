@@ -82,7 +82,11 @@ public class ActionCoordinatorScheduler extends PeriodicTableScheduler {
 
   @Override
   protected long getStartDelay(TableRuntime tableRuntime) {
-    return START_DELAY + coordinator.getNextExecutingTime(tableRuntime);
+    java.time.Duration initialDelay = coordinator.getInitialDelay();
+    return START_DELAY
+        + (initialDelay == null
+            ? coordinator.getNextExecutingTime(tableRuntime)
+            : initialDelay.toMillis());
   }
 
   /**

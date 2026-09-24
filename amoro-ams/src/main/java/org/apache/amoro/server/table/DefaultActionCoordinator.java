@@ -93,6 +93,11 @@ public class DefaultActionCoordinator implements ActionCoordinator {
   }
 
   @Override
+  public java.time.Duration getInitialDelay() {
+    return strategy.getInitialDelay();
+  }
+
+  @Override
   public boolean enabled(TableRuntime tableRuntime) {
     return formatSupported(tableRuntime.getFormat());
   }

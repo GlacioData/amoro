@@ -68,6 +68,7 @@ import org.apache.amoro.table.descriptor.OptimizingTaskInfo;
 import org.apache.amoro.table.descriptor.PartitionBaseInfo;
 import org.apache.amoro.table.descriptor.PartitionFileBaseInfo;
 import org.apache.amoro.table.descriptor.ServerTableMeta;
+import org.apache.amoro.table.descriptor.TableModel;
 import org.apache.amoro.table.descriptor.TableSummary;
 import org.apache.amoro.table.descriptor.TagOrBranchInfo;
 import org.apache.amoro.utils.MixedDataFiles;
@@ -133,10 +134,12 @@ public class MixedAndIcebergTableDescriptor extends PersistentBase
   @Override
   public ServerTableMeta getTableDetail(AmoroTable<?> amoroTable) {
     MixedTable table = getTable(amoroTable);
-    String tableFormat = decorateTableFormat(amoroTable);
+    TableModel tableModel = getTableModel(amoroTable);
+    String tableFormat = decorateTableFormat(amoroTable, tableModel);
     // set basic info
     TableBasicInfo tableBasicInfo = getTableBasicInfo(table);
     ServerTableMeta serverTableMeta = getServerTableMeta(table);
+    serverTableMeta.setTableModel(tableModel);
     long tableSize = 0;
     long tableFileCnt = 0;
     Map<String, Object> baseMetrics = Maps.newHashMap();
@@ -188,17 +191,28 @@ public class MixedAndIcebergTableDescriptor extends PersistentBase
     return serverTableMeta;
   }
 
-  private String decorateTableFormat(AmoroTable<?> table) {
+  private String decorateTableFormat(AmoroTable<?> table, TableModel model) {
     StringBuilder sb = new StringBuilder();
     sb.append(AmsUtil.formatString(table.format().name()));
-    if (table.format().equals(TableFormat.ICEBERG)) {
-      int formatVersion =
-          ((HasTableOperations) table.originalTable()).operations().current().formatVersion();
-      sb.append("(V");
-      sb.append(formatVersion);
+    if (model != null) {
+      sb.append("(");
+      sb.append(model.getCode());
       sb.append(")");
     }
     return sb.toString();
+  }
+
+  TableModel getTableModel(AmoroTable<?> table) {
+    if (!TableFormat.ICEBERG.equals(table.format())) {
+      // A Mixed table's base format version does not describe the logical table model.
+      return null;
+    }
+    // Reuse the metadata read previously used by decorateTableFormat, never refresh or load again.
+    // Iceberg 1.6.1 supports V1/V2; TableMetadata.formatVersion is the authoritative value:
+    // https://github.com/apache/iceberg/blob/apache-iceberg-1.6.1/core/src/main/java/org/apache/iceberg/TableMetadata.java
+    int version =
+        ((HasTableOperations) table.originalTable()).operations().current().formatVersion();
+    return new TableModel(TableModel.FORMAT_VERSION, "V" + version);
   }
 
   private long getRecordsOfTable(MixedTable mixedTable) {

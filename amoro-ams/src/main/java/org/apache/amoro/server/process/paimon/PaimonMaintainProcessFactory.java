@@ -73,6 +73,9 @@ public class PaimonMaintainProcessFactory implements ProcessFactory {
   public static final ConfigOption<Integer> SYNC_TABLE_META_TRIGGER_PARALLELISM =
       ConfigOptions.key("sync-table-meta.trigger-parallelism").intType().defaultValue(1);
 
+  public static final ConfigOption<Duration> SYNC_TABLE_META_INITIAL_DELAY =
+      ConfigOptions.key("sync-table-meta.initial-delay").durationType().defaultValue(Duration.ZERO);
+
   public static final ConfigOption<Boolean> SNAPSHOT_EXPIRE_ENABLED =
       ConfigOptions.key("expire-snapshots.enabled").booleanType().defaultValue(false);
 
@@ -208,7 +211,11 @@ public class PaimonMaintainProcessFactory implements ProcessFactory {
       int parallelism = configs.getInteger(SYNC_TABLE_META_TRIGGER_PARALLELISM);
       this.actions.put(
           PaimonActions.SYNC_TABLE_META,
-          new ProcessTriggerStrategy(interval, false, Math.max(parallelism, 1)));
+          new ProcessTriggerStrategy(
+              interval,
+              false,
+              Math.max(parallelism, 1),
+              configs.getDuration(SYNC_TABLE_META_INITIAL_DELAY)));
     }
     if (configs.getBoolean(SNAPSHOT_EXPIRE_ENABLED)) {
       Duration interval = configs.getDuration(SNAPSHOT_EXPIRE_INTERVAL);

@@ -27,6 +27,7 @@ import { fileStatisticsPresentation } from './file-statistics-view'
 import type { DetailColumnItem, IBaseDetailInfo, IColumns, IMap, PartitionColumnItem, TableFileStatistics } from '@/types/common.type'
 import { getTableDetail } from '@/services/table.service'
 import { dateFormat } from '@/utils'
+import { normalizeTableModel } from '@/utils/tableModel'
 
 const emit = defineEmits<{
   (e: 'initializationError', message: string): void
@@ -77,6 +78,7 @@ const state = reactive({
     tableType: '',
     tableName: '',
     createTime: '',
+    tableModel: null,
     size: '',
     file: '',
     averageFile: '',
@@ -139,12 +141,15 @@ async function getTableDetails() {
     state.fileStatistics = result.fileStatistics ?? null
     const { pkList = [], tableType, partitionColumnList = [], properties, changeMetrics, schema, createTime, tableIdentifier, baseMetrics, tableSummary, comment } = result
     const primaryKeys = pkList || []
+    const tableModel = normalizeTableModel(result.tableModel, tableType, result.bucketMode)
     state.baseDetailInfo = {
       ...tableSummary,
       boundedSnapshotRead: result.boundedSnapshotRead,
       tableType,
       tableName: `${tableIdentifier?.catalog || ''}.${tableIdentifier?.database || ''}.${tableIdentifier?.tableName || ''}`,
       createTime: createTime ? dateFormat(createTime) : '',
+      tableModel,
+      tableFormat: tableModel ? tableType : tableSummary?.tableFormat,
       hasPartition: !!(partitionColumnList?.length),
       hasPrimaryKey: primaryKeys.length > 0,
       healthDetails: tableSummary?.healthDetails ?? null,

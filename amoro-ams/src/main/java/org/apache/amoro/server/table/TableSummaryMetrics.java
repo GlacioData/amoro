@@ -135,7 +135,7 @@ public class TableSummaryMetrics extends AbstractTableMetrics {
 
   public TableSummaryMetrics(ServerTableIdentifier identifier) {
     super(identifier);
-    if (TableHealthSupports.forFormat(identifier.getFormat()).enabled()) {
+    if (TableFormatSupports.instance().healthSupport(identifier.getFormat()).enabled()) {
       refresh(commonSummary, false);
     }
   }
