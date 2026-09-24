@@ -22,12 +22,14 @@ import org.apache.amoro.AmoroTable;
 import org.apache.amoro.TableFormat;
 import org.apache.amoro.TableSnapshot;
 import org.apache.amoro.config.OptimizingConfig;
+import org.apache.amoro.formats.paimon.optimizing.PaimonAppendCapabilities;
 import org.apache.amoro.formats.paimon.optimizing.PaimonFullScheduling;
 import org.apache.amoro.formats.paimon.optimizing.PaimonOptimizingEligibility;
 import org.apache.amoro.formats.paimon.optimizing.PaimonPendingInput;
 import org.apache.amoro.formats.paimon.optimizing.health.PaimonAppendSnapshotAnalysis;
 import org.apache.amoro.formats.paimon.optimizing.health.PaimonHealthEvaluationContext;
 import org.apache.amoro.formats.paimon.optimizing.plan.PaimonAppendFileScanner;
+import org.apache.amoro.formats.paimon.optimizing.primary.PaimonManagedGentle;
 import org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeyOptimizingEvaluation;
 import org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeyOptimizingEvaluator;
 import org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeyPendingInput;
@@ -50,6 +52,8 @@ import org.apache.paimon.table.DataTable;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.PrimaryKeyFileStoreTable;
 import org.apache.paimon.table.Table;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.Serializable;
 import java.util.Collections;
@@ -60,6 +64,7 @@ import java.util.concurrent.Callable;
 
 public class PaimonTable implements AmoroTable<Table>, Serializable {
 
+  private static final Logger LOG = LoggerFactory.getLogger(PaimonTable.class);
   private static final long serialVersionUID = 1L;
   private static final String UNSUPPORTED_TABLE_SHAPE = "UNSUPPORTED_TABLE_SHAPE";
   private static final String UNSUPPORTED_BUCKET_MODE = "UNSUPPORTED_BUCKET_MODE";
@@ -241,16 +246,40 @@ public class PaimonTable implements AmoroTable<Table>, Serializable {
       Map<String, String> tableProperties) {
     PaimonAppendSnapshotAnalysis analysis =
         PaimonAppendFileScanner.analyze(appendTable, healthContext, null);
+    boolean fixedSupported = false;
+    if (appendTable.bucketMode() == BucketMode.HASH_FIXED) {
+      // Paimon ac223f47, operation/BucketedAppendFileStoreWrite.java:75-85 and
+      // CoreOptions.java:3654-3658 define the native ordered/unordered and clustering modes.
+      // Reuse the same current capability gate as planning; refusal is not a health read failure.
+      Optional<String> rejection = PaimonAppendCapabilities.fixedBucketRejection(appendTable);
+      if (rejection.isPresent()) {
+        LOG.info(
+            "Paimon table [{}] fixed Append optimization is unsupported: {}",
+            id(),
+            rejection.get());
+      }
+      fixedSupported = !rejection.isPresent() && analysis.plannerFactsAvailable();
+    }
     boolean optimizingNecessary =
         isOptimizingEligible(tableProperties, context)
-            && appendTable.bucketMode() == BucketMode.BUCKET_UNAWARE;
+            && (appendTable.bucketMode() == BucketMode.BUCKET_UNAWARE || fixedSupported);
+    PaimonPendingInput pendingInput = analysis.pendingInput();
+    PaimonPendingInput optimizingPendingInput = copyPendingInput(pendingInput);
+    // Paimon ac223f47, FileSystemCatalog.java:167-171 and SchemaManager.java:252-280 publish option
+    // changes through a new schema without a data snapshot. Keep exactly one planning demand for a
+    // fixed Append capability change until beginProcess or empty-plan completion consumes
+    // pending_input.
+    optimizingPendingInput.setSameSnapshotPlanningPending(
+        appendTable.bucketMode() == BucketMode.HASH_FIXED && optimizingNecessary);
     return new PendingInputResult(
-        analysis.pendingInput(), analysis.pendingInput(), optimizingNecessary, analysis);
+        pendingInput, optimizingPendingInput, optimizingNecessary, analysis);
   }
 
   @Override
   public boolean supportsPendingInputRefresh() {
-    return PaimonFullScheduling.isPrimaryKeyTable(this);
+    return PaimonFullScheduling.isPrimaryKeyTable(this)
+        || (table instanceof AppendOnlyFileStoreTable
+            && ((AppendOnlyFileStoreTable) table).bucketMode() == BucketMode.HASH_FIXED);
   }
 
   @Override
@@ -298,7 +327,16 @@ public class PaimonTable implements AmoroTable<Table>, Serializable {
     // validation remain authoritative.
     pending.setFullCompactionPending(
         optimizingNecessary && evaluation.optimizingType() == OptimizingType.FULL);
-    return new PendingInputResult(analysis.pendingInput(), pending, optimizingNecessary, analysis);
+    pending.setGentleMinorCompactionPending(
+        optimizingNecessary
+            && evaluation.optimizingType() == OptimizingType.MINOR
+            && PaimonManagedGentle.isAffected(fileStoreTable));
+    return new PendingInputResult(
+        analysis.pendingInput(),
+        pending,
+        optimizingNecessary,
+        analysis,
+        isOptimizingEligible(tableProperties, context) ? evaluation.nextEvaluationTime() : 0L);
   }
 
   private static PaimonPendingInput legacyPendingInput(PaimonPrimaryKeyPendingInput source) {
@@ -311,6 +349,19 @@ public class PaimonTable implements AmoroTable<Table>, Serializable {
         NOT_EQUIVALENT,
         NOT_EQUIVALENT,
         NOT_EQUIVALENT,
+        source.getHealthScore());
+  }
+
+  private static PaimonPendingInput copyPendingInput(PaimonPendingInput source) {
+    return new PaimonPendingInput(
+        source.getDataFileCount(),
+        source.getDataFileSize(),
+        source.getDataRecordCount(),
+        source.getSmallFileCount(),
+        source.getSmallFileSize(),
+        source.getPartitionCount(),
+        source.getFileWithDeleteCount(),
+        source.getDeleteRecordCount(),
         source.getHealthScore());
   }
 

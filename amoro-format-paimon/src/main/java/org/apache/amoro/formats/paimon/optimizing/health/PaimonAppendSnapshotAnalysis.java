@@ -47,6 +47,7 @@ public final class PaimonAppendSnapshotAnalysis implements FormatTableAnalysis {
   private final TableHealthDetails healthDetails;
   private final List<PlannerFile> plannerFiles;
   private final boolean plannerFactsAvailable;
+  private final boolean plannerFilesTruncated;
   @Nullable private final Snapshot snapshot;
   private final long fullSnapshotFileCount;
   private final int fullSnapshotScanCount;
@@ -57,6 +58,7 @@ public final class PaimonAppendSnapshotAnalysis implements FormatTableAnalysis {
       TableHealthDetails healthDetails,
       List<PlannerFile> plannerFiles,
       boolean plannerFactsAvailable,
+      boolean plannerFilesTruncated,
       @Nullable Snapshot snapshot,
       long fullSnapshotFileCount,
       int fullSnapshotScanCount) {
@@ -65,6 +67,7 @@ public final class PaimonAppendSnapshotAnalysis implements FormatTableAnalysis {
     this.healthDetails = Objects.requireNonNull(healthDetails, "Health details must not be null");
     this.plannerFiles = Collections.unmodifiableList(new ArrayList<>(plannerFiles));
     this.plannerFactsAvailable = plannerFactsAvailable;
+    this.plannerFilesTruncated = plannerFilesTruncated;
     this.snapshot = snapshot;
     this.fullSnapshotFileCount = fullSnapshotFileCount;
     this.fullSnapshotScanCount = fullSnapshotScanCount;
@@ -78,6 +81,7 @@ public final class PaimonAppendSnapshotAnalysis implements FormatTableAnalysis {
         healthDetails,
         Collections.emptyList(),
         false,
+        false,
         null,
         fullSnapshotFileCount,
         fullSnapshotScanCount);
@@ -90,6 +94,20 @@ public final class PaimonAppendSnapshotAnalysis implements FormatTableAnalysis {
         healthDetails.withStructure(structure),
         plannerFiles,
         plannerFactsAvailable,
+        plannerFilesTruncated,
+        snapshot,
+        fullSnapshotFileCount,
+        fullSnapshotScanCount);
+  }
+
+  public PaimonAppendSnapshotAnalysis withPlannerFilesTruncated(boolean truncated) {
+    return new PaimonAppendSnapshotAnalysis(
+        key,
+        pendingInput,
+        healthDetails,
+        plannerFiles,
+        plannerFactsAvailable,
+        truncated,
         snapshot,
         fullSnapshotFileCount,
         fullSnapshotScanCount);
@@ -126,6 +144,7 @@ public final class PaimonAppendSnapshotAnalysis implements FormatTableAnalysis {
         details(context, result, structuralResult, totals),
         plannerFiles,
         plannerFactsAvailable,
+        false,
         snapshot,
         totals.totalFileCount,
         fullSnapshotScanCount);
@@ -140,6 +159,7 @@ public final class PaimonAppendSnapshotAnalysis implements FormatTableAnalysis {
         pendingInput,
         details(context, null, null, new ScanTotals(), Collections.singletonList(reasonCode)),
         Collections.emptyList(),
+        false,
         false,
         context.snapshot().orElse(null),
         -1L,
@@ -307,6 +327,11 @@ public final class PaimonAppendSnapshotAnalysis implements FormatTableAnalysis {
     return plannerFactsAvailable;
   }
 
+  /** Candidate truncation is not a failed or partial health scan. */
+  public boolean plannerFilesTruncated() {
+    return plannerFilesTruncated;
+  }
+
   @Nullable
   public Snapshot snapshot() {
     return snapshot;
@@ -389,6 +414,8 @@ public final class PaimonAppendSnapshotAnalysis implements FormatTableAnalysis {
   /** Bounded immutable file fact used to reconstruct the existing planner candidate. */
   public static final class PlannerFile {
     private final BinaryRow partition;
+    private final int bucket;
+    private final int totalBuckets;
     private final DataFileMeta file;
     @Nullable private final DeletionFile deletionFile;
     @Nullable private final String dvGroupKey;
@@ -398,7 +425,19 @@ public final class PaimonAppendSnapshotAnalysis implements FormatTableAnalysis {
         DataFileMeta file,
         @Nullable DeletionFile deletionFile,
         @Nullable String dvGroupKey) {
+      this(partition, 0, -1, file, deletionFile, dvGroupKey);
+    }
+
+    public PlannerFile(
+        BinaryRow partition,
+        int bucket,
+        int totalBuckets,
+        DataFileMeta file,
+        @Nullable DeletionFile deletionFile,
+        @Nullable String dvGroupKey) {
       this.partition = partition.copy();
+      this.bucket = bucket;
+      this.totalBuckets = totalBuckets;
       this.file = Objects.requireNonNull(file, "Data file must not be null");
       this.deletionFile = deletionFile;
       this.dvGroupKey = dvGroupKey;
@@ -406,6 +445,14 @@ public final class PaimonAppendSnapshotAnalysis implements FormatTableAnalysis {
 
     public BinaryRow partition() {
       return partition.copy();
+    }
+
+    public int bucket() {
+      return bucket;
+    }
+
+    public int totalBuckets() {
+      return totalBuckets;
     }
 
     public DataFileMeta file() {

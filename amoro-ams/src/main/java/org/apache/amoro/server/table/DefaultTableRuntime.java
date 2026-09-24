@@ -101,6 +101,8 @@ public class DefaultTableRuntime extends AbstractTableRuntime implements Optimiz
   private volatile long latestRefreshInterval = AmoroServiceConstants.INVALID_TIME;
   private volatile boolean latestEvaluatedNeedOptimizing = true;
   private volatile TableAnalysisKey currentAnalysisKey;
+  private volatile TableAnalysisKey deferredPlanningKey;
+  private volatile RuntimeEvaluationDeadline evaluationDeadline;
   private final AtomicReference<FormatTableAnalysis> tableAnalysisSlot = new AtomicReference<>();
   private final RuntimeHealthState runtimeHealthState;
   private final TableHealthSupport healthSupport;
@@ -108,6 +110,7 @@ public class DefaultTableRuntime extends AbstractTableRuntime implements Optimiz
       new java.util.concurrent.locks.ReentrantLock();
   private final ThreadLocal<Long> healthAttempt = new ThreadLocal<>();
   protected volatile OptimizingProcess optimizingProcess;
+  private Long corruptedProcessCloseReservation;
   private final List<TaskRuntime.TaskQuota> taskQuotas = new CopyOnWriteArrayList<>();
 
   private final Supplier<AmoroTable<?>> loader;
@@ -142,12 +145,65 @@ public class DefaultTableRuntime extends AbstractTableRuntime implements Optimiz
   }
 
   public void recover(OptimizingProcess optimizingProcess) {
+    OptimizingProcess canonical = attachRecoveredProcess(optimizingProcess);
+    if (canonical == optimizingProcess && optimizingProcess.getStatus() == ProcessStatus.SUCCESS) {
+      completeProcess(optimizingProcess, true);
+    }
+  }
+
+  public OptimizingProcess attachRecoveredProcess(OptimizingProcess optimizingProcess) {
     if (!Objects.equals(optimizingProcess.getProcessId(), getProcessId())) {
       throw new IllegalStateException("Table runtime and processing are not matched!");
     }
-    this.optimizingProcess = optimizingProcess;
-    if (this.optimizingProcess.getStatus() == ProcessStatus.SUCCESS) {
-      completeProcess(optimizingProcess, true);
+    return attachOptimizingProcessIfAbsent(optimizingProcess);
+  }
+
+  /**
+   * Publish one Amoro-owned in-memory process instance for a durable process id.
+   *
+   * <p>The monitor protects only local publication state. Callers must not perform database work or
+   * invoke a process lifecycle method while holding it.
+   */
+  private synchronized OptimizingProcess attachOptimizingProcessIfAbsent(
+      OptimizingProcess candidate) {
+    if (Objects.equals(corruptedProcessCloseReservation, candidate.getProcessId())) {
+      throw new IllegalStateException(
+          "The optimizing process is reserved for corrupted recovery closure");
+    }
+    if (optimizingProcess == null) {
+      optimizingProcess = candidate;
+      return candidate;
+    }
+    if (optimizingProcess.getProcessId() == candidate.getProcessId()) {
+      return optimizingProcess;
+    }
+    throw new OptimizingOwnerConflictException(
+        "attach", getTableIdentifier(), candidate.getProcessId(), optimizingProcess.getProcessId());
+  }
+
+  public synchronized boolean reserveCorruptedProcessClose(long processId) {
+    // Reservation and normal attachment share this short monitor. The database close runs after
+    // this method returns, so no persistence or process lifecycle call occurs under the monitor.
+    if (optimizingProcess != null) {
+      if (optimizingProcess.getProcessId() == processId) {
+        return false;
+      }
+      throw new OptimizingOwnerConflictException(
+          "reserve corrupted process close",
+          getTableIdentifier(),
+          processId,
+          optimizingProcess.getProcessId());
+    }
+    if (corruptedProcessCloseReservation != null) {
+      throw new IllegalStateException("Another corrupted process closure is already reserved");
+    }
+    corruptedProcessCloseReservation = processId;
+    return true;
+  }
+
+  public synchronized void releaseCorruptedProcessClose(long processId) {
+    if (Objects.equals(corruptedProcessCloseReservation, processId)) {
+      corruptedProcessCloseReservation = null;
     }
   }
 
@@ -353,6 +409,7 @@ public class DefaultTableRuntime extends AbstractTableRuntime implements Optimiz
         .synchronizedInvoke(
             () -> {
               currentAnalysisKey = null;
+              evaluationDeadline = null;
               clearTableAnalysis();
             });
   }
@@ -364,6 +421,57 @@ public class DefaultTableRuntime extends AbstractTableRuntime implements Optimiz
       return false;
     }
     return runtimeHealthState.shouldEvaluate(key);
+  }
+
+  /** Planning-only changes need fresh decisions without invalidating structural health. */
+  public boolean shouldEvaluateCurrentPlanningAnalysis() {
+    return shouldEvaluateCurrentPlanningAnalysis(System.currentTimeMillis());
+  }
+
+  boolean shouldEvaluateCurrentPlanningAnalysis(long now) {
+    return needsPlanningAnalysis() || isEvaluationDeadlineDue(now);
+  }
+
+  private boolean needsPlanningAnalysis() {
+    TableAnalysisKey key = currentAnalysisKey;
+    // Source:
+    // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/operation/BaseAppendFileStoreWrite.java#L187-L222
+    // Native rewriting does not schedule AMS work. Publishing health during PLANNING must
+    // not consume a newer demand key. Retry it once idle, without polling busy tables or
+    // bypassing health-scan failure backoff. No persistent state or new timer is needed.
+    return key != null
+        && (runtimeHealthState.shouldEvaluateAnalysis(key)
+            || (isIdle()
+                && key.equals(deferredPlanningKey)
+                && runtimeHealthState.hasSuccessfulAnalysis(key)));
+  }
+
+  private boolean isEvaluationDeadlineDue(long now) {
+    if (evaluationDeadline == null) {
+      return false;
+    }
+    AtomicBoolean due = new AtomicBoolean(false);
+    store()
+        .synchronizedInvoke(
+            () -> {
+              if (evaluationDeadline == null) {
+                return;
+              }
+              if (currentAnalysisKey == null
+                  || !isIdle()
+                  || !getOptimizingConfig().isEnabled()
+                  || !evaluationDeadline.matches(
+                      currentAnalysisKey, getLastMinorOptimizingTime(), getLastPlanTime())
+                  || getProcessId() != 0L) {
+                evaluationDeadline = null;
+                return;
+              }
+              // A timer must not bypass a failed scan's existing retry backoff.
+              due.set(
+                  runtimeHealthState.hasSuccessfulAnalysis(currentAnalysisKey)
+                      && evaluationDeadline.isDue(now));
+            });
+    return due.get();
   }
 
   // ---- OptimizationContext implementation ----
@@ -433,10 +541,12 @@ public class DefaultTableRuntime extends AbstractTableRuntime implements Optimiz
     Map<String, String> refreshableConfig =
         table.supportsPendingInputRefresh() ? new HashMap<>(getTableConfig()) : null;
     long evaluationPlanTime = getLastPlanTime();
+    long evaluationMinorTime = getLastMinorOptimizingTime();
 
     if (!config.isEnabled() && !config.isTableSummaryEnabled()) {
       if (refreshableConfig != null) {
-        return applyRefreshableEvaluation(Optional.empty(), refreshableConfig, evaluationPlanTime);
+        return applyRefreshableEvaluation(
+            Optional.empty(), refreshableConfig, evaluationPlanTime, evaluationMinorTime);
       }
       clearTableAnalysis();
       clearPendingSummary();
@@ -455,7 +565,8 @@ public class DefaultTableRuntime extends AbstractTableRuntime implements Optimiz
     }
     if (!result.isPresent()) {
       if (refreshableConfig != null) {
-        return applyRefreshableEvaluation(result, refreshableConfig, evaluationPlanTime);
+        return applyRefreshableEvaluation(
+            result, refreshableConfig, evaluationPlanTime, evaluationMinorTime);
       }
       clearTableAnalysis();
       boolean idle = isIdle();
@@ -482,7 +593,12 @@ public class DefaultTableRuntime extends AbstractTableRuntime implements Optimiz
           || !Objects.equals(expectedKey, currentAnalysisKey)
           || !expectedKey.equals(tableAnalysis.get().key())) {
         // Keep a complete scanned snapshot as historical display data, never as planner input.
-        tableAnalysis.ifPresent(this::recordRuntimeHealth);
+        // A clock/config transition may make the result equal the NEW current key although
+        // this attempt began with the old key. Recording it would consume planning demand
+        // without ever applying pending input. Keep the previous health until the next pass.
+        tableAnalysis
+            .filter(analysis -> !analysis.key().equals(currentAnalysisKey))
+            .ifPresent(this::recordRuntimeHealth);
         clearTableAnalysis();
         return !isIdle();
       }
@@ -493,7 +609,8 @@ public class DefaultTableRuntime extends AbstractTableRuntime implements Optimiz
     }
 
     if (refreshableConfig != null) {
-      return applyRefreshableEvaluation(result, refreshableConfig, evaluationPlanTime);
+      return applyRefreshableEvaluation(
+          result, refreshableConfig, evaluationPlanTime, evaluationMinorTime);
     }
 
     if (!config.isEnabled()) {
@@ -522,7 +639,8 @@ public class DefaultTableRuntime extends AbstractTableRuntime implements Optimiz
   private boolean applyRefreshableEvaluation(
       Optional<PendingInputResult> result,
       Map<String, String> evaluatedConfig,
-      long evaluatedPlanTime) {
+      long evaluatedPlanTime,
+      long evaluatedMinorTime) {
     AtomicBoolean necessary = new AtomicBoolean(!isIdle());
     store()
         .synchronizedInvoke(
@@ -540,6 +658,10 @@ public class DefaultTableRuntime extends AbstractTableRuntime implements Optimiz
                 // Process state only blocks demand changes; health facts for the same analysis key
                 // use the existing publication path.
                 result.ifPresent(this::persistEvaluationSummaryAndClear);
+                result
+                    .filter(PendingInputResult::optimizingNecessary)
+                    .flatMap(PendingInputResult::tableAnalysis)
+                    .ifPresent(analysis -> deferredPlanningKey = analysis.key());
                 return;
               }
               if (result.isPresent()) {
@@ -571,6 +693,21 @@ public class DefaultTableRuntime extends AbstractTableRuntime implements Optimiz
                       })
                   .updateStatusCode(ignored -> OptimizingStatus.IDLE.getCode())
                   .commit();
+              deferredPlanningKey = null;
+              evaluationDeadline = null;
+              if (getOptimizingConfig().isEnabled()
+                  && result.isPresent()
+                  && !result.get().optimizingNecessary()
+                  && result.get().nextEvaluationTime() > 0L
+                  && result.get().tableAnalysis().isPresent()
+                  && evaluatedMinorTime == getLastMinorOptimizingTime()) {
+                evaluationDeadline =
+                    new RuntimeEvaluationDeadline(
+                        result.get().tableAnalysis().get().key(),
+                        result.get().nextEvaluationTime(),
+                        evaluatedMinorTime,
+                        evaluatedPlanTime);
+              }
               necessary.set(false);
             });
     return necessary.get();
@@ -628,7 +765,7 @@ public class DefaultTableRuntime extends AbstractTableRuntime implements Optimiz
     return optimizingProcess;
   }
 
-  public void detachOptimizingProcess(OptimizingProcess process) {
+  public synchronized void detachOptimizingProcess(OptimizingProcess process) {
     if (optimizingProcess == process) {
       optimizingProcess = null;
     }
@@ -753,7 +890,13 @@ public class DefaultTableRuntime extends AbstractTableRuntime implements Optimiz
       throw new OptimizingOwnerConflictException(
           "acquire", getTableIdentifier(), optimizingProcess.getProcessId(), getProcessId());
     }
-    this.optimizingProcess = optimizingProcess;
+    if (attachOptimizingProcessIfAbsent(optimizingProcess) != optimizingProcess) {
+      throw new OptimizingOwnerConflictException(
+          "publish",
+          getTableIdentifier(),
+          optimizingProcess.getProcessId(),
+          this.optimizingProcess.getProcessId());
+    }
 
     store()
         .begin()
@@ -829,9 +972,7 @@ public class DefaultTableRuntime extends AbstractTableRuntime implements Optimiz
         .commit();
 
     optimizingMetrics.processComplete(processType, success, planTime);
-    if (optimizingProcess == null || optimizingProcess.getProcessId() == process.getProcessId()) {
-      optimizingProcess = null;
-    }
+    detachOptimizingProcess(process);
   }
 
   /**
@@ -841,6 +982,7 @@ public class DefaultTableRuntime extends AbstractTableRuntime implements Optimiz
    */
   public void completeEmptyProcess() {
     invalidateCurrentAnalysisKey();
+    OptimizingProcess expectedProcess = getOptimizingProcess();
     OptimizingStatus originalStatus = getOptimizingStatus();
     if (originalStatus == OptimizingStatus.IDLE) {
       return;
@@ -869,7 +1011,9 @@ public class DefaultTableRuntime extends AbstractTableRuntime implements Optimiz
             })
         .updateState(pendingInputKey, any -> pendingInputKey.getDefaultValue())
         .commit();
-    optimizingProcess = null;
+    if (expectedProcess != null) {
+      detachOptimizingProcess(expectedProcess);
+    }
   }
 
   public void optimizingNotNecessary() {
@@ -907,6 +1051,7 @@ public class DefaultTableRuntime extends AbstractTableRuntime implements Optimiz
   @Override
   public void dispose() {
     runtimeHealthState.clear();
+    deferredPlanningKey = null;
     invalidateCurrentAnalysisKey();
     unregisterMetric();
     store()
@@ -1022,9 +1167,11 @@ public class DefaultTableRuntime extends AbstractTableRuntime implements Optimiz
                                 evalResult.optimizingPendingInput().getTotalFileCount());
                           })
                       .commit();
+                  deferredPlanningKey = null;
                   if (recordRuntimeHealth(analysis)) {
                     refreshSummaryMetrics(evalResult.pendingInput(), analysis);
                   }
+                  evaluationDeadline = null;
                   transitioned.set(true);
                 } catch (Throwable throwable) {
                   if (analysis != null) {
@@ -1197,6 +1344,7 @@ public class DefaultTableRuntime extends AbstractTableRuntime implements Optimiz
   private void updateCurrentAnalysisKey(TableAnalysisKey analysisKey) {
     if (!Objects.equals(currentAnalysisKey, analysisKey)) {
       currentAnalysisKey = analysisKey;
+      evaluationDeadline = null;
       clearTableAnalysis();
     }
   }

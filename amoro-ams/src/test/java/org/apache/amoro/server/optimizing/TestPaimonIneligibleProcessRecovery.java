@@ -46,6 +46,7 @@ import org.apache.amoro.server.process.TableProcessMeta;
 import org.apache.amoro.server.resource.OptimizerThread;
 import org.apache.amoro.server.table.AMSTableTestBase;
 import org.apache.amoro.server.table.DefaultTableRuntime;
+import org.apache.amoro.server.table.DefaultTableRuntimeStore;
 import org.apache.amoro.utils.IdGenerator;
 import org.apache.amoro.utils.SerializationUtil;
 import org.junit.After;
@@ -397,8 +398,12 @@ public class TestPaimonIneligibleProcessRecovery extends AMSTableTestBase {
 
   private PlannedPaimonProcess plannedPaimonProcess() {
     long processId = IdGenerator.randomId();
-    DefaultTableRuntime runtime =
-        Mockito.spy(getDefaultTableRuntime(serverTableIdentifier().getId()));
+    DefaultTableRuntime managedRuntime = getDefaultTableRuntime(serverTableIdentifier().getId());
+    // These independent queues reconcile explicitly. A spy shares its store with the managed
+    // runtime, so default-service callbacks must not attach a second process to that runtime.
+    ((DefaultTableRuntimeStore) managedRuntime.store()).setRuntimeHandler(null);
+    Assert.assertNull(managedRuntime.getOptimizingProcess());
+    DefaultTableRuntime runtime = Mockito.spy(managedRuntime);
     Mockito.doReturn(TableFormat.PAIMON).when(runtime).getFormat();
     Mockito.doReturn(runtime).when(runtime).refresh(Mockito.any());
     Mockito.doReturn(1L).when(runtime).getCurrentSnapshotId();

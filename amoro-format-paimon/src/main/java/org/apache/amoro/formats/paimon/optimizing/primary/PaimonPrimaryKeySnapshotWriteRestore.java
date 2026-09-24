@@ -45,7 +45,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * 为全部合并单元准备同一执行时快照的数据文件与索引，writer 只消费已检查的恢复结果。 快照发现不列举 snapshot 目录；准备完成后不再读取 latest。
+ * 为全部合并单元准备同一执行时快照的数据文件与索引，writer 只消费已检查的恢复结果。 正常快照发现避免列举目录，追赶超限时使用原生发现；准备完成后不再读取 latest。
  *
  * <p>Paimon's default restore resolves the latest filesystem snapshot for every writer restore and
  * restores its data files, hash index, and deletion vectors. See Paimon 1.4.2 {@code
@@ -56,12 +56,15 @@ import java.util.Map;
  * https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/utils/HintFileUtils.java#L43-L55.
  *
  * <p>Amoro already knows the snapshot used by the optimizing plan. This restore treats that ID as a
- * lower bound, consults the {@code LATEST} hint, and then probes only consecutive snapshot paths.
- * This is valid because Paimon assigns every committed snapshot {@code latestSnapshot.id() + 1}.
- * See {@code FileStoreCommitImpl}:
+ * lower bound, consults the {@code LATEST} hint, and probes a bounded number of consecutive paths.
+ * Long gaps use native filesystem discovery once, which may list the snapshot directory. This is
+ * valid because Paimon assigns every committed snapshot {@code latestSnapshot.id() + 1}. See {@code
+ * FileStoreCommitImpl}:
  * https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/operation/FileStoreCommitImpl.java#L806-L814.
  */
 final class PaimonPrimaryKeySnapshotWriteRestore implements WriteRestore {
+
+  private static final int MAX_CONSECUTIVE_SNAPSHOT_PROBES = 32;
 
   private final SnapshotManager snapshotManager;
   private final FileStoreScan scan;
@@ -222,17 +225,32 @@ final class PaimonPrimaryKeySnapshotWriteRestore implements WriteRestore {
       latestKnownSnapshotId = hintedSnapshotId;
     }
 
-    // Probe exact snapshot paths instead of listing the directory. Besides avoiding the filesystem
-    // failure which triggered this restore, resolving at execution time is required for
+    // Keep short gaps on the exact-path fast path. Resolving at execution time is required for
     // correctness:
     // bucketed index manifests replace deletion-vector indexes by bucket identity, so restoring an
     // old planned snapshot can overwrite a concurrent update's deletion vector. See Paimon 1.4.2
     // IndexManifestFileHandler:
     // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/manifest/IndexManifestFileHandler.java#L171-L198.
-    while (latestKnownSnapshotId < Long.MAX_VALUE
-        && snapshotManager.snapshotExists(latestKnownSnapshotId + 1)) {
+    for (int probes = 0;
+        probes < MAX_CONSECUTIVE_SNAPSHOT_PROBES && latestKnownSnapshotId < Long.MAX_VALUE;
+        probes++) {
+      if (!snapshotManager.snapshotExists(latestKnownSnapshotId + 1)) {
+        return snapshotManager.snapshot(latestKnownSnapshotId);
+      }
       latestKnownSnapshotId++;
     }
-    return snapshotManager.snapshot(latestKnownSnapshotId);
+    if (latestKnownSnapshotId == Long.MAX_VALUE) {
+      return snapshotManager.snapshot(latestKnownSnapshotId);
+    }
+
+    // Paimon 1.4.2 resolves missing/stale hints by listing instead of chasing every snapshot ID.
+    // Freeze its result for this restore; do not chase concurrent writes again after relocation.
+    // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/utils/HintFileUtils.java#L43-L55
+    Snapshot latest = snapshotManager.latestSnapshotFromFileSystem();
+    if (latest == null || latest.id() < latestKnownSnapshotId) {
+      throw new IllegalStateException(
+          "Latest Paimon snapshot discovery did not reach known snapshot " + latestKnownSnapshotId);
+    }
+    return latest;
   }
 }

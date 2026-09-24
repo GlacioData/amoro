@@ -33,6 +33,7 @@ public class PaimonPrimaryKeyOptimizingEvaluation {
   private final boolean fullCompaction;
   private final long targetSnapshotId;
   private final PaimonPrimaryKeySnapshotAnalysis analysis;
+  private final long nextEvaluationTime;
 
   private PaimonPrimaryKeyOptimizingEvaluation(
       List<PaimonBucketCompactionUnit> units,
@@ -40,6 +41,17 @@ public class PaimonPrimaryKeyOptimizingEvaluation {
       boolean fullCompaction,
       long targetSnapshotId,
       PaimonPrimaryKeySnapshotAnalysis analysis) {
+    this(units, optimizingType, fullCompaction, targetSnapshotId, analysis, 0L);
+  }
+
+  private PaimonPrimaryKeyOptimizingEvaluation(
+      List<PaimonBucketCompactionUnit> units,
+      OptimizingType optimizingType,
+      boolean fullCompaction,
+      long targetSnapshotId,
+      PaimonPrimaryKeySnapshotAnalysis analysis,
+      long nextEvaluationTime) {
+    this.nextEvaluationTime = nextEvaluationTime;
     this.units =
         units == null
             ? Collections.emptyList()
@@ -78,6 +90,15 @@ public class PaimonPrimaryKeyOptimizingEvaluation {
       PaimonPrimaryKeySnapshotAnalysis analysis) {
     return new PaimonPrimaryKeyOptimizingEvaluation(
         units, optimizingType, fullCompaction, targetSnapshotId, analysis);
+  }
+
+  PaimonPrimaryKeyOptimizingEvaluation withNextEvaluationTime(long time) {
+    return new PaimonPrimaryKeyOptimizingEvaluation(
+        units, optimizingType, fullCompaction, targetSnapshotId, analysis, time);
+  }
+
+  public long nextEvaluationTime() {
+    return nextEvaluationTime;
   }
 
   public boolean necessary() {

@@ -20,6 +20,8 @@ package org.apache.amoro.formats.paimon.optimizing.health;
 
 import org.apache.amoro.TableFormat;
 import org.apache.amoro.config.OptimizingConfig;
+import org.apache.amoro.formats.paimon.optimizing.PaimonAppendCapabilities;
+import org.apache.amoro.formats.paimon.optimizing.PaimonAppendRewriteOptions;
 import org.apache.amoro.formats.paimon.optimizing.PaimonOptimizingEligibility;
 import org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeyOptions;
 import org.apache.amoro.optimizing.OptimizationContext;
@@ -119,7 +121,17 @@ public final class PaimonHealthEvaluationContext {
       String tableId,
       @Nullable OptimizationContext context,
       @Nullable Map<String, String> eligibilityTableOptions) {
-    return captureFixed(table, tableId, context, eligibilityTableOptions, null);
+    return captureAt(table, tableId, context, eligibilityTableOptions, System.currentTimeMillis());
+  }
+
+  /** Capture scheduling transitions at the same logical instant used by the planner. */
+  public static PaimonHealthEvaluationContext captureAt(
+      FileStoreTable table,
+      String tableId,
+      @Nullable OptimizationContext context,
+      @Nullable Map<String, String> eligibilityTableOptions,
+      long now) {
+    return captureFixed(table, tableId, context, eligibilityTableOptions, null, now);
   }
 
   /** Evaluate the supplied snapshot directly, without consulting latestSnapshot. */
@@ -129,7 +141,7 @@ public final class PaimonHealthEvaluationContext {
     if (table.schema().id() != snapshot.schemaId()) {
       throw new IllegalArgumentException("Historical table schema does not match snapshot schema");
     }
-    return captureFixed(table, tableId, null, null, snapshot);
+    return captureFixed(table, tableId, null, null, snapshot, snapshot.timeMillis());
   }
 
   private static PaimonHealthEvaluationContext captureFixed(
@@ -137,7 +149,8 @@ public final class PaimonHealthEvaluationContext {
       String tableId,
       @Nullable OptimizationContext context,
       @Nullable Map<String, String> eligibilityTableOptions,
-      @Nullable Snapshot fixedSnapshot) {
+      @Nullable Snapshot fixedSnapshot,
+      long now) {
     Objects.requireNonNull(table, "Paimon table must not be null");
     Objects.requireNonNull(tableId, "Table id must not be null");
 
@@ -199,6 +212,7 @@ public final class PaimonHealthEvaluationContext {
     }
     String fingerprint =
         fingerprint(
+            table,
             shape,
             bucketMode,
             schemaId,
@@ -207,7 +221,9 @@ public final class PaimonHealthEvaluationContext {
             rawOptions,
             eligibilityOptions,
             optimizingConfig,
-            configurationError);
+            configurationError,
+            context,
+            now);
     // Keep the full planning digest in the key, but identify structural diagnostics separately.
     // The versioned pair stays opaque to other formats and to the public key implementation.
     if (configurationError == null) {
@@ -281,6 +297,7 @@ public final class PaimonHealthEvaluationContext {
   }
 
   private static String fingerprint(
+      FileStoreTable table,
       TableShape shape,
       BucketMode bucketMode,
       long schemaId,
@@ -289,7 +306,9 @@ public final class PaimonHealthEvaluationContext {
       Map<String, String> rawOptions,
       Map<String, String> eligibilityOptions,
       @Nullable OptimizingConfig optimizingConfig,
-      @Nullable String configurationError) {
+      @Nullable String configurationError,
+      @Nullable OptimizationContext context,
+      long now) {
     FingerprintBuilder builder =
         new FingerprintBuilder()
             .add("tableFormat", TableFormat.PAIMON.name())
@@ -302,6 +321,29 @@ public final class PaimonHealthEvaluationContext {
             .add(
                 "selfOptimizingEnabled",
                 eligibilityOptions.get(PaimonOptimizingEligibility.SELF_OPTIMIZING_ENABLED));
+    if (shape == TableShape.APPEND && bucketMode == BucketMode.HASH_FIXED) {
+      addFixedAppendPlanningOptions(builder, (AppendOnlyFileStoreTable) table, eligibilityOptions);
+      if (context != null && optimizingConfig != null) {
+        // Source:
+        // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/operation/BaseAppendFileStoreWrite.java#L187-L222
+        // Native rewriting has no AMS clock wakeup. Encode only interval transitions in the
+        // planning digest: unchanged overdue state is consumed once, without manifest polling.
+        // The structural health digest below intentionally excludes these scheduling flags.
+        builder
+            .add(
+                "fixedAppendMinorDue",
+                intervalReached(
+                    now,
+                    context.getLastMinorOptimizingTime(),
+                    optimizingConfig.getMinorLeastInterval()))
+            .add(
+                "fixedAppendFullDue",
+                intervalReached(
+                    now,
+                    context.getLastFullOptimizingTime(),
+                    optimizingConfig.getFullTriggerInterval()));
+      }
+    }
     if (configurationError != null) {
       addInvalidOptions(builder, shape, bucketMode, rawOptions);
       return builder
@@ -317,6 +359,38 @@ public final class PaimonHealthEvaluationContext {
       addPrimaryKeyOptions(builder, bucketMode, options, optimizingConfig);
     }
     return builder.digest();
+  }
+
+  /** Match the existing Append planner's strict interval boundary, including disabled intervals. */
+  public static boolean intervalReached(long now, long lastOptimizingTime, long interval) {
+    return interval >= 0 && now >= lastOptimizingTime && now - lastOptimizingTime > interval;
+  }
+
+  private static void addFixedAppendPlanningOptions(
+      FingerprintBuilder builder,
+      AppendOnlyFileStoreTable table,
+      Map<String, String> mergedOptions) {
+    // Paimon ac223f47, operation/BaseAppendFileStoreWrite.java:187-222 creates the rewrite
+    // writer from bound options; CoreOptions.java:3654-3658 determines effective clustering.
+    // These decisions invalidate planning, not the independent structural health digest.
+    builder.add("fixedRewriteConstraints", PaimonAppendCapabilities.rewriteFingerprint(table));
+    builder.add(
+        "fixedRewriteAmoro", mergedOptions.get(PaimonAppendRewriteOptions.AMORO_FULL_REWRITE));
+    builder.add(
+        "fixedRewritePaimon",
+        mergedOptions.get(CoreOptions.COMPACTION_FORCE_REWRITE_ALL_FILES.key()));
+    try {
+      builder.add("fixedBucketCount", table.coreOptions().bucket());
+      builder.add(
+          "fixedCapability",
+          PaimonAppendCapabilities.fixedBucketRejection(table).orElse("SUPPORTED"));
+      PaimonAppendRewriteOptions rewrite = PaimonAppendRewriteOptions.from(mergedOptions);
+      builder.add("fixedRewriteAll", rewrite.fullRewriteAllFiles());
+      builder.add("fixedRewriteSource", rewrite.source().name());
+    } catch (RuntimeException e) {
+      // An invalid rewrite policy is not a manifest read failure or invalid structural health.
+      builder.add("fixedPlanningError", stableConfigurationError(e));
+    }
   }
 
   private static void addAppendOptions(

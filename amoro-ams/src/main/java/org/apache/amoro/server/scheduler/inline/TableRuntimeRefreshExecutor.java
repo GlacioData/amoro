@@ -88,6 +88,9 @@ public class TableRuntimeRefreshExecutor extends PeriodicTableScheduler {
       boolean keyBasedEvaluation = defaultTableRuntime.getCurrentAnalysisKey().isPresent();
       boolean healthNeedsEvaluation =
           keyBasedEvaluation && defaultTableRuntime.shouldEvaluateCurrentAnalysis();
+      // Planning inputs may change while the structural health result remains reusable.
+      boolean planningNeedsEvaluation =
+          keyBasedEvaluation && defaultTableRuntime.shouldEvaluateCurrentPlanningAnalysis();
       boolean retryUnoptimizedSnapshot =
           optimizingConfig.isEnabled() && defaultTableRuntime.isIdle() && snapshotChanged;
       boolean formatEvaluation =
@@ -99,7 +102,7 @@ public class TableRuntimeRefreshExecutor extends PeriodicTableScheduler {
       boolean shouldEvaluate =
           formatEvaluation
               || (keyBasedEvaluation
-                  ? healthNeedsEvaluation || retryUnoptimizedSnapshot
+                  ? planningNeedsEvaluation || retryUnoptimizedSnapshot
                   : snapshotChanged);
 
       boolean hasOptimizingDemand = false;

@@ -30,6 +30,7 @@ import org.apache.amoro.AmoroTable;
 import org.apache.amoro.BasicTableTestHelper;
 import org.apache.amoro.TableFormat;
 import org.apache.amoro.catalog.BasicCatalogTestHelper;
+import org.apache.amoro.formats.paimon.optimizing.PaimonPendingInput;
 import org.apache.amoro.optimizing.FormatTableAnalysis;
 import org.apache.amoro.optimizing.OptimizingType;
 import org.apache.amoro.optimizing.PendingInputResult;
@@ -129,6 +130,69 @@ public class TestDefaultTableRuntimePendingInputEvaluation extends AMSTableTestB
   }
 
   @Test
+  public void testRefreshablePendingEvaluationReplacesLegacySameSnapshotMarker() {
+    DefaultTableRuntime runtime = paimonRuntime();
+    PaimonPendingInput legacyPendingInput = new PaimonPendingInput();
+    runtime.setPendingInput(legacyPendingInput);
+    Assert.assertEquals(OptimizingStatus.PENDING, runtime.getOptimizingStatus());
+    Assert.assertEquals(runtime.getCurrentSnapshotId(), runtime.getLastOptimizedSnapshotId());
+    Assert.assertEquals(
+        runtime.getCurrentChangeSnapshotId(), runtime.getLastOptimizedChangeSnapshotId());
+    Assert.assertFalse(
+        legacyPendingInput.canPlanWithoutSnapshotChange(runtime, System.currentTimeMillis()));
+
+    PaimonPendingInput refreshedPendingInput = new PaimonPendingInput();
+    refreshedPendingInput.setSameSnapshotPlanningPending(true);
+    @SuppressWarnings("unchecked")
+    AmoroTable<Object> table = mock(AmoroTable.class);
+    when(table.supportsPendingInputRefresh()).thenReturn(true);
+    when(table.evaluatePendingInput(any(), anyInt()))
+        .thenReturn(
+            Optional.of(
+                new PendingInputResult(refreshedPendingInput, refreshedPendingInput, true, null)));
+
+    Assert.assertTrue(runtime.evaluatePendingInputAndTransition(table, MAX_PENDING_PARTITIONS));
+
+    Assert.assertEquals(OptimizingStatus.PENDING, runtime.getOptimizingStatus());
+    Assert.assertTrue(
+        runtime
+            .getPendingInput()
+            .canPlanWithoutSnapshotChange(runtime, System.currentTimeMillis()));
+  }
+
+  @Test
+  public void testRefreshableUnsupportedEvaluationClearsSameSnapshotMarker() {
+    DefaultTableRuntime runtime = paimonRuntime();
+    PaimonPendingInput pendingInput = new PaimonPendingInput();
+    pendingInput.setSameSnapshotPlanningPending(true);
+    runtime.setPendingInput(pendingInput);
+    Assert.assertEquals(OptimizingStatus.PENDING, runtime.getOptimizingStatus());
+    Assert.assertEquals(runtime.getCurrentSnapshotId(), runtime.getLastOptimizedSnapshotId());
+    Assert.assertEquals(
+        runtime.getCurrentChangeSnapshotId(), runtime.getLastOptimizedChangeSnapshotId());
+    Assert.assertTrue(
+        pendingInput.canPlanWithoutSnapshotChange(runtime, System.currentTimeMillis()));
+
+    PaimonPendingInput unsupportedPendingInput = new PaimonPendingInput();
+    @SuppressWarnings("unchecked")
+    AmoroTable<Object> table = mock(AmoroTable.class);
+    when(table.supportsPendingInputRefresh()).thenReturn(true);
+    when(table.evaluatePendingInput(any(), anyInt()))
+        .thenReturn(
+            Optional.of(
+                new PendingInputResult(
+                    unsupportedPendingInput, unsupportedPendingInput, false, null)));
+
+    Assert.assertFalse(runtime.evaluatePendingInputAndTransition(table, MAX_PENDING_PARTITIONS));
+
+    Assert.assertEquals(OptimizingStatus.IDLE, runtime.getOptimizingStatus());
+    Assert.assertFalse(
+        runtime
+            .getPendingInput()
+            .canPlanWithoutSnapshotChange(runtime, System.currentTimeMillis()));
+  }
+
+  @Test
   public void testDisabledSummaryEvaluationClearsPendingSummary() {
     DefaultTableRuntime runtime = getDefaultTableRuntime(serverTableIdentifier().getId());
     seedPendingSummary(runtime);
@@ -225,6 +289,104 @@ public class TestDefaultTableRuntimePendingInputEvaluation extends AMSTableTestB
   }
 
   @Test
+  public void testEmptyPlanDoesNotReevaluateDeterministicSameKey() {
+    DefaultTableRuntime runtime = paimonRuntime();
+    runtime.completeEmptyProcess();
+    TableAnalysisKey key = analysisKey(11L, TableFormat.PAIMON);
+    FormatTableAnalysis analysis = analysis(key, new AbstractOptimizingEvaluator.PendingInput());
+    PaimonPendingInput optimizingPendingInput = new PaimonPendingInput();
+    optimizingPendingInput.setSameSnapshotPlanningPending(true);
+
+    @SuppressWarnings("unchecked")
+    AmoroTable<Object> table = mock(AmoroTable.class);
+    when(table.properties()).thenReturn(Collections.emptyMap());
+    when(table.currentAnalysisKey(any())).thenReturn(Optional.of(key));
+    when(table.evaluatePendingInput(any(), anyInt()))
+        .thenReturn(
+            Optional.of(
+                new PendingInputResult(
+                    analysis.pendingInput(), optimizingPendingInput, true, analysis)));
+
+    runtime.refresh(table);
+    Assert.assertTrue(runtime.evaluatePendingInputAndTransition(table, MAX_PENDING_PARTITIONS));
+    Assert.assertTrue(
+        runtime
+            .getPendingInput()
+            .canPlanWithoutSnapshotChange(runtime, System.currentTimeMillis()));
+    runtime.completeEmptyProcess();
+    Assert.assertFalse(
+        runtime
+            .getPendingInput()
+            .canPlanWithoutSnapshotChange(runtime, System.currentTimeMillis()));
+    runtime.refresh(table);
+
+    Assert.assertFalse(runtime.shouldEvaluateCurrentPlanningAnalysis());
+    verify(table).evaluatePendingInput(any(), eq(MAX_PENDING_PARTITIONS));
+  }
+
+  @Test
+  public void testTimerPlanningKeyWakesSameSnapshotOnceAfterEmptyPlan() {
+    DefaultTableRuntime runtime = paimonRuntime();
+    runtime.completeEmptyProcess();
+    TableAnalysisKey before = analysisKey(11L, TableFormat.PAIMON);
+    TableAnalysisKey due =
+        new TableAnalysisKey(
+            before.getTableId(),
+            TableFormat.PAIMON,
+            before.getSnapshotId(),
+            before.getChangeSnapshotId(),
+            before.getSchemaId(),
+            "timer-due-fingerprint",
+            before.getFormulaVersion(),
+            before.getSuccessfulOptimizationBaselineId(),
+            before.getSuccessfulOptimizationBaselineTimeMillis());
+    java.util.concurrent.atomic.AtomicReference<TableAnalysisKey> clockKey =
+        new java.util.concurrent.atomic.AtomicReference<>(before);
+    AmoroTable<?> table = mock(AmoroTable.class);
+    when(table.properties()).thenReturn(Collections.emptyMap());
+    when(table.supportsPendingInputRefresh()).thenReturn(true);
+    when(table.currentAnalysisKey(any())).thenAnswer(ignored -> Optional.of(clockKey.get()));
+    when(table.evaluatePendingInput(any(), anyInt(), org.mockito.ArgumentMatchers.anyBoolean()))
+        .thenCallRealMethod();
+    when(table.evaluatePendingInput(any(), anyInt()))
+        .thenAnswer(
+            ignored -> {
+              FormatTableAnalysis facts =
+                  analysis(clockKey.get(), new AbstractOptimizingEvaluator.PendingInput());
+              PaimonPendingInput pending = new PaimonPendingInput();
+              pending.setSameSnapshotPlanningPending(true);
+              return Optional.of(
+                  new PendingInputResult(facts.pendingInput(), pending, true, facts));
+            });
+    TableService service = mock(TableService.class);
+    org.mockito.Mockito.doReturn(table).when(service).loadTable(any());
+    org.apache.amoro.server.scheduler.inline.TableRuntimeRefreshExecutor refresh =
+        new org.apache.amoro.server.scheduler.inline.TableRuntimeRefreshExecutor(
+            service, 1, 60000, MAX_PENDING_PARTITIONS);
+    try {
+      refresh.execute(runtime);
+      Assert.assertEquals(OptimizingStatus.PENDING, runtime.getOptimizingStatus());
+      runtime.completeEmptyProcess();
+      refresh.execute(runtime);
+      Assert.assertEquals(OptimizingStatus.IDLE, runtime.getOptimizingStatus());
+      // The format's real clock-to-key transition is covered by TestPaimonHealthFingerprint.
+      // This layer proves persisted empty-plan consumption and the unchanged-snapshot wakeup.
+      clockKey.set(due);
+      refresh.execute(runtime);
+      Assert.assertEquals(OptimizingStatus.PENDING, runtime.getOptimizingStatus());
+      Assert.assertTrue(runtime.getPendingInput().canPlanWithoutSnapshotChange(runtime, 0));
+      runtime.completeEmptyProcess();
+      refresh.execute(runtime);
+      Assert.assertEquals(OptimizingStatus.IDLE, runtime.getOptimizingStatus());
+      Assert.assertFalse(runtime.shouldEvaluateCurrentPlanningAnalysis());
+      verify(table, org.mockito.Mockito.times(2))
+          .evaluatePendingInput(any(), eq(MAX_PENDING_PARTITIONS));
+    } finally {
+      refresh.gracefulShutdown();
+    }
+  }
+
+  @Test
   public void testMismatchedTakeStillConsumesAnalysis() {
     DefaultTableRuntime runtime = getDefaultTableRuntime(serverTableIdentifier().getId());
     runtime.completeEmptyProcess();
@@ -243,6 +405,126 @@ public class TestDefaultTableRuntimePendingInputEvaluation extends AMSTableTestB
 
     Assert.assertFalse(runtime.takeTableAnalysis(analysisKey(13L)).isPresent());
     Assert.assertFalse(runtime.takeTableAnalysis(key).isPresent());
+  }
+
+  @Test
+  public void testDueDemandPublishedDuringPlanningSurvivesOldEmptyPlan() {
+    DefaultTableRuntime runtime = paimonRuntime();
+    runtime.completeEmptyProcess();
+    TableAnalysisKey before = analysisKey(11L, TableFormat.PAIMON);
+    TableAnalysisKey due =
+        new TableAnalysisKey(
+            before.getTableId(),
+            before.getTableFormat(),
+            before.getSnapshotId(),
+            before.getChangeSnapshotId(),
+            before.getSchemaId(),
+            "due-during-planning",
+            before.getFormulaVersion(),
+            before.getSuccessfulOptimizationBaselineId(),
+            before.getSuccessfulOptimizationBaselineTimeMillis());
+    java.util.concurrent.atomic.AtomicReference<TableAnalysisKey> clockKey =
+        new java.util.concurrent.atomic.AtomicReference<>(before);
+    java.util.concurrent.atomic.AtomicBoolean failNextScan =
+        new java.util.concurrent.atomic.AtomicBoolean();
+    AmoroTable<?> table = mock(AmoroTable.class);
+    when(table.properties()).thenReturn(Collections.emptyMap());
+    when(table.supportsPendingInputRefresh()).thenReturn(true);
+    when(table.currentAnalysisKey(any())).thenAnswer(ignored -> Optional.of(clockKey.get()));
+    when(table.evaluatePendingInput(any(), anyInt()))
+        .thenAnswer(
+            ignored -> {
+              if (failNextScan.getAndSet(false)) {
+                throw new IllegalStateException("Injected pending scan failure");
+              }
+              AbstractOptimizingEvaluator.PendingInput healthy =
+                  new AbstractOptimizingEvaluator.PendingInput() {
+                    @Override
+                    public int getHealthScore() {
+                      return 22;
+                    }
+                  };
+              FormatTableAnalysis facts = analysis(clockKey.get(), healthy);
+              PaimonPendingInput pending = new PaimonPendingInput();
+              pending.setSameSnapshotPlanningPending(true);
+              return Optional.of(
+                  new PendingInputResult(facts.pendingInput(), pending, true, facts));
+            });
+    runtime.refresh(table);
+    Assert.assertTrue(runtime.evaluatePendingInputAndTransition(table, MAX_PENDING_PARTITIONS));
+    runtime.beginPlanning();
+    clockKey.set(due);
+    runtime.refresh(table);
+    Assert.assertTrue(runtime.evaluatePendingInputAndTransition(table, MAX_PENDING_PARTITIONS));
+    Assert.assertEquals(OptimizingStatus.PLANNING, runtime.getOptimizingStatus());
+    Assert.assertEquals(
+        due.encoded(),
+        runtime.getRuntimeHealthSnapshot().get().getHealthDetails().getEvaluationKey());
+    Assert.assertFalse(runtime.shouldEvaluateCurrentPlanningAnalysis());
+
+    runtime.completeEmptyProcess();
+    runtime.setLastPlanTime(System.currentTimeMillis());
+    runtime.refresh(table);
+    Assert.assertTrue(runtime.shouldEvaluateCurrentPlanningAnalysis());
+    failNextScan.set(true);
+    Assert.assertThrows(
+        IllegalStateException.class,
+        () -> runtime.evaluatePendingInputAndTransition(table, MAX_PENDING_PARTITIONS));
+    Assert.assertFalse(runtime.shouldEvaluateCurrentPlanningAnalysis());
+    Assert.assertTrue(runtime.evaluatePendingInputAndTransition(table, MAX_PENDING_PARTITIONS));
+    Assert.assertEquals(OptimizingStatus.PENDING, runtime.getOptimizingStatus());
+    Assert.assertTrue(runtime.getPendingInput().canPlanWithoutSnapshotChange(runtime, 0));
+    runtime.completeEmptyProcess();
+    runtime.refresh(table);
+    Assert.assertFalse(runtime.shouldEvaluateCurrentPlanningAnalysis());
+  }
+
+  @Test
+  public void testKeyTransitionDuringEvaluationDoesNotConsumeUnpublishedDemand() {
+    DefaultTableRuntime runtime = paimonRuntime();
+    runtime.completeEmptyProcess();
+    TableAnalysisKey before = analysisKey(11L, TableFormat.PAIMON);
+    TableAnalysisKey due =
+        new TableAnalysisKey(
+            before.getTableId(),
+            before.getTableFormat(),
+            before.getSnapshotId(),
+            before.getChangeSnapshotId(),
+            before.getSchemaId(),
+            "due",
+            before.getFormulaVersion(),
+            before.getSuccessfulOptimizationBaselineId(),
+            before.getSuccessfulOptimizationBaselineTimeMillis());
+    java.util.concurrent.atomic.AtomicReference<TableAnalysisKey> current =
+        new java.util.concurrent.atomic.AtomicReference<>(before);
+    AmoroTable<?> table = mock(AmoroTable.class);
+    when(table.properties()).thenReturn(Collections.emptyMap());
+    when(table.supportsPendingInputRefresh()).thenReturn(true);
+    when(table.currentAnalysisKey(any())).thenAnswer(ignored -> Optional.of(current.get()));
+    when(table.evaluatePendingInput(any(), anyInt()))
+        .thenAnswer(
+            ignored -> {
+              // Force the exact interleaving: preflight old, captured result new, recheck new.
+              current.set(due);
+              FormatTableAnalysis facts =
+                  analysis(due, new AbstractOptimizingEvaluator.PendingInput());
+              PaimonPendingInput pending = new PaimonPendingInput();
+              pending.setSameSnapshotPlanningPending(true);
+              return Optional.of(
+                  new PendingInputResult(facts.pendingInput(), pending, true, facts));
+            });
+    runtime.refresh(table);
+    Assert.assertFalse(runtime.evaluatePendingInputAndTransition(table, MAX_PENDING_PARTITIONS));
+    Assert.assertEquals(OptimizingStatus.IDLE, runtime.getOptimizingStatus());
+    Assert.assertEquals(Optional.of(due), runtime.getCurrentAnalysisKey());
+    Assert.assertTrue(runtime.shouldEvaluateCurrentPlanningAnalysis());
+    Assert.assertFalse(runtime.takeTableAnalysis(due).isPresent());
+    runtime.refresh(table);
+    Assert.assertTrue(runtime.evaluatePendingInputAndTransition(table, MAX_PENDING_PARTITIONS));
+    Assert.assertEquals(OptimizingStatus.PENDING, runtime.getOptimizingStatus());
+    runtime.completeEmptyProcess();
+    runtime.refresh(table);
+    Assert.assertFalse(runtime.shouldEvaluateCurrentPlanningAnalysis());
   }
 
   @Test
@@ -493,7 +775,12 @@ public class TestDefaultTableRuntimePendingInputEvaluation extends AMSTableTestB
             serverTableIdentifier().getIdentifier(), TableFormat.PAIMON);
     id.setId(serverTableIdentifier().getId());
     org.mockito.Mockito.doReturn(id).when(store).getTableIdentifier();
-    return new DefaultTableRuntime(store, () -> mock(AmoroTable.class));
+    return new DefaultTableRuntime(
+        store,
+        () -> mock(AmoroTable.class),
+        org.apache.amoro.table.StateKey.stateKey("pending_input")
+            .jsonType(PaimonPendingInput.class)
+            .defaultValue(new PaimonPendingInput()));
   }
 
   private TableAnalysisKey analysisKey(long snapshotId) {

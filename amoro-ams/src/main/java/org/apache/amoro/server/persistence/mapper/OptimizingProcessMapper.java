@@ -172,12 +172,14 @@ public interface OptimizingProcessMapper {
 
   /**
    * Loads task state without materializing {@code rewrite_output}. This is only used to close an
-   * otherwise unrecoverable process when the output BLOB itself is corrupt.
+   * otherwise unrecoverable process when the output BLOB itself is corrupt. MyBatis applies a
+   * property mapping only when its column exists in the result set, so omitting the column also
+   * avoids invoking its payload type handler.
    */
   @Select(
       "SELECT process_id, task_id, 'executing' as stage, retry_num, table_id, partition_data, "
           + "create_time, start_time, end_time, status, fail_reason, optimizer_token, thread_id, "
-          + "NULL AS rewrite_output, metrics_summary, properties FROM task_runtime "
+          + "metrics_summary, properties FROM task_runtime "
           + "WHERE table_id = #{table_id} AND process_id = #{process_id}")
   @ResultMap("taskRuntimeDescriptorMap")
   List<TaskRuntime<? extends StagedTaskDescriptor<? extends BaseOptimizingInput, ?, ?>>>

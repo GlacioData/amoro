@@ -86,9 +86,12 @@ class TestRuntimeHealthState {
     for (int i = 0; i < 12; i++) {
       state.update(analysis(1, -1, "SNAPSHOT_SCAN_FAILED"));
       assertFalse(state.shouldEvaluate(key(1)));
+      assertFalse(state.shouldEvaluateAnalysis(key(1)));
       assertTrue(state.shouldEvaluate(key(2)));
+      assertTrue(state.shouldEvaluateAnalysis(key(2)));
       clock.addAndGet(60000);
       assertTrue(state.shouldEvaluate(key(1)));
+      assertTrue(state.shouldEvaluateAnalysis(key(1)));
     }
     state.update(analysis(1, -1, "DELETE_METADATA_INCOMPLETE"));
     clock.addAndGet(600000);
@@ -387,28 +390,60 @@ class TestRuntimeHealthState {
     return analysis;
   }
 
+  @Test
+  void planningDigestChangeRequiresAnalysisWithoutInvalidatingStructuralHealth() {
+    RuntimeHealthState state =
+        new RuntimeHealthState(TableFormatSupports.instance().healthSupport(TableFormat.PAIMON));
+    TableAnalysisKey evaluated = dualFingerprintKey(1, 'a', 'b');
+    state.update(analysis(evaluated, 90, null));
+
+    assertFalse(state.shouldEvaluate(evaluated));
+    assertFalse(state.shouldEvaluateAnalysis(evaluated));
+
+    TableAnalysisKey planningChanged = dualFingerprintKey(1, 'a', 'c');
+    assertFalse(state.shouldEvaluate(planningChanged));
+    assertTrue(state.shouldEvaluateAnalysis(planningChanged));
+    assertFalse(state.snapshot(planningChanged).get().getEvaluation().isStale());
+  }
+
   private static TableAnalysisKey key(long id) {
     return new TableAnalysisKey("1", TableFormat.PAIMON, id, -1, 1, "config", "v3", -1, -1);
   }
 
   private static FormatTableAnalysis analysis(long id, int score, String reason) {
+    return analysis(key(id), score, reason);
+  }
+
+  private static FormatTableAnalysis analysis(TableAnalysisKey key, int score, String reason) {
     FormatTableAnalysis analysis = mock(FormatTableAnalysis.class);
     FormatPendingInput input = mock(FormatPendingInput.class);
     when(input.getHealthScore()).thenReturn(score);
-    when(analysis.key()).thenReturn(key(id));
+    when(analysis.key()).thenReturn(key);
     when(analysis.pendingInput()).thenReturn(input);
     when(analysis.healthDetails())
         .thenReturn(
             new TableHealthDetails(
                 "v3",
-                id,
+                key.getSnapshotId(),
                 null,
-                1L,
-                "config",
-                key(id).encoded(),
+                key.getSchemaId(),
+                key.getScoringConfigFingerprint(),
+                key.encoded(),
                 null,
                 null,
                 reason == null ? Collections.emptyList() : Collections.singletonList(reason)));
     return analysis;
+  }
+
+  private static TableAnalysisKey dualFingerprintKey(
+      long snapshotId, char healthDigest, char planningDigest) {
+    String fingerprint =
+        "paimon-health-v1:" + repeat(healthDigest, 64) + ":" + repeat(planningDigest, 64);
+    return new TableAnalysisKey(
+        "1", TableFormat.PAIMON, snapshotId, -1, 1, fingerprint, "v3", -1, -1);
+  }
+
+  private static String repeat(char value, int count) {
+    return String.join("", Collections.nCopies(count, String.valueOf(value)));
   }
 }

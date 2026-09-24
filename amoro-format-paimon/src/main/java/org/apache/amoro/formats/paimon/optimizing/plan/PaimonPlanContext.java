@@ -20,6 +20,8 @@ package org.apache.amoro.formats.paimon.optimizing.plan;
 
 import org.apache.amoro.OptimizerProperties;
 import org.apache.amoro.config.OptimizingConfig;
+import org.apache.amoro.formats.paimon.optimizing.PaimonAppendRewriteOptions;
+import org.apache.amoro.formats.paimon.optimizing.health.PaimonHealthEvaluationContext;
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.options.Options;
 
@@ -43,6 +45,7 @@ final class PaimonPlanContext {
   private final int fileNumLimit;
   private final double deleteRatioThreshold;
   private final long openFileCost;
+  private final PaimonAppendRewriteOptions fixedRewriteOptions;
 
   private PaimonPlanContext(
       CoreOptions coreOptions,
@@ -53,6 +56,29 @@ final class PaimonPlanContext {
       double availableCore,
       long maxInputSizePerThread,
       long planTime) {
+    this(
+        coreOptions,
+        optimizingConfig,
+        lastMinorOptimizingTime,
+        lastMajorOptimizingTime,
+        lastFullOptimizingTime,
+        availableCore,
+        maxInputSizePerThread,
+        planTime,
+        null);
+  }
+
+  private PaimonPlanContext(
+      CoreOptions coreOptions,
+      OptimizingConfig optimizingConfig,
+      long lastMinorOptimizingTime,
+      long lastMajorOptimizingTime,
+      long lastFullOptimizingTime,
+      double availableCore,
+      long maxInputSizePerThread,
+      long planTime,
+      PaimonAppendRewriteOptions fixedRewriteOptions) {
+    this.fixedRewriteOptions = fixedRewriteOptions;
     this.coreOptions = coreOptions;
     this.optimizingConfig = optimizingConfig == null ? new OptimizingConfig() : optimizingConfig;
     this.lastMinorOptimizingTime = lastMinorOptimizingTime;
@@ -100,6 +126,19 @@ final class PaimonPlanContext {
 
   CoreOptions coreOptions() {
     return coreOptions;
+  }
+
+  PaimonPlanContext withFixedRewriteOptions(PaimonAppendRewriteOptions options) {
+    return new PaimonPlanContext(
+        coreOptions,
+        optimizingConfig,
+        lastMinorOptimizingTime,
+        lastMajorOptimizingTime,
+        lastFullOptimizingTime,
+        availableCore,
+        maxInputSizePerThread,
+        planTime,
+        java.util.Objects.requireNonNull(options, "fixed rewrite options"));
   }
 
   OptimizingConfig optimizingConfig() {
@@ -155,17 +194,19 @@ final class PaimonPlanContext {
   }
 
   boolean reachMinorInterval() {
-    return optimizingConfig.getMinorLeastInterval() >= 0
-        && planTime - lastMinorOptimizingTime > optimizingConfig.getMinorLeastInterval();
+    return PaimonHealthEvaluationContext.intervalReached(
+        planTime, lastMinorOptimizingTime, optimizingConfig.getMinorLeastInterval());
   }
 
   boolean reachFullInterval() {
-    return optimizingConfig.getFullTriggerInterval() >= 0
-        && planTime - lastFullOptimizingTime > optimizingConfig.getFullTriggerInterval();
+    return PaimonHealthEvaluationContext.intervalReached(
+        planTime, lastFullOptimizingTime, optimizingConfig.getFullTriggerInterval());
   }
 
   boolean fullRewriteAllFiles() {
-    return optimizingConfig.isFullRewriteAllFiles();
+    return fixedRewriteOptions == null
+        ? optimizingConfig.isFullRewriteAllFiles()
+        : fixedRewriteOptions.fullRewriteAllFiles();
   }
 
   long effectiveTaskInputLimit() {

@@ -32,6 +32,40 @@ public final class PaimonCompactionSchema {
 
   private PaimonCompactionSchema() {}
 
+  static FileStoreTable refreshFixed(
+      FileStoreTable original, long requiredSchemaId, long snapshotId) {
+    FileStoreTable current = refresh(original, requiredSchemaId, snapshotId);
+    // Fixed append additionally preserves every column in its exact prepared inputs.
+    // Keep the existing primary-key and bucket-unaware refresh contract unchanged.
+    validateRewriteSchema(original, requiredSchemaId, current.schema().id());
+    return current;
+  }
+
+  static void validateRewriteSchema(
+      FileStoreTable original, long requiredSchemaId, long outputSchemaId) {
+    if (requiredSchemaId <= original.schema().id()) {
+      if (outputSchemaId != original.schema().id()) {
+        throw new IllegalArgumentException("Rewrite output changed the bound writer schema");
+      }
+      return;
+    }
+    if (outputSchemaId < requiredSchemaId) {
+      throw new IllegalArgumentException("Rewrite output schema is behind prepared inputs");
+    }
+    // Paimon ac223f47, AbstractFileStoreTable.java:382-393 retains bound execution options.
+    // Validate the immutable schema used by the output, not a later concurrent latest schema.
+    TableSchema outputSchema = original.schemaManager().schema(outputSchemaId);
+    FileStoreTable output = original.copy(outputSchema.copy(original.options()));
+    validateCompatibility(original, output);
+    FileStoreTable required =
+        original.copy(original.schemaManager().schema(requiredSchemaId).copy(original.options()));
+    // Same SHA, schema/SchemaEvolutionUtil.java:79-100 maps existing values by field id.
+    // A column added after the bound schema is still an input column: a later output schema
+    // must not silently discard it just because original -> output alone looks compatible.
+    validateCompatibility(original, required);
+    validateCompatibility(required, output);
+  }
+
   public static FileStoreTable refresh(
       FileStoreTable original, long requiredSchemaId, long snapshotId) {
     FileStoreTable current = original;

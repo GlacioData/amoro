@@ -33,8 +33,22 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 
-class TestPaimonHealthSupport {
+public class TestPaimonHealthSupport {
   @org.junit.jupiter.api.io.TempDir java.nio.file.Path warehouse;
+
+  public static org.apache.amoro.optimizing.FormatTableAnalysis evaluateHistorical(
+      org.apache.paimon.table.FileStoreTable table, String tableId, long snapshotId) {
+    return PaimonHistoricalHealth.evaluate(table, tableId, snapshotId);
+  }
+
+  public static void buildComparison(
+      Entry entry,
+      org.apache.paimon.table.FileStoreTable table,
+      String tableId,
+      org.apache.amoro.table.health.TableHealthDetails currentDetails,
+      int currentScore) {
+    PaimonHealthSupport.build(entry, table, tableId, currentDetails, currentScore);
+  }
 
   @Test
   void extractsCompleteFileStatisticsDespitePartialHealthEvaluation() {

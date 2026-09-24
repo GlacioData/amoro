@@ -250,17 +250,28 @@ public class PaimonPrimaryKeyOptimizingEvaluator {
         return PaimonPrimaryKeyOptimizingEvaluation.of(
             normalCandidates, OptimizingType.MINOR, false, targetSnapshot.id());
       }
-      return evaluateFull(
-          table,
-          tableName,
-          snapshotFiles,
-          allUnits,
-          primaryKeyOptions,
-          effectiveConfig,
-          lastFullOptimizingTime,
-          planTime,
-          targetSnapshot.id(),
-          fullRetryNotBefore);
+      PaimonPrimaryKeyOptimizingEvaluation full =
+          evaluateFull(
+              table,
+              tableName,
+              snapshotFiles,
+              allUnits,
+              primaryKeyOptions,
+              effectiveConfig,
+              lastFullOptimizingTime,
+              planTime,
+              targetSnapshot.id(),
+              fullRetryNotBefore);
+      if (!full.necessary()
+          && !normalCandidates.isEmpty()
+          && effectiveConfig.isEnabled()
+          && effectiveConfig.getMinorLeastInterval() >= 0
+          && PaimonManagedGentle.isAffected(table)) {
+        return full.withNextEvaluationTime(
+            PaimonManagedGentle.nextEvaluationTime(
+                lastMinorOptimizingTime, effectiveConfig.getMinorLeastInterval()));
+      }
+      return full;
     } catch (RuntimeException e) {
       LOG.warn(
           "Failed to evaluate fixed snapshot [{}] for Paimon primary-key table [{}]; skip "
@@ -379,18 +390,29 @@ public class PaimonPrimaryKeyOptimizingEvaluator {
         return PaimonPrimaryKeyOptimizingEvaluation.of(
             normalCandidates, OptimizingType.MINOR, false, targetSnapshotId, analysis);
       }
-      return evaluateFull(
-          table,
-          tableName,
-          healthContext,
-          analysis,
-          allUnits,
-          primaryKeyOptions,
-          effectiveConfig,
-          lastFullOptimizingTime,
-          planTime,
-          targetSnapshotId,
-          fullRetryNotBefore);
+      PaimonPrimaryKeyOptimizingEvaluation full =
+          evaluateFull(
+              table,
+              tableName,
+              healthContext,
+              analysis,
+              allUnits,
+              primaryKeyOptions,
+              effectiveConfig,
+              lastFullOptimizingTime,
+              planTime,
+              targetSnapshotId,
+              fullRetryNotBefore);
+      if (!full.necessary()
+          && !normalCandidates.isEmpty()
+          && effectiveConfig.isEnabled()
+          && effectiveConfig.getMinorLeastInterval() >= 0
+          && PaimonManagedGentle.isAffected(table)) {
+        return full.withNextEvaluationTime(
+            PaimonManagedGentle.nextEvaluationTime(
+                lastMinorOptimizingTime, effectiveConfig.getMinorLeastInterval()));
+      }
+      return full;
     } catch (RuntimeException e) {
       LOG.warn(
           "Failed to decide optimizing for analyzed Paimon primary-key snapshot [{}] of table "

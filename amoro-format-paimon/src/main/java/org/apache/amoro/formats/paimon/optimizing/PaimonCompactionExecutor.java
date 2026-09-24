@@ -35,7 +35,7 @@ import org.slf4j.LoggerFactory;
 import java.util.Collections;
 
 /**
- * Optimizer-side executor that performs Paimon BUCKET_UNAWARE compaction for one task.
+ * Optimizer-side executor for ordinary Paimon Append compaction in either bucket mode.
  *
  * <p>Reuses the Paimon-native path: {@link AppendCompactTask#doCompact} internally calls {@code
  * BaseAppendFileStoreWrite#compactRewrite} and returns a ready-to-commit {@link CommitMessage}.
@@ -72,6 +72,48 @@ public class PaimonCompactionExecutor implements OptimizingExecutor<PaimonCompac
               + ".");
     }
 
+    CommitMessage message =
+        input.getSerializerVersion() == PaimonFixedBucketTaskSerializer.VERSION
+            ? PaimonFixedBucketRewrite.execute(input)
+            : executeUnaware();
+
+    byte[] msgBytes;
+    CommitMessageSerializer msgSerializer = new CommitMessageSerializer();
+    int msgVersion = msgSerializer.getVersion();
+    try {
+      msgBytes = msgSerializer.serialize(message);
+    } catch (Exception e) {
+      throw new IllegalStateException(
+          "Failed to serialize Paimon CommitMessage for partition " + input.getPartitionPath(), e);
+    }
+
+    PaimonRewriteMetrics metrics = PaimonRewriteMetrics.collect(Collections.singletonList(message));
+    long compactedFileCount = metrics.inputFiles();
+    long compactedFileSize = metrics.inputBytes();
+    long producedFileCount = metrics.outputFiles();
+    long producedFileSize = metrics.outputBytes();
+
+    LOG.info(
+        "Paimon compaction done: partition={} compactedFiles={} compactedBytes={} producedFiles={} producedBytes={}",
+        input.getPartitionPath(),
+        compactedFileCount,
+        compactedFileSize,
+        producedFileCount,
+        producedFileSize);
+
+    PaimonCompactionOutput output =
+        new PaimonCompactionOutput(
+            msgBytes,
+            msgVersion,
+            compactedFileCount,
+            compactedFileSize,
+            producedFileCount,
+            producedFileSize);
+    output.setRewriteRecords(metrics.inputRecords(), metrics.outputRecords());
+    return output;
+  }
+
+  private CommitMessage executeUnaware() {
     AppendCompactTask task;
     try {
       task =
@@ -123,40 +165,6 @@ public class PaimonCompactionExecutor implements OptimizingExecutor<PaimonCompac
             closeErr.getMessage());
       }
     }
-
-    byte[] msgBytes;
-    CommitMessageSerializer msgSerializer = new CommitMessageSerializer();
-    int msgVersion = msgSerializer.getVersion();
-    try {
-      msgBytes = msgSerializer.serialize(message);
-    } catch (Exception e) {
-      throw new IllegalStateException(
-          "Failed to serialize Paimon CommitMessage for partition " + input.getPartitionPath(), e);
-    }
-
-    PaimonRewriteMetrics metrics = PaimonRewriteMetrics.collect(Collections.singletonList(message));
-    long compactedFileCount = metrics.inputFiles();
-    long compactedFileSize = metrics.inputBytes();
-    long producedFileCount = metrics.outputFiles();
-    long producedFileSize = metrics.outputBytes();
-
-    LOG.info(
-        "Paimon compaction done: partition={} compactedFiles={} compactedBytes={} producedFiles={} producedBytes={}",
-        input.getPartitionPath(),
-        compactedFileCount,
-        compactedFileSize,
-        producedFileCount,
-        producedFileSize);
-
-    PaimonCompactionOutput output =
-        new PaimonCompactionOutput(
-            msgBytes,
-            msgVersion,
-            compactedFileCount,
-            compactedFileSize,
-            producedFileCount,
-            producedFileSize);
-    output.setRewriteRecords(metrics.inputRecords(), metrics.outputRecords());
-    return output;
+    return message;
   }
 }

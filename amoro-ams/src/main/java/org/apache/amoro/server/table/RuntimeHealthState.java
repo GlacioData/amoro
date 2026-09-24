@@ -101,6 +101,23 @@ final class RuntimeHealthState {
 
   boolean shouldEvaluate(TableAnalysisKey key) {
     EvaluationAttempt attempt = state.get().attempt;
+    return shouldEvaluateHealth(key, attempt);
+  }
+
+  boolean shouldEvaluateAnalysis(TableAnalysisKey key) {
+    EvaluationAttempt attempt = state.get().attempt;
+    return shouldEvaluateHealth(key, attempt)
+        || !Objects.equals(key.encoded(), attempt.details.getEvaluationKey());
+  }
+
+  boolean hasSuccessfulAnalysis(TableAnalysisKey key) {
+    EvaluationAttempt attempt = state.get().attempt;
+    return attempt != null
+        && attempt.outcome == EvaluationOutcome.SUCCESS
+        && key.encoded().equals(attempt.evaluationKey);
+  }
+
+  private boolean shouldEvaluateHealth(TableAnalysisKey key, EvaluationAttempt attempt) {
     return attempt == null
         || !support.sameInput(key, attempt.details)
         || (attempt.outcome == EvaluationOutcome.RETRYABLE_FAILURE

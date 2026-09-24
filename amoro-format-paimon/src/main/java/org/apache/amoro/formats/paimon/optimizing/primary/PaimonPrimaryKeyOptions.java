@@ -73,6 +73,12 @@ public class PaimonPrimaryKeyOptions {
       // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/mergetree/compact/EarlyFullCompaction.java#L57-L81
       options.remove(CoreOptions.COMPACTION_OPTIMIZATION_INTERVAL.key());
     }
+    if (PaimonManagedGentle.isAffected(originalOptions.toMap())) {
+      // Native GENTLE keeps its counter in a strategy instance, which is recreated per task.
+      // Use the native stateless L0 fallback in both planning and execution copies only.
+      // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/mergetree/compact/ForceUpLevel0Compaction.java#L50-L76
+      options.put(CoreOptions.LOOKUP_COMPACT.key(), "radical");
+    }
     return CoreOptions.fromMap(options);
   }
 
@@ -85,6 +91,9 @@ public class PaimonPrimaryKeyOptions {
       // 源码：paimon-core/src/main/java/org/apache/paimon/table/AbstractFileStoreTable.java
       // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/table/AbstractFileStoreTable.java#L322-L378
       overrides.put(CoreOptions.COMPACTION_OPTIMIZATION_INTERVAL.key(), null);
+    }
+    if (PaimonManagedGentle.isAffected(originalOptions)) {
+      overrides.put(CoreOptions.LOOKUP_COMPACT.key(), "radical");
     }
     overrides.put(CoreOptions.WRITE_ONLY.key(), "false");
     return overrides;

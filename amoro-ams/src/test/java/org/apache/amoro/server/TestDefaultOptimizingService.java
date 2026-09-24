@@ -785,6 +785,11 @@ public class TestDefaultOptimizingService extends AMSTableTestBase {
     DefaultTableRuntime runtime = getDefaultTableRuntime(serverTableIdentifier().getId());
     SchedulingPolicy policy = getSchedulingPolicy(runtime.getGroupName());
 
+    // prepare() already leaves this runtime PENDING. Exercise a real status transition;
+    // persisting PENDING again correctly emits no status-changed notification.
+    Assertions.assertEquals(OptimizingStatus.PENDING, runtime.getOptimizingStatus());
+    runtime.beginPlanning();
+    Assertions.assertEquals(OptimizingStatus.PLANNING, runtime.getOptimizingStatus());
     policy.removeTable(runtime);
     Assertions.assertFalse(
         policy.tableIdentifiersSnapshot().contains(runtime.getTableIdentifier()));

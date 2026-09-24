@@ -18,6 +18,7 @@
 
 package org.apache.amoro.formats.paimon.optimizing;
 
+import org.apache.amoro.formats.paimon.optimizing.primary.PaimonManagedGentle;
 import org.apache.amoro.table.FormatPendingInput;
 
 /** Paimon-specific pending input metrics collected during the refresh phase. */
@@ -26,7 +27,9 @@ public class PaimonPendingInput implements FormatPendingInput {
   @Override
   public boolean canPlanWithoutSnapshotChange(
       org.apache.amoro.optimizing.OptimizationContext context, long now) {
-    return fullCompactionPending && PaimonFullScheduling.isDue(context, now);
+    return sameSnapshotPlanningPending
+        || (fullCompactionPending && PaimonFullScheduling.isDue(context, now))
+        || (gentleMinorCompactionPending && PaimonManagedGentle.canSchedule(context, now));
   }
 
   // ---- Workload dimension ----
@@ -50,12 +53,35 @@ public class PaimonPendingInput implements FormatPendingInput {
   // false.
   private boolean fullCompactionPending;
 
+  // A fixed-bucket Append capability/configuration change can create fresh planning demand without
+  // publishing a new Paimon snapshot. Older pending_input JSON defaults this field to false.
+  private boolean sameSnapshotPlanningPending;
+
+  // Confirmed MINOR demand for an affected, originally GENTLE primary-key table.
+  private boolean gentleMinorCompactionPending;
+
+  public boolean isGentleMinorCompactionPending() {
+    return gentleMinorCompactionPending;
+  }
+
+  public void setGentleMinorCompactionPending(boolean value) {
+    gentleMinorCompactionPending = value;
+  }
+
   public boolean isFullCompactionPending() {
     return fullCompactionPending;
   }
 
   public void setFullCompactionPending(boolean fullCompactionPending) {
     this.fullCompactionPending = fullCompactionPending;
+  }
+
+  public boolean isSameSnapshotPlanningPending() {
+    return sameSnapshotPlanningPending;
+  }
+
+  public void setSameSnapshotPlanningPending(boolean sameSnapshotPlanningPending) {
+    this.sameSnapshotPlanningPending = sameSnapshotPlanningPending;
   }
 
   public PaimonPendingInput() {}

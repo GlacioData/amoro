@@ -58,6 +58,9 @@ import org.apache.amoro.process.ProcessStatus;
 import org.apache.amoro.resource.ResourceGroup;
 import org.apache.amoro.server.catalog.CatalogManager;
 import org.apache.amoro.server.manager.MetricManager;
+import org.apache.amoro.server.persistence.PersistentBase;
+import org.apache.amoro.server.persistence.mapper.OptimizingProcessMapper;
+import org.apache.amoro.server.persistence.mapper.TableRuntimeMapper;
 import org.apache.amoro.server.process.ProcessFactoryRouter;
 import org.apache.amoro.server.process.TableProcessMeta;
 import org.apache.amoro.server.process.iceberg.IcebergProcessFactory;
@@ -66,6 +69,7 @@ import org.apache.amoro.server.resource.OptimizerThread;
 import org.apache.amoro.server.resource.QuotaProvider;
 import org.apache.amoro.server.table.AMSTableTestBase;
 import org.apache.amoro.server.table.DefaultTableRuntime;
+import org.apache.amoro.server.table.DefaultTableRuntimeStore;
 import org.apache.amoro.shade.guava32.com.google.common.collect.ImmutableMap;
 import org.apache.amoro.shade.guava32.com.google.common.collect.Lists;
 import org.apache.amoro.table.MixedTable;
@@ -1075,6 +1079,18 @@ public class TestOptimizingQueue extends AMSTableTestBase {
                 SerializationUtil.simpleSerialize(new RewriteFilesOutput(null, null, null))));
     Assert.assertEquals(OptimizingStatus.COMMITTING, runtime.getOptimizingStatus());
 
+    OptimizingProcess originalProcess = runtime.getOptimizingProcess();
+    Assert.assertNotNull(originalProcess);
+    long processId = runtime.getProcessId();
+    // Recovery is an ownership handoff, not a replacement of a live NORMAL process. The format
+    // spy shares this store, so keep configuration callbacks out of the unrelated default queue.
+    ((DefaultTableRuntimeStore) runtime.store()).setRuntimeHandler(null);
+    originalQueue.detachTable(runtime);
+    Assert.assertNull(runtime.getOptimizingProcess());
+    Assert.assertTrue(originalQueue.collectTasks().isEmpty());
+    Assert.assertEquals(processId, runtime.getProcessId());
+    new ReplayRecoveryPersistency().assertCommittingTask(task);
+
     DefaultTableRuntime paimonRuntime = Mockito.spy(runtime);
     Mockito.doReturn(TableFormat.PAIMON).when(paimonRuntime).getFormat();
     paimonRuntime
@@ -1109,6 +1125,8 @@ public class TestOptimizingQueue extends AMSTableTestBase {
 
     OptimizingProcess recoveredProcess = paimonRuntime.getOptimizingProcess();
     Assert.assertNotNull(recoveredProcess);
+    Assert.assertNotSame(originalProcess, recoveredProcess);
+    Assert.assertEquals(processId, recoveredProcess.getProcessId());
     Assert.assertEquals(CommitMode.RECOVERY_REPLAY, commitMode(recoveredProcess));
     Assert.assertTrue(canReplayPaimonCommittingProcess(recoveryQueue, recoveredProcess));
 
@@ -1118,6 +1136,24 @@ public class TestOptimizingQueue extends AMSTableTestBase {
     Assert.assertEquals(0, recordingCommitter.legacyCommitCount);
     recoveryQueue.dispose();
     originalQueue.dispose();
+  }
+
+  private static class ReplayRecoveryPersistency extends PersistentBase {
+    private void assertCommittingTask(TaskRuntime<?> task) {
+      Assert.assertEquals(
+          OptimizingStatus.COMMITTING.getCode(),
+          getAs(TableRuntimeMapper.class, mapper -> mapper.selectRuntime(task.getTableId()))
+              .getStatusCode()
+              .intValue());
+      Assert.assertEquals(
+          TaskRuntime.Status.SUCCESS,
+          getAs(
+                  OptimizingProcessMapper.class,
+                  mapper ->
+                      mapper.selectOptimizeTaskMeta(
+                          task.getTableId(), task.getProcessId(), task.getTaskId().getTaskId()))
+              .getStatus());
+    }
   }
 
   private OptimizingQueue recoveryQueue(

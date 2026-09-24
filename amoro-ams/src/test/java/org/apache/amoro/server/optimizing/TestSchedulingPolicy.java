@@ -24,6 +24,7 @@ import static org.mockito.Mockito.when;
 import org.apache.amoro.ServerTableIdentifier;
 import org.apache.amoro.TableFormat;
 import org.apache.amoro.config.OptimizingConfig;
+import org.apache.amoro.formats.paimon.optimizing.PaimonPendingInput;
 import org.apache.amoro.resource.ResourceGroup;
 import org.apache.amoro.server.table.DefaultTableRuntime;
 import org.apache.amoro.table.TableIdentifier;
@@ -90,6 +91,25 @@ public class TestSchedulingPolicy {
 
     Assert.assertEquals(1, result.size());
     Assert.assertEquals(eligible.getTableIdentifier(), result.get(0).getTableIdentifier());
+  }
+
+  @Test
+  public void testScheduleTablesAcceptsSameSnapshotPaimonPlanningDemand() {
+    SchedulingPolicy policy =
+        new SchedulingPolicy(new ResourceGroup.Builder("test", "local").build());
+    DefaultTableRuntime eligible =
+        tableRuntime("same_snapshot", 14L, OptimizingStatus.PENDING, 0L, 2L, 2L, 0L);
+    PaimonPendingInput pendingInput = new PaimonPendingInput();
+    pendingInput.setSameSnapshotPlanningPending(true);
+    when(eligible.getPendingInput()).thenReturn(pendingInput);
+    policy.addTable(eligible);
+
+    Assert.assertEquals(
+        Collections.singletonList(eligible), policy.scheduleTables(Collections.emptySet(), 1));
+
+    when(eligible.getLastPlanTime()).thenReturn(System.currentTimeMillis());
+    when(eligible.getOptimizingConfig().getMinPlanInterval()).thenReturn(60_000L);
+    Assert.assertTrue(policy.scheduleTables(Collections.emptySet(), 1).isEmpty());
   }
 
   @Test
