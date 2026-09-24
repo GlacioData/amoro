@@ -19,9 +19,11 @@
 package org.apache.amoro;
 
 import org.apache.amoro.table.TableMetaStore;
+import org.apache.amoro.table.TableRuntimeSupport;
 import org.apache.amoro.table.health.TableHealthSupport;
 
 import java.util.Map;
+import java.util.Optional;
 
 /** A factory to create a {@link FormatCatalog}. */
 public interface FormatCatalogFactory {
@@ -44,6 +46,11 @@ public interface FormatCatalogFactory {
   /** Optional health capabilities owned by this format, independent of optimizer enablement. */
   default TableHealthSupport healthSupport() {
     return TableHealthSupport.NONE;
+  }
+
+  /** Optional default-runtime capability; absent formats need their own TableRuntimeFactory. */
+  default Optional<TableRuntimeSupport> runtimeSupport() {
+    return Optional.empty();
   }
 
   /** format of this catalog factory */

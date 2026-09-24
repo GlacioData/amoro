@@ -23,14 +23,21 @@ import org.apache.amoro.FormatCatalogFactory;
 import org.apache.amoro.TableFormat;
 import org.apache.amoro.shade.guava32.com.google.common.base.Preconditions;
 import org.apache.amoro.table.TableMetaStore;
+import org.apache.amoro.table.TableRuntimeSupport;
 import org.apache.amoro.utils.MixedFormatCatalogUtil;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.iceberg.CatalogUtil;
 import org.apache.iceberg.catalog.Catalog;
 
 import java.util.Map;
+import java.util.Optional;
 
 public class IcebergCatalogFactory implements FormatCatalogFactory {
+
+  @Override
+  public Optional<TableRuntimeSupport> runtimeSupport() {
+    return Optional.of(new IcebergRuntimeSupport());
+  }
 
   @Override
   public FormatCatalog create(

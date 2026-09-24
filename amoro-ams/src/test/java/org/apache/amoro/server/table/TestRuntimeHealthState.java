@@ -58,7 +58,8 @@ class TestRuntimeHealthState {
   void failedLatestAttemptKeepsSuccessButExposesStalenessAndReason() {
     AtomicLong clock = new AtomicLong(1000);
     RuntimeHealthState state =
-        new RuntimeHealthState(TableHealthSupports.forFormat(TableFormat.PAIMON), clock::get);
+        new RuntimeHealthState(
+            TableFormatSupports.instance().healthSupport(TableFormat.PAIMON), clock::get);
     state.update(analysis(1, 90, null));
     state.update(analysis(2, -1, "DELETE_METADATA_READ_FAILED"));
     RuntimeHealthSnapshot snapshot = state.snapshot(key(2)).get();
@@ -80,7 +81,8 @@ class TestRuntimeHealthState {
   void backoffIsBoundedAndNewInputsBypassHealthRetryDelay() {
     AtomicLong clock = new AtomicLong(1000);
     RuntimeHealthState state =
-        new RuntimeHealthState(TableHealthSupports.forFormat(TableFormat.PAIMON), clock::get);
+        new RuntimeHealthState(
+            TableFormatSupports.instance().healthSupport(TableFormat.PAIMON), clock::get);
     for (int i = 0; i < 12; i++) {
       state.update(analysis(1, -1, "SNAPSHOT_SCAN_FAILED"));
       assertFalse(state.shouldEvaluate(key(1)));
@@ -99,7 +101,7 @@ class TestRuntimeHealthState {
   @Test
   void lateCompletionCannotReplaceNewAttemptOrClearedGeneration() {
     RuntimeHealthState state =
-        new RuntimeHealthState(TableHealthSupports.forFormat(TableFormat.PAIMON));
+        new RuntimeHealthState(TableFormatSupports.instance().healthSupport(TableFormat.PAIMON));
     long old = state.beginAttempt();
     long newer = state.beginAttempt();
     assertTrue(state.update(analysis(2, 80, null), newer));
@@ -115,7 +117,7 @@ class TestRuntimeHealthState {
   @Test
   void completeOldSnapshotRemainsVisibleAsStaleUntilLatestInputFinishes() {
     RuntimeHealthState state =
-        new RuntimeHealthState(TableHealthSupports.forFormat(TableFormat.PAIMON));
+        new RuntimeHealthState(TableFormatSupports.instance().healthSupport(TableFormat.PAIMON));
     state.update(analysis(1, 75, null), state.beginAttempt());
     assertEquals("STALE", state.snapshot(key(2)).get().getEvaluation().getStatus());
     assertEquals(75, state.snapshot(key(2)).get().getHealthScore());
@@ -124,7 +126,7 @@ class TestRuntimeHealthState {
   @Test
   void thrownScanFailureKeepsVerifiedSnapshotAndIsRetryable() {
     RuntimeHealthState state =
-        new RuntimeHealthState(TableHealthSupports.forFormat(TableFormat.PAIMON));
+        new RuntimeHealthState(TableFormatSupports.instance().healthSupport(TableFormat.PAIMON));
     state.update(analysis(1, 90, null));
     state.fail(key(2), state.beginAttempt());
     RuntimeHealthSnapshot snapshot = state.snapshot(key(2)).get();
@@ -136,7 +138,7 @@ class TestRuntimeHealthState {
   @Test
   void schedulingBaselineDoesNotInvalidateStructuralHealthButConfigDoes() {
     RuntimeHealthState state =
-        new RuntimeHealthState(TableHealthSupports.forFormat(TableFormat.PAIMON));
+        new RuntimeHealthState(TableFormatSupports.instance().healthSupport(TableFormat.PAIMON));
     state.update(analysis(1, 90, null));
     TableAnalysisKey baseline =
         new TableAnalysisKey("1", TableFormat.PAIMON, 1, -1, 1, "config", "v3", 1, 999);
@@ -151,7 +153,7 @@ class TestRuntimeHealthState {
   @Test
   void partialFileStatisticsSurviveLaterFailureWithoutChangingHistoricalHealth() {
     RuntimeHealthState state =
-        new RuntimeHealthState(TableHealthSupports.forFormat(TableFormat.PAIMON));
+        new RuntimeHealthState(TableFormatSupports.instance().healthSupport(TableFormat.PAIMON));
     assertTrue(state.update(fileAnalysis(100, 90, 3, 30), state.beginAttempt(), key(100)));
     assertFalse(state.update(fileAnalysis(101, -1, 4, 80), state.beginAttempt(), key(101)));
     TableFileStatisticsSnapshot statistics = state.snapshot(key(101)).get().getFileStatistics();
@@ -176,7 +178,7 @@ class TestRuntimeHealthState {
   @Test
   void fileStatisticsHonorAttemptGenerationAndAllowConfirmedRollbackRecovery() {
     RuntimeHealthState state =
-        new RuntimeHealthState(TableHealthSupports.forFormat(TableFormat.PAIMON));
+        new RuntimeHealthState(TableFormatSupports.instance().healthSupport(TableFormat.PAIMON));
     long early = state.beginAttempt();
     state.update(fileAnalysis(200, 90, 2, 200), state.beginAttempt(), key(200));
     state.update(fileAnalysis(150, 80, 1, 100), early, key(150));
@@ -215,7 +217,7 @@ class TestRuntimeHealthState {
   void requestSnapshotDoesNotWaitForAnUnpublishedBackgroundUpdate() throws Exception {
     CountDownLatch extracting = new CountDownLatch(1);
     CountDownLatch release = new CountDownLatch(1);
-    TableHealthSupport paimon = TableHealthSupports.forFormat(TableFormat.PAIMON);
+    TableHealthSupport paimon = TableFormatSupports.instance().healthSupport(TableFormat.PAIMON);
     TableHealthSupport blocked =
         new TableHealthSupport() {
           @Override
@@ -268,7 +270,7 @@ class TestRuntimeHealthState {
   @Test
   void repeatedResultsRetainOneScalarSummaryAndClearReleasesTheRuntimeReference() throws Exception {
     RuntimeHealthState state =
-        new RuntimeHealthState(TableHealthSupports.forFormat(TableFormat.PAIMON));
+        new RuntimeHealthState(TableFormatSupports.instance().healthSupport(TableFormat.PAIMON));
     RuntimeHealthSnapshot inFlight = null;
     for (long id = 100; id < 160; id += 3) {
       assertTrue(state.update(fileAnalysis(id, 90, 3, 30), state.beginAttempt(), key(id)));

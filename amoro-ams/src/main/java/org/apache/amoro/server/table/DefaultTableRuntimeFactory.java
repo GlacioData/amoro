@@ -23,8 +23,6 @@ import org.apache.amoro.AmoroTable;
 import org.apache.amoro.ServerTableIdentifier;
 import org.apache.amoro.TableFormat;
 import org.apache.amoro.TableRuntime;
-import org.apache.amoro.formats.paimon.optimizing.PaimonPendingInput;
-import org.apache.amoro.optimizing.plan.AbstractOptimizingEvaluator;
 import org.apache.amoro.process.ActionCoordinator;
 import org.apache.amoro.process.ProcessFactory;
 import org.apache.amoro.shade.guava32.com.google.common.collect.Lists;
@@ -32,6 +30,7 @@ import org.apache.amoro.table.FormatPendingInput;
 import org.apache.amoro.table.StateKey;
 import org.apache.amoro.table.TableRuntimeFactory;
 import org.apache.amoro.table.TableRuntimeStore;
+import org.apache.amoro.table.TableRuntimeSupport;
 
 import java.util.Collections;
 import java.util.HashMap;
@@ -58,6 +57,15 @@ public class DefaultTableRuntimeFactory implements TableRuntimeFactory {
   private final List<ActionCoordinator> supportedCoordinators = Lists.newArrayList();
 
   private Function<ServerTableIdentifier, AmoroTable<?>> loader;
+  private final TableFormatSupports formatSupports;
+
+  public DefaultTableRuntimeFactory() {
+    this(TableFormatSupports.instance());
+  }
+
+  DefaultTableRuntimeFactory(TableFormatSupports formatSupports) {
+    this.formatSupports = formatSupports;
+  }
 
   @Override
   public List<ActionCoordinator> supportedCoordinators() {
@@ -103,39 +111,33 @@ public class DefaultTableRuntimeFactory implements TableRuntimeFactory {
   @Override
   public Optional<TableRuntimeCreator> accept(
       ServerTableIdentifier tableIdentifier, Map<String, String> tableProperties) {
-    TableFormat format = tableIdentifier.getFormat();
-
-    boolean defaultSupported =
-        format.in(
-            TableFormat.MIXED_ICEBERG,
-            TableFormat.MIXED_HIVE,
-            TableFormat.ICEBERG,
-            TableFormat.PAIMON);
-    boolean hasProcessFactories = factoriesByFormat.containsKey(format);
-
-    if (!defaultSupported && !hasProcessFactories) {
-      return Optional.empty();
-    }
-
-    return Optional.of(new TableRuntimeCreatorImpl(format));
+    return formatSupports
+        .runtimeSupport(tableIdentifier.getFormat())
+        .map(support -> new TableRuntimeCreatorImpl(tableIdentifier.getFormat(), support));
   }
 
   private class TableRuntimeCreatorImpl implements TableRuntimeFactory.TableRuntimeCreator {
 
     private final TableFormat format;
+    private final TableRuntimeSupport support;
+    private final StateKey<? extends FormatPendingInput> pendingInputKey;
 
-    private TableRuntimeCreatorImpl(TableFormat format) {
+    private TableRuntimeCreatorImpl(TableFormat format, TableRuntimeSupport support) {
       this.format = format;
+      this.support = support;
+      this.pendingInputKey = support.pendingInputKey();
     }
 
     @Override
     public List<StateKey<?>> requiredStateKeys() {
       Map<String, StateKey<?>> merged = new LinkedHashMap<>();
       DefaultTableRuntime.REQUIRED_STATES.forEach(key -> merged.put(key.getKey(), key));
-      merged.put("pending_input", createPendingInputKey(format));
-      TableHealthSupports.forFormat(format)
+      addState(merged, pendingInputKey, "format " + format);
+      support.requiredStates().forEach(key -> addState(merged, key, "format " + format));
+      formatSupports
+          .healthSupport(format)
           .requiredStates()
-          .forEach(key -> merged.put(key.getKey(), key));
+          .forEach(key -> addState(merged, key, "health support " + format));
 
       Map<Action, ProcessFactory> byAction = factoriesByFormat.get(format);
       if (byAction != null) {
@@ -148,17 +150,8 @@ public class DefaultTableRuntimeFactory implements TableRuntimeFactory {
                     factory
                         .requiredStates()
                         .forEach(
-                            stateKey -> {
-                              if (merged.containsKey(stateKey.getKey())) {
-                                throw new IllegalStateException(
-                                    "Failed to initialize table runtime creator, due to stateKey: "
-                                        + stateKey.getKey()
-                                        + " declared by process-factory: "
-                                        + factory.name()
-                                        + " has already been defined.");
-                              }
-                              merged.put(stateKey.getKey(), stateKey);
-                            }));
+                            stateKey ->
+                                addState(merged, stateKey, "process-factory " + factory.name())));
       }
 
       return Lists.newArrayList(merged.values());
@@ -167,18 +160,14 @@ public class DefaultTableRuntimeFactory implements TableRuntimeFactory {
     @Override
     public TableRuntime create(TableRuntimeStore store) {
       return new DefaultTableRuntime(
-          store, () -> loader.apply(store.getTableIdentifier()), createPendingInputKey(format));
+          store, () -> loader.apply(store.getTableIdentifier()), pendingInputKey);
     }
   }
 
-  private static StateKey<? extends FormatPendingInput> createPendingInputKey(TableFormat format) {
-    if (format == TableFormat.PAIMON) {
-      return StateKey.stateKey("pending_input")
-          .jsonType(PaimonPendingInput.class)
-          .defaultValue(new PaimonPendingInput());
+  private static void addState(Map<String, StateKey<?>> states, StateKey<?> key, String owner) {
+    if (states.putIfAbsent(key.getKey(), key) != null) {
+      throw new IllegalStateException(
+          "State key " + key.getKey() + " declared by " + owner + " has already been defined");
     }
-    return StateKey.stateKey("pending_input")
-        .jsonType(AbstractOptimizingEvaluator.PendingInput.class)
-        .defaultValue(new AbstractOptimizingEvaluator.PendingInput());
   }
 }

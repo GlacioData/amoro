@@ -31,11 +31,35 @@ import java.time.Duration;
 public class TestActionCoordinatorScheduler {
 
   @Test
+  public void testMetadataSyncInitialDelayDoesNotChangePeriodicInterval() {
+    org.apache.amoro.server.process.paimon.PaimonMaintainProcessFactory factory =
+        new org.apache.amoro.server.process.paimon.PaimonMaintainProcessFactory();
+    factory.open(java.util.Collections.singletonMap("sync-table-meta.interval", "48h"));
+    ActionCoordinator coordinator =
+        new org.apache.amoro.server.table.DefaultActionCoordinator(
+            org.apache.amoro.TableFormat.PAIMON, PaimonActions.SYNC_TABLE_META, factory);
+    TableRuntime runtime = Mockito.mock(TableRuntime.class);
+    TestableActionCoordinatorScheduler scheduler =
+        new TestableActionCoordinatorScheduler(
+            coordinator, Mockito.mock(TableService.class), Mockito.mock(ProcessService.class));
+    try {
+      Assert.assertEquals(10000L, scheduler.startDelayFor(runtime));
+      Assert.assertEquals(
+          Duration.ofHours(48).toMillis(), coordinator.getNextExecutingTime(runtime));
+    } finally {
+      scheduler.dispose();
+      factory.close();
+    }
+  }
+
+  @Test
   public void testStartDelayUsesTableSpecificInterval() {
     ActionCoordinator coordinator = Mockito.mock(ActionCoordinator.class);
     TableRuntime tableRuntime = Mockito.mock(TableRuntime.class);
     Mockito.when(coordinator.action()).thenReturn(PaimonActions.EXPIRE_SNAPSHOTS);
     Mockito.when(coordinator.parallelism()).thenReturn(1);
+    // Mockito supplies Duration.ZERO by default; the real legacy coordinator returns null.
+    Mockito.when(coordinator.getInitialDelay()).thenReturn(null);
     Mockito.when(coordinator.getNextExecutingTime(tableRuntime))
         .thenReturn(Duration.ofHours(2).toMillis());
 

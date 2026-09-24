@@ -58,6 +58,7 @@ import org.apache.amoro.server.persistence.TableRuntimeMeta;
 import org.apache.amoro.server.process.TableProcessMeta;
 import org.apache.amoro.server.table.DefaultTableRuntime;
 import org.apache.amoro.server.table.RuntimeHealthSnapshot;
+import org.apache.amoro.server.table.TableFormatSupports;
 import org.apache.amoro.server.table.TableManager;
 import org.apache.amoro.server.table.TableService;
 import org.apache.amoro.shade.guava32.com.google.common.base.Function;
@@ -204,10 +205,14 @@ public class TableController {
           tableSummary.setPositionalDeleteScore(runtimeSummary.getPositionalDeleteScore());
         }
       }
-      runtime = currentRuntime(identifier);
+      org.apache.amoro.TableRuntime detailRuntime = currentRuntime(identifier);
+      TableFormatSupports.instance()
+          .runtimeSupport(identifier.getFormat())
+          .ifPresent(support -> support.projectDetail(detailRuntime, serverTableMeta));
+      runtime =
+          detailRuntime instanceof DefaultTableRuntime ? (DefaultTableRuntime) detailRuntime : null;
       if (runtime != null
-          && org.apache.amoro.server.table.TableHealthSupports.forFormat(identifier.getFormat())
-              .enabled()) {
+          && TableFormatSupports.instance().healthSupport(identifier.getFormat()).enabled()) {
         runtimeHealth = runtime.getRuntimeHealthSnapshot();
       }
       projectHealthDetails(
@@ -237,13 +242,12 @@ public class TableController {
     ctx.json(OkResponse.of(serverTableMeta));
   }
 
-  private DefaultTableRuntime currentRuntime(ServerTableIdentifier identifier) {
+  private org.apache.amoro.TableRuntime currentRuntime(ServerTableIdentifier identifier) {
     TableService tableService = tableServiceSupplier.get();
     if (tableService == null) {
       return null;
     }
-    org.apache.amoro.TableRuntime runtime = tableService.getRuntime(identifier.getId());
-    return runtime instanceof DefaultTableRuntime ? (DefaultTableRuntime) runtime : null;
+    return tableService.getRuntime(identifier.getId());
   }
 
   private void projectHealthDetails(
@@ -252,7 +256,7 @@ public class TableController {
       TableFormat format,
       DefaultTableRuntime runtime,
       Optional<RuntimeHealthSnapshot> runtimeHealth) {
-    if (org.apache.amoro.server.table.TableHealthSupports.forFormat(format).enabled()) {
+    if (TableFormatSupports.instance().healthSupport(format).enabled()) {
       target.setHealthComparison(
           org.apache.amoro.server.table.TableHealthComparisonService.instance().view(runtime));
       if (!runtimeHealth.isPresent()) {

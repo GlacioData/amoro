@@ -42,7 +42,7 @@ class TestTableHealthSupports {
         new TableFormat[] {
           TableFormat.ICEBERG, TableFormat.MIXED_ICEBERG, TableFormat.MIXED_HIVE
         }) {
-      TableHealthSupport support = TableHealthSupports.forFormat(format);
+      TableHealthSupport support = TableFormatSupports.instance().healthSupport(format);
       assertFalse(support.enabled());
       assertTrue(support.requiredStates().isEmpty());
       DefaultTableRuntime runtime = mock(DefaultTableRuntime.class);
@@ -60,7 +60,7 @@ class TestTableHealthSupports {
 
   @Test
   void catalogSpiProvidesHealthWithoutRequiringOptimizerActions() {
-    TableHealthSupport support = TableHealthSupports.forFormat(TableFormat.PAIMON);
+    TableHealthSupport support = TableFormatSupports.instance().healthSupport(TableFormat.PAIMON);
     assertTrue(support.enabled());
     assertEquals("paimon_health_comparison_v1", support.requiredStates().get(0).getKey());
   }

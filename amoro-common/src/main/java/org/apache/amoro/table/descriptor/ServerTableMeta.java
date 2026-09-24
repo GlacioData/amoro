@@ -30,6 +30,8 @@ import java.util.Objects;
 /** ams table meta. */
 public class ServerTableMeta {
   private String tableType;
+  private String bucketMode;
+  private TableModel tableModel;
   private TableDetailObservation detailObservation;
   private TableFileStatisticsView fileStatistics;
 
@@ -107,6 +109,24 @@ public class ServerTableMeta {
 
   public String getTableType() {
     return tableType;
+  }
+
+  /** Legacy Paimon compatibility field; new clients should use {@link #getTableModel()}. */
+  public String getBucketMode() {
+    return bucketMode;
+  }
+
+  /** Null when this format has not supplied a model. */
+  public TableModel getTableModel() {
+    return tableModel;
+  }
+
+  public void setTableModel(TableModel tableModel) {
+    this.tableModel = tableModel;
+  }
+
+  public void setBucketMode(String bucketMode) {
+    this.bucketMode = bucketMode;
   }
 
   public void setTableType(String tableType) {

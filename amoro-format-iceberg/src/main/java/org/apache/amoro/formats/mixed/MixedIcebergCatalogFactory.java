@@ -23,16 +23,24 @@ import static org.apache.iceberg.CatalogUtil.ICEBERG_CATALOG_TYPE;
 import org.apache.amoro.FormatCatalog;
 import org.apache.amoro.FormatCatalogFactory;
 import org.apache.amoro.TableFormat;
+import org.apache.amoro.formats.iceberg.IcebergRuntimeSupport;
 import org.apache.amoro.mixed.CatalogLoader;
 import org.apache.amoro.mixed.MixedFormatCatalog;
 import org.apache.amoro.properties.CatalogMetaProperties;
 import org.apache.amoro.shade.guava32.com.google.common.collect.Maps;
 import org.apache.amoro.table.TableMetaStore;
+import org.apache.amoro.table.TableRuntimeSupport;
 import org.apache.amoro.utils.CatalogUtil;
 
 import java.util.Map;
+import java.util.Optional;
 
 public class MixedIcebergCatalogFactory implements FormatCatalogFactory {
+  @Override
+  public Optional<TableRuntimeSupport> runtimeSupport() {
+    return Optional.of(new IcebergRuntimeSupport());
+  }
+
   @Override
   public FormatCatalog create(
       String catalogName,

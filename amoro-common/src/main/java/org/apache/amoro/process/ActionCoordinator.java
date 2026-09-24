@@ -61,6 +61,11 @@ public interface ActionCoordinator extends ActivePlugin {
    */
   long getNextExecutingTime(TableRuntime tableRuntime);
 
+  /** Optional initial delay before the scheduler's startup grace period. */
+  default java.time.Duration getInitialDelay() {
+    return null;
+  }
+
   /**
    * Determine whether scheduling is enabled for the given table runtime.
    *

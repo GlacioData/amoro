@@ -33,6 +33,7 @@ import org.apache.amoro.ServerTableIdentifier;
 import org.apache.amoro.TableFormat;
 import org.apache.amoro.api.TableIdentifier;
 import org.apache.amoro.config.Configurations;
+import org.apache.amoro.formats.paimon.PaimonTableCreationTime;
 import org.apache.amoro.server.catalog.CatalogManager;
 import org.apache.amoro.server.dashboard.controller.TableController;
 import org.apache.amoro.server.optimizing.OptimizingStatus;
@@ -46,6 +47,7 @@ import org.apache.amoro.table.TableProperties;
 import org.apache.amoro.table.descriptor.ServerTableMeta;
 import org.apache.amoro.table.descriptor.TableDetailObservation;
 import org.apache.amoro.table.descriptor.TableHealthDetailsView;
+import org.apache.amoro.table.descriptor.TableModel;
 import org.apache.amoro.table.descriptor.TableSummary;
 import org.apache.amoro.table.health.TableAnalysisKey;
 import org.apache.amoro.table.health.TableFileStatisticsSnapshot;
@@ -97,6 +99,41 @@ class TestTableHealthDetailsProjection {
     when(tableDescriptor.getTableDetail(any())).thenReturn(serverTableMeta);
     when(tableManager.getServerTableIdentifier(any(TableIdentifier.class))).thenReturn(identifier);
     when(tableManager.getTableRuntimeMata(identifier)).thenReturn(runtimeMeta);
+  }
+
+  @Test
+  void projectsSchemaTimeWithTheExistingQueriesOnly() {
+    DefaultTableRuntime runtime =
+        runtimeWithHealth(0, details(analysisKey(SNAPSHOT_ID), SNAPSHOT_ID));
+    org.apache.amoro.formats.paimon.PaimonTableCreationTime time =
+        new org.apache.amoro.formats.paimon.PaimonTableCreationTime();
+    time.setCreateTime(1700000000123L);
+    when(runtime.getState(org.apache.amoro.formats.paimon.PaimonTableCreationTime.KEY))
+        .thenReturn(time);
+    when(tableService.getRuntime(TABLE_ID)).thenReturn(runtime);
+    controllerWithRuntime().getTableDetail(context);
+    assertEquals(time.getCreateTime(), serverTableMeta.getCreateTime());
+    verify(tableManager).getServerTableIdentifier(any(TableIdentifier.class));
+    verify(tableManager).getTableRuntimeMata(identifier);
+    org.mockito.Mockito.verifyNoMoreInteractions(tableManager);
+    verify(tableService).getRuntime(TABLE_ID);
+    org.mockito.Mockito.verifyNoMoreInteractions(tableService);
+    verify(runtime, org.mockito.Mockito.never()).loadTable();
+  }
+
+  @Test
+  void detailProjectionAcceptsCustomRuntimeImplementations() {
+    org.apache.amoro.TableRuntime runtime = mock(org.apache.amoro.TableRuntime.class);
+    org.apache.amoro.formats.paimon.PaimonTableCreationTime time =
+        new org.apache.amoro.formats.paimon.PaimonTableCreationTime();
+    time.setCreateTime(1700000000123L);
+    when(runtime.getState(org.apache.amoro.formats.paimon.PaimonTableCreationTime.KEY))
+        .thenReturn(time);
+    when(tableService.getRuntime(TABLE_ID)).thenReturn(runtime);
+    controllerWithRuntime().getTableDetail(context);
+    assertEquals(time.getCreateTime(), serverTableMeta.getCreateTime());
+    verify(runtime).getState(org.apache.amoro.formats.paimon.PaimonTableCreationTime.KEY);
+    org.mockito.Mockito.verifyNoMoreInteractions(runtime);
   }
 
   @Test
@@ -269,12 +306,17 @@ class TestTableHealthDetailsProjection {
   @Test
   void fileStatisticsKeepHealthAndLatestCommitIndependentAcrossRepeatedReads() throws Exception {
     serverTableMeta.setTableType("PAIMON");
+    serverTableMeta.setTableModel(new TableModel(TableModel.BUCKET_MODE, "HASH_FIXED"));
+    serverTableMeta.setBucketMode("HASH_FIXED");
     serverTableMeta.setDetailObservation(new TableDetailObservation(102L, 1));
     Map<String, Object> base = new LinkedHashMap<>();
     base.put("lastCommitTime", 123456L);
     base.put("baseWatermark", 120000L);
     serverTableMeta.setBaseMetrics(base);
     DefaultTableRuntime runtime = runtimeWithHealth(88, details(analysisKey(100), 100L));
+    PaimonTableCreationTime creationTime = new PaimonTableCreationTime();
+    creationTime.setCreateTime(1700000000123L);
+    when(runtime.getState(PaimonTableCreationTime.KEY)).thenReturn(creationTime);
     TableHealthEvaluation evaluation =
         new TableHealthEvaluation(
             "FAILED",
@@ -310,11 +352,18 @@ class TestTableHealthDetailsProjection {
     assertEquals("101", serverTableMeta.getFileStatistics().getSnapshotId());
     assertEquals("102", serverTableMeta.getFileStatistics().getObservedSnapshotId());
     verify(runtime, times(100)).getRuntimeHealthSnapshot();
+    verify(runtime, times(100)).getState(PaimonTableCreationTime.KEY);
     verify(tableManager, times(100)).getTableRuntimeMata(identifier);
+    verify(runtime, never()).loadTable();
     verify(runtime, never()).takeTableAnalysis(any());
     org.apache.amoro.shade.jackson2.com.fasterxml.jackson.databind.JsonNode json =
         new ObjectMapper().valueToTree(serverTableMeta);
     assertFalse(json.get("fileStatistics").has("evaluation"));
+    assertFalse(json.has("detailObservation"));
+    assertEquals(creationTime.getCreateTime(), json.get("createTime").asLong());
+    assertEquals("BUCKET_MODE", json.at("/tableModel/kind").asText());
+    assertEquals("HASH_FIXED", json.at("/tableModel/code").asText());
+    assertEquals("HASH_FIXED", json.get("bucketMode").asText());
     assertEquals(
         "102", json.at("/tableSummary/healthDetails/evaluation/attemptedSnapshotId").asText());
   }

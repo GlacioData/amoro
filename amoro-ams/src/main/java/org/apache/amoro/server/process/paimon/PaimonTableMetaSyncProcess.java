@@ -21,6 +21,8 @@ package org.apache.amoro.server.process.paimon;
 import org.apache.amoro.Action;
 import org.apache.amoro.AmoroTable;
 import org.apache.amoro.PaimonActions;
+import org.apache.amoro.formats.paimon.PaimonTable;
+import org.apache.amoro.formats.paimon.PaimonTableCreationTime;
 import org.apache.amoro.process.LocalExecutionEngine;
 import org.apache.amoro.process.LocalProcess;
 import org.apache.amoro.process.TableProcess;
@@ -62,6 +64,7 @@ public class PaimonTableMetaSyncProcess extends TableProcess implements LocalPro
     }
 
     FileStoreTable fileStoreTable = (FileStoreTable) originalTable;
+    syncCreationTime(amoroTable, fileStoreTable);
     try {
       // Trigger Paimon lazy refresh before extracting the latest snapshot and metadata.
       amoroTable.currentSnapshot();
@@ -72,6 +75,17 @@ public class PaimonTableMetaSyncProcess extends TableProcess implements LocalPro
     } catch (Throwable t) {
       LOG.error("Failed to sync table metadata for {}", tableRuntime.getTableIdentifier(), t);
       throw t;
+    }
+  }
+
+  private void syncCreationTime(AmoroTable<?> amoroTable, FileStoreTable table) {
+    try {
+      PaimonTableCreationTime creationTime =
+          ((PaimonTable) amoroTable).doAs(() -> PaimonTableCreationTime.read(table));
+      tableRuntime.updateState(PaimonTableCreationTime.KEY, previous -> creationTime);
+    } catch (Exception e) {
+      // Ancillary metadata must not prevent the rest of the synchronization from completing.
+      LOG.warn("Unable to sync schema creation time for {}", tableRuntime.getTableIdentifier(), e);
     }
   }
 

@@ -28,6 +28,7 @@ import UProcess from './components/Process.vue'
 import UHealthScore from './components/HealthScoreDetails.vue'
 import TableExplorer from './components/TableExplorer.vue'
 import HiveDetails from './components/HiveDetails.vue'
+import TableModel from './components/TableModel.vue'
 import { snapshotTableKey } from './components/snapshot-page-state'
 import useStore from '@/store/index'
 import type { IBaseDetailInfo } from '@/types/common.type'
@@ -45,6 +46,7 @@ export default defineComponent({
     UHealthScore,
     TableExplorer,
     HiveDetails,
+    TableModel,
   },
   setup() {
     const router = useRouter()
@@ -127,6 +129,7 @@ export default defineComponent({
         tableType: '',
         tableName: '',
         createTime: '',
+        tableModel: null,
         tableFormat: '',
         hasPartition: false,
         hasPrimaryKey: false,
@@ -162,6 +165,7 @@ export default defineComponent({
         tableType: '',
         tableName: '',
         createTime: '',
+        tableModel: null,
         tableFormat: '',
         hasPartition: false,
         hasPrimaryKey: false,
@@ -301,7 +305,7 @@ export default defineComponent({
           <HiveDetails v-else-if="hasSelectedTable && isHiveTable" />
           <template v-else-if="hasSelectedTable">
             <div class="tables-main-header g-flex-jsb">
-              <div class="g-flex-col">
+              <div class="g-flex-col model-header">
                 <div class="g-flex">
                   <span :title="baseInfo.tableName" class="table-name g-text-nowrap">{{ baseInfo.tableName }}</span>
                 </div>
@@ -314,9 +318,13 @@ export default defineComponent({
                   <p>{{ $t('records') }}: <span class="text-color">{{ baseInfo.records }}</span></p>
                   <a-divider type="vertical" />
                   <template v-if="!isIceberg">
-                    <p>{{ $t('createTime') }}: <span class="text-color">{{ baseInfo.createTime }}</span></p>
+                    <p :title="baseInfo.tableType === 'PAIMON' ? $t('paimonCreateTimeHelp') : undefined">
+                      {{ $t('createTime') }}: <span class="text-color">{{ baseInfo.createTime || (baseInfo.tableType === 'PAIMON' ? '—' : '') }}</span>
+                    </p>
                     <a-divider type="vertical" />
                   </template>
+                  <TableModel :format="baseInfo.tableType" :model="baseInfo.tableModel" />
+                  <a-divider type="vertical" />
                   <p>{{ $t('tableFormat') }}: <span class="text-color">{{ baseInfo.tableFormat }}</span></p>
                   <a-divider type="vertical" />
                   <p>
@@ -446,6 +454,19 @@ export default defineComponent({
       color: #7CB305;
     }
 
+  }
+
+  .model-header {
+    min-width: 0;
+
+    .table-info {
+      flex-wrap: wrap;
+      row-gap: 8px;
+
+      > p {
+        white-space: nowrap;
+      }
+    }
   }
 
   .table-edit {

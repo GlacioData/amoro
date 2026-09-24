@@ -154,6 +154,11 @@ export interface TableHealthComparison {
   completedAtMillis: number
 }
 
+export interface ITableModel {
+  kind: string
+  code: string
+}
+
 export interface IBaseDetailInfo {
   boundedSnapshotRead: boolean | null
   optimizingStatus: string
@@ -161,6 +166,7 @@ export interface IBaseDetailInfo {
   tableType: string
   tableName: string
   createTime: string
+  tableModel: ITableModel | null
   size: string
   file: string | number | null
   averageFile: string

@@ -39,6 +39,8 @@ public class TestDefaultTableRuntimeFactory {
           factory.accept(id, Collections.emptyMap()).get().requiredStateKeys();
       Assert.assertFalse(
           states.stream().anyMatch(key -> key.getKey().equals("paimon_health_comparison_v1")));
+      Assert.assertFalse(
+          states.stream().anyMatch(key -> key.getKey().equals("paimon_table_creation_time")));
       Assert.assertTrue(states.stream().anyMatch(key -> key.getKey().equals("pending_input")));
     }
   }
@@ -50,6 +52,9 @@ public class TestDefaultTableRuntimeFactory {
         ServerTableIdentifier.of("catalog", "database", "table", TableFormat.PAIMON);
 
     Assert.assertTrue(factory.accept(identifier, Collections.emptyMap()).isPresent());
+    Assert.assertTrue(
+        factory.accept(identifier, Collections.emptyMap()).get().requiredStateKeys().stream()
+            .anyMatch(key -> key.getKey().equals("paimon_table_creation_time")));
     Assert.assertTrue(
         factory.accept(identifier, Collections.emptyMap()).get().requiredStateKeys().stream()
             .anyMatch(key -> key.getKey().equals(OptimizingCommitGuard.STATE_KEY.getKey())));
