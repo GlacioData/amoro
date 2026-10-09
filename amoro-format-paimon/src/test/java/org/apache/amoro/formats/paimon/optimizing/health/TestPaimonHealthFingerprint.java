@@ -28,6 +28,7 @@ import static org.mockito.Mockito.when;
 
 import org.apache.amoro.config.OptimizingConfig;
 import org.apache.amoro.formats.paimon.PaimonCatalogFactory;
+import org.apache.amoro.formats.paimon.optimizing.PaimonAppendRewriteOptions;
 import org.apache.amoro.formats.paimon.optimizing.plan.PaimonAppendFileScanner;
 import org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeySnapshotAnalysis;
 import org.apache.amoro.optimizing.FormatTableAnalysis;
@@ -46,15 +47,178 @@ import org.apache.paimon.table.sink.BatchTableCommit;
 import org.apache.paimon.table.sink.BatchTableWrite;
 import org.apache.paimon.table.sink.BatchWriteBuilder;
 import org.apache.paimon.types.DataTypes;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.file.Path;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
 
 class TestPaimonHealthFingerprint {
   @TempDir Path warehouse;
+
+  @Test
+  void clockTransitionsInvalidateOnlyPlanningAndAreConsumedOnce() throws Exception {
+    try (Catalog catalog =
+        PaimonCatalogFactory.paimonCatalog(
+            Collections.singletonMap("warehouse", warehouse.toUri().toString()),
+            new Configuration())) {
+      AppendOnlyFileStoreTable table = fixedTable(catalog);
+      write(table, 1);
+      OptimizationContext runtime = mock(OptimizationContext.class);
+      when(runtime.getOptimizingConfig())
+          .thenReturn(
+              new OptimizingConfig().setMinorLeastInterval(100).setFullTriggerInterval(200));
+      when(runtime.getLastMinorOptimizingTime()).thenReturn(1000L);
+      when(runtime.getLastFullOptimizingTime()).thenReturn(1000L);
+      PaimonHealthEvaluationContext before =
+          PaimonHealthEvaluationContext.captureAt(table, "t", runtime, null, 1100);
+      PaimonHealthEvaluationContext minorDue =
+          PaimonHealthEvaluationContext.captureAt(table, "t", runtime, null, 1101);
+      PaimonHealthEvaluationContext fullDue =
+          PaimonHealthEvaluationContext.captureAt(table, "t", runtime, null, 1201);
+      assertNotEquals(before.key(), minorDue.key());
+      assertNotEquals(minorDue.key(), fullDue.key());
+      assertEquals(
+          minorDue.key(),
+          PaimonHealthEvaluationContext.captureAt(table, "t", runtime, null, 1200).key());
+      assertEquals(
+          fullDue.key(),
+          PaimonHealthEvaluationContext.captureAt(table, "t", runtime, null, Long.MAX_VALUE).key());
+      assertEquals(
+          PaimonHealthEvaluationContext.healthIdentity(before.scoringConfigFingerprint()),
+          PaimonHealthEvaluationContext.healthIdentity(fullDue.scoringConfigFingerprint()));
+      // Restart and empty-plan completion do not alter persisted due flags by elapsed time alone.
+      when(runtime.getLastPlanTime()).thenReturn(1300L);
+      assertEquals(
+          fullDue.key(),
+          PaimonHealthEvaluationContext.captureAt(table, "t", runtime, null, 1400).key());
+      when(runtime.getLastPlanTime()).thenReturn(0L);
+      assertEquals(
+          fullDue.key(),
+          PaimonHealthEvaluationContext.captureAt(table, "t", runtime, null, 1400).key());
+      // Successful optimization resets only its own threshold for the next interval.
+      when(runtime.getLastFullOptimizingTime()).thenReturn(1400L);
+      assertEquals(
+          minorDue.key(),
+          PaimonHealthEvaluationContext.captureAt(table, "t", runtime, null, 1500).key());
+      assertFalse(PaimonHealthEvaluationContext.intervalReached(1000, 1000, 0));
+      assertTrue(PaimonHealthEvaluationContext.intervalReached(1001, 1000, 0));
+      assertFalse(PaimonHealthEvaluationContext.intervalReached(999, 1000, 0));
+      assertFalse(PaimonHealthEvaluationContext.intervalReached(1001, 1000, -1));
+    }
+  }
+
+  // Paimon ac223f47, table/AbstractFileStoreTable.java:396-408 and schema/TableSchema.java:317
+  // copy the native schema/options without committing a new schema ID. This is not a DDL test.
+  @ParameterizedTest
+  @CsvSource({
+    "bucket-append-ordered, false, true",
+    "file-index.range-bitmap.columns, id, true",
+    "file-index.in-manifest-threshold, 1 b, true",
+    "clustering.incremental, true, true",
+    "clustering.columns, id, true",
+    "compaction.force-rewrite-all-files, true, true",
+    "compaction.force-rewrite-all-files, false, true",
+    "self-optimizing.full.rewrite-all-files, true, true",
+    "self-optimizing.full.rewrite-all-files, false, true",
+    "self-optimizing.full.rewrite-all-files, invalid, true",
+    "compaction.force-rewrite-all-files, invalid, true",
+    "bucket-key, other, true",
+    "bucket, 4, true",
+    "file.format, parquet, true",
+    "file.compression, gzip, true",
+    "deletion-vectors.enabled, true, false",
+    "target-file-size, 3 mb, false"
+  })
+  void fixedWriterOptionsInvalidatePlanningWithoutChangingStructuralHealth(
+      String option, String value, boolean sameHealth) throws Exception {
+    try (Catalog catalog =
+        PaimonCatalogFactory.paimonCatalog(
+            Collections.singletonMap("warehouse", warehouse.toUri().toString()),
+            new Configuration())) {
+      AppendOnlyFileStoreTable table = fixedTable(catalog);
+      write(table, 1);
+      FormatTableAnalysis before = analyze(table, null);
+      Map<String, String> options = new HashMap<>(table.options());
+      options.put(option, value);
+      FileStoreTable copied = table.copy(table.schema().copy(options));
+      PaimonHealthEvaluationContext changed =
+          PaimonHealthEvaluationContext.capture(copied, "t", null);
+
+      assertEquals(before.key().getSnapshotId(), changed.key().getSnapshotId());
+      assertEquals(table.schema().id(), copied.schema().id());
+      assertNotEquals(before.key(), changed.key());
+      assertEquals(
+          sameHealth, new PaimonHealthSupport().sameInput(changed.key(), before.healthDetails()));
+    }
+  }
+
+  @Test
+  void unchangedNativeOptionsCopyKeepsTheWholeAnalysisKey() throws Exception {
+    try (Catalog catalog =
+        PaimonCatalogFactory.paimonCatalog(
+            Collections.singletonMap("warehouse", warehouse.toUri().toString()),
+            new Configuration())) {
+      AppendOnlyFileStoreTable table = fixedTable(catalog);
+      write(table, 1);
+      assertEquals(
+          PaimonHealthEvaluationContext.capture(table, "t", null).key(),
+          PaimonHealthEvaluationContext.capture(table.copy(Collections.emptyMap()), "t", null)
+              .key());
+    }
+  }
+
+  // Paimon ac223f47, CoreOptions.java:236-241 defines native rewrite default false. Amoro
+  // resolves explicit merged catalog/table properties before defaults erase their provenance.
+  @Test
+  void inheritedAmoroRewriteOverridesNativePolicyInThePlanningKey() throws Exception {
+    try (Catalog catalog =
+        PaimonCatalogFactory.paimonCatalog(
+            Collections.singletonMap("warehouse", warehouse.toUri().toString()),
+            new Configuration())) {
+      FileStoreTable table =
+          fixedTable(catalog)
+              .copy(Collections.singletonMap("compaction.force-rewrite-all-files", "true"));
+      write(table, 1);
+      FormatTableAnalysis nativeAnalysis = analyze(table, null);
+      Map<String, String> inherited = new HashMap<>(table.options());
+      inherited.put(PaimonAppendRewriteOptions.AMORO_FULL_REWRITE, "false");
+      PaimonAppendRewriteOptions policy = PaimonAppendRewriteOptions.from(inherited);
+      PaimonHealthEvaluationContext changed =
+          PaimonHealthEvaluationContext.capture(table, "t", null, inherited);
+      FileStoreTable explicit =
+          table.copy(
+              Collections.singletonMap(PaimonAppendRewriteOptions.AMORO_FULL_REWRITE, "false"));
+
+      assertEquals(PaimonAppendRewriteOptions.Source.AMORO_EXPLICIT, policy.source());
+      assertFalse(policy.fullRewriteAllFiles());
+      assertNotEquals(nativeAnalysis.key(), changed.key());
+      assertEquals(PaimonHealthEvaluationContext.capture(explicit, "t", null).key(), changed.key());
+      assertTrue(
+          new PaimonHealthSupport().sameInput(changed.key(), nativeAnalysis.healthDetails()));
+    }
+  }
+
+  private static AppendOnlyFileStoreTable fixedTable(Catalog catalog) throws Exception {
+    catalog.createDatabase("d", false);
+    Identifier id = Identifier.create("d", "fixed");
+    catalog.createTable(
+        id,
+        Schema.newBuilder()
+            .column("id", DataTypes.INT())
+            .column("other", DataTypes.INT())
+            .option("bucket", "2")
+            .option("bucket-key", "id")
+            .option("write-only", "true")
+            .build(),
+        false);
+    return (AppendOnlyFileStoreTable) catalog.getTable(id);
+  }
 
   @ParameterizedTest
   @ValueSource(booleans = {false, true})
@@ -156,7 +320,8 @@ class TestPaimonHealthFingerprint {
     BatchWriteBuilder builder = table.newBatchWriteBuilder();
     try (BatchTableWrite write = builder.newWrite();
         BatchTableCommit commit = builder.newCommit()) {
-      write.write(GenericRow.of(value));
+      write.write(
+          table.schema().fields().size() == 2 ? GenericRow.of(value, value) : GenericRow.of(value));
       commit.commit(write.prepareCommit());
     }
   }

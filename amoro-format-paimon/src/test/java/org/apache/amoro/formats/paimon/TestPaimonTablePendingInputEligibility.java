@@ -21,6 +21,7 @@ package org.apache.amoro.formats.paimon;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -126,7 +127,10 @@ class TestPaimonTablePendingInputEligibility {
             .orElseThrow(AssertionError::new);
 
     assertTrue(result.optimizingNecessary());
+    assertFalse(paimonTable.supportsPendingInputRefresh());
     assertTrue(result.pendingInput() instanceof PaimonPendingInput);
+    assertFalse(
+        ((PaimonPendingInput) result.optimizingPendingInput()).isSameSnapshotPlanningPending());
     assertTrue(result.tableAnalysis().get() instanceof PaimonAppendSnapshotAnalysis);
     assertTrue(
         ((PaimonPendingInput) result.pendingInput()).getHealthScore() >= 0,
@@ -452,9 +456,8 @@ class TestPaimonTablePendingInputEligibility {
   }
 
   @Test
-  @DisplayName("fixed-bucket append-only table is not bound to optimizing queue")
-  void fixedBucketAppendOnlyTableIsNotOptimizingNecessary(@TempDir Path warehouse)
-      throws Exception {
+  @DisplayName("supported fixed-bucket append-only table is eligible for optimizing")
+  void fixedBucketAppendOnlyTableIsEligibleForOptimizing(@TempDir Path warehouse) throws Exception {
     Catalog catalog = fsCatalog(warehouse);
     Map<String, String> options = eligibleRuntimeOptions();
     options.put("bucket", "2");
@@ -467,8 +470,19 @@ class TestPaimonTablePendingInputEligibility {
             .evaluatePendingInput(optimizationContext(true), 10)
             .orElseThrow(AssertionError::new);
 
-    assertFalse(result.optimizingNecessary());
+    // Paimon ac223f47, BucketedAppendFileStoreWrite:75-85 supports ordinary fixed append.
+    // Admission is distinct from the existing queue's empty-plan/no-process completion.
+    assertTrue(result.optimizingNecessary());
     assertTrue(result.tableAnalysis().isPresent());
+    assertTrue(paimonTable.supportsPendingInputRefresh());
+    assertFalse(((PaimonPendingInput) result.pendingInput()).isSameSnapshotPlanningPending());
+    assertNotSame(result.pendingInput(), result.optimizingPendingInput());
+    assertTrue(
+        ((PaimonPendingInput) result.optimizingPendingInput()).isSameSnapshotPlanningPending());
+    assertTrue(
+        result
+            .optimizingPendingInput()
+            .canPlanWithoutSnapshotChange(optimizationContext(true), System.currentTimeMillis()));
   }
 
   @Test
@@ -486,6 +500,8 @@ class TestPaimonTablePendingInputEligibility {
     assertFalse(result.optimizingNecessary());
     assertTrue(((PaimonPendingInput) result.pendingInput()).getHealthScore() >= 0);
     assertTrue(result.tableAnalysis().isPresent());
+    assertFalse(
+        ((PaimonPendingInput) result.optimizingPendingInput()).isSameSnapshotPlanningPending());
   }
 
   @Test
@@ -729,6 +745,7 @@ class TestPaimonTablePendingInputEligibility {
     assertEquals(-1, roundTripped.getPartitionCount());
     assertEquals(-1, roundTripped.getFileWithDeleteCount());
     assertEquals(-1L, roundTripped.getDeleteRecordCount());
+    assertFalse(roundTripped.isSameSnapshotPlanningPending());
   }
 
   private static Catalog fsCatalog(Path warehouse) {

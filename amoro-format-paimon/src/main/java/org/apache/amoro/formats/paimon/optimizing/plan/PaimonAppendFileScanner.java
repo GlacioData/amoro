@@ -21,6 +21,7 @@ package org.apache.amoro.formats.paimon.optimizing.plan;
 import static org.apache.paimon.deletionvectors.DeletionVectorsIndexFile.DELETION_VECTORS_INDEX;
 
 import org.apache.amoro.config.OptimizingConfig;
+import org.apache.amoro.formats.paimon.optimizing.PaimonAppendCapabilities;
 import org.apache.amoro.formats.paimon.optimizing.health.PaimonAppendHealthEvaluator;
 import org.apache.amoro.formats.paimon.optimizing.health.PaimonAppendHealthEvaluator.UnitAccumulator;
 import org.apache.amoro.formats.paimon.optimizing.health.PaimonAppendHealthEvaluator.UnitStatistics;
@@ -65,12 +66,15 @@ import java.util.Set;
 public final class PaimonAppendFileScanner {
 
   private static final Logger LOG = LoggerFactory.getLogger(PaimonAppendFileScanner.class);
+  // Keep synchronous planning bounded: three selection rounds, each with at most one proof.
+  private static final int MAX_FIXED_WINDOW_ROUNDS = 3;
 
   private final AppendOnlyFileStoreTable table;
   private final PaimonHealthEvaluationContext healthContext;
   private final PaimonPlanContext context;
   @Nullable private final Predicate partitionFilter;
   private final IndexFileHandler indexFileHandler;
+  private int fixedScopeScanCount;
 
   PaimonAppendFileScanner(
       AppendOnlyFileStoreTable table,
@@ -162,7 +166,7 @@ public final class PaimonAppendFileScanner {
                   health,
                   new ScanTotals(),
                   Collections.emptyList(),
-                  collectPlannerFacts && table.bucketMode() == BucketMode.BUCKET_UNAWARE,
+                  collectPlannerFacts && planningShapeSupported(),
                   null,
                   0)
               .withStructure(new PaimonHealthStructureCollector(table, healthContext).finish(true));
@@ -175,6 +179,7 @@ public final class PaimonAppendFileScanner {
       ScanResult result =
           scanCompleteSnapshot(snapshot, deletionMetadataLookup, collectPlannerFacts);
       if (applyFullRewrite
+          && table.bucketMode() == BucketMode.BUCKET_UNAWARE
           && context.reachFullInterval()
           && context.fullRewriteAllFiles()
           && !result.files().isEmpty()) {
@@ -208,11 +213,11 @@ public final class PaimonAppendFileScanner {
       DeletionMetadataLookup deletionMetadataLookup,
       boolean collectPlannerFacts) {
     PaimonAppendHealthEvaluator evaluator = evaluator();
-    Map<UnitKey, UnitAccumulator> units = new LinkedHashMap<>();
-    Map<UnitKey, UnitAccumulator> structuralUnits = new LinkedHashMap<>();
+    Map<PaimonAppendUnitKey, UnitAccumulator> units = new LinkedHashMap<>();
+    Map<PaimonAppendUnitKey, UnitAccumulator> structuralUnits = new LinkedHashMap<>();
     Set<BinaryRow> partitions = new HashSet<>();
-    Map<UnitKey, Map<String, Long>> bucketedCounts = new HashMap<>();
-    Set<UnitKey> failedDvUnits = new HashSet<>();
+    Map<PaimonAppendUnitKey, Map<String, Long>> bucketedCounts = new HashMap<>();
+    Set<PaimonAppendUnitKey> failedDvUnits = new HashSet<>();
     Map<BinaryRow, List<PaimonFileCandidate>> candidates = new LinkedHashMap<>();
     List<PlannerFile> plannerFiles = new ArrayList<>();
     ScanTotals totals = new ScanTotals();
@@ -220,6 +225,10 @@ public final class PaimonAppendFileScanner {
         new PaimonHealthStructureCollector(table, healthContext);
     PartitionPredicate plannerPartitionPredicate = plannerPartitionPredicate();
     int candidateCount = 0;
+    long eligibleFileCount = 0;
+    boolean supported = planningShapeSupported();
+    boolean fixed = table.bucketMode() == BucketMode.HASH_FIXED;
+    boolean layoutValid = true;
 
     Iterator<ManifestEntry> iterator = addFileIterator(snapshot, null, false);
     while (iterator.hasNext()) {
@@ -229,7 +238,7 @@ public final class PaimonAppendFileScanner {
       }
       BinaryRow partition = entry.partition().copy();
       partitions.add(partition);
-      UnitKey unitKey = new UnitKey(partition, entry.bucket());
+      PaimonAppendUnitKey unitKey = new PaimonAppendUnitKey(partition, entry.bucket());
       DeleteLookup delete =
           deletionMetadata(entry, unitKey, deletionMetadataLookup, bucketedCounts, failedDvUnits);
       collector.addFile(partition, entry.bucket(), entry.file(), delete.healthCount);
@@ -245,9 +254,16 @@ public final class PaimonAppendFileScanner {
           healthContext.targetFileSize(),
           delete.healthCount);
 
+      // Paimon ac223f47, manifest/FileEntry.java:49-55 carries the physical bucket layout.
+      // A complete health scan still succeeds when this snapshot cannot safely be planned.
+      if (fixed
+          && (entry.bucket() < 0
+              || entry.bucket() >= table.coreOptions().bucket()
+              || entry.totalBuckets() != table.coreOptions().bucket())) {
+        layoutValid = false;
+      }
       if (!collectPlannerFacts
-          || table.bucketMode() != BucketMode.BUCKET_UNAWARE
-          || candidateCount >= context.fileNumLimit()
+          || !supported
           || (plannerPartitionPredicate != null && !plannerPartitionPredicate.test(partition))) {
         continue;
       }
@@ -257,10 +273,22 @@ public final class PaimonAppendFileScanner {
       if (!candidate.isProblemFile()) {
         continue;
       }
+      eligibleFileCount++;
+      if (candidateCount >= context.fileNumLimit()) {
+        continue;
+      }
       candidateCount++;
-      candidates.computeIfAbsent(partition, ignored -> new ArrayList<>()).add(candidate);
+      if (!fixed) {
+        candidates.computeIfAbsent(partition, ignored -> new ArrayList<>()).add(candidate);
+      }
       plannerFiles.add(
-          new PlannerFile(partition, entry.file(), delete.deletionFile, delete.dvGroupKey));
+          new PlannerFile(
+              partition,
+              entry.bucket(),
+              entry.totalBuckets(),
+              entry.file(),
+              delete.deletionFile,
+              delete.dvGroupKey));
     }
 
     totals.setPartitionCount(partitions.size());
@@ -280,9 +308,7 @@ public final class PaimonAppendFileScanner {
     PaimonAppendHealthEvaluator.Result structuralHealth =
         evaluator.evaluate(structuralStatistics, healthContext.activityInput(0));
     boolean plannerFactsAvailable =
-        collectPlannerFacts
-            && table.bucketMode() == BucketMode.BUCKET_UNAWARE
-            && failedDvUnits.isEmpty();
+        collectPlannerFacts && supported && layoutValid && failedDvUnits.isEmpty();
     if (!plannerFactsAvailable) {
       candidates.clear();
       plannerFiles.clear();
@@ -297,6 +323,7 @@ public final class PaimonAppendFileScanner {
                 plannerFactsAvailable,
                 snapshot,
                 1)
+            .withPlannerFilesTruncated(plannerFactsAvailable && eligibleFileCount > candidateCount)
             .withStructure(collector.finish(health.healthScore() >= 0));
     return new ScanResult(snapshot.id(), candidates, analysis);
   }
@@ -304,6 +331,11 @@ public final class PaimonAppendFileScanner {
   private PaimonAppendHealthEvaluator evaluator() {
     return new PaimonAppendHealthEvaluator(
         healthContext.targetFileSize(), healthContext.smallFileBoundary());
+  }
+
+  private boolean planningShapeSupported() {
+    return table.bucketMode() == BucketMode.BUCKET_UNAWARE
+        || !PaimonAppendCapabilities.fixedBucketRejection(table).isPresent();
   }
 
   @Nullable
@@ -315,10 +347,10 @@ public final class PaimonAppendFileScanner {
 
   private DeleteLookup deletionMetadata(
       ManifestEntry entry,
-      UnitKey unitKey,
+      PaimonAppendUnitKey unitKey,
       DeletionMetadataLookup deletionMetadataLookup,
-      Map<UnitKey, Map<String, Long>> bucketedCounts,
-      Set<UnitKey> failedDvUnits) {
+      Map<PaimonAppendUnitKey, Map<String, Long>> bucketedCounts,
+      Set<PaimonAppendUnitKey> failedDvUnits) {
     if (!healthContext.deletionVectorsEnabled()) {
       return DeleteLookup.withoutDeletionFile(deleteCountWithoutDeletionVectors(entry.file()));
     }
@@ -327,13 +359,14 @@ public final class PaimonAppendFileScanner {
     }
 
     try {
-      if (deletionMetadataLookup.incomplete(unitKey.partition)) {
+      if (deletionMetadataLookup.incomplete(unitKey.partition())) {
         failedDvUnits.add(unitKey);
         return DeleteLookup.incomplete();
       }
       if (table.bucketMode() == BucketMode.BUCKET_UNAWARE) {
         DeletionFile deletionFile =
-            deletionMetadataLookup.unawareDeletionFile(unitKey.partition, entry.file().fileName());
+            deletionMetadataLookup.unawareDeletionFile(
+                unitKey.partition(), entry.file().fileName());
         if (deletionFile == null) {
           return DeleteLookup.withDeletionFile(null, 0L);
         }
@@ -345,9 +378,9 @@ public final class PaimonAppendFileScanner {
         counts =
             PaimonDeletionVectorCounts.read(
                 indexFileHandler,
-                unitKey.partition,
-                unitKey.bucket,
-                deletionMetadataLookup.bucketedIndexFiles(unitKey.partition, unitKey.bucket));
+                unitKey.partition(),
+                unitKey.bucket(),
+                deletionMetadataLookup.bucketedIndexFiles(unitKey.partition(), unitKey.bucket()));
         bucketedCounts.put(unitKey, counts);
       }
       return DeleteLookup.withoutDeletionFile(counts.getOrDefault(entry.file().fileName(), 0L));
@@ -373,6 +406,10 @@ public final class PaimonAppendFileScanner {
 
   Map<BinaryRow, List<PaimonFileCandidate>> candidatesFromAnalysis(
       PaimonAppendSnapshotAnalysis analysis) {
+    if (table.bucketMode() != BucketMode.BUCKET_UNAWARE) {
+      // Fixed buckets require their own range proof; never mix them into partition-only inputs.
+      return Collections.emptyMap();
+    }
     Map<BinaryRow, List<PaimonFileCandidate>> candidates = new LinkedHashMap<>();
     PartitionPredicate plannerPartitionPredicate = plannerPartitionPredicate();
     int count = 0;
@@ -406,8 +443,8 @@ public final class PaimonAppendFileScanner {
       Snapshot snapshot,
       Map<BinaryRow, List<PaimonFileCandidate>> candidateFiles,
       DeletionMetadataLookup deletionMetadataLookup) {
-    Map<UnitKey, Map<String, Long>> bucketedCounts = new HashMap<>();
-    Set<UnitKey> failedDvUnits = new HashSet<>();
+    Map<PaimonAppendUnitKey, Map<String, Long>> bucketedCounts = new HashMap<>();
+    Set<PaimonAppendUnitKey> failedDvUnits = new HashSet<>();
     Map<BinaryRow, List<PaimonFileCandidate>> allFiles = new LinkedHashMap<>();
     Iterator<ManifestEntry> iterator =
         addFileIterator(snapshot, new ArrayList<>(candidateFiles.keySet()), true);
@@ -417,7 +454,7 @@ public final class PaimonAppendFileScanner {
         continue;
       }
       BinaryRow partition = entry.partition().copy();
-      UnitKey unitKey = new UnitKey(partition, entry.bucket());
+      PaimonAppendUnitKey unitKey = new PaimonAppendUnitKey(partition, entry.bucket());
       DeleteLookup delete =
           deletionMetadata(entry, unitKey, deletionMetadataLookup, bucketedCounts, failedDvUnits);
       if (delete.healthCount == null) {
@@ -429,6 +466,151 @@ public final class PaimonAppendFileScanner {
       allFiles.computeIfAbsent(partition, ignored -> new ArrayList<>()).add(candidate);
     }
     return allFiles;
+  }
+
+  Map<PaimonAppendUnitKey, PaimonFixedBucketFileWindow> fixedBucketWindows(
+      PaimonAppendSnapshotAnalysis analysis) {
+    if (PaimonAppendCapabilities.fixedBucketRejection(table).isPresent()
+        || !analysis.plannerFactsAvailable()
+        || analysis.snapshot() == null
+        || !healthContext.key().equals(analysis.key())) {
+      return Collections.emptyMap();
+    }
+    Map<PaimonAppendUnitKey, Integer> budgets = new LinkedHashMap<>();
+    PartitionPredicate filter = plannerPartitionPredicate();
+    int remaining = context.fileNumLimit();
+    for (PlannerFile file : analysis.plannerFiles()) {
+      if (remaining <= 0) {
+        break;
+      }
+      if (filter != null && !filter.test(file.partition())) {
+        continue;
+      }
+      PaimonAppendUnitKey unit = new PaimonAppendUnitKey(file.partition(), file.bucket());
+      budgets.merge(unit, 1, Integer::sum);
+      remaining--;
+    }
+    if (budgets.isEmpty()) {
+      return Collections.emptyMap();
+    }
+    // Candidate count only selects units. Spend the remaining existing file-count budget on
+    // their active files too, so FULL can include large files instead of capping each bucket
+    // at its problem-file count. The sum of window capacities is still fileNumLimit.
+    int share = remaining / budgets.size();
+    int extra = remaining % budgets.size();
+    for (Map.Entry<PaimonAppendUnitKey, Integer> entry : budgets.entrySet()) {
+      entry.setValue(entry.getValue() + share + (extra-- > 0 ? 1 : 0));
+    }
+    Map<PaimonAppendUnitKey, PaimonFixedBucketFileWindow> windows = new LinkedHashMap<>();
+    budgets.forEach(
+        (unit, budget) -> {
+          windows.put(
+              unit,
+              new PaimonFixedBucketFileWindow(
+                  unit,
+                  table.coreOptions().bucket(),
+                  budget,
+                  table.coreOptions().bucketAppendOrdered(),
+                  entry ->
+                      PaimonFileCandidate.from(entry.partition(), entry.file(), context, null, null)
+                          .isProblemFile()));
+        });
+    Map<PaimonAppendUnitKey, PaimonFixedBucketFileWindow> pending = windows;
+    PaimonPartitionEvaluator evaluator = new PaimonPartitionEvaluator(context);
+    PaimonFixedBucketTaskPacker packer = new PaimonFixedBucketTaskPacker(context);
+    for (int round = 0; round < MAX_FIXED_WINDOW_ROUNDS && !pending.isEmpty(); round++) {
+      scanFixedWindows(analysis, pending);
+      Map<PaimonAppendUnitKey, PaimonFixedBucketFileWindow> next = new LinkedHashMap<>();
+      boolean lastRound = round == MAX_FIXED_WINDOW_ROUNDS - 1;
+      int exhaustedUnits = 0;
+      for (Map.Entry<PaimonAppendUnitKey, PaimonFixedBucketFileWindow> entry : pending.entrySet()) {
+        PaimonFixedBucketFileWindow window = entry.getValue();
+        if (window.canAdvance() && packer.pack(window, evaluator.evaluate(window)).isEmpty()) {
+          if (lastRound) {
+            exhaustedUnits++;
+          } else {
+            next.put(entry.getKey(), window.advance());
+          }
+        }
+      }
+      if (exhaustedUnits > 0) {
+        LOG.warn(
+            "Fixed-bucket candidate search reached {} rounds for {} units of {} at snapshot {}; "
+                + "the file-count budget may be too small for this ordered layout",
+            MAX_FIXED_WINDOW_ROUNDS,
+            exhaustedUnits,
+            table.fullName(),
+            analysis.snapshot().id());
+      }
+      windows.putAll(next);
+      pending = next;
+    }
+    return Collections.unmodifiableMap(windows);
+  }
+
+  private void scanFixedWindows(
+      PaimonAppendSnapshotAnalysis analysis,
+      Map<PaimonAppendUnitKey, PaimonFixedBucketFileWindow> windows) {
+    // Paimon ac223f47, BucketedAppendCompactManager.java:204-229 advances its sorted queue.
+    // Manifest iteration is not sorted: retry only unproductive units at the same snapshot,
+    // with a strictly advancing cursor and unchanged capacity. This trades extra scan I/O
+    // for bounded metadata; MAX_FIXED_WINDOW_ROUNDS also bounds synchronous scan work.
+    Iterator<ManifestEntry> entries = fixedScopeIterator(analysis, windows);
+    while (entries.hasNext()) {
+      ManifestEntry entry = entries.next();
+      PaimonFixedBucketFileWindow window =
+          windows.get(new PaimonAppendUnitKey(entry.partition(), entry.bucket()));
+      if (window != null) {
+        window.add(entry);
+      }
+    }
+    windows.values().forEach(PaimonFixedBucketFileWindow::finish);
+    Map<PaimonAppendUnitKey, PaimonFixedBucketFileWindow> proofWindows = new LinkedHashMap<>();
+    windows.forEach(
+        (unit, window) -> {
+          if (window.needsScopeProof()) {
+            proofWindows.put(unit, window);
+          }
+        });
+    if (!proofWindows.isEmpty()) {
+      // Re-scan only the selected units at the SAME snapshot after bounded selection freezes.
+      // Omitted metadata stays streaming; complete windows and proven prefixes need no rescan.
+      entries = fixedScopeIterator(analysis, proofWindows);
+      while (entries.hasNext()) {
+        ManifestEntry entry = entries.next();
+        PaimonFixedBucketFileWindow window =
+            proofWindows.get(new PaimonAppendUnitKey(entry.partition(), entry.bucket()));
+        if (window != null) {
+          window.verifyScopeEntry(entry);
+        }
+      }
+      proofWindows.values().forEach(PaimonFixedBucketFileWindow::finishScopeProof);
+    }
+  }
+
+  private Iterator<ManifestEntry> fixedScopeIterator(
+      PaimonAppendSnapshotAnalysis analysis,
+      Map<PaimonAppendUnitKey, PaimonFixedBucketFileWindow> windows) {
+    Set<BinaryRow> partitions = new HashSet<>();
+    windows.keySet().forEach(unit -> partitions.add(unit.partition()));
+    // Paimon ac223f47, operation/FileStoreScan.java:54-74 accepts one selected-unit predicate
+    // and a fixed Snapshot. This is one logical scope scan, not a full scan per bucket; native
+    // manifest reads may still inspect other units and are not claimed as physical I/O pruning.
+    fixedScopeScanCount++;
+    return table
+        .store()
+        .newScan()
+        .withSnapshot(analysis.snapshot())
+        .withKind(ScanMode.ALL)
+        .withPartitionFilter(new ArrayList<>(partitions))
+        .withTotalAwareBucketFilter(
+            (partition, bucket, total) ->
+                windows.containsKey(new PaimonAppendUnitKey(partition, bucket)))
+        .readFileIterator();
+  }
+
+  int fixedScopeScanCount() {
+    return fixedScopeScanCount;
   }
 
   private Iterator<ManifestEntry> addFileIterator(
@@ -447,14 +629,14 @@ public final class PaimonAppendFileScanner {
 
   static final class DeletionMetadataLookup {
     private final Map<BinaryRow, Map<String, DeletionFile>> unawareDeletionFiles;
-    private final Map<UnitKey, List<IndexFileMeta>> bucketedIndexFiles;
+    private final Map<PaimonAppendUnitKey, List<IndexFileMeta>> bucketedIndexFiles;
     private final Set<BinaryRow> incompletePartitions;
     private final boolean manifestScanFailed;
     private boolean readFailed;
 
     private DeletionMetadataLookup(
         Map<BinaryRow, Map<String, DeletionFile>> unawareDeletionFiles,
-        Map<UnitKey, List<IndexFileMeta>> bucketedIndexFiles,
+        Map<PaimonAppendUnitKey, List<IndexFileMeta>> bucketedIndexFiles,
         Set<BinaryRow> incompletePartitions,
         boolean manifestScanFailed) {
       this.unawareDeletionFiles = unawareDeletionFiles;
@@ -485,7 +667,7 @@ public final class PaimonAppendFileScanner {
       }
 
       Map<BinaryRow, Map<String, DeletionFile>> unawareDeletionFiles = new HashMap<>();
-      Map<UnitKey, List<IndexFileMeta>> bucketedIndexFiles = new HashMap<>();
+      Map<PaimonAppendUnitKey, List<IndexFileMeta>> bucketedIndexFiles = new HashMap<>();
       Set<BinaryRow> incompletePartitions = new HashSet<>();
       boolean readFailed = false;
       Map<BinaryRow, Set<String>> resolvedFiles = new HashMap<>();
@@ -497,7 +679,8 @@ public final class PaimonAppendFileScanner {
         BinaryRow partition = entry.partition().copy();
         if (bucketMode != BucketMode.BUCKET_UNAWARE) {
           bucketedIndexFiles
-              .computeIfAbsent(new UnitKey(partition, entry.bucket()), ignored -> new ArrayList<>())
+              .computeIfAbsent(
+                  new PaimonAppendUnitKey(partition, entry.bucket()), ignored -> new ArrayList<>())
               .add(entry.indexFile());
           continue;
         }
@@ -567,7 +750,7 @@ public final class PaimonAppendFileScanner {
 
     List<IndexFileMeta> bucketedIndexFiles(BinaryRow partition, int bucket) {
       return bucketedIndexFiles.getOrDefault(
-          new UnitKey(partition, bucket), Collections.emptyList());
+          new PaimonAppendUnitKey(partition, bucket), Collections.emptyList());
     }
   }
 
@@ -595,33 +778,6 @@ public final class PaimonAppendFileScanner {
 
     PaimonAppendSnapshotAnalysis analysis() {
       return analysis;
-    }
-  }
-
-  private static final class UnitKey {
-    private final BinaryRow partition;
-    private final int bucket;
-
-    private UnitKey(BinaryRow partition, int bucket) {
-      this.partition = partition.copy();
-      this.bucket = bucket;
-    }
-
-    @Override
-    public boolean equals(Object other) {
-      if (this == other) {
-        return true;
-      }
-      if (!(other instanceof UnitKey)) {
-        return false;
-      }
-      UnitKey that = (UnitKey) other;
-      return bucket == that.bucket && partition.equals(that.partition);
-    }
-
-    @Override
-    public int hashCode() {
-      return 31 * partition.hashCode() + bucket;
     }
   }
 

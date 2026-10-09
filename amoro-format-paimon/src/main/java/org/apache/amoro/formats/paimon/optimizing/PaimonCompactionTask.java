@@ -26,8 +26,8 @@ import org.apache.amoro.utils.SerializationUtil;
 import java.util.Map;
 
 /**
- * Staged task descriptor for one Paimon BUCKET_UNAWARE compaction task, wrapping one Paimon {@code
- * AppendCompactTask}. Counterpart of {@code RewriteStageTask} on the Iceberg side.
+ * Staged descriptor for one Paimon append compaction, carrying a legacy bucket-unaware or an exact
+ * fixed-bucket input. Counterpart of {@code RewriteStageTask} on the Iceberg side.
  */
 public class PaimonCompactionTask
     extends StagedTaskDescriptor<

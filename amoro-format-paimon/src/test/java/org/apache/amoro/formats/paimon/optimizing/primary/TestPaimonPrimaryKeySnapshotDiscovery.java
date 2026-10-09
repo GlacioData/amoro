@@ -1,0 +1,212 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.apache.amoro.formats.paimon.optimizing.primary;
+
+import static org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeyIntervalTestSupport.append;
+import static org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeyIntervalTestSupport.catalog;
+import static org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeyIntervalTestSupport.commit;
+import static org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeyIntervalTestSupport.input;
+import static org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeyIntervalTestSupport.options;
+import static org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeyIntervalTestSupport.rows;
+import static org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeyIntervalTestSupport.table;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+import org.apache.amoro.optimizing.OptimizingType;
+import org.apache.paimon.FileStore;
+import org.apache.paimon.Snapshot;
+import org.apache.paimon.catalog.Catalog;
+import org.apache.paimon.data.GenericRow;
+import org.apache.paimon.fs.FileIO;
+import org.apache.paimon.operation.FileStoreScan;
+import org.apache.paimon.table.FileStoreTable;
+import org.apache.paimon.utils.HintFileUtils;
+import org.apache.paimon.utils.SnapshotManager;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
+
+import java.nio.file.Path;
+import java.util.Collections;
+import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.atomic.AtomicInteger;
+
+class TestPaimonPrimaryKeySnapshotDiscovery {
+  @ParameterizedTest
+  @CsvSource({"0,1", "2,3", "31,32"})
+  void shortGapDoesNotUseNativeFallback(int gap, int expectedProbes) throws Exception {
+    Fixture fixture = new Fixture(10, 10 + gap, null);
+    assertEquals(10 + gap, fixture.restore().snapshotId());
+    assertEquals(expectedProbes, fixture.probes.get());
+    verify(fixture.manager, never()).latestSnapshotFromFileSystem();
+  }
+
+  @Test
+  void currentHintKeepsFastPath() throws Exception {
+    Fixture fixture = new Fixture(10, 1010, "1010");
+    assertEquals(1010, fixture.restore().snapshotId());
+    assertEquals(2, fixture.probes.get());
+    verify(fixture.manager, never()).latestSnapshotFromFileSystem();
+  }
+
+  @ParameterizedTest
+  @ValueSource(ints = {32, 1000})
+  void longGapUsesOneNativeLookupAndStopsProbing(int gap) throws Exception {
+    Fixture fixture = new Fixture(10, 10 + gap, null);
+    Snapshot latest = snapshot(10 + gap);
+    when(fixture.manager.latestSnapshotFromFileSystem()).thenReturn(latest);
+    assertEquals(10 + gap, fixture.restore().snapshotId());
+    assertEquals(32, fixture.probes.get());
+    verify(fixture.manager).latestSnapshotFromFileSystem();
+    verify(fixture.manager, never()).snapshot(anyLong());
+  }
+
+  @Test
+  void staleHintAlsoHasBoundedProbes() throws Exception {
+    Fixture fixture = new Fixture(10, 1010, "100");
+    doReturn(snapshot(1010)).when(fixture.manager).latestSnapshotFromFileSystem();
+    assertEquals(1010, fixture.restore().snapshotId());
+    assertEquals(33, fixture.probes.get(), "One hint validation plus 32 consecutive probes");
+    verify(fixture.manager).latestSnapshotFromFileSystem();
+  }
+
+  @Test
+  void repeatedTaskDiscoveryDoesNotScaleWithSnapshotGap() throws Exception {
+    Fixture fixture = new Fixture(10, 1010, null);
+    doReturn(snapshot(1010)).when(fixture.manager).latestSnapshotFromFileSystem();
+    for (int i = 0; i < 16; i++) {
+      assertEquals(1010, fixture.restore().snapshotId());
+    }
+    assertEquals(512, fixture.probes.get());
+    verify(fixture.manager, times(16)).latestSnapshotFromFileSystem();
+    System.out.println(
+        "SNAPSHOT_DISCOVERY tasks=16 gap=1000 directExists="
+            + fixture.probes.get()
+            + " nativeLookups=16");
+  }
+
+  @Test
+  void fallbackFailureDoesNotRestoreAnOlderSnapshot() throws Exception {
+    Fixture fixture = new Fixture(10, 1010, null);
+    IllegalStateException failure = new IllegalStateException("listing unavailable");
+    when(fixture.manager.latestSnapshotFromFileSystem()).thenThrow(failure);
+    assertSame(failure, assertThrows(IllegalStateException.class, fixture::restore));
+    verify(fixture.manager, never()).snapshot(anyLong());
+    assertEquals(32, fixture.probes.get());
+  }
+
+  @ParameterizedTest
+  @ValueSource(longs = {-1, 10, 41})
+  void missingOrRegressedFallbackCannotUsePartialProgress(long result) throws Exception {
+    Fixture fixture = new Fixture(10, 1010, null);
+    doReturn(result < 0 ? null : snapshot(result))
+        .when(fixture.manager)
+        .latestSnapshotFromFileSystem();
+    assertThrows(IllegalStateException.class, fixture::restore);
+    verify(fixture.manager, never()).snapshot(anyLong());
+  }
+
+  @Test
+  void maximumSnapshotIdDoesNotOverflow() throws Exception {
+    Fixture fixture = new Fixture(Long.MAX_VALUE, Long.MAX_VALUE, null);
+    assertEquals(Long.MAX_VALUE, fixture.restore().snapshotId());
+    assertEquals(0, fixture.probes.get());
+    verify(fixture.manager, never()).latestSnapshotFromFileSystem();
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"1", "-1"})
+  void realNativeFallbackExecutesAndCommitsLatestRows(String bucket, @TempDir Path warehouse)
+      throws Exception {
+    try (Catalog catalog = catalog(warehouse)) {
+      Map<String, String> opts = options(false);
+      opts.put("bucket", bucket);
+      opts.put("deletion-vectors.enabled", "true");
+      FileStoreTable raw = table(catalog, "bounded_restore", opts);
+      append(raw, GenericRow.of(1, 10, 10, 1L));
+      SnapshotManager manager = spy(raw.snapshotManager());
+      FileStoreTable observed = spy(raw);
+      doReturn(manager).when(observed).snapshotManager();
+      PaimonPrimaryKeyCompactionInput planned = input(observed, OptimizingType.MINOR, 501L);
+      for (int i = 2; i <= 41; i++) {
+        append(raw, GenericRow.of(1, i, i, (long) i));
+      }
+      HintFileUtils.deleteLatestHint(manager.fileIO(), manager.snapshotDirectory());
+      PaimonPrimaryKeyCompactionOutput output =
+          new PaimonPrimaryKeyCompactionExecutor(planned).execute();
+      verify(manager).latestSnapshotFromFileSystem();
+      commit(raw, planned, output);
+      assertEquals(Collections.singletonList("1|41|41|41"), rows(raw));
+    }
+  }
+
+  private static Snapshot snapshot(long id) {
+    Snapshot snapshot = mock(Snapshot.class);
+    when(snapshot.id()).thenReturn(id);
+    return snapshot;
+  }
+
+  private static class Fixture {
+    final FileStoreTable table = mock(FileStoreTable.class);
+    final SnapshotManager manager = mock(SnapshotManager.class);
+    final AtomicInteger probes = new AtomicInteger();
+    final long planned;
+
+    @SuppressWarnings("unchecked")
+    Fixture(long planned, long latest, String hint) throws Exception {
+      this.planned = planned;
+      FileStore store = mock(FileStore.class);
+      FileStoreScan scan = mock(FileStoreScan.class);
+      FileIO io = mock(FileIO.class);
+      when(table.options()).thenReturn(Collections.emptyMap());
+      when(table.store()).thenReturn(store);
+      when(table.snapshotManager()).thenReturn(manager);
+      when(store.newScan()).thenReturn(scan);
+      when(manager.fileIO()).thenReturn(io);
+      when(manager.snapshotDirectory())
+          .thenReturn(new org.apache.paimon.fs.Path("file:/tmp/discovery-test"));
+      when(io.readOverwrittenFileUtf8(any())).thenReturn(Optional.ofNullable(hint));
+      when(manager.snapshotExists(anyLong()))
+          .thenAnswer(
+              call -> {
+                probes.incrementAndGet();
+                long id = call.getArgument(0);
+                return id > 0 && id <= latest;
+              });
+      doReturn(snapshot(latest)).when(manager).snapshot(latest);
+    }
+
+    PaimonPrimaryKeySnapshotWriteRestore restore() {
+      return new PaimonPrimaryKeySnapshotWriteRestore(table, planned, Collections.emptyList());
+    }
+  }
+}

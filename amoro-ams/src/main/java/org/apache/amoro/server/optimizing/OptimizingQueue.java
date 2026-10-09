@@ -363,7 +363,6 @@ public class OptimizingQueue extends PersistentBase {
       long expectedProcessId,
       String trigger,
       RuntimeException failure) {
-    detachUnpublishedProcess(tableRuntime, expectedProcessId);
     Throwable permanentFailure = permanentRecoveryFailure(failure);
     if (permanentFailure != null) {
       try {
@@ -388,21 +387,6 @@ public class OptimizingQueue extends PersistentBase {
     registerPendingRecovery(tableRuntime, expectedProcessId, trigger, failure);
   }
 
-  private void detachUnpublishedProcess(DefaultTableRuntime tableRuntime, long expectedProcessId) {
-    OptimizingProcess localProcess = tableRuntime.getOptimizingProcess();
-    if (!(localProcess instanceof TableOptimizingProcess)
-        || !((TableOptimizingProcess) localProcess).belongsTo(this)
-        || localProcess.getProcessId() != expectedProcessId
-        || tableRuntime.getOptimizingStatus() == OptimizingStatus.COMMITTING) {
-      return;
-    }
-    boolean queued =
-        tableQueue.stream().anyMatch(process -> process.getProcessId() == expectedProcessId);
-    if (!queued) {
-      tableRuntime.detachOptimizingProcess(localProcess);
-    }
-  }
-
   private void closeCorruptedProcess(
       DefaultTableRuntime tableRuntime, long expectedProcessId, String trigger, Throwable failure) {
     long currentProcessId = tableRuntime.getProcessId();
@@ -413,34 +397,49 @@ public class OptimizingQueue extends PersistentBase {
           expectedProcessId,
           currentProcessId);
     }
-    TableProcessMeta processMeta = loadProcessMeta(expectedProcessId);
-    if (processMeta == null) {
-      throw new IllegalStateException(
-          "No process metadata found while closing corrupted optimizing process");
+    // This payload-free closer must never be published as an executable canonical process.
+    // Reservation excludes normal recovery attachment while the durable close runs outside the
+    // runtime monitor.
+    if (!tableRuntime.reserveCorruptedProcessClose(expectedProcessId)) {
+      LOG.info(
+          "Skip closing corrupted recovery candidate for table {} processId={} because a"
+              + " canonical local process is already published",
+          tableRuntime.getTableIdentifier(),
+          expectedProcessId);
+      return;
     }
-    OptimizingProcessState processState =
-        getAs(
-            OptimizingProcessMapper.class,
-            mapper -> mapper.getProcessState(processMeta.getProcessId()));
-    TableOptimizingProcess process =
-        new TableOptimizingProcess(tableRuntime, processMeta, processState, false);
-    String failureCategory =
-        failure instanceof OptimizingPayloadException
-            ? ((OptimizingPayloadException) failure).getReason().name()
-            : "DESCRIPTOR_INCOMPATIBLE";
-    process.failedReason =
-        "RECOVERY_PAYLOAD_CORRUPTED["
-            + failureCategory
-            + "]: "
-            + ExceptionUtil.getErrorMessage(failure);
-    process.closeStrict(trigger, OptimizingOwnership.OWNED, "NOT_EVALUATED");
+    try {
+      TableProcessMeta processMeta = loadProcessMeta(expectedProcessId);
+      if (processMeta == null) {
+        throw new IllegalStateException(
+            "No process metadata found while closing corrupted optimizing process");
+      }
+      OptimizingProcessState processState =
+          getAs(
+              OptimizingProcessMapper.class,
+              mapper -> mapper.getProcessState(processMeta.getProcessId()));
+      TableOptimizingProcess process =
+          new TableOptimizingProcess(tableRuntime, processMeta, processState, false);
+      String failureCategory =
+          failure instanceof OptimizingPayloadException
+              ? ((OptimizingPayloadException) failure).getReason().name()
+              : "DESCRIPTOR_INCOMPATIBLE";
+      process.failedReason =
+          "RECOVERY_PAYLOAD_CORRUPTED["
+              + failureCategory
+              + "]: "
+              + ExceptionUtil.getErrorMessage(failure);
+      process.closeStrict(trigger, OptimizingOwnership.OWNED, "NOT_EVALUATED");
+    } finally {
+      tableRuntime.releaseCorruptedProcessClose(expectedProcessId);
+    }
     refreshTable(tableRuntime);
     LOG.warn(
         "Optimizing reconciliation trigger={} table={} processId={} eligibility=NOT_EVALUATED"
             + " ownership=OWNED action=CLOSE_AND_REPLAN result=SUCCESS reason={}",
         trigger,
         tableRuntime.getTableIdentifier(),
-        processMeta.getProcessId(),
+        expectedProcessId,
         failure.getClass().getSimpleName());
   }
 
@@ -618,7 +617,14 @@ public class OptimizingQueue extends PersistentBase {
           tableRuntime.getTableIdentifier());
       return null;
     }
-    return new TableOptimizingProcess(tableRuntime, processMeta, state);
+    TableOptimizingProcess candidate = new TableOptimizingProcess(tableRuntime, processMeta, state);
+    TableOptimizingProcess canonical = candidate.publishRecovered();
+    if (canonical.processId != processMeta.getProcessId() || !canonical.belongsTo(this)) {
+      throw new IllegalStateException(
+          "Recovered optimizing process conflicts with the canonical local owner for process "
+              + processMeta.getProcessId());
+    }
+    return canonical;
   }
 
   private boolean isPersistedPaimonCommitReplay(
@@ -711,7 +717,6 @@ public class OptimizingQueue extends PersistentBase {
       DefaultTableRuntime tableRuntime, TableOptimizingProcess process, String trigger) {
     if (!process.offerIfEligibleAndOwned(trigger)) {
       scheduler.removeTable(tableRuntime);
-      tableRuntime.detachOptimizingProcess(process);
     }
   }
 
@@ -737,7 +742,11 @@ public class OptimizingQueue extends PersistentBase {
     OptimizingOwnership resetOwnership = ownershipGuard.apply(tableRuntime);
     if (resetOwnership != OptimizingOwnership.OWNED) {
       scheduler.removeTable(tableRuntime);
-      tableRuntime.detachOptimizingProcess(process);
+      // Recovery also visits idle tables with no process. Ownership loss is a normal skip;
+      // do not manufacture a failed recovery by dereferencing that absent local process.
+      if (process != null) {
+        process.detachLocalProcess();
+      }
       LOG.debug(
           "Optimizing reconciliation trigger={} table={} processId={}"
               + " eligibility=NOT_EVALUATED ownership={} action=SKIP"
@@ -960,7 +969,8 @@ public class OptimizingQueue extends PersistentBase {
   }
 
   private void clearProcess(OptimizingProcess optimizingProcess) {
-    tableQueue.removeIf(process -> process.getProcessId() == optimizingProcess.getProcessId());
+    // A stale instance must never remove its canonical recovery successor with the same id.
+    tableQueue.remove(optimizingProcess);
   }
 
   public TaskRuntime<?> pollTask(
@@ -1387,7 +1397,7 @@ public class OptimizingQueue extends PersistentBase {
       }
     }
     scheduler.removeTable(tableRuntime);
-    tableRuntime.detachOptimizingProcess(process);
+    process.detachLocalProcess();
     return false;
   }
 
@@ -1775,19 +1785,63 @@ public class OptimizingQueue extends PersistentBase {
               ? null
               : new HashMap<>(processMeta.getSummary());
       if (loadPayloads) {
-        loadTaskRuntimes(resume);
+        // Materialize without callbacks, retries, or queue publication. Only the candidate that
+        // becomes the runtime's canonical process may activate these side effects.
+        loadTaskRuntimes(false);
         commitMode =
             resolveRecoveryCommitMode(
                 format, recoveredOptimizingStatus, status, allTasksPrepared());
-        // Publish only after all descriptors and payloads have been decoded and validated. This
-        // prevents a recovery exception from leaving a process attached to the runtime but absent
-        // from tableQueue.
-        if (resume) {
-          tableRuntime.recover(this);
-        }
       } else {
         loadTaskRuntimesWithoutPayload();
         commitMode = CommitMode.NORMAL;
+      }
+    }
+
+    private TableOptimizingProcess publishRecovered() {
+      lock.lock();
+      boolean publishedHere = false;
+      try {
+        // This is Amoro's local process-object identity only. Paimon publication idempotency stays
+        // at the native boundary: ac223f47 Snapshot.java:332-338 uses commitUser and
+        // commitIdentifier.
+        OptimizingProcess published = tableRuntime.attachRecoveredProcess(this);
+        if (published != this) {
+          if (!(published instanceof TableOptimizingProcess)) {
+            throw new IllegalStateException("Canonical optimizing process has an invalid type");
+          }
+          return (TableOptimizingProcess) published;
+        }
+        publishedHere = true;
+        if (status == ProcessStatus.SUCCESS) {
+          tableRuntime.recover(this);
+        } else if (status == ProcessStatus.RUNNING) {
+          activateRecoveredTasks();
+        }
+        return this;
+      } catch (RuntimeException | Error failure) {
+        if (publishedHere) {
+          tableRuntime.detachOptimizingProcess(this);
+        }
+        throw failure;
+      } finally {
+        lock.unlock();
+      }
+    }
+
+    private void activateRecoveredTasks() {
+      for (TaskRuntime<? extends StagedTaskDescriptor<?, ?, ?>> taskRuntime : taskMap.values()) {
+        taskRuntime.getCompletedFuture().whenCompleted(() -> acceptResult(taskRuntime));
+        if (taskRuntime.getStatus() == TaskRuntime.Status.PLANNED) {
+          taskQueue.offer(taskRuntime);
+        } else if (taskRuntime.getStatus() == TaskRuntime.Status.SCHEDULED
+            || taskRuntime.getStatus() == TaskRuntime.Status.ACKED) {
+          LOG.debug(
+              "Keeping task {} in {} during recovery, waiting for optimizer to complete",
+              taskRuntime.getTaskId(),
+              taskRuntime.getStatus());
+        } else if (taskRuntime.getStatus() == TaskRuntime.Status.FAILED) {
+          resetTask(taskRuntime);
+        }
       }
     }
 
@@ -2134,13 +2188,16 @@ public class OptimizingQueue extends PersistentBase {
 
     private boolean offerIfEligibleAndOwned(String trigger) {
       lock.lock();
+      AtomicReference<Boolean> offered = new AtomicReference<>(false);
       try {
-        AtomicReference<Boolean> offered = new AtomicReference<>(false);
         tableRuntime
             .store()
             .synchronizedInvoke(
                 () -> {
-                  if (status != ProcessStatus.RUNNING || tableRuntime.getProcessId() != processId) {
+                  if (detached
+                      || status != ProcessStatus.RUNNING
+                      || tableRuntime.getOptimizingProcess() != this
+                      || tableRuntime.getProcessId() != processId) {
                     return;
                   }
                   PlanningFenceResult fence = evaluateOptimizingFence(tableRuntime, trigger);
@@ -2155,6 +2212,11 @@ public class OptimizingQueue extends PersistentBase {
                 });
         return offered.get();
       } finally {
+        // Reject and detach under the same process lock as publication. A delayed planning
+        // callback must not re-offer P after recovery has attached another instance Q.
+        if (!offered.get()) {
+          detachLocalProcess();
+        }
         lock.unlock();
       }
     }
@@ -2252,13 +2314,6 @@ public class OptimizingQueue extends PersistentBase {
 
     @Override
     public void commit() {
-      List<TaskRuntime<? extends StagedTaskDescriptor<?, ?, ?>>> successTasks =
-          taskMap.values().stream()
-              .filter(task -> task.getStatus() == Status.SUCCESS)
-              .collect(Collectors.toList());
-      LOG.debug(
-          "{} get {} tasks to commit", tableRuntime.getTableIdentifier(), successTasks.size());
-
       lock.lock();
       try {
         if (detached) {
@@ -2282,7 +2337,15 @@ public class OptimizingQueue extends PersistentBase {
         }
         try {
           hasCommitted = true;
-          if (successTasks.isEmpty()) {
+          // Task completion, retry, cancellation and commit are serialized by this process lock.
+          // Keep the real zero-success guard, but never decide it from an unlocked task snapshot.
+          boolean hasSuccessfulTask =
+              taskMap.values().stream().anyMatch(task -> task.getStatus() == Status.SUCCESS);
+          LOG.debug(
+              "{} has successful task to commit: {}",
+              tableRuntime.getTableIdentifier(),
+              hasSuccessfulTask);
+          if (!hasSuccessfulTask) {
             status = ProcessStatus.FAILED;
             failedReason =
                 "No successful task is available for commit, stop building committer to avoid"
@@ -2340,10 +2403,19 @@ public class OptimizingQueue extends PersistentBase {
     private void detach() {
       lock.lock();
       try {
+        detachLocalProcess();
+        removePendingRecovery(tableRuntime);
+      } finally {
+        lock.unlock();
+      }
+    }
+
+    private void detachLocalProcess() {
+      lock.lock();
+      try {
         detached = true;
         clearProcess(this);
         tableRuntime.detachOptimizingProcess(this);
-        removePendingRecovery(tableRuntime);
       } finally {
         lock.unlock();
       }
@@ -2518,40 +2590,55 @@ public class OptimizingQueue extends PersistentBase {
     }
 
     private void beginAndPersistProcess() {
-      doAsTransaction(
-          () ->
-              doAs(
-                  TableProcessMapper.class,
-                  mapper ->
-                      mapper.insertProcess(
-                          tableRuntime.getTableIdentifier().getId(),
-                          processId,
-                          "",
-                          status,
-                          optimizingType.name().toUpperCase(),
-                          tableRuntime.getOptimizingStatus().name().toLowerCase(),
-                          "AMORO",
-                          0,
-                          planTime,
-                          new HashMap<>(),
-                          summaryForPersistence())),
-          () ->
-              doAs(
-                  OptimizingProcessMapper.class,
-                  mapper ->
-                      mapper.insertInternalProcessState(
-                          tableRuntime.getTableIdentifier().getId(),
-                          processId,
-                          targetSnapshotId,
-                          targetChangeSnapshotId,
-                          fromSequence,
-                          toSequence)),
-          () ->
-              doAs(
-                  OptimizingProcessMapper.class,
-                  mapper -> mapper.insertTaskRuntimes(typedTaskRuntimes())),
-          () -> TaskFilesPersistence.persistTaskInputs(processId, typedTaskRuntimes()),
-          () -> tableRuntime.beginProcess(this));
+      // Amoro publishes the runtime reference inside this outer SQL transaction. Keep recovery
+      // behind the process lock until the owner and tasks are durable, not merely visible in
+      // memory. Paimon ac223f47 Snapshot.java:332-338 defines native commit identity only; it
+      // cannot repair two AMS instances created from an uncommitted owner read.
+      lock.lock();
+      try {
+        doAsTransaction(
+            () ->
+                doAs(
+                    TableProcessMapper.class,
+                    mapper ->
+                        mapper.insertProcess(
+                            tableRuntime.getTableIdentifier().getId(),
+                            processId,
+                            "",
+                            status,
+                            optimizingType.name().toUpperCase(),
+                            tableRuntime.getOptimizingStatus().name().toLowerCase(),
+                            "AMORO",
+                            0,
+                            planTime,
+                            new HashMap<>(),
+                            summaryForPersistence())),
+            () ->
+                doAs(
+                    OptimizingProcessMapper.class,
+                    mapper ->
+                        mapper.insertInternalProcessState(
+                            tableRuntime.getTableIdentifier().getId(),
+                            processId,
+                            targetSnapshotId,
+                            targetChangeSnapshotId,
+                            fromSequence,
+                            toSequence)),
+            () ->
+                doAs(
+                    OptimizingProcessMapper.class,
+                    mapper -> mapper.insertTaskRuntimes(typedTaskRuntimes())),
+            () -> TaskFilesPersistence.persistTaskInputs(processId, typedTaskRuntimes()),
+            () -> tableRuntime.beginProcess(this));
+      } catch (RuntimeException | Error failure) {
+        // The SQL transaction has rolled back. Do not issue a second durable close/cancel;
+        // only discard this local candidate before the normal planning failure path retries.
+        status = ProcessStatus.CLOSED;
+        detachLocalProcess();
+        throw failure;
+      } finally {
+        lock.unlock();
+      }
     }
 
     private void persistAndSetCompleted(boolean success) {

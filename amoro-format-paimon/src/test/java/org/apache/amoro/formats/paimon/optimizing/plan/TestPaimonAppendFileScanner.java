@@ -517,7 +517,7 @@ class TestPaimonAppendFileScanner {
   }
 
   @Test
-  void bucketedAppendTableIsScoredWithoutPlannerCandidates(@TempDir Path warehouse)
+  void bucketedAppendFactsDoNotLeakIntoLegacyPartitionCandidates(@TempDir Path warehouse)
       throws Exception {
     Catalog catalog = fsCatalog(warehouse);
     Map<String, String> options = new HashMap<>();
@@ -536,7 +536,8 @@ class TestPaimonAppendFileScanner {
 
     assertTrue(result.files().isEmpty());
     assertEquals(1, result.analysis().pendingInput().getDataFileCount());
-    assertFalse(result.analysis().plannerFactsAvailable());
+    assertTrue(result.analysis().plannerFactsAvailable());
+    assertEquals(1, result.analysis().plannerFiles().size());
   }
 
   @Test

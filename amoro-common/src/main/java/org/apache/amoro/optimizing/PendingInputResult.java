@@ -29,6 +29,7 @@ public class PendingInputResult {
   private final FormatPendingInput optimizingPendingInput;
   private final boolean optimizingNecessary;
   private final FormatTableAnalysis tableAnalysis;
+  private final long nextEvaluationTime;
 
   public PendingInputResult(FormatPendingInput pendingInput, boolean optimizingNecessary) {
     this(pendingInput, pendingInput, optimizingNecessary, null);
@@ -53,11 +54,21 @@ public class PendingInputResult {
       FormatPendingInput optimizingPendingInput,
       boolean optimizingNecessary,
       FormatTableAnalysis tableAnalysis) {
+    this(pendingInput, optimizingPendingInput, optimizingNecessary, tableAnalysis, 0L);
+  }
+
+  public PendingInputResult(
+      FormatPendingInput pendingInput,
+      FormatPendingInput optimizingPendingInput,
+      boolean optimizingNecessary,
+      FormatTableAnalysis tableAnalysis,
+      long nextEvaluationTime) {
     this.pendingInput = pendingInput;
     this.optimizingPendingInput =
         optimizingPendingInput == null ? pendingInput : optimizingPendingInput;
     this.optimizingNecessary = optimizingNecessary;
     this.tableAnalysis = tableAnalysis;
+    this.nextEvaluationTime = nextEvaluationTime;
   }
 
   public FormatPendingInput pendingInput() {
@@ -70,6 +81,11 @@ public class PendingInputResult {
 
   public boolean optimizingNecessary() {
     return optimizingNecessary;
+  }
+
+  /** Earliest requested reevaluation time in epoch milliseconds; zero means no deadline. */
+  public long nextEvaluationTime() {
+    return nextEvaluationTime;
   }
 
   public Optional<FormatTableAnalysis> tableAnalysis() {

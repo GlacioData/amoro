@@ -22,6 +22,7 @@ import org.apache.amoro.exception.OptimizingCommitException;
 import org.apache.amoro.formats.paimon.PaimonTable;
 import org.apache.amoro.formats.paimon.optimizing.PaimonCompactionOutput;
 import org.apache.amoro.formats.paimon.optimizing.PaimonCompactionTask;
+import org.apache.amoro.formats.paimon.optimizing.PaimonFixedBucketCommitGuard;
 import org.apache.amoro.optimizing.TableOptimizingCommitter;
 import org.apache.amoro.optimizing.TableOptimizingCommitter.CommitMode;
 import org.apache.paimon.table.AppendOnlyFileStoreTable;
@@ -38,7 +39,7 @@ import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 /**
- * AMS-side committer for Paimon BUCKET_UNAWARE compaction.
+ * AMS-side committer for Paimon Append compaction.
  *
  * <p>Deserialises every {@link CommitMessage} carried by {@link PaimonCompactionTask#getOutput()},
  * then performs a single atomic commit via Paimon's {@link
@@ -194,13 +195,20 @@ public class PaimonTableCommit implements TableOptimizingCommitter {
 
   void commitMessages(List<CommitMessage> messages, CommitMode mode)
       throws OptimizingCommitException {
+    PaimonFixedBucketCommitGuard guard =
+        PaimonFixedBucketCommitGuard.validate(
+            table, successTasks, messages, commitUser, commitIdentifier);
     if (mode == CommitMode.RECOVERY_REPLAY) {
       try {
-        filterAndCommitOnce(messages, mode, "recovery");
+        filterAndCommitOnce(messages, mode, "recovery", guard);
       } catch (Exception failure) {
         throw filterFailure(mode, "recovery", failure);
       }
       return;
+    }
+
+    if (guard != null) {
+      guard.validateUncommitted();
     }
 
     long directStartNanos = System.nanoTime();
@@ -214,7 +222,7 @@ public class PaimonTableCommit implements TableOptimizingCommitter {
         messages.size());
     Exception directFailure;
     try {
-      directCommitOnce(messages);
+      directCommitOnce(messages, guard);
       LOG.info(
           "PaimonTableCommit: commit success mode={} api=commit stage=direct table={} "
               + "commitUser={} identifier={} messageCount={} elapsedMs={}",
@@ -241,7 +249,7 @@ public class PaimonTableCommit implements TableOptimizingCommitter {
     }
 
     try {
-      filterAndCommitOnce(messages, mode, "fallback");
+      filterAndCommitOnce(messages, mode, "fallback", guard);
     } catch (Exception fallbackFailure) {
       OptimizingCommitException finalFailure =
           new OptimizingCommitException(
@@ -255,14 +263,21 @@ public class PaimonTableCommit implements TableOptimizingCommitter {
     }
   }
 
-  private void directCommitOnce(List<CommitMessage> messages) throws Exception {
-    try (StreamTableCommit directCommit = table.newCommit(commitUser)) {
+  private void directCommitOnce(List<CommitMessage> messages, PaimonFixedBucketCommitGuard guard)
+      throws Exception {
+    AppendOnlyFileStoreTable bound = guard == null ? table : guard.table();
+    try (StreamTableCommit directCommit = bound.newCommit(commitUser)) {
       directCommit.commit(commitIdentifier, messages);
     }
   }
 
-  private int filterAndCommitOnce(List<CommitMessage> messages, CommitMode mode, String stage)
+  private int filterAndCommitOnce(
+      List<CommitMessage> messages,
+      CommitMode mode,
+      String stage,
+      PaimonFixedBucketCommitGuard guard)
       throws Exception {
+    boolean alreadyProven = guard != null && guard.validateReplay(commitUser, commitIdentifier);
     long startNanos = System.nanoTime();
     LOG.info(
         "PaimonTableCommit: commit start mode={} api=filterAndCommit stage={} table={} "
@@ -274,7 +289,8 @@ public class PaimonTableCommit implements TableOptimizingCommitter {
         commitIdentifier,
         messages.size());
     int committed;
-    try (StreamTableCommit commit = table.newCommit(commitUser)) {
+    AppendOnlyFileStoreTable bound = guard == null ? table : guard.table();
+    try (StreamTableCommit commit = bound.newCommit(commitUser)) {
       committed = commit.filterAndCommit(Collections.singletonMap(commitIdentifier, messages));
     } catch (Exception failure) {
       LOG.warn(
@@ -308,6 +324,14 @@ public class PaimonTableCommit implements TableOptimizingCommitter {
           elapsedMillis(startNanos),
           failure);
       throw failure;
+    }
+    // Paimon ac223f47, operation/FileStoreCommitImpl.java:246-284 can filter a concurrent
+    // same-identity commit after our preflight. A zero result alone does not prove its scope.
+    if (guard != null
+        && committed == 0
+        && !alreadyProven
+        && !guard.validateReplay(commitUser, commitIdentifier)) {
+      throw new IllegalStateException("Fixed commit was filtered without matching delta evidence");
     }
     LOG.info(
         "PaimonTableCommit: commit success mode={} api=filterAndCommit stage={} table={} "

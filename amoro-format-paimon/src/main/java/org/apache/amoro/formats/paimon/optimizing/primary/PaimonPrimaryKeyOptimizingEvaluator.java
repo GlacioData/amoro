@@ -19,6 +19,7 @@
 package org.apache.amoro.formats.paimon.optimizing.primary;
 
 import org.apache.amoro.config.OptimizingConfig;
+import org.apache.amoro.formats.paimon.optimizing.PaimonOptimizingEligibility;
 import org.apache.amoro.formats.paimon.optimizing.health.PaimonHealthEvaluationContext;
 import org.apache.amoro.optimizing.OptimizingType;
 import org.apache.paimon.CoreOptions;
@@ -250,17 +251,29 @@ public class PaimonPrimaryKeyOptimizingEvaluator {
         return PaimonPrimaryKeyOptimizingEvaluation.of(
             normalCandidates, OptimizingType.MINOR, false, targetSnapshot.id());
       }
-      return evaluateFull(
-          table,
-          tableName,
-          snapshotFiles,
-          allUnits,
-          primaryKeyOptions,
-          effectiveConfig,
-          lastFullOptimizingTime,
-          planTime,
-          targetSnapshot.id(),
-          fullRetryNotBefore);
+      PaimonPrimaryKeyOptimizingEvaluation full =
+          evaluateFull(
+              table,
+              tableName,
+              snapshotFiles,
+              allUnits,
+              primaryKeyOptions,
+              effectiveConfig,
+              lastFullOptimizingTime,
+              planTime,
+              targetSnapshot.id(),
+              fullRetryNotBefore);
+      if (!full.necessary()
+          && !normalCandidates.isEmpty()
+          && effectiveConfig.isEnabled()
+          && effectiveConfig.getMinorLeastInterval() >= 0
+          && PaimonOptimizingEligibility.isEligible(table.options())
+          && !coreOptions.isChainTable()) {
+        return full.withNextEvaluationTime(
+            nextMinorEvaluationTime(
+                lastMinorOptimizingTime, effectiveConfig.getMinorLeastInterval()));
+      }
+      return full;
     } catch (RuntimeException e) {
       LOG.warn(
           "Failed to evaluate fixed snapshot [{}] for Paimon primary-key table [{}]; skip "
@@ -379,18 +392,30 @@ public class PaimonPrimaryKeyOptimizingEvaluator {
         return PaimonPrimaryKeyOptimizingEvaluation.of(
             normalCandidates, OptimizingType.MINOR, false, targetSnapshotId, analysis);
       }
-      return evaluateFull(
-          table,
-          tableName,
-          healthContext,
-          analysis,
-          allUnits,
-          primaryKeyOptions,
-          effectiveConfig,
-          lastFullOptimizingTime,
-          planTime,
-          targetSnapshotId,
-          fullRetryNotBefore);
+      PaimonPrimaryKeyOptimizingEvaluation full =
+          evaluateFull(
+              table,
+              tableName,
+              healthContext,
+              analysis,
+              allUnits,
+              primaryKeyOptions,
+              effectiveConfig,
+              lastFullOptimizingTime,
+              planTime,
+              targetSnapshotId,
+              fullRetryNotBefore);
+      if (!full.necessary()
+          && !normalCandidates.isEmpty()
+          && effectiveConfig.isEnabled()
+          && effectiveConfig.getMinorLeastInterval() >= 0
+          && PaimonOptimizingEligibility.isEligible(table.options())
+          && !coreOptions.isChainTable()) {
+        return full.withNextEvaluationTime(
+            nextMinorEvaluationTime(
+                lastMinorOptimizingTime, effectiveConfig.getMinorLeastInterval()));
+      }
+      return full;
     } catch (RuntimeException e) {
       LOG.warn(
           "Failed to decide optimizing for analyzed Paimon primary-key snapshot [{}] of table "
@@ -622,6 +647,17 @@ public class PaimonPrimaryKeyOptimizingEvaluator {
       return true;
     }
     return false;
+  }
+
+  static long nextMinorEvaluationTime(long lastMinorTime, long interval) {
+    if (interval < 0) {
+      return 0L;
+    }
+    // Preserve the evaluator's strict elapsed > interval boundary without wrapping on overflow.
+    if (lastMinorTime > Long.MAX_VALUE - interval - 1L) {
+      return Long.MAX_VALUE;
+    }
+    return Math.max(1L, lastMinorTime + interval + 1L);
   }
 
   private static boolean reachMinorInterval(

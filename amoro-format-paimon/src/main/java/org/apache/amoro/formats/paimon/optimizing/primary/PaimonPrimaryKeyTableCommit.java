@@ -24,6 +24,7 @@ import org.apache.amoro.formats.paimon.PaimonTable;
 import org.apache.amoro.optimizing.OptimizingType;
 import org.apache.amoro.optimizing.TableOptimizingCommitter;
 import org.apache.amoro.optimizing.TableOptimizingCommitter.CommitMode;
+import org.apache.commons.lang3.exception.ExceptionUtils;
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.Snapshot;
 import org.apache.paimon.table.FileStoreTable;
@@ -34,6 +35,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.FileNotFoundException;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -170,7 +172,30 @@ public class PaimonPrimaryKeyTableCommit implements TableOptimizingCommitter {
       CommitMode mode,
       boolean skippedBeforeExecute)
       throws OptimizingCommitException {
-    FullStatus fullStatus = inspectFull(identity);
+    FullStatus fullStatus;
+    try {
+      fullStatus = inspectFull(identity);
+    } catch (RuntimeException failure) {
+      // Only this NORMAL preflight is known not to have attempted publication. Do not apply
+      // this conversion to reconciliation, recovery replay, or the post-commit identity probe.
+      if (mode != CommitMode.NORMAL
+          || identity.optimizingType != OptimizingType.FULL
+          || ExceptionUtils.indexOfType(failure, IOException.class) < 0) {
+        throw failure;
+      }
+      OptimizingCommitSkippedException skipped =
+          staleFull(identity, "PRE_COMMIT_SNAPSHOT_READ_FAILED");
+      skipped.initCause(failure);
+      LOG.warn(
+          "Paimon FULL skipped before publication: table={} target={} commitUser={} identifier={} "
+              + "reason=PRE_COMMIT_SNAPSHOT_READ_FAILED",
+          name(),
+          identity.targetSnapshotId,
+          identity.commitUser,
+          identity.commitIdentifier,
+          failure);
+      throw skipped;
+    }
     if (skippedBeforeExecute && fullStatus == FullStatus.ALREADY_PUBLISHED) {
       throw new OptimizingCommitException(
           "Paimon FULL output conflicts with its published identity: " + identity.commitIdentifier,

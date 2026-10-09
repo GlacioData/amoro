@@ -380,6 +380,47 @@ public class TestTableRuntimeRefreshExecutorForPaimon extends AMSServiceTestBase
   }
 
   @Test
+  public void planningDigestChangeReevaluatesWithoutForcingStructuralHealth() {
+    long snapshotId = 515L;
+    TableAnalysisKey firstKey = dualFingerprintKey(snapshotId, 'a', 'b');
+    TableAnalysisKey changedPlanningKey = dualFingerprintKey(snapshotId, 'a', 'c');
+    PaimonPendingInput firstInput = pendingInput(4, 400L, 82);
+    PaimonPendingInput changedInput = pendingInput(5, 500L, 82);
+    AmoroTable<?> firstTable =
+        keyedPaimonTable(
+            snapshotWithId(snapshotId),
+            firstKey,
+            firstInput,
+            false,
+            analysis(firstKey, firstInput, Collections.emptyList()));
+    AmoroTable<?> changedPlanningTable =
+        keyedPaimonTable(
+            snapshotWithId(snapshotId),
+            changedPlanningKey,
+            changedInput,
+            false,
+            analysis(changedPlanningKey, changedInput, Collections.emptyList()));
+
+    executorWith(firstTable).execute(paimonRuntime);
+    executorWith(changedPlanningTable).execute(paimonRuntime);
+    executorWith(changedPlanningTable).execute(paimonRuntime);
+
+    verify(firstTable, times(1)).evaluatePendingInput(any(), anyInt(), eq(true));
+    verify(changedPlanningTable, times(1)).evaluatePendingInput(any(), anyInt());
+    verify(changedPlanningTable, never()).evaluatePendingInput(any(), anyInt(), eq(true));
+    assertFalse(paimonRuntime.getRuntimeHealthSnapshot().get().getEvaluation().isStale());
+    assertEquals(
+        changedPlanningKey.encoded(),
+        paimonRuntime.getRuntimeHealthSnapshot().get().getHealthDetails().getEvaluationKey());
+    assertEquals(
+        5,
+        tableManager()
+            .getTableRuntimeMata(paimonRuntime.getTableIdentifier())
+            .getTableSummary()
+            .getTotalFileCount());
+  }
+
+  @Test
   public void successfulHealthSnapshotAndGaugesSurviveLaterInvalidEvaluation() {
     TableAnalysisKey successfulKey = analysisKey(520L);
     PaimonPendingInput successfulInput = pendingInput(4, 400L, 82);
@@ -772,6 +813,16 @@ public class TestTableRuntimeRefreshExecutorForPaimon extends AMSServiceTestBase
         "test-paimon-health-v1",
         TableAnalysisKey.NO_BASELINE,
         TableAnalysisKey.NO_BASELINE_TIME);
+  }
+
+  private TableAnalysisKey dualFingerprintKey(
+      long snapshotId, char healthDigest, char planningDigest) {
+    String fingerprint =
+        "paimon-health-v1:"
+            + String.join("", Collections.nCopies(64, String.valueOf(healthDigest)))
+            + ":"
+            + String.join("", Collections.nCopies(64, String.valueOf(planningDigest)));
+    return analysisKey(snapshotId, 1L, fingerprint);
   }
 
   private PaimonPendingInput pendingInput(int fileCount, long fileSize, int healthScore) {

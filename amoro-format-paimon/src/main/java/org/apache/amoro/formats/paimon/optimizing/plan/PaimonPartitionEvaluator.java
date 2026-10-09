@@ -34,6 +34,21 @@ final class PaimonPartitionEvaluator {
     this.context = context;
   }
 
+  PaimonPartitionEvaluation evaluate(PaimonFixedBucketFileWindow window) {
+    if (!window.safe()) {
+      throw new IllegalArgumentException("Unsafe fixed-bucket window: " + window.reason());
+    }
+    // Paimon ac223f47, manifest/FileEntry.java:49-57 identifies partition + bucket.
+    // Apply the existing Amoro triggers within that unit; a proven prefix is not the whole bucket.
+    List<PaimonFileCandidate> files =
+        window.files().stream()
+            .map(
+                entry ->
+                    PaimonFileCandidate.from(entry.partition(), entry.file(), context, null, null))
+            .collect(Collectors.toList());
+    return evaluate(window.unit().partition(), files);
+  }
+
   PaimonPartitionEvaluation evaluate(BinaryRow partition, List<PaimonFileCandidate> files) {
     List<PaimonFileCandidate> smallFiles =
         files.stream().filter(PaimonFileCandidate::isSmallFile).collect(Collectors.toList());

@@ -21,14 +21,19 @@ package org.apache.amoro.server.table;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
 
 import org.apache.amoro.ServerTableIdentifier;
 import org.apache.amoro.TableFormat;
 import org.apache.amoro.api.OptimizingTaskResult;
+import org.apache.amoro.exception.PersistenceException;
 import org.apache.amoro.formats.paimon.PaimonCatalogFactory;
 import org.apache.amoro.formats.paimon.PaimonTable;
 import org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeyCompactionExecutor;
@@ -60,21 +65,31 @@ import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.data.GenericRow;
 import org.apache.paimon.data.InternalRow;
+import org.apache.paimon.fs.FileIO;
 import org.apache.paimon.reader.RecordReader;
 import org.apache.paimon.schema.Schema;
 import org.apache.paimon.table.FileStoreTable;
+import org.apache.paimon.table.FileStoreTableFactory;
 import org.apache.paimon.table.sink.BatchTableCommit;
 import org.apache.paimon.table.sink.BatchTableWrite;
 import org.apache.paimon.table.sink.BatchWriteBuilder;
 import org.apache.paimon.table.source.ReadBuilder;
+import org.apache.paimon.table.source.ScanMode;
 import org.apache.paimon.types.DataTypes;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.io.IOException;
+import java.io.Serializable;
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -82,6 +97,8 @@ import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
 class TestPaimonFullSkipE2E extends PersistentBase {
@@ -93,6 +110,31 @@ class TestPaimonFullSkipE2E extends PersistentBase {
   @ParameterizedTest
   @ValueSource(booleans = {false, true})
   void fullWithoutNewSnapshotAndStaleRetryCommitRealRows(boolean staleSkip, @TempDir Path warehouse)
+      throws Exception {
+    runFullScenario(staleSkip, false, 0, "none", warehouse);
+  }
+
+  @ParameterizedTest
+  @CsvSource({
+    "false,1,none",
+    "true,1,none",
+    "false,2,none",
+    "true,2,none",
+    "true,1,before",
+    "true,1,after"
+  })
+  void snapshotReadFailureClosesAndRetriesFull(
+      boolean changelog, int readFailures, String persistenceFailure, @TempDir Path warehouse)
+      throws Exception {
+    runFullScenario(true, changelog, readFailures, persistenceFailure, warehouse);
+  }
+
+  private void runFullScenario(
+      boolean staleSkip,
+      boolean changelog,
+      int readFailures,
+      String persistenceFailure,
+      Path warehouse)
       throws Exception {
     ServerTableIdentifier id =
         ServerTableIdentifier.of("full-e2e", "db", "table", TableFormat.PAIMON);
@@ -106,10 +148,13 @@ class TestPaimonFullSkipE2E extends PersistentBase {
       Identifier paimonId = Identifier.create("db", "table");
       Map<String, String> options = new HashMap<>();
       options.put("bucket", "1");
+      options.put("changelog-producer", changelog ? "full-compaction" : "none");
       options.put("write-only", "true");
       options.put("self-optimizing.enabled", "true");
       options.put("self-optimizing.group", "full-e2e");
       options.put("self-optimizing.minor.trigger.file-count", "99");
+      // Isolate FULL retry deadlines from the independent minimum planning interval.
+      options.put("self-optimizing.min-plan-interval", "0");
       options.put("self-optimizing.full.trigger.interval", "600000");
       options.put("paimon-optimizer.primary-key.partition-idle-time", "0s");
       options.put("num-sorted-run.compaction-trigger", "999");
@@ -123,8 +168,14 @@ class TestPaimonFullSkipE2E extends PersistentBase {
       FileStoreTable nativeTable = (FileStoreTable) catalog.getTable(paimonId);
       write(nativeTable, 1, 10);
       write(nativeTable, 2, 20);
+      AtomicBoolean failSnapshotRead = new AtomicBoolean(false);
+      AtomicInteger snapshotReadFailures = new AtomicInteger();
+      FileStoreTable observedTable =
+          readFailures == 0
+              ? nativeTable
+              : snapshotReadFailureTable(nativeTable, failSnapshotRead, snapshotReadFailures);
       PaimonTable table =
-          new PaimonTable(TableIdentifier.of("full-e2e", "db", "table"), nativeTable);
+          new PaimonTable(TableIdentifier.of("full-e2e", "db", "table"), observedTable);
       doAs(TableMetaMapper.class, m -> m.insertTable(id));
       TableRuntimeMeta meta = new TableRuntimeMeta();
       meta.setTableId(id.getId());
@@ -141,7 +192,7 @@ class TestPaimonFullSkipE2E extends PersistentBase {
       DefaultTableRuntimeStore store =
           new DefaultTableRuntimeStore(
               id, meta, creator.requiredStateKeys(), Collections.emptyList());
-      DefaultTableRuntime runtime = (DefaultTableRuntime) creator.create(store);
+      DefaultTableRuntime runtime = spy((DefaultTableRuntime) creator.create(store));
       runtime.refresh(table);
       store
           .begin()
@@ -194,11 +245,53 @@ class TestPaimonFullSkipE2E extends PersistentBase {
         assertEquals(0L, runtime.getFullRetryNotBefore());
         return;
       }
-      write(nativeTable, 1, 99);
+      if (readFailures == 0) {
+        write(nativeTable, 1, 99);
+      }
       List<String> visible = rows(nativeTable);
       long snapshot = nativeTable.latestSnapshot().get().id();
-      first.commit();
+      AtomicBoolean failPersistence = new AtomicBoolean(!"none".equals(persistenceFailure));
+      doAnswer(
+              call -> {
+                if ("before".equals(persistenceFailure) && failPersistence.getAndSet(false)) {
+                  throw new PersistenceException("injected before FULL completion persistence");
+                }
+                Object result = call.callRealMethod();
+                if ("after".equals(persistenceFailure) && failPersistence.getAndSet(false)) {
+                  throw new PersistenceException("injected lost FULL completion response");
+                }
+                return result;
+              })
+          .when(runtime)
+          .completeSkippedFull(anyLong(), any(), any());
+      failSnapshotRead.set(readFailures > 0);
+      try {
+        if ("none".equals(persistenceFailure)) {
+          first.commit();
+        } else {
+          assertThrows(PersistenceException.class, first::commit);
+        }
+      } finally {
+        failSnapshotRead.set(false);
+      }
+      if (readFailures > 0) {
+        assertTrue(snapshotReadFailures.get() > 0, "snapshot read fault must actually fire");
+      }
+      if (!"none".equals(persistenceFailure)) {
+        queue.retryPendingRecoveries(Long.MAX_VALUE);
+      }
       assertEquals(snapshot, nativeTable.latestSnapshot().get().id());
+      assertEquals(
+          "0",
+          getAs(TableRuntimeMapper.class, TableRuntimeMapper::selectAllStates).stream()
+              .filter(
+                  s ->
+                      s.getTableId() == id.getId()
+                          && s.getStateKey().equals(OptimizingCommitGuard.STATE_KEY.getKey()))
+              .findFirst()
+              .get()
+              .getStateValue());
+      assertEquals(OptimizingStatus.IDLE, runtime.getOptimizingStatus());
       assertEquals(visible, rows(nativeTable));
       assertEquals(oldFull, runtime.getLastFullOptimizingTime());
       assertEquals(oldOptimized, runtime.getLastOptimizedSnapshotId());
@@ -247,18 +340,67 @@ class TestPaimonFullSkipE2E extends PersistentBase {
       executeOne(queue, runtime);
       OptimizingProcess second = runtime.getOptimizingProcess();
       long secondId = second.getProcessId();
+      if (readFailures > 1) {
+        int previousFaults = snapshotReadFailures.get();
+        failSnapshotRead.set(true);
+        try {
+          second.commit();
+        } finally {
+          failSnapshotRead.set(false);
+        }
+        assertTrue(snapshotReadFailures.get() > previousFaults);
+        assertEquals(snapshot, nativeTable.latestSnapshot().get().id());
+        assertEquals(oldFull, runtime.getLastFullOptimizingTime());
+        assertEquals(OptimizingStatus.IDLE, runtime.getOptimizingStatus());
+        assertEquals(0L, runtime.getProcessId());
+        assertTrue(runtime.getFullRetryNotBefore() > System.currentTimeMillis());
+        assertFalse(factory.createPlanner(runtime, table, 1, 64L * 1024 * 1024).isNecessary());
+        restored
+            .begin()
+            .updateState(
+                DefaultTableRuntime.OPTIMIZING_STATE_KEY,
+                current -> {
+                  current.setFullRetryNotBefore(1);
+                  return current;
+                })
+            .commit();
+        refresh(table, runtime);
+        assertEquals(OptimizingStatus.PENDING, runtime.getOptimizingStatus());
+        executeOne(queue, runtime);
+        second = runtime.getOptimizingProcess();
+      }
+      long successfulId = second.getProcessId();
       second.commit();
       assertEquals(
           ProcessStatus.SUCCESS,
-          getAs(TableProcessMapper.class, m -> m.getProcessMeta(secondId)).getStatus());
+          getAs(TableProcessMapper.class, m -> m.getProcessMeta(successfulId)).getStatus());
       assertEquals(snapshot + 1, nativeTable.latestSnapshot().get().id());
-      assertEquals(secondId, nativeTable.latestSnapshot().get().commitIdentifier());
+      assertEquals(successfulId, nativeTable.latestSnapshot().get().commitIdentifier());
       assertEquals(visible, rows(nativeTable));
+      if (changelog) {
+        ReadBuilder read = nativeTable.newReadBuilder();
+        List<String> changes = new ArrayList<>();
+        try (RecordReader<InternalRow> reader =
+            read.newRead()
+                .createReader(
+                    nativeTable
+                        .newSnapshotReader()
+                        .withSnapshot(snapshot + 1)
+                        .withMode(ScanMode.CHANGELOG)
+                        .read())) {
+          reader.forEachRemaining(
+              row ->
+                  changes.add(
+                      row.getRowKind().shortString() + ":" + row.getInt(0) + ":" + row.getInt(1)));
+        }
+        Collections.sort(changes);
+        assertEquals(Arrays.asList("+I:1:10", "+I:2:20"), changes);
+      }
       TableRuntimeOptimizingState state =
           restored.getState(DefaultTableRuntime.OPTIMIZING_STATE_KEY);
       assertEquals(0, state.getFullStaleSkipCount());
       assertEquals(0, state.getFullRetryNotBefore());
-      assertEquals(firstId, state.getLastFullStaleProcessId());
+      assertEquals(readFailures > 1 ? secondId : firstId, state.getLastFullStaleProcessId());
       assertTrue(state.getLastFullOptimizingTime() > oldFull);
     } finally {
       if (queue != null) {
@@ -279,6 +421,41 @@ class TestPaimonFullSkipE2E extends PersistentBase {
         doAs(TableMetaMapper.class, m -> m.deleteTableIdById(id.getId()));
       }
     }
+  }
+
+  private static FileStoreTable snapshotReadFailureTable(
+      FileStoreTable table, AtomicBoolean fail, AtomicInteger failures) {
+    FileIO delegate = table.fileIO();
+    FileIO faulty =
+        (FileIO)
+            Proxy.newProxyInstance(
+                FileIO.class.getClassLoader(),
+                new Class<?>[] {FileIO.class},
+                (InvocationHandler & Serializable)
+                    (proxy, method, args) -> {
+                      if (fail.get()
+                          && Arrays.asList(
+                                  "exists",
+                                  "listStatus",
+                                  "getFileStatus",
+                                  "newInputStream",
+                                  "readFileUtf8")
+                              .contains(method.getName())
+                          && args != null
+                          && args.length > 0
+                          && args[0] instanceof org.apache.paimon.fs.Path
+                          && (args[0].toString().endsWith("/snapshot")
+                              || args[0].toString().contains("/snapshot/"))) {
+                        failures.incrementAndGet();
+                        throw new IOException("injected pre-commit snapshot read failure");
+                      }
+                      try {
+                        return method.invoke(delegate, args);
+                      } catch (InvocationTargetException failure) {
+                        throw failure.getCause();
+                      }
+                    });
+    return FileStoreTableFactory.create(faulty, table.location(), table.schema());
   }
 
   private static void refresh(PaimonTable table, DefaultTableRuntime runtime) {

@@ -65,7 +65,7 @@ import java.util.Set;
 import java.util.function.Supplier;
 
 /**
- * {@link ProcessFactory} for Paimon BUCKET_UNAWARE (AppendOnly) compaction. Discovered via
+ * {@link ProcessFactory} for supported Paimon append and primary-key compaction. Discovered via
  * ServiceLoader through {@code META-INF/services/org.apache.amoro.process.ProcessFactory} in this
  * module.
  *
@@ -94,7 +94,7 @@ public class PaimonProcessFactory implements ProcessFactory {
           .booleanType()
           .defaultValue(false)
           .withDescription(
-              "Enable Paimon optimizing (BUCKET_UNAWARE small-file compaction). Default off.");
+              "Enable supported Paimon append and primary-key optimizing. Default off.");
 
   private boolean enabled;
 
