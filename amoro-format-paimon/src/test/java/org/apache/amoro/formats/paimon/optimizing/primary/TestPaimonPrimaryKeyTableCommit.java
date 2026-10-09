@@ -69,8 +69,12 @@ import org.apache.paimon.types.DataTypes;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.InOrder;
 
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.ByteBuffer;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -83,6 +87,97 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 @DisplayName("PaimonPrimaryKeyTableCommit")
 class TestPaimonPrimaryKeyTableCommit {
+
+  @ParameterizedTest
+  @CsvSource({"false,false", "false,true", "true,false", "true,true"})
+  void initialSnapshotIoFailureSafelySkipsFull(boolean historical, boolean authenticated)
+      throws Exception {
+    FileStoreTable table = mockCommitTable();
+    RuntimeException failure =
+        historical
+            ? new IllegalStateException(new IOException("historical snapshot unavailable"))
+            : new UncheckedIOException(new IOException("latest snapshot unavailable"));
+    if (historical) {
+      org.apache.paimon.utils.SnapshotManager manager =
+          mock(org.apache.paimon.utils.SnapshotManager.class);
+      when(table.snapshotManager()).thenReturn(manager);
+      Snapshot latest = snapshot(3, "other", 1);
+      when(table.latestSnapshot()).thenReturn(java.util.Optional.of(latest));
+      when(manager.tryGetSnapshot(2)).thenThrow(failure);
+    } else {
+      when(table.latestSnapshot()).thenThrow(failure);
+    }
+    PaimonTable wrapper = authenticated ? mock(PaimonTable.class) : null;
+    if (wrapper != null) {
+      when(wrapper.doAs(any()))
+          .thenAnswer(
+              call -> {
+                try {
+                  return ((Callable<?>) call.getArgument(0)).call();
+                } catch (Exception e) {
+                  throw new RuntimeException(e);
+                }
+              });
+    }
+    PaimonPrimaryKeyTableCommit committer =
+        new PaimonPrimaryKeyTableCommit(wrapper, table, Collections.singletonList(emptyFullTask()));
+    OptimizingCommitSkippedException skipped =
+        assertThrows(OptimizingCommitSkippedException.class, committer::commit);
+    assertEquals(OptimizingCommitSkippedException.Reason.STALE_FULL, skipped.getReason());
+    assertFalse(skipped.isPublicationUncertain());
+    assertTrue(skipped.getMessage().contains("PRE_COMMIT_SNAPSHOT_READ_FAILED"));
+    assertSame(failure, skipped.getCause());
+    verify(table, never()).newCommit(any());
+    verify(table, times(1)).latestSnapshot();
+  }
+
+  @Test
+  void recoveryAndReconciliationIoFailuresAreNotSafeSkips() {
+    FileStoreTable table = mockCommitTable();
+    RuntimeException failure = new UncheckedIOException(new IOException("snapshot unavailable"));
+    when(table.latestSnapshot()).thenThrow(failure);
+    PaimonPrimaryKeyTableCommit committer =
+        new PaimonPrimaryKeyTableCommit(table, Collections.singletonList(emptyFullTask()));
+    OptimizingCommitException replay =
+        assertThrows(
+            OptimizingCommitException.class, () -> committer.commit(CommitMode.RECOVERY_REPLAY));
+    assertFalse(replay instanceof OptimizingCommitSkippedException);
+    assertSame(failure, replay.getCause());
+    OptimizingCommitException reconcile =
+        assertThrows(OptimizingCommitException.class, committer::reconcile);
+    assertFalse(reconcile instanceof OptimizingCommitSkippedException);
+    assertSame(failure, reconcile.getCause());
+    verify(table, never()).newCommit(any());
+  }
+
+  @Test
+  void snapshotIoFailureAfterNativeAttemptRemainsUncertain(@TempDir Path warehouse)
+      throws Exception {
+    try (Catalog catalog = fsCatalog(warehouse)) {
+      Map<String, String> options = primaryKeyOptions();
+      options.put(PaimonPrimaryKeyOptions.PARTITION_IDLE_TIME, "0s");
+      Identifier id = createPrimaryKeyTable(catalog, "post_commit_read_failure", options);
+      writeCommits(catalog.getTable(id), 2);
+      List<PaimonPrimaryKeyCompactionTask> tasks = fullTasks(catalog, id);
+      FileStoreTable real = (FileStoreTable) catalog.getTable(id);
+      FileStoreTable table = mockCommitTable();
+      when(table.latestSnapshot())
+          .thenReturn(real.latestSnapshot())
+          .thenThrow(new UncheckedIOException(new IOException("post-commit read failed")));
+      TableCommitImpl nativeCommit = mock(TableCommitImpl.class);
+      when(table.newCommit(any())).thenReturn(nativeCommit);
+      doThrow(new RuntimeException("ambiguous native failure"))
+          .when(nativeCommit)
+          .commit(org.mockito.ArgumentMatchers.anyLong(), any());
+      OptimizingCommitException failure =
+          assertThrows(
+              OptimizingCommitException.class,
+              () -> new PaimonPrimaryKeyTableCommit(table, tasks).commit());
+      assertFalse(failure instanceof OptimizingCommitSkippedException);
+      verify(nativeCommit).commit(org.mockito.ArgumentMatchers.anyLong(), any());
+      verify(nativeCommit, never()).filterAndCommit(anyMap());
+    }
+  }
 
   @Test
   void fullCommitAndReplayKeepAllFileIoInsideAuthentication(@TempDir Path warehouse)
@@ -697,7 +792,7 @@ class TestPaimonPrimaryKeyTableCommit {
   }
 
   @Test
-  void exactIdentityProbeIsBoundedAndIoFailureIsNotSkip() throws Exception {
+  void exactIdentityProbeIsBoundedAndNonIoFailureIsNotSkip() throws Exception {
     FileStoreTable table = mockCommitTable();
     org.apache.paimon.utils.SnapshotManager manager =
         mock(org.apache.paimon.utils.SnapshotManager.class);
