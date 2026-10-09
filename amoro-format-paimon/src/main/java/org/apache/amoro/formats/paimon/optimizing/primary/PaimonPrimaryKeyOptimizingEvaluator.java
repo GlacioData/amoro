@@ -19,6 +19,7 @@
 package org.apache.amoro.formats.paimon.optimizing.primary;
 
 import org.apache.amoro.config.OptimizingConfig;
+import org.apache.amoro.formats.paimon.optimizing.PaimonOptimizingEligibility;
 import org.apache.amoro.formats.paimon.optimizing.health.PaimonHealthEvaluationContext;
 import org.apache.amoro.optimizing.OptimizingType;
 import org.apache.paimon.CoreOptions;
@@ -266,9 +267,10 @@ public class PaimonPrimaryKeyOptimizingEvaluator {
           && !normalCandidates.isEmpty()
           && effectiveConfig.isEnabled()
           && effectiveConfig.getMinorLeastInterval() >= 0
-          && PaimonManagedGentle.isAffected(table)) {
+          && PaimonOptimizingEligibility.isEligible(table.options())
+          && !coreOptions.isChainTable()) {
         return full.withNextEvaluationTime(
-            PaimonManagedGentle.nextEvaluationTime(
+            nextMinorEvaluationTime(
                 lastMinorOptimizingTime, effectiveConfig.getMinorLeastInterval()));
       }
       return full;
@@ -407,9 +409,10 @@ public class PaimonPrimaryKeyOptimizingEvaluator {
           && !normalCandidates.isEmpty()
           && effectiveConfig.isEnabled()
           && effectiveConfig.getMinorLeastInterval() >= 0
-          && PaimonManagedGentle.isAffected(table)) {
+          && PaimonOptimizingEligibility.isEligible(table.options())
+          && !coreOptions.isChainTable()) {
         return full.withNextEvaluationTime(
-            PaimonManagedGentle.nextEvaluationTime(
+            nextMinorEvaluationTime(
                 lastMinorOptimizingTime, effectiveConfig.getMinorLeastInterval()));
       }
       return full;
@@ -644,6 +647,17 @@ public class PaimonPrimaryKeyOptimizingEvaluator {
       return true;
     }
     return false;
+  }
+
+  static long nextMinorEvaluationTime(long lastMinorTime, long interval) {
+    if (interval < 0) {
+      return 0L;
+    }
+    // Preserve the evaluator's strict elapsed > interval boundary without wrapping on overflow.
+    if (lastMinorTime > Long.MAX_VALUE - interval - 1L) {
+      return Long.MAX_VALUE;
+    }
+    return Math.max(1L, lastMinorTime + interval + 1L);
   }
 
   private static boolean reachMinorInterval(

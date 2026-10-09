@@ -34,7 +34,9 @@ import org.apache.amoro.TableRuntime;
 import org.apache.amoro.formats.paimon.PaimonTable;
 import org.apache.amoro.formats.paimon.optimizing.PaimonPendingInput;
 import org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeyIntervalTestSupport;
+import org.apache.amoro.formats.paimon.process.PaimonProcessFactory;
 import org.apache.amoro.optimizing.FormatTableAnalysis;
+import org.apache.amoro.optimizing.OptimizingType;
 import org.apache.amoro.optimizing.PendingInputResult;
 import org.apache.amoro.resource.ResourceGroup;
 import org.apache.amoro.server.optimizing.OptimizingStatus;
@@ -206,6 +208,89 @@ class TestRuntimeEvaluationDeadline extends PersistentBase {
       scheduler.addTable(runtime);
       assertEquals(
           Collections.singletonList(runtime), scheduler.scheduleTables(Collections.emptySet(), 1));
+    }
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"interval", "disabled", "writer", "consumed", "empty"})
+  void ordinaryMinorDemandIsRevalidatedBeforePlanning(String change, @TempDir Path warehouse)
+      throws Exception {
+    try (Catalog catalog = PaimonPrimaryKeyIntervalTestSupport.catalog(warehouse)) {
+      Map<String, String> options = PaimonPrimaryKeyIntervalTestSupport.options(false);
+      options.put("self-optimizing.full.trigger.interval", "-1");
+      options.put("self-optimizing.minor.trigger.interval", "0");
+      options.put("num-sorted-run.compaction-trigger", "2");
+      FileStoreTable nativeTable =
+          PaimonPrimaryKeyIntervalTestSupport.table(catalog, "ordinary", options);
+      PaimonPrimaryKeyIntervalTestSupport.append(nativeTable, GenericRow.of(1, 10, 20, 1L));
+      PaimonPrimaryKeyIntervalTestSupport.append(nativeTable, GenericRow.of(1, 11, 21, 2L));
+      table = PaimonPrimaryKeyIntervalTestSupport.wrap(nativeTable);
+      runtime.refresh(table);
+      store
+          .begin()
+          .updateState(
+              DefaultTableRuntime.OPTIMIZING_STATE_KEY,
+              state -> {
+                state.setLastMinorOptimizingTime(System.currentTimeMillis() - 1000L);
+                state.setLastOptimizedSnapshotId(state.getCurrentSnapshotId());
+                return state;
+              })
+          .commit();
+      runtime.refresh(table);
+      assertTrue(runtime.evaluatePendingInputAndTransition(table, 20));
+      assertEquals(runtime.getCurrentSnapshotId(), runtime.getLastOptimizedSnapshotId());
+      assertTrue(((PaimonPendingInput) runtime.getPendingInput()).isSameSnapshotPlanningPending());
+      PaimonProcessFactory factory = new PaimonProcessFactory();
+      factory.open(Collections.singletonMap(PaimonProcessFactory.OPTIMIZER_ENABLED.key(), "true"));
+      assertTrue(factory.createPlanner(runtime, table, 1, 64L * 1024 * 1024).isNecessary());
+      if (change.equals("consumed")) {
+        PaimonPrimaryKeyIntervalTestSupport.compact(nativeTable, OptimizingType.MINOR, 1L);
+      } else if (change.equals("disabled")) {
+        nativeTable =
+            nativeTable.copy(Collections.singletonMap("self-optimizing.enabled", "false"));
+      } else if (change.equals("writer")) {
+        nativeTable = nativeTable.copy(Collections.singletonMap("write-only", "false"));
+      } else {
+        nativeTable =
+            nativeTable.copy(
+                Collections.singletonMap("self-optimizing.minor.trigger.interval", "600000"));
+      }
+      table = PaimonPrimaryKeyIntervalTestSupport.wrap(nativeTable);
+      runtime.refresh(table);
+      // Keep the stale persisted marker: the planner itself must revalidate it before any task.
+      assertTrue(((PaimonPendingInput) runtime.getPendingInput()).isSameSnapshotPlanningPending());
+      assertFalse(factory.createPlanner(runtime, table, 1, 64L * 1024 * 1024).isNecessary());
+      if (change.equals("empty")) {
+        store.begin().updateStatusCode(ignored -> OptimizingStatus.PLANNING.getCode()).commit();
+        runtime.completeEmptyProcess();
+      } else {
+        assertFalse(runtime.evaluatePendingInputAndTransition(table, 20));
+      }
+      assertEquals(OptimizingStatus.IDLE, runtime.getOptimizingStatus());
+      assertFalse(((PaimonPendingInput) runtime.getPendingInput()).isSameSnapshotPlanningPending());
+      runtime.refresh(table);
+      assertFalse(runtime.evaluatePendingInputAndTransition(table, 20));
+      runtime.refresh(table);
+      if (change.equals("disabled") || change.equals("writer")) {
+        // Ineligible tables may still lack a health analysis; that is not MINOR demand.
+        assertFalse(table.shouldEvaluatePendingInput(runtime, false, Long.MAX_VALUE));
+        assertFalse(
+            ((PaimonPendingInput) runtime.getPendingInput()).isSameSnapshotPlanningPending());
+        assertFalse(factory.createPlanner(runtime, table, 1, 64L * 1024 * 1024).isNecessary());
+      } else {
+        assertFalse(runtime.shouldEvaluateCurrentPlanningAnalysis());
+        assertEquals(change.equals("interval") || change.equals("empty"), due(Long.MAX_VALUE));
+      }
+      if (change.equals("interval")) {
+        reload();
+        runtime.refresh(table);
+        assertTrue(runtime.shouldEvaluateCurrentPlanningAnalysis());
+        assertFalse(runtime.evaluatePendingInputAndTransition(table, 20));
+        runtime.refresh(table);
+        assertFalse(runtime.shouldEvaluateCurrentPlanningAnalysis());
+        assertTrue(
+            due(Long.MAX_VALUE), "Restart reconstructs an ordinary MINOR deadline from real facts");
+      }
     }
   }
 

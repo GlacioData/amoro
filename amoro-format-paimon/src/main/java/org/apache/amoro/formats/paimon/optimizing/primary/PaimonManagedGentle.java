@@ -69,15 +69,4 @@ public final class PaimonManagedGentle {
       return false;
     }
   }
-
-  static long nextEvaluationTime(long lastMinorTime, long interval) {
-    if (interval < 0) {
-      return 0L;
-    }
-    // Preserve the evaluator's strict elapsed > interval boundary without wrapping on overflow.
-    if (lastMinorTime > Long.MAX_VALUE - interval - 1L) {
-      return Long.MAX_VALUE;
-    }
-    return Math.max(1L, lastMinorTime + interval + 1L);
-  }
 }

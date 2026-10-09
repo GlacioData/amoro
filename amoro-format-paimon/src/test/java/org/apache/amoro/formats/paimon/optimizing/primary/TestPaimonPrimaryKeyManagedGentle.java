@@ -154,7 +154,7 @@ class TestPaimonPrimaryKeyManagedGentle {
 
   @ParameterizedTest
   @CsvSource({"gentle,true", "radical,false"})
-  void delayHintsAreScopedAndPreserveStrictInterval(
+  void delayHintsPreserveStrictIntervalAndGentleDemandScope(
       String mode, boolean affected, @TempDir Path dir) throws Exception {
     try (Catalog c = catalog(dir)) {
       Map<String, String> opts = gentleOptions();
@@ -175,7 +175,7 @@ class TestPaimonPrimaryKeyManagedGentle {
                 t, t.name(), health, analysis, config, 1000L, 0L, null, now);
         assertEquals(now > 2000L, direct.necessary());
         assertEquals(direct.necessary(), reused.necessary());
-        assertEquals(affected && now <= 2000L ? 2001L : 0L, direct.nextEvaluationTime());
+        assertEquals(now <= 2000L ? 2001L : 0L, direct.nextEvaluationTime());
         assertEquals(direct.nextEvaluationTime(), reused.nextEvaluationTime());
       }
       config.setMinorLeastInterval(-1);
@@ -191,7 +191,7 @@ class TestPaimonPrimaryKeyManagedGentle {
       when(context.getLastMinorOptimizingTime()).thenReturn(future);
       PendingInputResult delayed = wrap(t).evaluatePendingInput(context, 1).get();
       assertFalse(delayed.optimizingNecessary());
-      assertEquals(affected ? future + 1001L : 0L, delayed.nextEvaluationTime());
+      assertEquals(future + 1001L, delayed.nextEvaluationTime());
       assertFalse(
           ((PaimonPendingInput) delayed.optimizingPendingInput()).isGentleMinorCompactionPending());
       when(context.getLastMinorOptimizingTime()).thenReturn(0L);
@@ -219,7 +219,9 @@ class TestPaimonPrimaryKeyManagedGentle {
       assertFalse(result.optimizingNecessary());
       assertEquals(0L, result.nextEvaluationTime());
     }
-    assertEquals(Long.MAX_VALUE, PaimonManagedGentle.nextEvaluationTime(Long.MAX_VALUE - 2, 1000));
+    assertEquals(
+        Long.MAX_VALUE,
+        PaimonPrimaryKeyOptimizingEvaluator.nextMinorEvaluationTime(Long.MAX_VALUE - 2, 1000));
   }
 
   @Test
