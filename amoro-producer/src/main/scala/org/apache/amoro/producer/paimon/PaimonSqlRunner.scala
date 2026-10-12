@@ -21,6 +21,7 @@ package org.apache.amoro.producer.paimon
 import scala.collection.JavaConverters._
 
 import org.apache.paimon.spark.SparkTable
+import org.apache.paimon.spark.catalog.ProcedureCatalog
 import org.apache.spark.sql.{Row, SparkSession}
 import org.apache.spark.sql.connector.catalog.{Identifier, TableCatalog}
 import org.apache.spark.sql.internal.SQLConf
@@ -37,6 +38,29 @@ final case class PaimonTableMetadata(
 trait PaimonSqlRunner {
 
   def run(spark: SparkSession, sqlText: String): Seq[Row]
+
+  def expireSnapshotsSupportsOptions(spark: SparkSession, catalogName: String): Boolean = {
+    val previousSession = SparkSession.getActiveSession
+    SparkSession.setActiveSession(spark)
+    try {
+      SQLConf.withExistingConf(spark.sessionState.conf) {
+        // Inspect the runtime procedure, since Producer supports both Paimon 0.9 and 1.3.
+        // https://github.com/apache/paimon/blob/release-1.3.2/paimon-spark/paimon-spark-common/src/main/java/org/apache/paimon/spark/catalog/ProcedureCatalog.java
+        spark.sessionState.catalogManager.catalog(catalogName) match {
+          case catalog: ProcedureCatalog =>
+            catalog.loadProcedure(Identifier.of(Array("sys"), "expire_snapshots"))
+              .parameters().exists(_.name() == "options")
+          case _ =>
+            throw new IllegalArgumentException(s"Catalog $catalogName cannot load procedures")
+        }
+      }
+    } finally {
+      previousSession match {
+        case Some(session) => SparkSession.setActiveSession(session)
+        case None => SparkSession.clearActiveSession()
+      }
+    }
+  }
 
   def loadTableMetadata(
       spark: SparkSession,

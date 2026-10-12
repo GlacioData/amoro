@@ -166,6 +166,9 @@ class PaimonFormatAdapterTest {
   final private class FakeRunner(rows: Seq[Row]) extends PaimonSqlRunner {
     var sqls: Seq[String] = Seq.empty
 
+    override def expireSnapshotsSupportsOptions(spark: SparkSession, catalogName: String): Boolean =
+      true
+
     override def loadTableMetadata(
         spark: SparkSession,
         catalog: String,

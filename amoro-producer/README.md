@@ -389,14 +389,36 @@ Compaction completed: {"catalog":"paimon","database":"ods","table":"orders","sql
 
 ## expire-snapshots
 
-执行 Paimon `expire_snapshots` procedure。
+执行 Paimon `expire_snapshots` procedure。每张表先读取 `$options` 中显式保存的 snapshot
+配置，按参数分别解析；表配置优先于命令行参数，未配置的参数才使用命令行值或下表默认值。
 
 | 参数 | 是否必填 | 默认值 | 说明 |
 |------|----------|--------|------|
-| `--retainMax` | 否 | `20` | 传给 `expire_snapshots` 的 `retain_max`。 |
-| `--retainMin` | 否 | `10` | 传给 `expire_snapshots` 的 `retain_min`。 |
-| `--maxDeletes` | 否 | `550` | 单轮最多删除的 snapshot 数量；删除数达到该值会继续下一轮。 |
-| `--procedureOptions` | 否 | `file-operation.thread-num=32,snapshot.expire.execution-mode=sync` | 传给 `expire_snapshots` 的 `options` 字符串，空字符串表示不拼接。 |
+| `--retainMax` | 否 | `20` | 表未配置 `snapshot.num-retained.max` 时，作为 `retain_max`。 |
+| `--retainMin` | 否 | `10` | 表未配置 `snapshot.num-retained.min` 时，作为 `retain_min`。 |
+| `--maxDeletes` | 否 | `550` | 表未配置 `snapshot.expire.limit` 时，作为单轮删除上限；达到最终生效的上限会继续下一轮。 |
+| `--procedureOptions` | 否 | `file-operation.thread-num=32,snapshot.expire.execution-mode=sync` | procedure 配置，执行前将其中的 snapshot 配置统一为最终生效值。 |
+
+时间保留使用表上的 `snapshot.time-retained`；表未配置时，使用 `--procedureOptions` 中的
+同名配置，仍未提供时保留对应 procedure 的原行为：1.3.2 使用原生默认的 1 小时，
+0.9.0 不按时间淘汰（描述为 `UNLIMITED`）。配置读取失败、配置值无效或最终
+`retain_max < retain_min` 时，该表执行失败，不回退到另一套保留策略。
+
+Spark Job/Task 描述展示表名与最终生效的参数，例如：
+
+```text
+Expire snapshots: paimon.db.orders | retained_min=50 | retained_max=300 | retained_time=86400000ms | max_deletes=50
+```
+
+每轮过期及重试使用该描述，结束或异常后恢复原来的描述。描述不包含完整 procedure options。
+`max_deletes` 只限制单轮，整个任务会循环执行到单轮删除数低于该值。
+
+Paimon 1.3.2 通过 `options` 传递最终的时间保留配置。Paimon 0.9.0 不支持 `options` 参数，
+Producer 自动改为通过带 UTC 偏移的 `older_than` timestamp 传递时间边界，不依赖 session 时区。
+0.9.0 下默认的线程数及执行模式不传给 procedure；非默认且无法表达的其他 options 会报错。
+
+依据：[1.3.2 配置解析源码](https://github.com/apache/paimon/blob/release-1.3.2/paimon-common/src/main/java/org/apache/paimon/utils/ProcedureUtils.java)、
+[0.9.0 procedure 源码](https://github.com/apache/paimon/blob/release-0.9.0/paimon-spark/paimon-spark-common/src/main/java/org/apache/paimon/spark/procedure/ExpireSnapshotsProcedure.java)。
 
 示例：
 

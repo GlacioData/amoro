@@ -240,6 +240,136 @@ class PaimonExpireSnapshotsActionTest {
     assertEquals("5", executeOnce(Row(5L)).metrics("totalDeletedCount"))
   }
 
+  @Test
+  def tableRetentionOverridesArgumentsAndProcedureOptionsInEveryRound(): Unit = {
+    val runner = new FakeRunner(Seq(success(Row(2L)), success(Row(1L))))
+    runner.properties = Map(
+      "snapshot.num-retained.min" -> "50",
+      "snapshot.num-retained.max" -> "300",
+      "snapshot.time-retained" -> "24 h",
+      "snapshot.expire.limit" -> "2")
+    val config = defaultConfig.copy(procedureOptions = "snapshot.time-retained=1 ms")
+    val result = new PaimonExpireSnapshotsAction(runner).execute(context(), table, config)
+
+    assertEquals(1, runner.optionReads)
+    assertEquals(2, runner.sqls.size)
+    runner.sqls.foreach { sql =>
+      assertTrue(sql.contains("retain_min => 50"), sql)
+      assertTrue(sql.contains("retain_max => 300"), sql)
+      assertTrue(sql.contains("max_deletes => 2"), sql)
+      assertTrue(sql.contains("snapshot.time-retained=86400000 ms"), sql)
+    }
+    assertEquals("2", result.metrics("maxDeletes"))
+    assertEquals("50", result.metrics("retainMin"))
+    assertEquals("300", result.metrics("retainMax"))
+    assertEquals("86400000", result.metrics("timeRetainedMs"))
+  }
+
+  @Test
+  def missingTableOptionsFallBackIndividuallyToArguments(): Unit = {
+    val runner = new FakeRunner(Seq(success(Row(0L))))
+    runner.properties = Map("snapshot.num-retained.min" -> "15")
+    val config = PaimonExpireSnapshotsConfig(80, 2, 9L, "snapshot.time-retained=2 h")
+    val result = new PaimonExpireSnapshotsAction(runner).execute(context(), table, config)
+
+    assertTrue(runner.sqls.head.contains("retain_min => 15"))
+    assertTrue(runner.sqls.head.contains("retain_max => 80"))
+    assertTrue(runner.sqls.head.contains("max_deletes => 9"))
+    assertEquals("7200000", result.metrics("timeRetainedMs"))
+  }
+
+  @Test
+  def invalidTableRetentionNeverFallsBackOrCallsExpire(): Unit = {
+    Seq(
+      Map("snapshot.num-retained.min" -> "0"),
+      Map("snapshot.num-retained.max" -> "1"),
+      Map("snapshot.num-retained.min" -> "invalid"),
+      Map("snapshot.time-retained" -> "invalid"),
+      Map("snapshot.time-retained" -> "-1 s"),
+      Map("snapshot.expire.limit" -> "0"))
+      .foreach { properties =>
+        val runner = new FakeRunner(Seq.empty)
+        runner.properties = properties
+        assertThrows(
+          classOf[IllegalArgumentException],
+          () => new PaimonExpireSnapshotsAction(runner).execute(context(), table, defaultConfig))
+        assertTrue(runner.sqls.isEmpty, properties.toString)
+      }
+  }
+
+  @Test
+  def optionReadRetriesWithoutReplayingSuccessfulExpiration(): Unit = {
+    val runner = new FakeRunner(Seq(success(Row(0L))))
+    runner.optionReadFailures = 1
+    new PaimonExpireSnapshotsAction(runner).execute(context(), table, defaultConfig)
+    assertEquals(2, runner.optionReads)
+    assertEquals(1, runner.sqls.size)
+  }
+
+  @Test
+  def exhaustedOptionReadDoesNotExpireWithDefaults(): Unit = {
+    val runner = new FakeRunner(Seq.empty)
+    runner.optionReadFailures = 3
+    assertThrows(
+      classOf[RuntimeException],
+      () => new PaimonExpireSnapshotsAction(runner).execute(context(), table, defaultConfig))
+    assertEquals(3, runner.optionReads)
+    assertTrue(runner.sqls.isEmpty)
+  }
+
+  @Test
+  def invalidOptionsRowsDoNotPermitExpiration(): Unit = {
+    Seq(Seq(Row("key")), Seq(Row(null, "1")), Seq(Row("key", "1"), Row("key", "2")))
+      .foreach { rows =>
+        val runner = new FakeRunner(Seq.empty) {
+          override def optionRows: Seq[Row] = rows
+        }
+        assertThrows(
+          classOf[RuntimeException],
+          () => new PaimonExpireSnapshotsAction(runner).execute(context(), table, defaultConfig))
+        assertTrue(runner.sqls.isEmpty)
+      }
+  }
+
+  @Test
+  def legacyTimeRetentionIsUnlimitedOnlyWhenNoTimeWasConfigured(): Unit = {
+    val absent = new FakeRunner(Seq(success(Row(0L))))
+    absent.supportsOptions = false
+    val result = new PaimonExpireSnapshotsAction(absent).execute(context(), table, defaultConfig)
+    assertEquals(Long.MaxValue.toString, result.metrics("timeRetainedMs"))
+    assertFalse(absent.sqls.head.contains("older_than"))
+    assertFalse(absent.sqls.head.contains("options =>"))
+
+    val configured = new FakeRunner(Seq(success(Row(0L))))
+    configured.supportsOptions = false
+    configured.properties = Map("snapshot.time-retained" -> "24 h")
+    new PaimonExpireSnapshotsAction(configured).execute(context(), table, defaultConfig)
+    assertTrue(configured.sqls.head.contains("older_than => TIMESTAMP"))
+    assertFalse(configured.sqls.head.contains("options =>"))
+  }
+
+  @Test
+  def unsupportedLegacyOptionsAndIntegerOverflowNeverCallExpire(): Unit = {
+    val legacy = new FakeRunner(Seq.empty)
+    legacy.supportsOptions = false
+    assertThrows(
+      classOf[IllegalArgumentException],
+      () =>
+        new PaimonExpireSnapshotsAction(legacy)
+          .execute(
+            context(),
+            table,
+            defaultConfig.copy(procedureOptions = "file-operation.thread-num=16")))
+    assertTrue(legacy.sqls.isEmpty)
+    val oversized = new FakeRunner(Seq.empty)
+    assertThrows(
+      classOf[IllegalArgumentException],
+      () =>
+        new PaimonExpireSnapshotsAction(oversized)
+          .execute(context(), table, defaultConfig.copy(maxDeletes = Int.MaxValue.toLong + 1)))
+    assertTrue(oversized.sqls.isEmpty)
+  }
+
   private def executeOnce(row: Row): org.apache.amoro.producer.core.ActionResult = {
     new PaimonExpireSnapshotsAction(new FakeRunner(Seq(success(row))))
       .execute(context(), table, defaultConfig)
@@ -296,11 +426,25 @@ class PaimonExpireSnapshotsActionTest {
 
   private class FakeRunner(results: Seq[Either[RuntimeException, Row]]) extends PaimonSqlRunner {
 
+    var supportsOptions = true
+    override def expireSnapshotsSupportsOptions(spark: SparkSession, catalogName: String): Boolean =
+      supportsOptions
+
     var sqls: Seq[String] = Seq.empty
     var outcomes: Seq[String] = Seq.empty
+    var properties = Map.empty[String, String]
+    var optionReads = 0
+    var optionReadFailures = 0
     private var remainingResults = results
 
+    def optionRows: Seq[Row] = properties.toSeq.map { case (key, value) => Row(key, value) }
+
     override def run(spark: SparkSession, sqlText: String): Seq[Row] = {
+      if (sqlText.startsWith("SELECT")) {
+        optionReads += 1
+        if (optionReads <= optionReadFailures) throw new RuntimeException("options unavailable")
+        return optionRows
+      }
       sqls :+= sqlText
       if (remainingResults.isEmpty) {
         throw new AssertionError("FakeRunner result queue exhausted")
