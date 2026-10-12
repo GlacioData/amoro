@@ -81,8 +81,8 @@ object ProducerApp {
       printTargets(common, targets)
       val context = ProducerContext(spark, common, adapter)
       val results = executeTables(context, action, actionConfig, targets)
-      val summary = printSummary(common, results)
-      if (summary.failedTables.nonEmpty && !common.continueOnTableFailure) 1 else 0
+      val summary = printSummary(common, results, targets.size)
+      if (summary.failedTables.nonEmpty) 1 else 0
     } catch {
       case NonFatal(exception) =>
         println(s"执行失败: ${exception.getClass.getSimpleName}: ${exception.getMessage}")
@@ -144,34 +144,24 @@ object ProducerApp {
       actionConfig: ActionConfig,
       targets: Seq[TargetTable]): Seq[(TargetTable, ActionResult)] = {
     validateRetryTimesForFrameworkRetry(context, action)
-    targets.map { table =>
+    val results = Seq.newBuilder[(TargetTable, ActionResult)]
+    val remaining = targets.iterator
+    var stopped = false
+    while (remaining.hasNext && !stopped) {
+      val table = remaining.next()
       val startNs = System.nanoTime()
-      val execution =
+      val actionResult =
         try {
-          Right(executeOneTableWithRetry(context, action, actionConfig, table))
+          executeOneTableWithRetry(context, action, actionConfig, table)
         } catch {
-          case NonFatal(exception) => Left(exception)
+          case NonFatal(exception) => failedResult(table, exception)
         }
-
-      execution match {
-        case Right(actionResult) =>
-          val result = actionResult.copy(costMs = elapsedMs(startNs))
-          printTableAction(context.common, table, result)
-          if (result.status == ActionStatus.Failed && !context.common.continueOnTableFailure) {
-            throw new RuntimeException(failedStatusMessage(action, table, result))
-          }
-          table -> result
-
-        case Left(exception) =>
-          val result = failedResult(table, exception).copy(costMs = elapsedMs(startNs))
-          printTableAction(context.common, table, result)
-          if (context.common.continueOnTableFailure) {
-            table -> result
-          } else {
-            throw exception
-          }
-      }
+      val result = actionResult.copy(costMs = elapsedMs(startNs))
+      printTableAction(context.common, table, result)
+      results += table -> result
+      stopped = result.status == ActionStatus.Failed && !context.common.continueOnTableFailure
     }
+    results.result()
   }
 
   private def executeWithFrameworkRetry(
@@ -204,14 +194,6 @@ object ProducerApp {
       message = Some(Option(exception.getMessage).getOrElse(exception.getClass.getName)),
       metrics = Map("table" -> table.raw),
       costMs = 0.0d)
-  }
-
-  private def failedStatusMessage(
-      action: ProducerAction,
-      table: TargetTable,
-      result: ActionResult): String = {
-    val message = result.message.getOrElse("action returned failed status")
-    s"Action '${action.name}' failed for table ${table.raw}: $message"
   }
 
   private def printTableAction(
@@ -283,13 +265,16 @@ object ProducerApp {
 
   private def printSummary(
       common: CommonProducerConfig,
-      results: Seq[(TargetTable, ActionResult)]): ProducerSummary = {
+      results: Seq[(TargetTable, ActionResult)],
+      targetCount: Int): ProducerSummary = {
     val summary = ProducerSummary.fromResults(results)
     println("=========== PRODUCER SUMMARY ===========")
     println(s"format             = ${common.format}")
     println(s"action             = ${common.action}")
     println(s"catalog            = ${common.catalogName}")
-    println(s"tables found       = ${summary.tableCount}")
+    println(s"tables found       = $targetCount")
+    println(s"tables executed    = ${summary.tableCount}")
+    println(s"tables not executed = ${targetCount - summary.tableCount}")
     println(s"tables success     = ${summary.successTables.size}")
     println(s"tables failed      = ${summary.failedTables.size}")
     println(s"tables skipped     = ${summary.skippedTables.size}")

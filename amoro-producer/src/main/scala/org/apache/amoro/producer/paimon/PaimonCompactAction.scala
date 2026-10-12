@@ -18,368 +18,425 @@
 
 package org.apache.amoro.producer.paimon
 
+import java.time.{Instant, LocalDate}
+import java.time.format.{DateTimeFormatter, DateTimeParseException}
+import java.util.Locale
+
+import scala.collection.JavaConverters._
 import scala.util.control.NonFatal
 
+import org.apache.paimon.utils.{JsonSerdeUtil, ParameterUtils, StringUtils}
+import org.apache.spark.sql.Row
+import org.slf4j.LoggerFactory
+
 import org.apache.amoro.producer.core.{ActionOption, ActionResult, ActionStatus, ActionTaskResult, CommonProducerConfig, ProducerContext, ProducerParsedOptions, RetryMode, TargetTable}
-import org.apache.amoro.producer.paimon.PaimonSqlUtils.{fieldOpt, quoteIdent, sqlString, valueAt}
+import org.apache.amoro.producer.paimon.PaimonSqlUtils.quoteIdent
 import org.apache.amoro.producer.spi.{ActionConfig, ProducerAction}
 
 final case class PaimonCompactConfig(
-    startBucket: Int,
-    step: Int,
     compactStrategy: String,
     procedureOptions: String,
     version: String,
-    partitionIdleTime: String)
-  extends ActionConfig
+    partitionIdleTime: String,
+    where: Option[String],
+    compactStrategyExplicitlySet: Boolean = false) extends ActionConfig
 
-class PaimonCompactAction(runner: PaimonSqlRunner = SparkPaimonSqlRunner) extends ProducerAction {
+class PaimonCompactAction(
+    runner: PaimonSqlRunner = SparkPaimonSqlRunner,
+    onCompactionCompleted: PaimonCompactionCompletion => Unit = PaimonCompactionCompletion.log)
+  extends ProducerAction {
+
+  private val log = LoggerFactory.getLogger(classOf[PaimonCompactAction])
 
   override def name: String = "compact"
-
   override def retryMode: RetryMode = RetryMode.ActionManagedRetry
 
-  override def options: Seq[ActionOption] = {
-    Seq(
-      ActionOption("startBucket", description = "Start bucket id"),
-      ActionOption("step", description = "Bucket range step"),
-      ActionOption("compactStrategy", description = "Paimon compact strategy"),
-      ActionOption("procedureOptions", description = "Paimon compact procedure options"),
-      ActionOption("version", description = "Paimon version"),
-      ActionOption("partitionIdleTime", description = "Paimon 0.9 partition idle time"))
-  }
+  override def options: Seq[ActionOption] = Seq(
+    ActionOption("startBucket", description = "Removed: official Paimon does not support buckets"),
+    ActionOption("step", description = "Removed: official Paimon does not support buckets"),
+    ActionOption(
+      "compactStrategy",
+      description =
+        "Paimon 1.3 full or minor; default minor for unpartitioned primary-key tables, full otherwise"),
+    ActionOption("procedureOptions", description = "Paimon 1.3 compact procedure options"),
+    ActionOption("version", description = "Table execution version: 0.9 or 1.3 (default 0.9)"),
+    ActionOption("partitionIdleTime", description = "Paimon 0.9 partition idle time"),
+    ActionOption(
+      "where",
+      description = "Partition predicate adapted to each table; mutually exclusive with --between"),
+    ActionOption(
+      "between",
+      description =
+        "Date yyyy-MM-dd: generate preset_dt BETWEEN previous day and date; exclusive with --where"))
 
   override def parse(commandLine: ProducerParsedOptions): ActionConfig = {
+    require(
+      !(commandLine.hasOption("where") && commandLine.hasOption("between")),
+      "--where and --between are mutually exclusive; provide only one")
+    Seq("startBucket", "step").foreach { option =>
+      require(
+        !commandLine.hasOption(option),
+        s"--$option is no longer supported: official Paimon compact has no buckets argument")
+    }
     PaimonCompactConfig(
-      startBucket = parseInt(optionValue(commandLine, "startBucket", "0"), "--startBucket"),
-      step = parseInt(optionValue(commandLine, "step", "20"), "--step"),
-      compactStrategy = optionValue(commandLine, "compactStrategy", "full"),
-      procedureOptions = optionValue(commandLine, "procedureOptions", "target-file-size=256m"),
-      version = optionValue(commandLine, "version", "0.9"),
-      partitionIdleTime = optionValue(commandLine, "partitionIdleTime", "1d"))
+      compactStrategy =
+        commandLine.getOptionValue("compactStrategy", "full").trim.toLowerCase(Locale.ROOT),
+      procedureOptions =
+        commandLine.getOptionValue("procedureOptions", "target-file-size=256m").trim,
+      version = commandLine.getOptionValue("version", "0.9").trim,
+      partitionIdleTime = commandLine.getOptionValue("partitionIdleTime", "1h").trim,
+      where = if (commandLine.hasOption("between")) {
+        Some(PaimonCompactAction.betweenPredicate(commandLine.getOptionValue("between")))
+      } else Option(commandLine.getOptionValue("where")),
+      compactStrategyExplicitlySet = commandLine.hasOption("compactStrategy"))
   }
 
   override def validate(common: CommonProducerConfig, actionConfig: ActionConfig): Unit = {
     val config = asCompactConfig(actionConfig)
-    validateRetryTimes(common.retryTimes)
-    if (!PaimonCompactAction.isSupportedVersion(config)) {
-      throw new IllegalArgumentException("--version 目前仅支持 0.9 或 1.3")
-    }
-    if (PaimonCompactAction.isPaimon13(config)) {
-      if (config.startBucket < 0) {
-        throw new IllegalArgumentException("--startBucket 不能小于 0")
-      }
-      if (config.step <= 0) {
-        throw new IllegalArgumentException("--step 必须大于 0")
-      }
-      if (config.compactStrategy.trim.isEmpty) {
-        throw new IllegalArgumentException("--compactStrategy 的值不能为空")
-      }
-    } else if (config.partitionIdleTime.trim.isEmpty) {
-      throw new IllegalArgumentException("--partitionIdleTime 的值不能为空")
-    }
+    require(common.retryTimes > 0, "--retryTimes must be greater than 0")
+    require(Set("0.9", "1.3").contains(config.version), "--version must be 0.9 or 1.3")
+    config.where.foreach(value => requireNonBlank(value, "--where"))
   }
 
   override def execute(
       context: ProducerContext,
       table: TargetTable,
       actionConfig: ActionConfig): ActionResult = {
+    validate(context.common, actionConfig)
     val config = asCompactConfig(actionConfig)
-    validateRetryTimes(context.common.retryTimes)
+    val (displayConfig, secrets) = PaimonCompactionCompletion.redactOptions(config)
     val startNs = System.nanoTime()
+    var metrics = Map("table" -> table.raw, "requestedVersion" -> config.version)
 
-    val tasks: Seq[ActionTaskResult] =
-      if (PaimonCompactAction.isPaimon09(config)) {
-        val taskName = s"partition_idle_time=${config.partitionIdleTime.trim}"
-        Seq(
-          runTask(
-            context,
-            table,
-            taskName,
-            PaimonCompactAction.buildCompactSql(
-              context.common.catalogName,
-              config,
-              table,
-              bucketRange = "")))
-      } else {
-        readBucketNum(context, table) match {
-          case Left(_) =>
-            Seq(runTask(
-              context,
-              table,
-              "non-bucket",
-              PaimonCompactAction.buildNonBucketCompactSql(table)))
+    def result(task: ActionTaskResult): ActionResult = ActionResult(
+      task.status,
+      Seq(task),
+      task.message,
+      metrics,
+      (System.nanoTime() - startNs) / 1e6)
+    def failed(taskName: String, error: Throwable, attempts: Int): ActionResult = result(
+      ActionTaskResult(
+        taskName,
+        ActionStatus.Failed,
+        Some(PaimonCompactionCompletion.redactError(errorMessage(error), secrets)),
+        Map("attempts" -> attempts.toString)))
 
-          case Right(bucketNum) if config.startBucket > bucketNum - 1 =>
-            val reason = s"startBucket(${config.startBucket}) > 最大 bucket id(${bucketNum - 1})"
-            return result(
-              status = ActionStatus.Skipped,
-              tasks =
-                Seq(
-                  ActionTaskResult(
-                    name = "skipped",
-                    status = ActionStatus.Skipped,
-                    message = Some(reason),
-                    metrics = Map("table" -> table.raw))),
-              message = Some(reason),
-              table = table,
-              startNs = startNs)
-
-          case Right(bucketNum) =>
-            PaimonCompactAction
-              .buildBucketRanges(config.startBucket, config.step, bucketNum)
-              .map { bucketRange =>
-                runTask(
-                  context,
-                  table,
-                  bucketRange,
-                  PaimonCompactAction.buildCompactSql(
-                    context.common.catalogName,
-                    config,
-                    table,
-                    bucketRange))
-              }
-        }
-      }
-
-    val status =
-      if (tasks.exists(_.status == ActionStatus.Failed)) {
-        ActionStatus.Failed
-      } else {
-        ActionStatus.Success
-      }
-
-    result(status, tasks, None, table, startNs)
-  }
-
-  private[paimon] def buildBucketRanges(
-      startBucket: Int,
-      step: Int,
-      bucketNum: Int): Seq[String] = {
-    PaimonCompactAction.buildBucketRanges(startBucket, step, bucketNum)
-  }
-
-  private[paimon] def buildCompactSql(
-      catalogName: String,
-      config: PaimonCompactConfig,
-      table: TargetTable,
-      bucketRange: String): String = {
-    PaimonCompactAction.buildCompactSql(catalogName, config, table, bucketRange)
-  }
-
-  private[paimon] def buildNonBucketCompactSql(table: TargetTable): String = {
-    PaimonCompactAction.buildNonBucketCompactSql(table)
-  }
-
-  private[paimon] def buildNonBucketCompactSql(
-      config: PaimonCompactConfig,
-      table: TargetTable): String = {
-    PaimonCompactAction.buildNonBucketCompactSql(config, table)
-  }
-
-  private[paimon] def isPaimon09(config: PaimonCompactConfig): Boolean = {
-    PaimonCompactAction.isPaimon09(config)
-  }
-
-  private def readBucketNum(context: ProducerContext, table: TargetTable): Either[String, Int] = {
-    val optionsTable =
-      s"${quoteIdent(context.common.catalogName)}.${quoteIdent(table.database)}.${quoteIdent(table.table + "$options")}"
-    val sqlText =
-      s"""
-         |SELECT `value`
-         |FROM $optionsTable
-         |WHERE lower(trim(`key`)) = 'bucket'
-         |LIMIT 1
-         |""".stripMargin
-
-    try {
-      runner.run(context.spark, sqlText).headOption match {
-        case None =>
-          Left("no bucket option in $options")
-
-        case Some(row) =>
-          fieldOpt(row, Set("value")).orElse(valueAt(row, 0)).map(_.toString.trim) match {
-            case None =>
-              Left("bucket value is null")
-
-            case Some(bucketText) =>
-              try {
-                val bucketNum = bucketText.toInt
-                if (bucketNum <= 0) {
-                  Left(s"bucket = $bucketNum (非正数，无法按 bucket 范围 compact)")
-                } else {
-                  Right(bucketNum)
-                }
-              } catch {
-                case NonFatal(_) =>
-                  Left(s"bucket 不是整数: $bucketText")
-              }
-          }
-      }
-    } catch {
-      case NonFatal(t) =>
-        Left(s"read bucket error: ${t.getMessage}")
+    val (readResult, readAttempts) = withRetry(context.common.retryTimes) {
+      readProperties(context, table)
     }
+    metrics += "metadataAttempts" -> readAttempts.toString
+    val properties = readResult match {
+      case Right(value) => value
+      case Left(error) => return failed("read-options", error, readAttempts)
+    }
+    val managed =
+      enabled(properties, "self-optimizing.enabled") && enabled(properties, "write-only")
+    val effectiveVersion = if (managed) "1.3" else "0.9"
+    if (config.version != effectiveVersion) {
+      val reason = if (managed) {
+        "table enables both self-optimizing.enabled and write-only and requires --version 1.3"
+      } else {
+        "table does not enable both self-optimizing.enabled and write-only"
+      }
+      log.warn(
+        s"compact skipped: catalog=${context.common.catalogName}, database=${table.database}, " +
+          s"table=${table.table}, requestedVersion=${config.version}, reason=$reason")
+      return result(ActionTaskResult("compact", ActionStatus.Skipped, Some(reason), Map.empty))
+    }
+    metrics += "effectiveVersion" -> effectiveVersion
+
+    // Spark applies session/table-scoped options when loading the target. The $options
+    // system table exposes only persistent options and cannot prove range safety.
+    // https://github.com/apache/paimon/blob/release-1.3.2/paimon-spark/paimon-spark-common/src/main/scala/org/apache/paimon/spark/SparkTable.scala
+    val (loaded, metadataAttempts) = withRetry(context.common.retryTimes) {
+      runner.loadTableMetadata(context.spark, context.common.catalogName, table)
+    }
+    metrics += "effectiveOptionsAttempts" -> metadataAttempts.toString
+    val metadata = loaded match {
+      case Right(value) => value
+      case Left(error) => return failed("read-table-metadata", error, metadataAttempts)
+    }
+    metrics ++= Map(
+      "primaryKeys" -> JsonSerdeUtil.toFlatJson(metadata.primaryKeys.asJava),
+      "partitionKeys" -> JsonSerdeUtil.toFlatJson(metadata.partitionKeys.asJava))
+
+    val (sql, scope, effectiveStrategy) =
+      try {
+        validateSqlArguments(context, config, effectiveVersion)
+        val resolved = PaimonCompactionScope.resolve(context.spark, metadata, config.where)
+        val observed = resolved.redacted(secrets)
+        metrics ++= observed.metrics
+        val scopeLog = JsonSerdeUtil.toFlatJson((observed.fields ++ Map[String, AnyRef](
+          "catalog" -> context.common.catalogName,
+          "database" -> table.database,
+          "table" -> table.table)).asJava)
+        if (resolved.removesWhere) {
+          log.warn(
+            "Compaction scope adjusted; the requested where no longer limits this table: {}",
+            scopeLog)
+        } else {
+          log.info("Compaction scope resolved: {}", scopeLog)
+        }
+        val scopedConfig = config.copy(where = resolved.effectiveWhere)
+        validateExecution(scopedConfig, metadata.properties, effectiveVersion)
+        val useMinorDefault = effectiveVersion == "1.3" &&
+          !config.compactStrategyExplicitlySet && metadata.primaryKeys.nonEmpty &&
+          metadata.partitionKeys.isEmpty
+        val strategy = if (useMinorDefault) "minor" else config.compactStrategy
+        val effectiveConfig = scopedConfig.copy(compactStrategy = strategy)
+        if (effectiveVersion == "1.3") {
+          metrics ++= Map(
+            "requestedCompactStrategy" -> (if (config.compactStrategyExplicitlySet)
+                                             config.compactStrategy
+                                           else "default"),
+            "effectiveCompactStrategy" -> strategy)
+        }
+        if (useMinorDefault) {
+          log.info(
+            s"Compaction defaults to minor for an unpartitioned primary-key table: " +
+              s"catalog=${context.common.catalogName}, database=${table.database}, table=${table.table}")
+        }
+        (
+          PaimonCompactAction.buildCompactSql(
+            context.common.catalogName,
+            effectiveConfig,
+            table,
+            effectiveVersion),
+          observed,
+          strategy)
+      } catch {
+        case NonFatal(error) => return failed("validate", error, 0)
+      }
+    val compactionStartTime = Instant.now()
+    val compactionStartNs = System.nanoTime()
+    val descriptionStrategy = if (effectiveVersion == "1.3") effectiveStrategy else "native"
+    val (execution, attempts) = withCompactionJobDescription(
+      context,
+      table,
+      descriptionStrategy,
+      scope.effectiveWhere) {
+      withRetry(context.common.retryTimes) {
+        requireSuccessfulResult(runner.run(context.spark, sql))
+      }
+    }
+    val compactionEndTime = Instant.now()
+    val compactionDurationMs = (System.nanoTime() - compactionStartNs) / 1e6
+    val actionResult = execution match {
+      case Left(error) => failed("compact", error, attempts)
+      case Right(_) => result(ActionTaskResult(
+          "compact",
+          ActionStatus.Success,
+          None,
+          Map("attempts" -> attempts.toString, "result" -> "true")))
+    }
+    // A completion callback is an observation of the final result, never part of a retry.
+    try {
+      val displaySql = PaimonCompactAction.buildCompactSql(
+        context.common.catalogName,
+        displayConfig.copy(compactStrategy = effectiveStrategy, where = scope.effectiveWhere),
+        table,
+        effectiveVersion)
+      onCompactionCompleted(PaimonCompactionCompletion(
+        catalog = context.common.catalogName,
+        database = table.database,
+        table = table.table,
+        sql = displaySql,
+        success = actionResult.status == ActionStatus.Success,
+        startTime = compactionStartTime,
+        endTime = compactionEndTime,
+        durationMs = compactionDurationMs,
+        attempts = attempts,
+        effectiveVersion = effectiveVersion,
+        error = actionResult.message,
+        scope = scope))
+    } catch {
+      case NonFatal(error) =>
+        log.warn(
+          "Compaction completion callback failed; compaction result is unchanged: {}",
+          error.getClass.getName)
+    }
+    actionResult
   }
 
-  private def runTask(
+  private def withCompactionJobDescription[T](
       context: ProducerContext,
       table: TargetTable,
-      taskName: String,
-      sqlText: String): ActionTaskResult = {
-    var attempt = 1
-    var lastError: Throwable = null
+      strategy: String,
+      where: Option[String])(body: => T): T = {
+    val sparkContext = Option(context.spark).map(_.sparkContext)
+    val previous = sparkContext.map(_.getLocalProperty("spark.job.description"))
+    sparkContext.foreach(_.setJobDescription(
+      s"Compact table: ${context.common.catalogName}.${table.database}.${table.table} " +
+        s"| strategy=$strategy | where=${where.getOrElse("ALL")}"))
+    try body
+    finally sparkContext.foreach(_.setJobDescription(previous.orNull))
+  }
 
-    while (attempt <= context.common.retryTimes) {
+  private def readProperties(context: ProducerContext, table: TargetTable): Map[String, String] = {
+    requireLiteralArguments(context, Seq(context.common.catalogName, table.database, table.table))
+    val optionsTable = s"${quoteIdent(context.common.catalogName)}.${quoteIdent(table.database)}." +
+      quoteIdent(table.table + "$options")
+    val rows = runner.run(context.spark, s"SELECT `key`, `value` FROM $optionsTable")
+    val pairs = rows.map { row =>
+      require(
+        row.size == 2 && !row.isNullAt(0) && !row.isNullAt(1),
+        "Invalid Paimon options row: expected non-null key and value")
+      row.getString(0) -> row.getString(1)
+    }
+    require(pairs.map(_._1).distinct.size == pairs.size, "Duplicate Paimon option keys")
+    pairs.toMap
+  }
+
+  private def validateSqlArguments(
+      context: ProducerContext,
+      config: PaimonCompactConfig,
+      effectiveVersion: String): Unit = {
+    // CALL arguments are parsed by Spark. Legacy escapedStringLiterals changes their values.
+    // https://spark.apache.org/docs/3.5.6/sql-ref-literals.html#string-literal
+    require(
+      context.spark == null ||
+        !context.spark.conf.get("spark.sql.parser.escapedStringLiterals", "false").toBoolean,
+      "compact requires spark.sql.parser.escapedStringLiterals=false to preserve SQL arguments")
+
+    requireLiteralArguments(
+      context,
+      config.where.toSeq ++ (if (effectiveVersion == "1.3") {
+                               Seq(config.compactStrategy, config.procedureOptions)
+                             } else {
+                               Seq(config.partitionIdleTime)
+                             }))
+
+  }
+
+  private def validateExecution(
+      config: PaimonCompactConfig,
+      properties: Map[String, String],
+      effectiveVersion: String): Unit = {
+    val dynamicOptions = if (effectiveVersion == "1.3") {
+      require(
+        Set("full", "minor").contains(config.compactStrategy),
+        "--compactStrategy must be full or minor")
+      // Use the same parser as Paimon's Procedure, including duplicate-key precedence.
+      // https://github.com/apache/paimon/blob/release-1.3.2/paimon-common/src/main/java/org/apache/paimon/utils/ParameterUtils.java
+      val options =
+        ParameterUtils.parseCommaSeparatedKeyValues(config.procedureOptions).asScala.toMap
+      options.get("write-only").foreach { value =>
+        require(value.equalsIgnoreCase("false"), "--procedureOptions must not enable write-only")
+      }
+      options
+    } else {
+      requireNonBlank(config.partitionIdleTime, "--partitionIdleTime")
+      Map.empty[String, String]
+    }
+    val effectiveOptions = properties ++ dynamicOptions
+    // 1.3.2's incremental unaware-bucket branch does not forward the partition predicate.
+    // https://github.com/apache/paimon/blob/release-1.3.2/paimon-spark/paimon-spark-common/src/main/java/org/apache/paimon/spark/procedure/CompactProcedure.java
+    if (config.where.isDefined && enabled(effectiveOptions, "clustering.incremental")) {
+      val bucket = effectiveOptions.getOrElse("bucket", "-1").trim.toInt
+      require(
+        bucket != -1,
+        "--where is unsupported for unaware-bucket incremental clustering in Paimon 1.3.2")
+    }
+  }
+
+  private def enabled(properties: Map[String, String], key: String): Boolean =
+    properties.get(key).exists(_.trim.equalsIgnoreCase("true"))
+
+  // Use the Procedure's Unicode whitespace semantics, preserving the original value.
+  private def requireNonBlank(value: String, option: String): Unit = {
+    require(
+      !StringUtils.isNullOrWhitespaceOnly(value) && value.trim.nonEmpty,
+      s"$option must not be empty or whitespace-only")
+  }
+
+  // Paimon's Spark parser substitutes variables before parsing CALL arguments. Escaping a
+  // SQL literal cannot prevent substitution from changing the predicate or dynamic options.
+  private def requireLiteralArguments(context: ProducerContext, values: Seq[String]): Unit = {
+    val substitutionEnabled = context.spark == null ||
+      context.spark.conf.get("spark.sql.variable.substitute", "true").toBoolean
+    require(
+      !substitutionEnabled || !values.exists(_.contains("${")),
+      "compact requires spark.sql.variable.substitute=false when arguments contain ${...}")
+  }
+
+  private def requireSuccessfulResult(rows: Seq[Row]): Unit = {
+    require(
+      rows.size == 1 && rows.head.size == 1 && !rows.head.isNullAt(0),
+      "Invalid compact result: expected one non-null boolean result")
+    rows.head.get(0) match {
+      case value: java.lang.Boolean if value.booleanValue() =>
+      case value: java.lang.Boolean =>
+        throw new IllegalStateException("Paimon compact returned false")
+      case _ => throw new IllegalStateException("Invalid compact result: expected boolean")
+    }
+  }
+
+  private def withRetry[A](maxAttempts: Int)(operation: => A): (Either[Throwable, A], Int) = {
+    var attempt = 0
+    var lastError: Throwable = null
+    while (attempt < maxAttempts) {
+      attempt += 1
       try {
-        runner.run(context.spark, sqlText)
-        return ActionTaskResult(
-          name = taskName,
-          status = ActionStatus.Success,
-          message = None,
-          metrics = Map("table" -> table.raw, "attempts" -> attempt.toString))
+        return (Right(operation), attempt)
       } catch {
-        case NonFatal(t) =>
-          lastError = t
-          attempt += 1
+        case NonFatal(error) => lastError = error
       }
     }
-
-    ActionTaskResult(
-      name = taskName,
-      status = ActionStatus.Failed,
-      message = Some(errorMessage(lastError)),
-      metrics = Map("table" -> table.raw, "attempts" -> context.common.retryTimes.toString))
+    (Left(lastError), attempt)
   }
 
-  private def result(
-      status: ActionStatus,
-      tasks: Seq[ActionTaskResult],
-      message: Option[String],
-      table: TargetTable,
-      startNs: Long): ActionResult = {
-    ActionResult(
-      status = status,
-      tasks = tasks,
-      message = message,
-      metrics = Map("table" -> table.raw),
-      costMs = (System.nanoTime() - startNs) / 1e6)
-  }
-
-  private def asCompactConfig(actionConfig: ActionConfig): PaimonCompactConfig = {
+  private def asCompactConfig(actionConfig: ActionConfig): PaimonCompactConfig =
     actionConfig match {
       case config: PaimonCompactConfig => config
-      case other =>
-        throw new IllegalArgumentException(
-          s"Action compact requires PaimonCompactConfig, but got ${configType(other)}")
+      case other => throw new IllegalArgumentException(
+          s"Action compact requires PaimonCompactConfig, but got ${Option(other).map(
+              _.getClass.getName).getOrElse("null")}")
     }
-  }
 
-  private def configType(actionConfig: ActionConfig): String = {
-    Option(actionConfig).map(_.getClass.getName).getOrElse("null")
-  }
-
-  private def parseInt(value: String, optionName: String): Int = {
-    try {
-      value.trim.toInt
-    } catch {
-      case _: NumberFormatException =>
-        throw new IllegalArgumentException(s"$optionName 必须是整数: $value")
-    }
-  }
-
-  private def optionValue(
-      commandLine: ProducerParsedOptions,
-      optionName: String,
-      defaultValue: String): String = {
-    commandLine.getOptionValue(optionName, defaultValue).trim
-  }
-
-  private def validateRetryTimes(retryTimes: Int): Unit = {
-    if (retryTimes <= 0) {
-      throw new IllegalArgumentException("--retryTimes 必须大于 0")
-    }
-  }
-
-  private def errorMessage(error: Throwable): String = {
-    Option(error)
-      .map(t => s"${t.getClass.getSimpleName}: ${Option(t.getMessage).getOrElse("")}")
-      .getOrElse("unknown error")
-  }
+  private def errorMessage(error: Throwable): String =
+    s"${error.getClass.getSimpleName}: ${Option(error.getMessage).getOrElse("")}"
 }
 
 object PaimonCompactAction {
-
-  private val Paimon09 = "0.9"
-  private val Paimon13 = "1.3"
-
-  private[paimon] def buildBucketRanges(
-      startBucket: Int,
-      step: Int,
-      bucketNum: Int): Seq[String] = {
-    var start = startBucket
-    var ranges = Seq.empty[String]
-    while (start < bucketNum) {
-      val end = math.min(start + step - 1, bucketNum - 1)
-      ranges :+= s"$start-$end"
-      start = end + 1
-    }
-    ranges
+  private[paimon] def betweenPredicate(input: String): String = {
+    val value = Option(input).getOrElse("").trim
+    require(
+      value.matches("[0-9]{4}-[0-9]{2}-[0-9]{2}"),
+      "--between must be a date in yyyy-MM-dd format")
+    val end =
+      try {
+        LocalDate.parse(value, DateTimeFormatter.ISO_LOCAL_DATE)
+      } catch {
+        case error: DateTimeParseException =>
+          throw new IllegalArgumentException(
+            "--between must be a valid calendar date in yyyy-MM-dd format",
+            error)
+      }
+    val start = end.minusDays(1)
+    require(
+      end.getYear >= 1 && start.getYear >= 1,
+      "--between and its previous day must have years from 0001 to 9999")
+    s"preset_dt BETWEEN '${start.format(DateTimeFormatter.ISO_LOCAL_DATE)}' AND '${end.format(DateTimeFormatter.ISO_LOCAL_DATE)}'"
   }
 
   private[paimon] def buildCompactSql(
       catalogName: String,
       config: PaimonCompactConfig,
       table: TargetTable,
-      bucketRange: String): String = {
-    if (isPaimon09(config)) {
-      return s"""
-                |CALL sys.compact(
-                |  table => ${sqlString(table.raw)},
-                |  partition_idle_time => ${sqlString(config.partitionIdleTime.trim)}
-                |)
-                |""".stripMargin
-    }
-
-    val optionsClause =
-      if (config.procedureOptions.trim.isEmpty) {
-        ""
-      } else {
-        s",\n  options => ${sqlString(config.procedureOptions.trim)}"
-      }
-
-    s"""
-       |CALL ${quoteIdent(catalogName)}.sys.compact(
-       |  table => ${sqlString(table.raw)},
-       |  buckets => ${sqlString(bucketRange)},
-       |  compact_strategy => ${sqlString(config.compactStrategy.trim)}$optionsClause
-       |)
-       |""".stripMargin
+      effectiveVersion: String): String = {
+    val arguments = Seq("table" -> table.raw) ++
+      (if (effectiveVersion == "1.3") {
+         Seq("compact_strategy" -> config.compactStrategy) ++
+           Option(config.procedureOptions).filter(_.nonEmpty).map("options" -> _)
+       } else {
+         Seq("partition_idle_time" -> config.partitionIdleTime)
+       }) ++ config.where.map("where" -> _)
+    arguments.map { case (name, value) => s"  $name => ${procedureString(value)}" }
+      .mkString(s"CALL ${quoteIdent(catalogName)}.sys.compact(\n", ",\n", "\n)")
   }
 
-  private[paimon] def buildNonBucketCompactSql(table: TargetTable): String = {
-    s"""
-       |CALL sys.compact(
-       |  table => ${sqlString(table.raw)}
-       |)
-       |""".stripMargin
-  }
-
-  private[paimon] def buildNonBucketCompactSql(
-      config: PaimonCompactConfig,
-      table: TargetTable): String = {
-    buildNonBucketCompactSql(table)
-  }
-
-  private[paimon] def isPaimon09(config: PaimonCompactConfig): Boolean = {
-    config.version.trim == Paimon09
-  }
-
-  private[paimon] def isPaimon13(config: PaimonCompactConfig): Boolean = {
-    config.version.trim == Paimon13
-  }
-
-  private[paimon] def isSupportedVersion(config: PaimonCompactConfig): Boolean = {
-    isPaimon09(config) || isPaimon13(config)
-  }
+  // Spark concatenates adjacent quoted literals; doubling quotes loses embedded quotes.
+  // https://spark.apache.org/docs/3.5.6/sql-ref-literals.html#string-literal
+  private[paimon] def procedureString(value: String): String =
+    "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
 }

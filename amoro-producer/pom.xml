@@ -33,30 +33,51 @@
 
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <producer.spark.version>3.5.4</producer.spark.version>
+        <producer.paimon.version>1.3.2</producer.paimon.version>
+        <producer.paimon.spark.artifactId>paimon-spark-3.5</producer.paimon.spark.artifactId>
     </properties>
 
     <dependencies>
         <dependency>
             <groupId>org.apache.spark</groupId>
             <artifactId>spark-sql_${scala.binary.version}</artifactId>
-            <version>${spark.version}</version>
+            <version>${producer.spark.version}</version>
             <scope>provided</scope>
+            <exclusions>
+                <exclusion>
+                    <groupId>org.slf4j</groupId>
+                    <artifactId>slf4j-log4j12</artifactId>
+                </exclusion>
+            </exclusions>
         </dependency>
 
         <dependency>
             <groupId>org.apache.paimon</groupId>
-            <artifactId>paimon-spark-${spark.major.version}_${scala.binary.version}</artifactId>
-            <version>${paimon.version}</version>
+            <artifactId>${producer.paimon.spark.artifactId}</artifactId>
+            <version>${producer.paimon.version}</version>
+            <exclusions>
+                <exclusion>
+                    <groupId>org.apache.spark</groupId>
+                    <artifactId>*</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>org.scala-lang</groupId>
+                    <artifactId>*</artifactId>
+                </exclusion>
+            </exclusions>
         </dependency>
 
         <dependency>
             <groupId>org.apache.paimon</groupId>
             <artifactId>paimon-bundle</artifactId>
+            <version>${producer.paimon.version}</version>
         </dependency>
 
         <dependency>
             <groupId>org.apache.paimon</groupId>
             <artifactId>paimon-hive-connector-3.1</artifactId>
+            <version>${producer.paimon.version}</version>
             <exclusions>
                 <exclusion>
                     <groupId>com.google.guava</groupId>
@@ -68,11 +89,13 @@
         <dependency>
             <groupId>org.apache.paimon</groupId>
             <artifactId>paimon-s3</artifactId>
+            <version>${producer.paimon.version}</version>
         </dependency>
 
         <dependency>
             <groupId>org.apache.paimon</groupId>
             <artifactId>paimon-oss</artifactId>
+            <version>${producer.paimon.version}</version>
         </dependency>
     </dependencies>
 
@@ -132,4 +155,38 @@
             </plugin>
         </plugins>
     </build>
+
+    <!-- Paimon 0.9/1.3 publish the Scala 2.12 Spark bundle without a Scala suffix. -->
+    <profiles>
+        <profile>
+            <id>producer-paimon-1.3.2</id>
+            <activation>
+                <property>
+                    <name>paimon.version</name>
+                    <value>1.3.2</value>
+                </property>
+            </activation>
+            <properties>
+                <producer.spark.version>3.5.4</producer.spark.version>
+                <producer.paimon.version>1.3.2</producer.paimon.version>
+                <producer.paimon.spark.artifactId>paimon-spark-3.5</producer.paimon.spark.artifactId>
+            </properties>
+        </profile>
+        <profile>
+            <id>producer-paimon-0.9.0</id>
+            <activation>
+                <property>
+                    <name>paimon.version</name>
+                    <value>0.9.0</value>
+                </property>
+            </activation>
+            <properties>
+                <!-- Spark 3.2 uses SLF4J 1.7; keep this override local to Producer. -->
+                <slf4j.version>1.7.30</slf4j.version>
+                <producer.spark.version>3.2.1</producer.spark.version>
+                <producer.paimon.version>0.9.0</producer.paimon.version>
+                <producer.paimon.spark.artifactId>paimon-spark-3.2</producer.paimon.spark.artifactId>
+            </properties>
+        </profile>
+    </profiles>
 </project>
