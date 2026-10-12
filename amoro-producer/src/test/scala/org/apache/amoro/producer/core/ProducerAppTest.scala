@@ -29,6 +29,28 @@ import org.apache.amoro.producer.spi.{ActionConfig, LakeFormatAdapter, ProducerA
 class ProducerAppTest {
 
   @Test
+  def tableActionJsonIncludesEffectiveVersionAndFailedTaskDetails(): Unit = {
+    val json = TableActionJsonLog.render(
+      fakeContext(new CountingAction(RetryMode.ActionManagedRetry, 0)).common,
+      TargetTable("db.t1", "db", "t1"),
+      ActionResult(
+        ActionStatus.Failed,
+        Seq(ActionTaskResult(
+          "compact",
+          ActionStatus.Failed,
+          Some("invalid \"where\""),
+          Map("attempts" -> "3"))),
+        None,
+        Map("effectiveVersion" -> "1.3"),
+        1.0),
+      1.0)
+    val parsed = new com.fasterxml.jackson.databind.ObjectMapper().readTree(json)
+    assertEquals("1.3", parsed.get("effectiveVersion").asText())
+    assertEquals("invalid \"where\"", parsed.get("tasks").get(0).get("message").asText())
+    assertEquals("3", parsed.get("tasks").get(0).get("metrics").get("attempts").asText())
+  }
+
+  @Test
   def frameworkTableRetryRetriesThrownAction(): Unit = {
     val action = new CountingAction(RetryMode.FrameworkTableRetry, failTimes = 2)
     val result =
@@ -118,21 +140,19 @@ class ProducerAppTest {
   @Test
   def executeTablesLogsReturnedFailedJsonBeforeStopping(): Unit = {
     val action = new ReturnFailedFirstTableAction
-    val (output, thrown) =
+    val (output, results) =
       captureStdout {
-        assertThrows(
-          classOf[RuntimeException],
-          () =>
-            ProducerApp.executeTables(
-              context = fakeContext(action, continueOnTableFailure = false),
-              action = action,
-              actionConfig = NoopConfig,
-              targets =
-                Seq(TargetTable("db.t1", "db", "t1"), TargetTable("db.t2", "db", "t2"))))
+        ProducerApp.executeTables(
+          context = fakeContext(action, continueOnTableFailure = false),
+          action = action,
+          actionConfig = NoopConfig,
+          targets = Seq(TargetTable("db.t1", "db", "t1"), TargetTable("db.t2", "db", "t2")))
       }
 
     assertEquals(Seq("db.t1"), action.seenTables)
-    assertTrue(thrown.getMessage.contains("failed table db.t1"))
+    assertEquals(1, results.size)
+    assertEquals(ActionStatus.Failed, results.head._2.status)
+    assertEquals(Some("failed table db.t1"), results.head._2.message)
     val jsonLines = tableActionJsonLines(output)
     assertEquals(1, jsonLines.size)
     assertTrue(jsonLines.head.contains("\"status\":\"failed\""))
@@ -242,21 +262,19 @@ class ProducerAppTest {
   @Test
   def executeTablesStopsAfterFailedTableWhenConfigured(): Unit = {
     val action = new FailFirstTableAction
-    val (output, thrown) =
+    val (output, results) =
       captureStdout {
-        assertThrows(
-          classOf[RuntimeException],
-          () =>
-            ProducerApp.executeTables(
-              context = fakeContext(action, continueOnTableFailure = false),
-              action = action,
-              actionConfig = NoopConfig,
-              targets =
-                Seq(TargetTable("db.t1", "db", "t1"), TargetTable("db.t2", "db", "t2"))))
+        ProducerApp.executeTables(
+          context = fakeContext(action, continueOnTableFailure = false),
+          action = action,
+          actionConfig = NoopConfig,
+          targets = Seq(TargetTable("db.t1", "db", "t1"), TargetTable("db.t2", "db", "t2")))
       }
 
     assertEquals(Seq("db.t1"), action.seenTables)
-    assertTrue(thrown.getMessage.contains("failed table db.t1"))
+    assertEquals(1, results.size)
+    assertEquals(ActionStatus.Failed, results.head._2.status)
+    assertEquals(Some("failed table db.t1"), results.head._2.message)
     val jsonLines = tableActionJsonLines(output)
     assertEquals(1, jsonLines.size)
     assertTrue(jsonLines.head.contains("\"status\":\"failed\""))
@@ -266,20 +284,18 @@ class ProducerAppTest {
   @Test
   def executeTablesStopsAfterReturnedFailedTableWhenConfigured(): Unit = {
     val action = new ReturnFailedFirstTableAction
-    val (output, _) =
+    val (output, results) =
       captureStdout {
-        assertThrows(
-          classOf[RuntimeException],
-          () =>
-            ProducerApp.executeTables(
-              context = fakeContext(action, continueOnTableFailure = false),
-              action = action,
-              actionConfig = NoopConfig,
-              targets =
-                Seq(TargetTable("db.t1", "db", "t1"), TargetTable("db.t2", "db", "t2"))))
+        ProducerApp.executeTables(
+          context = fakeContext(action, continueOnTableFailure = false),
+          action = action,
+          actionConfig = NoopConfig,
+          targets = Seq(TargetTable("db.t1", "db", "t1"), TargetTable("db.t2", "db", "t2")))
       }
 
     assertEquals(Seq("db.t1"), action.seenTables)
+    assertEquals(1, results.size)
+    assertEquals(ActionStatus.Failed, results.head._2.status)
     assertEquals(1, tableActionJsonLines(output).size)
   }
 

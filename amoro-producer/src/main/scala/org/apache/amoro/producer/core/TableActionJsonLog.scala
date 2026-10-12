@@ -41,10 +41,23 @@ private[producer] object TableActionJsonLog {
         jsonField("action", jsonString(common.action)),
         jsonField("status", jsonString(statusName(result.status))),
         jsonField("costMs", jsonNumber(measuredCostMs)),
+        jsonField(
+          "effectiveVersion",
+          Option(result.metrics).flatMap(_.get("effectiveVersion")).map(jsonStringOrNull).getOrElse(
+            "null")),
+        jsonField("tasks", result.tasks.map(renderTask).mkString("[", ",", "]")),
         jsonField("deletedSnapshotsTotal", deletedSnapshotsTotal(result.metrics)),
         jsonField("metrics", jsonObject(result.metrics)),
         jsonField("message", result.message.map(jsonStringOrNull).getOrElse("null")))
     fields.mkString("{", ",", "}")
+  }
+
+  private def renderTask(task: ActionTaskResult): String = {
+    Seq(
+      jsonField("name", jsonString(task.name)),
+      jsonField("status", jsonString(statusName(task.status))),
+      jsonField("message", task.message.map(jsonStringOrNull).getOrElse("null")),
+      jsonField("metrics", jsonObject(task.metrics))).mkString("{", ",", "}")
   }
 
   private def statusName(status: ActionStatus): String = {

@@ -166,9 +166,20 @@ class PaimonFormatAdapterTest {
   final private class FakeRunner(rows: Seq[Row]) extends PaimonSqlRunner {
     var sqls: Seq[String] = Seq.empty
 
+    override def loadTableMetadata(
+        spark: SparkSession,
+        catalog: String,
+        table: TargetTable): PaimonTableMetadata = PaimonTableMetadata(
+      Seq.empty,
+      Seq.empty,
+      new org.apache.spark.sql.types.StructType(),
+      Map.empty)
+
     override def run(spark: SparkSession, sqlText: String): Seq[Row] = {
       sqls = sqls :+ sqlText
-      rows
+      if (sqlText.contains("$options")) Seq.empty
+      else if (sqlText.contains("sys.compact(")) Seq(Row(true))
+      else rows
     }
   }
 }

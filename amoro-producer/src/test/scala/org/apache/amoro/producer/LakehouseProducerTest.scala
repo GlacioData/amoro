@@ -153,7 +153,7 @@ class LakehouseProducerTest {
   }
 
   @Test
-  def actionReturnedFailedStatusReturnsZeroWhenContinueTrue(): Unit = {
+  def actionReturnedFailedStatusReturnsOneWhenContinueTrue(): Unit = {
     val exitCode =
       ProducerApp.runInternal(
         Array("--format", "paimon", "--action", "compact", "--databaseName", "db"),
@@ -165,11 +165,11 @@ class LakehouseProducerTest {
               resultStatusByTable = Map("db.t1" -> ActionStatus.Failed)))),
         () => null)
 
-    assertEquals(0, exitCode)
+    assertEquals(1, exitCode)
   }
 
   @Test
-  def partialReturnedFailedStatusReturnsZeroAndContinuesWhenConfigured(): Unit = {
+  def partialReturnedFailedStatusReturnsOneAndContinuesWhenConfigured(): Unit = {
     val action =
       new FakeAction(
         "compact",
@@ -188,7 +188,7 @@ class LakehouseProducerTest {
           () => null)
       }
 
-    assertEquals(0, exitCode)
+    assertEquals(1, exitCode)
     assertTrue(output.contains("failed tables:"))
     assertTrue(output.contains("  - db.t1 | failed table db.t1"))
     assertEquals(
@@ -208,22 +208,145 @@ class LakehouseProducerTest {
         action,
         tables = Seq(TargetTable("db.t1", "db", "t1"), TargetTable("db.t2", "db", "t2")))
 
-    val exitCode =
-      ProducerApp.runInternal(
-        Array(
-          "--format",
-          "paimon",
-          "--action",
-          "compact",
-          "--databaseName",
-          "db",
-          "--continueOnTableFailure",
-          "false"),
-        Seq(adapter),
-        () => null)
+    val (output, exitCode) =
+      captureStdout {
+        ProducerApp.runInternal(
+          Array(
+            "--format",
+            "paimon",
+            "--action",
+            "compact",
+            "--databaseName",
+            "db",
+            "--continueOnTableFailure",
+            "false"),
+          Seq(adapter),
+          () => null)
+      }
 
     assertEquals(1, exitCode)
     assertEquals(Seq(TargetTable("db.t1", "db", "t1")), action.executedTables)
+    assertTrue(output.contains("=========== PRODUCER SUMMARY ==========="))
+    assertTrue(output.contains("tables failed      = 1"))
+    assertTrue(output.contains("  - db.t1 | failed table db.t1"))
+    assertEquals(1, tableActionJsonLines(output).size)
+  }
+
+  @Test
+  def thrownFailureReturnsOneAndKeepsSummaryWithEitherContinuationPolicy(): Unit = {
+    Seq(true, false).foreach { continueOnFailure =>
+      val action = new FakeAction("compact", failExecution = true)
+      val adapter =
+        new FakeAdapter(
+          "paimon",
+          action,
+          tables = Seq(TargetTable("db.t1", "db", "t1"), TargetTable("db.t2", "db", "t2")))
+      val (output, exitCode) =
+        captureStdout {
+          ProducerApp.runInternal(
+            Array(
+              "--format",
+              "paimon",
+              "--action",
+              "compact",
+              "--databaseName",
+              "db",
+              "--continueOnTableFailure",
+              continueOnFailure.toString),
+            Seq(adapter),
+            () => null)
+        }
+
+      assertEquals(1, exitCode)
+      val expectedCount = if (continueOnFailure) 2 else 1
+      assertEquals(expectedCount, action.executedTables.size)
+      assertEquals(expectedCount, tableActionJsonLines(output).size)
+      assertTrue(output.contains("=========== PRODUCER SUMMARY ==========="))
+      assertTrue(output.contains(s"tables failed      = $expectedCount"))
+      assertTrue(output.contains("  - db.t1 | execution failed"))
+    }
+  }
+
+  @Test
+  def allSkippedTablesReturnZeroWithSummary(): Unit = {
+    val action =
+      new FakeAction(
+        "compact",
+        resultStatusByTable =
+          Map("db.t1" -> ActionStatus.Skipped, "db.t2" -> ActionStatus.Skipped))
+    val adapter =
+      new FakeAdapter(
+        "paimon",
+        action,
+        tables = Seq(TargetTable("db.t1", "db", "t1"), TargetTable("db.t2", "db", "t2")))
+    val (output, exitCode) =
+      captureStdout {
+        ProducerApp.runInternal(
+          Array("--format", "paimon", "--action", "compact", "--databaseName", "db"),
+          Seq(adapter),
+          () => null)
+      }
+
+    assertEquals(0, exitCode)
+    assertEquals(2, action.executedTables.size)
+    assertTrue(output.contains("tables skipped     = 2"))
+    assertTrue(output.contains("tables failed      = 0"))
+  }
+
+  @Test
+  def emptyTargetsReturnZeroWithoutExecutingAnAction(): Unit = {
+    val action = new FakeAction("compact")
+    val (output, exitCode) =
+      captureStdout {
+        ProducerApp.runInternal(
+          Array("--format", "paimon", "--action", "compact", "--databaseName", "db"),
+          Seq(new FakeAdapter("paimon", action, tables = Seq.empty)),
+          () => null)
+      }
+
+    assertEquals(0, exitCode)
+    assertTrue(action.executedTables.isEmpty)
+    assertTrue(tableActionJsonLines(output).isEmpty)
+    assertTrue(output.contains("tables found       = 0"))
+    assertTrue(output.contains("=========== PRODUCER SUMMARY ==========="))
+  }
+
+  @Test
+  def otherMaintenanceActionsUseTheSameFailureExitAndContinuationPolicy(): Unit = {
+    Seq("compact-manifest", "expire-snapshots", "remove-orphan-files").foreach { actionName =>
+      Seq(true, false).foreach { continueOnFailure =>
+        val action =
+          new FakeAction(
+            actionName,
+            resultStatusByTable = Map("db.t1" -> ActionStatus.Failed))
+        val adapter =
+          new FakeAdapter(
+            "paimon",
+            action,
+            tables = Seq(TargetTable("db.t1", "db", "t1"), TargetTable("db.t2", "db", "t2")))
+        val (output, exitCode) =
+          captureStdout {
+            ProducerApp.runInternal(
+              Array(
+                "--format",
+                "paimon",
+                "--action",
+                actionName,
+                "--databaseName",
+                "db",
+                "--continueOnTableFailure",
+                continueOnFailure.toString),
+              Seq(adapter),
+              () => null)
+          }
+
+        assertEquals(1, exitCode, actionName)
+        assertEquals(if (continueOnFailure) 2 else 1, action.executedTables.size, actionName)
+        assertTrue(output.contains("=========== PRODUCER SUMMARY ==========="), actionName)
+        assertTrue(output.contains("tables failed      = 1"), actionName)
+        assertTrue(output.contains(s"action             = $actionName"), actionName)
+      }
+    }
   }
 
   @Test

@@ -18,11 +18,57 @@
 
 package org.apache.amoro.producer.paimon
 
+import scala.collection.JavaConverters._
+
+import org.apache.paimon.spark.SparkTable
 import org.apache.spark.sql.{Row, SparkSession}
+import org.apache.spark.sql.connector.catalog.{Identifier, TableCatalog}
+import org.apache.spark.sql.internal.SQLConf
+import org.apache.spark.sql.types.StructType
+
+import org.apache.amoro.producer.core.TargetTable
+
+final case class PaimonTableMetadata(
+    primaryKeys: Seq[String],
+    partitionKeys: Seq[String],
+    schema: StructType,
+    properties: Map[String, String])
 
 trait PaimonSqlRunner {
 
   def run(spark: SparkSession, sqlText: String): Seq[Row]
+
+  def loadTableMetadata(
+      spark: SparkSession,
+      catalogName: String,
+      table: TargetTable): PaimonTableMetadata = {
+    val previousSession = SparkSession.getActiveSession
+    SparkSession.setActiveSession(spark)
+    try {
+      SQLConf.withExistingConf(spark.sessionState.conf) {
+        spark.sessionState.catalogManager.catalog(catalogName) match {
+          case catalog: TableCatalog =>
+            catalog.loadTable(Identifier.of(Array(table.database), table.table)) match {
+              case loaded: SparkTable =>
+                val paimonTable = loaded.getTable
+                PaimonTableMetadata(
+                  paimonTable.primaryKeys().asScala.toVector,
+                  paimonTable.partitionKeys().asScala.toVector,
+                  loaded.schema,
+                  loaded.properties().asScala.toMap)
+              case other => throw new IllegalArgumentException(
+                  s"Expected a Paimon SparkTable, got ${other.getClass.getName}")
+            }
+          case _ => throw new IllegalArgumentException(s"Catalog $catalogName cannot load tables")
+        }
+      }
+    } finally {
+      previousSession match {
+        case Some(session) => SparkSession.setActiveSession(session)
+        case None => SparkSession.clearActiveSession()
+      }
+    }
+  }
 }
 
 object SparkPaimonSqlRunner extends PaimonSqlRunner {
