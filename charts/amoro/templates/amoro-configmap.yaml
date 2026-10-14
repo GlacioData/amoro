@@ -110,25 +110,6 @@ data:
         connection-pool-max-idle: 16
         connection-pool-max-wait-millis: 30000
 
-      terminal:
-        backend: {{ .Values.amoroConf.terminal.backend }}
-        {{- if eq .Values.amoroConf.terminal.backend "local" }}
-        result:
-          limit: 1000
-        stop-on-error: false
-        session:
-          timeout: 30min
-        local:
-          using-session-catalog-for-hive: false        
-          spark.sql.iceberg.handle-timestamp-without-timezone: {{ .Values.amoroConf.terminal.icebergHandleTimestampWithoutTimezone }}
-        {{- end }}
-        {{- if hasKey .Values.amoroConf.terminal "kyuubiLdapEnabled" }}
-        kyuubi.ldap.enabled: {{ .Values.amoroConf.terminal.kyuubiLdapEnabled}}
-        {{- end }}
-        {{- if eq .Values.amoroConf.terminal.backend "kyuubi" }}
-        kyuubi.jdbc.url: {{ .Values.amoroConf.terminal.kyuubiJdbcUrl | quote  }}
-        {{- end }}
-        
     containers:
       {{- if .Values.optimizer.flink.enabled }}
       - name: {{ .Values.optimizer.flink.name | default "flink" }}

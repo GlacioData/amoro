@@ -81,15 +81,6 @@ mappings:
     privilege: MANAGE_OPTIMIZER
 
   - prefixes:
-      - /api/ams/v1/terminal
-    methods:
-      - GET
-      - POST
-      - PUT
-    resource-type: TERMINAL
-    privilege: EXECUTE_SQL
-
-  - prefixes:
       - /api/ams/v1/files
       - /api/ams/v1/settings
       - /api/ams/v1/api/token

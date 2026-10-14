@@ -225,7 +225,6 @@ org.apache.httpcomponents:httpcore
 org.apache.httpcomponents.client5:httpclient5
 org.apache.httpcomponents.core5:httpcore5
 org.apache.httpcomponents.core5:httpcore5-h2
-org.apache.kyuubi:kyuubi-hive-jdbc-shaded
 org.apache.thrift:libfb303
 org.apache.thrift:libthrift
 org.apache.yetus:audience-annotations

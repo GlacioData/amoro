@@ -30,7 +30,7 @@ Paimon format refers to [Apache Paimon](https://paimon.apache.org/) table.
 Paimon is a streaming data lake platform with high-speed data ingestion, changelog tracking and efficient real-time analytics.
 
 By registering Paimon's catalog with Amoro, users can view information such as Schema, Options, Files, Snapshots, DDLs, Compaction information, and more for Paimon tables.
-Furthermore, they can operate on Paimon tables using Spark SQL in the Terminal. The current supported catalog types and file system types for Paimon are all supported.
+To operate on Paimon tables with SQL, use an external Spark or Flink client with the Paimon connector. See [Spark Getting Started](../spark-getting-started/) or [Flink Getting Started](../flink-getting-started/) for connector setup. Configure the engine to use the same Paimon catalog and warehouse registered with Amoro, including its metastore and storage access settings.
 
 For registering catalog operation steps, please refer to [Managing Catalogs](../managing-catalogs/).
 

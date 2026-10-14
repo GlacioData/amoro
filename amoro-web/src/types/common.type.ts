@@ -340,13 +340,6 @@ export interface ICatalogItem {
   catalogName: string
   catalogType: string
 }
-export interface IDebugResult {
-  status: string
-  columns: string[]
-  rowData: (string | null)[][]
-  id: string
-}
-
 export interface IGroupItem {
   optimizerGroupId: number
   optimizerGroupName: string
@@ -457,14 +450,6 @@ export interface IResourceUsage {
   usedMem: string[]
   usedMemDivision: string[]
   usedMemPercent: string[]
-}
-
-export enum debugResultBgcMap {
-  Created = '#f5f5f5',
-  Failed = '#fff2f0',
-  Finished = '#f6ffed',
-  // eslint-disable-next-line ts/no-duplicate-enum-values
-  Canceled = '#f5f5f5',
 }
 
 export enum upgradeStatusMap {

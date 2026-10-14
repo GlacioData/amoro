@@ -111,22 +111,6 @@ ams:
 #    connection-pool-max-idle: 16
 #    connection-pool-max-wait-millis: 1000
 
-  terminal:
-    backend: local
-    result:
-      limit: 1000
-    stop-on-error: false
-    session:
-      timeout: 30min
-    local:
-      using-session-catalog-for-hive: false
-      spark.sql.iceberg.handle-timestamp-without-timezone: false
-
-#  Kyuubi terminal backend configuration.
-#  terminal:
-#    backend: kyuubi
-#    kyuubi.jdbc.url: jdbc:hive2://127.0.0.1:10009/
-
 #  High availability configuration.
 #  ha:
 #    enabled: true

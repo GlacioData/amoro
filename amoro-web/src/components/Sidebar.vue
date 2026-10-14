@@ -23,7 +23,6 @@ import { useI18n } from 'vue-i18n'
 import useStore from '@/store/index'
 import { getQueryString } from '@/utils'
 import {
-  canExecuteSql,
   canManagePlatform,
   canViewCatalog,
   canViewOptimizer,
@@ -57,7 +56,6 @@ export default defineComponent({
     const canAccessCatalog = computed(() => canViewCatalog())
     const canAccessTable = computed(() => canViewTable())
     const canAccessOptimizer = computed(() => canViewOptimizer())
-    const canAccessTerminal = computed(() => canExecuteSql())
     const canAccessSettings = computed(() => canManagePlatform())
     const menuList = computed(() => {
       const menu: MenuItem[] = [
@@ -89,11 +87,6 @@ export default defineComponent({
           icon: 'optimizers',
         },
         {
-          key: 'terminal',
-          title: t('terminal'),
-          icon: 'terminal',
-        },
-        {
           key: 'settings',
           title: t('settings'),
           icon: 'settings',
@@ -105,9 +98,6 @@ export default defineComponent({
           return false
         }
         if (!canAccessSystem.value && item.key === 'overview') {
-          return false
-        }
-        if (!canAccessTerminal.value && item.key === 'terminal') {
           return false
         }
         if (!canAccessCatalog.value && item.key === 'catalogs') {
@@ -212,7 +202,6 @@ export default defineComponent({
       canAccessCatalog,
       canAccessTable,
       canAccessOptimizer,
-      canAccessTerminal,
       canAccessSettings,
       menuList,
       toggleCollapsed,

@@ -75,16 +75,6 @@ public class AmoroManagementConfValidator {
         }
       }
     }
-    // terminal config
-    String terminalBackend =
-        configurations.getString(AmoroManagementConf.TERMINAL_BACKEND).toLowerCase();
-    if (!AmoroManagementConf.TERMINAL_BACKEND_VALUES.contains(terminalBackend)) {
-      throw new IllegalArgumentException(
-          String.format(
-              "Illegal terminal implement: %s, local, kyuubi, custom is available",
-              terminalBackend));
-    }
-
     validateThreadCount(configurations, AmoroManagementConf.REFRESH_TABLES_THREAD_COUNT);
     validateThreadCount(configurations, AmoroManagementConf.OPTIMIZING_COMMIT_THREAD_COUNT);
   }

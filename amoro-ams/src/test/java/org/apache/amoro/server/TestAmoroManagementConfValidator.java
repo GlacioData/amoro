@@ -18,6 +18,7 @@
 
 package org.apache.amoro.server;
 
+import org.apache.amoro.config.ConfigOptions;
 import org.apache.amoro.config.Configurations;
 import org.junit.Assert;
 import org.junit.Test;
@@ -115,23 +116,15 @@ public class TestAmoroManagementConfValidator {
   }
 
   @Test
-  public void testValidateTerminalBackend() {
+  public void testIgnoreLegacyTerminalBackend() {
     Configurations configurations = new Configurations();
     configurations.setString(AmoroManagementConf.SERVER_EXPOSE_HOST, "127.0.0.1");
-
-    configurations.setString(AmoroManagementConf.TERMINAL_BACKEND, "invalid_terminal_backend");
-    Assert.assertThrows(
-        IllegalArgumentException.class,
-        () -> AmoroManagementConfValidator.validateConfig(configurations));
-
-    configurations.setString(AmoroManagementConf.TERMINAL_BACKEND, "local");
     AmoroManagementConfValidator.validateConfig(configurations);
-
-    configurations.setString(AmoroManagementConf.TERMINAL_BACKEND, "kyuubi");
-    AmoroManagementConfValidator.validateConfig(configurations);
-
-    configurations.setString(AmoroManagementConf.TERMINAL_BACKEND, "custom");
-    AmoroManagementConfValidator.validateConfig(configurations);
+    for (String backend : new String[] {"local", "kyuubi", "custom", "invalid_terminal_backend"}) {
+      configurations.set(
+          ConfigOptions.key("terminal.backend").stringType().noDefaultValue(), backend);
+      AmoroManagementConfValidator.validateConfig(configurations);
+    }
   }
 
   @Test

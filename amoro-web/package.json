@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "vite",
     "dev:mock": "vite --mode mock",
-    "build": "node ./scripts/preload-error-recovery.test.mjs && node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --experimental-strip-types --test ./scripts/table-explorer-state.test.mts ./scripts/snapshot-page-state.test.mts ./scripts/snapshot-chart-data.test.mts ./scripts/file-statistics-view.test.mts ./scripts/table-model.test.mts ./scripts/tag-management-state.test.mts ./scripts/tag-snapshot-state.test.mts && vite build",
+    "build": "node --experimental-vm-modules ./scripts/dashboard-navigation.test.mjs && node ./scripts/preload-error-recovery.test.mjs && node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --experimental-strip-types --test ./scripts/table-explorer-state.test.mts ./scripts/snapshot-page-state.test.mts ./scripts/snapshot-chart-data.test.mts ./scripts/file-statistics-view.test.mts ./scripts/table-model.test.mts ./scripts/tag-management-state.test.mts ./scripts/tag-snapshot-state.test.mts && vite build",
     "typecheck": "vue-tsc --noEmit",
     "gen:license": "node ./license.node.js",
     "preview": "vite preview",
@@ -37,9 +37,7 @@
     "eslint": "^9.4.0",
     "less": "4.2.0",
     "mockjs": "^1.1.0",
-    "monaco-editor": "^0.56.0",
     "qs": "^6.12.1",
-    "sql-formatter": "^15.3.1",
     "typescript": "~5.9.3",
     "unplugin-vue-components": "^0.27.0",
     "vite": "^8.2.2",

@@ -577,50 +577,6 @@ public class AmoroManagementConf {
           .defaultValue(Duration.ofSeconds(30))
           .withDescription("Optimizer group refresh interval.");
 
-  /** config key prefix of terminal */
-  public static final String TERMINAL_PREFIX = "terminal.";
-
-  public static final ConfigOption<String> TERMINAL_BACKEND =
-      ConfigOptions.key("terminal.backend")
-          .stringType()
-          .defaultValue("local")
-          .withDescription(
-              "Terminal backend implementation. local, kyuubi and custom are valid values.");
-
-  public static final ConfigOption<String> TERMINAL_SESSION_FACTORY =
-      ConfigOptions.key("terminal.factory")
-          .stringType()
-          .noDefaultValue()
-          .withDescription(
-              "Session factory implement of terminal, `terminal.backend` must be `custom` if this is set.");
-
-  public static final ConfigOption<Integer> TERMINAL_RESULT_LIMIT =
-      ConfigOptions.key("terminal.result.limit")
-          .intType()
-          .defaultValue(1000)
-          .withDescription("Row limit of result-set");
-
-  public static final ConfigOption<Boolean> TERMINAL_STOP_ON_ERROR =
-      ConfigOptions.key("terminal.stop-on-error")
-          .booleanType()
-          .defaultValue(false)
-          .withDescription(
-              "When a statement fails to execute, stop execution or continue executing the remaining statements.");
-
-  public static final ConfigOption<Duration> TERMINAL_SESSION_TIMEOUT =
-      ConfigOptions.key("terminal.session.timeout")
-          .durationType()
-          .defaultValue(Duration.ofMinutes(30))
-          .withDescription(
-              "Session timeout. Default unit is milliseconds if not specified (** Note: default units are minutes when version < 0.8).");
-
-  public static final ConfigOption<String> TERMINAL_SENSITIVE_CONF_KEYS =
-      ConfigOptions.key("terminal.sensitive-conf-keys")
-          .stringType()
-          .defaultValue("")
-          .withDescription(
-              "Comma-separated list of sensitive conf keys used to desensitize related value.");
-
   public static final String SYSTEM_CONFIG = "ams";
 
   public static final String CATALOG_CORE_SITE = "core-site";
@@ -642,10 +598,6 @@ public class AmoroManagementConf {
   // HA config
   public static final String HA_TYPE_ZK = "zk";
   public static final String HA_TYPE_DATABASE = "database";
-
-  // terminal config
-  public static final List<String> TERMINAL_BACKEND_VALUES =
-      Arrays.asList("local", "kyuubi", "custom");
 
   // plugin config
   public static final String METRIC_REPORTERS = "metric-reports";

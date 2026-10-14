@@ -118,12 +118,6 @@ table td:last-child, table th:last-child { width: 40%; word-break: break-all; }
 | server-bind-host | 0.0.0.0 | The host bound to the server. |
 | server-expose-host |  | The exposed host of the server. |
 | table-manifest-io.thread-count | 20 | Sets the size of the worker pool. The worker pool limits the number of tasks concurrently processing manifests in the base table implementation across all concurrent planning or commit operations. |
-| terminal.backend | local | Terminal backend implementation. local, kyuubi and custom are valid values. |
-| terminal.factory | &lt;undefined&gt; | Session factory implement of terminal, `terminal.backend` must be `custom` if this is set. |
-| terminal.result.limit | 1000 | Row limit of result-set |
-| terminal.sensitive-conf-keys |  | Comma-separated list of sensitive conf keys used to desensitize related value. |
-| terminal.session.timeout | 30 min | Session timeout. Default unit is milliseconds if not specified (** Note: default units are minutes when version &lt; 0.8). |
-| terminal.stop-on-error | false | When a statement fails to execute, stop execution or continue executing the remaining statements. |
 | thrift-server.max-message-size | 100 mb | Maximum message size that the Thrift server can accept. Default unit is bytes if not specified. |
 | thrift-server.optimizing-service.bind-port | 1261 | Port that the optimizing service thrift server is bound to. |
 | thrift-server.selector-queue-size | 4 | The number of queue size per selector thread for the Thrift server |
@@ -149,7 +143,7 @@ Amoro provides two built-in roles by default:
 | `SERVICE_ADMIN` | Platform administrator | All privileges |
 | `VIEWER` | Read-only resource viewer | `VIEW_CATALOG`, `VIEW_TABLE`, `VIEW_OPTIMIZER` |
 
-`VIEWER` does not include `VIEW_SYSTEM`, so it cannot access `Overview` or `Terminal`.
+`VIEWER` does not include `VIEW_SYSTEM`, so it cannot access `Overview`.
 After login succeeds, `/login/current` returns both `roles` and effective `privileges`.
 
 If you need additional roles, define them by Casbin policy and map LDAP groups to those

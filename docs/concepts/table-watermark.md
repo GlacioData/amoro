@@ -61,8 +61,8 @@ data being written. To handle out-of-order writes, a maximum delay of 60 seconds
 processing, data with event_time values smaller than the watermark will not be rejected, but they will not affect the advancement of the watermark
 either.
 
-You can view the current watermark of a table in the AMS Dashboard's table details, or you can use the following SQL query in the terminal to query
-the watermark of a table:
+You can view the current watermark of a table in the AMS Dashboard's table details, or query it from an external Spark SQL client.
+Configure and select the same Mixed-Format catalog following [Spark Getting Started](../spark-getting-started/) before running the following statements:
 
 ```SQL
 SHOW TBLPROPERTIES test_db.test_log_store ('watermark.table');

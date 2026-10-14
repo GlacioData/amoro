@@ -49,8 +49,7 @@ public class TestAmoroManagementConf {
         AmoroManagementConf.BLOCKER_TIMEOUT,
         AmoroManagementConf.OPTIMIZER_HB_TIMEOUT,
         AmoroManagementConf.OPTIMIZER_TASK_ACK_TIMEOUT,
-        AmoroManagementConf.OPTIMIZER_POLLING_TIMEOUT,
-        AmoroManagementConf.TERMINAL_SESSION_TIMEOUT
+        AmoroManagementConf.OPTIMIZER_POLLING_TIMEOUT
       };
 
   private static final Map<String, String> DEFAULT_TIME_UNIT_IN_OLD_VERSIONS =
@@ -61,7 +60,6 @@ public class TestAmoroManagementConf {
           .put(AmoroManagementConf.OPTIMIZER_HB_TIMEOUT.key(), "ms")
           .put(AmoroManagementConf.OPTIMIZER_TASK_ACK_TIMEOUT.key(), "ms")
           .put(AmoroManagementConf.OPTIMIZER_POLLING_TIMEOUT.key(), "ms")
-          .put(AmoroManagementConf.TERMINAL_SESSION_TIMEOUT.key(), "min")
           .build();
 
   private static final ConfigOption<MemorySize>[] STORAGE_RELATED_CONFIG_OPTIONS =
@@ -140,18 +138,14 @@ public class TestAmoroManagementConf {
     assertStorageRelatedConfigs(serviceConfig, expectedConfig);
   }
 
-  /** Test for conflicts when parsing configuration files in older versions (< 0.8) */
+  /** Test parsing and upgrading the remaining time configurations in older versions (< 0.8) */
   @Test
-  void testConflictsForParsingAmoroManagementConfInOldVersions() throws Exception {
+  void testParsingAmoroManagementConfInOldVersions() throws Exception {
     Configurations serviceConfig = getConfigurationsWithoutUnits();
     Configurations expectedConfig =
         Configurations.fromObjectMap(timeRelatedConfigMapWithExpectedTimeUnitsInOldVersions);
 
-    // Checking the parsed time-related configuration items (should fail).
-    // As the default unit for `terminal.session.timeout` has changed from minutes to milliseconds
-    // since version 0.8.
-    Assertions.assertThrows(
-        AssertionError.class, () -> assertTimeRelatedConfigs(serviceConfig, expectedConfig));
+    assertTimeRelatedConfigs(serviceConfig, expectedConfig);
 
     // Updating the time-related items with the expected time units in older versions
     Configurations updatedServiceConfig = updateConfigurationOfOldVersions(serviceConfig);
@@ -226,7 +220,6 @@ public class TestAmoroManagementConf {
           .put("optimizer.task-ack-timeout", "30000")
           .put("optimizer.polling-timeout", "3000")
           .put("blocker.timeout", "60000")
-          .put("terminal.session.timeout", "1800000")
           .build();
 
   private final Map<String, Object> timeRelatedConfigMapWithTimeUnits =
@@ -237,7 +230,6 @@ public class TestAmoroManagementConf {
           .put("optimizer.task-ack-timeout", "60 s")
           .put("optimizer.polling-timeout", "6 s")
           .put("blocker.timeout", "2 min")
-          .put("terminal.session.timeout", "30 ms")
           .build();
 
   private final Map<String, Object> timeRelatedConfigMapWithExpectedTimeUnitsInOldVersions =
@@ -248,7 +240,6 @@ public class TestAmoroManagementConf {
           .put("optimizer.task-ack-timeout", "60 s")
           .put("optimizer.polling-timeout", "6 s")
           .put("blocker.timeout", "2 min")
-          .put("terminal.session.timeout", "30 min")
           .build();
 
   private final Map<String, Object> storageRelatedConfigMapWithoutTimeUnits =

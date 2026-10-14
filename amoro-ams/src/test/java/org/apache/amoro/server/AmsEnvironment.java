@@ -404,11 +404,6 @@ public class AmsEnvironment {
         + rootPath.replace("\\", "\\\\")
         + "/derby;create=true\"\n"
         + "\n"
-        + "  terminal:\n"
-        + "    backend: local\n"
-        + "    local.spark.sql.session.timeZone: UTC\n"
-        + "    local.spark.sql.iceberg.handle-timestamp-without-timezone: false\n"
-        + "\n"
         + "containers:\n"
         + "  - name: localContainer\n"
         + "    container-impl: org.apache.amoro.server.manager.LocalOptimizerContainer\n"

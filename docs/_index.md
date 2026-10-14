@@ -37,7 +37,6 @@ The core components of Amoro include:
 * Plugins: Amoro provides a wide selection of external plugins to meet different scenarios.
     * Optimizers: The self-optimizing execution engine plugin asynchronously performs merging, sorting, deduplication,
       layout optimization, and other operations on all type table format tables.
-    * Terminal: SQL command-line tools, provide various implementations like local Spark and Kyuubi.
     * LogStore: Provide millisecond to second level SLAs for real-time data processing based on message queues like Kafka and Pulsar.
 
 ## Supported table formats 

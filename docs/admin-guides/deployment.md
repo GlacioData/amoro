@@ -181,31 +181,6 @@ containers:
 
 More optimizer container configurations can be found in [managing optimizers](../managing-optimizers/).
 
-### Configure terminal
-
-The Terminal module in the AMS Dashboard allows users to execute SQL directly on the platform. Currently, the Terminal backend supports two implementations: `local` and `kyuubi`.
-In local mode, an embedded Spark environment will be started in AMS. In kyuubi mode, an additional kyuubi service needs to be deployed.
-The configuration for kyuubi mode can refer to: [Using Kyuubi with Terminal](../using-kyuubi/). Below is the configuration for the local mode:
-
-```yaml
-ams:
-  terminal:
-    backend: local
-    local.spark.sql.iceberg.handle-timestamp-without-timezone: false
-    # When the catalog type is Hive, it automatically uses the Spark session catalog to access Hive tables.
-    local.using-session-catalog-for-hive: true
-```
-
-More properties the terminal supports including:
-
-| Key                      | Default | Description                                                                                       |
-|--------------------------|---------|---------------------------------------------------------------------------------------------------|
-| terminal.backend         | local   | Terminal backend implementation. local, kyuubi and custom are valid values.                       |
-| terminal.factory         | -       | Session factory implement of terminal, `terminal.backend` must be `custom` if this is set.        |
-| terminal.result.limit    | 1000    | Row limit of result-set                                                                           |
-| terminal.stop-on-error   | false   | When a statement fails to execute, stop execution or continue executing the remaining statements. |
-| terminal.session.timeout | 30      | Session timeout in minutes.                                                                       |
-
 ### Configure metric reporter
 
 Amoro provides metric reporters by plugin mechanism to connect to  external metric systems.

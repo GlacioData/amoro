@@ -58,7 +58,7 @@ Kafka as LogStore Version Description:
 
 When creating an Amoro table, LogStore needs to be enabled.
 
-- You can create a table after selecting a specific Catalog on the Amoro [Dashboard](http://localhost:1630) - Terminal page
+- Create the table in an external Spark SQL client. The DDL below uses Spark syntax; configure and select the same Mixed-Format catalog registered with Amoro using [Spark Getting Started](../spark-getting-started/) and [Spark Configuration](../spark-configuration/). The subsequent Flink job must access that same catalog and table.
 
 ```sql
 CREATE TABLE db.log_table (
