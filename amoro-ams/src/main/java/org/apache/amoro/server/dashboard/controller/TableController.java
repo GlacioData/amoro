@@ -117,6 +117,7 @@ public class TableController {
   private final TableManager tableManager;
   private final ServerTableDescriptor tableDescriptor;
   private final Configurations serviceConfig;
+  private final org.apache.amoro.server.dashboard.TableTagService tableTagService;
   private final Supplier<TableService> tableServiceSupplier;
   private final ConcurrentHashMap<TableIdentifier, UpgradeRunningInfo> upgradeRunningInfo =
       new ConcurrentHashMap<>();
@@ -145,6 +146,7 @@ public class TableController {
       ServerTableDescriptor tableDescriptor,
       Configurations serviceConfig,
       Supplier<TableService> tableServiceSupplier) {
+    this.tableTagService = new org.apache.amoro.server.dashboard.TableTagService(catalogManager);
     this.catalogManager = catalogManager;
     this.tableManager = tableManager;
     this.tableDescriptor = tableDescriptor;
@@ -593,7 +595,9 @@ public class TableController {
                 SnapshotRequestErrors.integer(ctx, "page"),
                 SnapshotRequestErrors.integer(ctx, "pageSize"),
                 ctx.queryParam("cursor"),
-                ctx.queryParam("offset") != null));
+                ctx.queryParam("offset") != null,
+                ctx.queryParam("refType"),
+                TagRequestErrors.scope(ctx)));
   }
 
   /**
@@ -769,17 +773,69 @@ public class TableController {
   }
 
   public void getTableTags(Context ctx) {
-    String catalog = ctx.pathParam("catalog");
-    String database = ctx.pathParam("db");
-    String table = ctx.pathParam("table");
-    Integer page = ctx.queryParamAsClass("page", Integer.class).getOrDefault(1);
-    Integer pageSize = ctx.queryParamAsClass("pageSize", Integer.class).getOrDefault(20);
-    List<TagOrBranchInfo> partitionBaseInfos =
-        tableDescriptor.getTableTags(
-            TableIdentifier.of(catalog, database, table).buildTableIdentifier());
-    int offset = (page - 1) * pageSize;
-    PageResult<TagOrBranchInfo> amsPageResult = PageResult.of(partitionBaseInfos, offset, pageSize);
-    ctx.json(OkResponse.of(amsPageResult));
+    TagRequestErrors.respond(
+        ctx,
+        () -> {
+          org.apache.amoro.table.tag.TagQuery query = new org.apache.amoro.table.tag.TagQuery();
+          Integer page = SnapshotRequestErrors.integer(ctx, "page");
+          Integer size = SnapshotRequestErrors.integer(ctx, "pageSize");
+          if (page != null) {
+            query.setPage(page);
+          }
+          if (size != null) {
+            query.setPageSize(size);
+          }
+          query.setKeyword(ctx.queryParam("keyword"));
+          query.setScope(TagRequestErrors.scope(ctx));
+          return tableDescriptor.getTableTags(
+              TagRequestErrors.table(ctx).buildTableIdentifier(), query);
+        });
+  }
+
+  public void createTableTag(Context ctx) {
+    TagRequestErrors.respond(
+        ctx,
+        () ->
+            tableTagService.create(
+                TagRequestErrors.table(ctx),
+                TagRequestErrors.body(ctx, org.apache.amoro.table.tag.CreateTagRequest.class)));
+  }
+
+  public void copyTableTag(Context ctx) {
+    TagRequestErrors.respond(
+        ctx,
+        () -> {
+          org.apache.amoro.table.tag.CopyTagRequest request =
+              TagRequestErrors.body(ctx, org.apache.amoro.table.tag.CopyTagRequest.class);
+          request.setSourceName(ctx.pathParam("sourceName"));
+          return tableTagService.copy(TagRequestErrors.table(ctx), request);
+        });
+  }
+
+  public void deleteTableTag(Context ctx) {
+    TagRequestErrors.respond(
+        ctx,
+        () -> {
+          org.apache.amoro.table.tag.DeleteTagRequest request =
+              new org.apache.amoro.table.tag.DeleteTagRequest();
+          request.setName(ctx.pathParam("name"));
+          request.setScope(TagRequestErrors.scope(ctx));
+          request.setExpectedToken(TagRequestErrors.match(ctx));
+          return tableTagService.delete(TagRequestErrors.table(ctx), request);
+        });
+  }
+
+  public void updateTableTagRetention(Context ctx) {
+    TagRequestErrors.respond(
+        ctx,
+        () -> {
+          org.apache.amoro.table.tag.UpdateTagRetentionRequest request =
+              TagRequestErrors.body(
+                  ctx, org.apache.amoro.table.tag.UpdateTagRetentionRequest.class);
+          request.setName(ctx.pathParam("name"));
+          request.setExpectedToken(TagRequestErrors.match(ctx));
+          return tableTagService.updateRetention(TagRequestErrors.table(ctx), request);
+        });
   }
 
   public void getTableBranches(Context ctx) {

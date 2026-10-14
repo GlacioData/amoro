@@ -41,8 +41,11 @@ import org.apache.amoro.table.descriptor.PartitionFileBaseInfo;
 import org.apache.amoro.table.descriptor.ServerTableMeta;
 import org.apache.amoro.table.descriptor.SnapshotReadException;
 import org.apache.amoro.table.descriptor.TagOrBranchInfo;
+import org.apache.amoro.table.tag.TagWriteCapabilities;
 import org.apache.commons.lang3.tuple.Pair;
 import org.apache.iceberg.util.ThreadPools;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.Collections;
 import java.util.HashMap;
@@ -55,6 +58,7 @@ import java.util.concurrent.Semaphore;
 import java.util.function.Supplier;
 
 public class ServerTableDescriptor extends PersistentBase {
+  private static final Logger LOG = LoggerFactory.getLogger(ServerTableDescriptor.class);
 
   private final Map<TableFormat, FormatTableDescriptor> formatDescriptorMap = new HashMap<>();
 
@@ -85,6 +89,22 @@ public class ServerTableDescriptor extends PersistentBase {
     AmoroTable<?> amoroTable = loadTable(tableIdentifier);
     FormatTableDescriptor formatTableDescriptor = formatDescriptorMap.get(amoroTable.format());
     ServerTableMeta result = formatTableDescriptor.getTableDetail(amoroTable);
+    // Optional write discovery must never make the already-loaded read-only detail unavailable.
+    try {
+      amoroTable
+          .tagOperations()
+          .ifPresent(ops -> result.setTagWriteCapabilities(ops.capabilities()));
+    } catch (RuntimeException failure) {
+      TagWriteCapabilities unavailable = new TagWriteCapabilities();
+      unavailable.setUnavailableReason("CAPABILITY_READ_FAILED");
+      result.setTagWriteCapabilities(unavailable);
+      // Avoid logging exception messages which may contain catalog credentials or storage URLs.
+      LOG.warn(
+          "Tag write capability discovery failed for format {} ({})",
+          amoroTable.format(),
+          failure.getClass().getSimpleName());
+    }
+    result.setTypedSnapshotReferences(formatTableDescriptor.supportsTypedSnapshotReferences());
     result.setBoundedSnapshotRead(formatTableDescriptor.supportsBoundedSnapshotRead());
     return result;
   }
@@ -141,6 +161,28 @@ public class ServerTableDescriptor extends PersistentBase {
       Integer pageSize,
       String cursor,
       boolean hasOffset) {
+    return getSnapshotDetailResponse(
+        identifier,
+        snapshotId,
+        ref,
+        page,
+        pageSize,
+        cursor,
+        hasOffset,
+        null,
+        new org.apache.amoro.table.tag.TagScope());
+  }
+
+  public Object getSnapshotDetailResponse(
+      TableIdentifier identifier,
+      String snapshotId,
+      String ref,
+      Integer page,
+      Integer pageSize,
+      String cursor,
+      boolean hasOffset,
+      String refType,
+      org.apache.amoro.table.tag.TagScope scope) {
     AmoroTable<?> table = loadTable(identifier);
     FormatTableDescriptor descriptor = formatDescriptorMap.get(table.format());
     if (descriptor.supportsBoundedSnapshotRead()) {
@@ -159,7 +201,14 @@ public class ServerTableDescriptor extends PersistentBase {
       }
       return snapshotRead(
           descriptor,
-          () -> descriptor.getSnapshotDetailPage(table, snapshotId, ref, limit, cursor));
+          () ->
+              descriptor.getSnapshotDetailPage(
+                  table, snapshotId, ref, refType, scope, limit, cursor));
+    }
+    if (refType != null) {
+      throw new SnapshotReadException(
+          SnapshotReadException.Reason.INVALID_REQUEST,
+          "Typed references require bounded snapshot detail support");
     }
     if (cursor != null || hasOffset) {
       throw new SnapshotReadException(
@@ -226,6 +275,19 @@ public class ServerTableDescriptor extends PersistentBase {
     AmoroTable<?> amoroTable = loadTable(tableIdentifier);
     FormatTableDescriptor formatTableDescriptor = formatDescriptorMap.get(amoroTable.format());
     return formatTableDescriptor.getTableTags(amoroTable);
+  }
+
+  public PageResult<org.apache.amoro.table.tag.TableTagInfo> getTableTags(
+      TableIdentifier identifier, org.apache.amoro.table.tag.TagQuery query) {
+    query.offset();
+    org.apache.amoro.server.dashboard.TableTagService.scope(query.getScope());
+    if (query.getKeyword() != null && query.getKeyword().length() > 255) {
+      throw org.apache.amoro.table.tag.TagOperationException.invalid("Search keyword is too long");
+    }
+    AmoroTable<?> table = loadTable(identifier);
+    Pair<List<org.apache.amoro.table.tag.TableTagInfo>, Long> page =
+        formatDescriptorMap.get(table.format()).getTableTags(table, query);
+    return PageResult.of(page.getLeft(), page.getRight());
   }
 
   public List<TagOrBranchInfo> getTableBranches(TableIdentifier tableIdentifier) {

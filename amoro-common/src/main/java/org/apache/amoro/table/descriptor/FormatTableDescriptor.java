@@ -48,6 +48,11 @@ public interface FormatTableDescriptor {
     return false;
   }
 
+  /** Whether explicit Tag/Branch detail coordinates are implemented. */
+  default boolean supportsTypedSnapshotReferences() {
+    return false;
+  }
+
   /** Read raw changes without falling back to the unlimited legacy detail method. */
   default SnapshotDetailPage getSnapshotDetailPage(
       AmoroTable<?> table, String snapshotId, String ref, int limit, String cursor) {
@@ -94,6 +99,29 @@ public interface FormatTableDescriptor {
 
   /** Get the tag information of the {@link AmoroTable}. */
   List<TagOrBranchInfo> getTableTags(AmoroTable<?> amoroTable);
+
+  /** Paged, rich Tag view. Existing plugins use a compatible read-only projection. */
+  default Pair<List<org.apache.amoro.table.tag.TableTagInfo>, Long> getTableTags(
+      AmoroTable<?> table, org.apache.amoro.table.tag.TagQuery query) {
+    return org.apache.amoro.table.tag.LegacyTagViews.page(getTableTags(table), query);
+  }
+
+  /** Explicit reference type avoids a same-named Branch shadowing a Tag. */
+  default SnapshotDetailPage getSnapshotDetailPage(
+      AmoroTable<?> table,
+      String snapshotId,
+      String ref,
+      String refType,
+      org.apache.amoro.table.tag.TagScope scope,
+      int limit,
+      String cursor) {
+    if (refType != null) {
+      throw new SnapshotReadException(
+          SnapshotReadException.Reason.INVALID_REQUEST,
+          "Typed snapshot references are not supported by this format");
+    }
+    return getSnapshotDetailPage(table, snapshotId, ref, limit, cursor);
+  }
 
   /** Get the branch information of the {@link AmoroTable}. */
   List<TagOrBranchInfo> getTableBranches(AmoroTable<?> amoroTable);

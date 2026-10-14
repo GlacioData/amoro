@@ -29,6 +29,17 @@ import java.util.Objects;
 
 /** ams table meta. */
 public class ServerTableMeta {
+  private org.apache.amoro.table.tag.TagWriteCapabilities tagWriteCapabilities;
+
+  @JsonInclude(JsonInclude.Include.NON_NULL)
+  public org.apache.amoro.table.tag.TagWriteCapabilities getTagWriteCapabilities() {
+    return tagWriteCapabilities;
+  }
+
+  public void setTagWriteCapabilities(org.apache.amoro.table.tag.TagWriteCapabilities value) {
+    tagWriteCapabilities = value;
+  }
+
   private String tableType;
   private String bucketMode;
   private TableModel tableModel;
@@ -51,6 +62,16 @@ public class ServerTableMeta {
 
   public void setFileStatistics(TableFileStatisticsView value) {
     fileStatistics = value;
+  }
+
+  private boolean typedSnapshotReferences;
+
+  public boolean isTypedSnapshotReferences() {
+    return typedSnapshotReferences;
+  }
+
+  public void setTypedSnapshotReferences(boolean value) {
+    typedSnapshotReferences = value;
   }
 
   private boolean boundedSnapshotRead;

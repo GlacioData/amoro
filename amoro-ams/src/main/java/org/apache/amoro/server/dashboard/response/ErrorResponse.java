@@ -22,7 +22,30 @@ import io.javalin.http.HttpCode;
 import org.apache.amoro.shade.guava32.com.google.common.base.MoreObjects;
 
 public class ErrorResponse extends Response {
+  public static final String HTTP_ERROR_HANDLED = "amoro.dashboard.http-error-handled";
   private String requestId;
+  private String reason;
+  private String outcome;
+
+  @org.apache.amoro.shade.jackson2.com.fasterxml.jackson.annotation.JsonInclude(
+      org.apache.amoro.shade.jackson2.com.fasterxml.jackson.annotation.JsonInclude.Include.NON_NULL)
+  public String getReason() {
+    return reason;
+  }
+
+  public void setReason(String value) {
+    reason = value;
+  }
+
+  @org.apache.amoro.shade.jackson2.com.fasterxml.jackson.annotation.JsonInclude(
+      org.apache.amoro.shade.jackson2.com.fasterxml.jackson.annotation.JsonInclude.Include.NON_NULL)
+  public String getOutcome() {
+    return outcome;
+  }
+
+  public void setOutcome(String value) {
+    outcome = value;
+  }
 
   public ErrorResponse(int code, String message, String requestId) {
     super(code, message);

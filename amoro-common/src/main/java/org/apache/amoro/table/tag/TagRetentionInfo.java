@@ -1,0 +1,62 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.apache.amoro.table.tag;
+
+import org.apache.amoro.shade.jackson2.com.fasterxml.jackson.annotation.JsonInclude;
+
+/** Format-neutral Tag contract; version IDs remain opaque strings. */
+@JsonInclude(JsonInclude.Include.NON_NULL)
+public class TagRetentionInfo {
+  private String state = "UNKNOWN";
+  private String model = "UNKNOWN";
+  private String ageLimit = "UNKNOWN";
+  private Long maxAgeMillis;
+
+  public String getState() {
+    return state;
+  }
+
+  public void setState(String value) {
+    state = value;
+  }
+
+  public String getModel() {
+    return model;
+  }
+
+  public void setModel(String value) {
+    model = value;
+  }
+
+  public String getAgeLimit() {
+    return ageLimit;
+  }
+
+  public void setAgeLimit(String value) {
+    ageLimit = value;
+  }
+
+  public Long getMaxAgeMillis() {
+    return maxAgeMillis;
+  }
+
+  public void setMaxAgeMillis(Long value) {
+    maxAgeMillis = value;
+  }
+}

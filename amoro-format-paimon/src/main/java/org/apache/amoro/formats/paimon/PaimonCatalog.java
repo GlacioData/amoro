@@ -128,11 +128,22 @@ public class PaimonCatalog implements FormatCatalog {
     return doAs(
         () -> {
           try {
-            return new PaimonTable(
-                TableIdentifier.of(name, database, table),
-                catalog.getTable(Identifier.create(database, table)),
-                catalogProperties,
-                tableMetaStore);
+            Identifier identifier = Identifier.create(database, table);
+            PaimonTable result =
+                new PaimonTable(
+                    TableIdentifier.of(name, database, table),
+                    catalog.getTable(identifier),
+                    catalogProperties,
+                    tableMetaStore);
+            result.withTagContext(
+                () ->
+                    doAs(
+                        () -> {
+                          catalog.invalidateTable(identifier);
+                          return catalog.getTable(identifier);
+                        }),
+                catalog.supportsVersionManagement());
+            return result;
           } catch (Catalog.TableNotExistException e) {
             throw new NoSuchTableException(e);
           }

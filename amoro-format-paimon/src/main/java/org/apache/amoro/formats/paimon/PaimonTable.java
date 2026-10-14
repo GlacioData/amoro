@@ -34,6 +34,7 @@ import org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeyOptimi
 import org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeyOptimizingEvaluator;
 import org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeyPendingInput;
 import org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeySnapshotAnalysis;
+import org.apache.amoro.formats.paimon.tag.PaimonTagOperations;
 import org.apache.amoro.optimizing.FormatTableAnalysis;
 import org.apache.amoro.optimizing.OptimizationContext;
 import org.apache.amoro.optimizing.OptimizingType;
@@ -79,6 +80,20 @@ public class PaimonTable implements AmoroTable<Table>, Serializable {
   private final Map<String, String> catalogProperties;
 
   private transient TableMetaStore tableMetaStore;
+  private transient java.util.function.Supplier<Table> tagRefresh;
+  private boolean remoteTagCatalog;
+
+  void withTagContext(java.util.function.Supplier<Table> refresh, boolean remote) {
+    this.tagRefresh = refresh;
+    this.remoteTagCatalog = remote;
+  }
+
+  @Override
+  public Optional<org.apache.amoro.table.tag.TableTagOperations> tagOperations() {
+    return table instanceof FileStoreTable
+        ? Optional.of(new PaimonTagOperations(this, tagRefresh, remoteTagCatalog))
+        : Optional.empty();
+  }
 
   public PaimonTable(TableIdentifier tableIdentifier, Table table) {
     this(tableIdentifier, table, ImmutableMap.of());

@@ -19,6 +19,7 @@
 // import { IOptions } from '@/types/common.type'
 import type { ICatalogItem, IMap, SnapshotItem } from '@/types/common.type'
 import request from '@/utils/request'
+import { deletedTag, savedTag, updatedTag, tagMutation } from './tag-mutation'
 
 export function getCatalogList(): Promise<ICatalogItem[]> {
   return request.get('api/ams/v1/catalogs')
@@ -141,16 +142,11 @@ export function getDetailBySnapshotId(
 }
 // The bounded protocol deliberately has no page/offset field.
 export function getSnapshotDetailPage(params: {
-  catalog: string
-  db: string
-  table: string
-  ref: string
-  snapshotId: string
-  pageSize: number
-  cursor?: string
-}) {
-  const { catalog, db, table, snapshotId, ref, pageSize, cursor } = params
-  return request.get(`api/ams/v1/tables/catalogs/${catalog}/dbs/${db}/tables/${table}/snapshots/${snapshotId}/detail`, { handleError: false, params: { ref, pageSize, cursor } })
+  catalog: string, db: string, table: string, ref: string, snapshotId: string,
+  pageSize: number, cursor?: string, refType?: string, scopeKind?: string, branch?: string,
+}): Promise<{ list: any[], nextCursor: string | null }> {
+  const { catalog, db, table, snapshotId, ...query } = params
+  return request.get(`${tagTablePath({ catalog, db, table })}/snapshots/${encodeURIComponent(snapshotId)}/detail`, { handleError: false, params: query })
 }
 
 // get operations
@@ -282,9 +278,24 @@ export function getBranches(params: { catalog: string, db: string, table: string
   return request.get(`/api/ams/v1/tables/catalogs/${catalog}/dbs/${db}/tables/${table}/branches`)
 }
 
-export function getTags(params: { catalog: string, db: string, table: string }) {
-  const { catalog, db, table } = params
-  return request.get(`/api/ams/v1/tables/catalogs/${catalog}/dbs/${db}/tables/${table}/tags`)
+export function tagTablePath(source: { catalog: string, db: string, table: string }) {
+  return `/api/ams/v1/tables/catalogs/${encodeURIComponent(source.catalog)}/dbs/${encodeURIComponent(source.db)}/tables/${encodeURIComponent(source.table)}`
+}
+export function getTags(params: { catalog: string, db: string, table: string, page?: number, pageSize?: number, keyword?: string, scopeKind?: string, branch?: string }): Promise<{ list: import('@/types/tag.type').TableTag[], total: number }> {
+  const { catalog, db, table, ...query } = params
+  return request.get(`${tagTablePath({ catalog, db, table })}/tags`, { params: query, handleError: false })
+}
+export function createTag(source: { catalog: string, db: string, table: string }, body: import('@/types/tag.type').TagWriteRequest, expected: import('@/types/tag.type').TagRetention) {
+  return tagMutation(() => request.post(`${tagTablePath(source)}/tags`, body, { handleError: false, returnCode: true }), savedTag(body.name || '', body.target?.id, body.scope, expected))
+}
+export function copyTag(source: { catalog: string, db: string, table: string }, name: string, body: import('@/types/tag.type').TagWriteRequest, expectedVersion: string, expected: import('@/types/tag.type').TagRetention) {
+  return tagMutation(() => request.post(`${tagTablePath(source)}/tags/${encodeURIComponent(name)}/copy`, body, { handleError: false, returnCode: true }), savedTag(body.newName || '', expectedVersion, body.scope, expected))
+}
+export function deleteTag(source: { catalog: string, db: string, table: string }, row: import('@/types/tag.type').TableTag) {
+  return tagMutation(() => request.delete(`${tagTablePath(source)}/tags/${encodeURIComponent(row.name)}`, { params: { scopeKind: row.scope.kind, branch: row.scope.branch }, headers: { 'If-Match': `"${row.observationToken}"` }, handleError: false, returnCode: true }), deletedTag(row.name, row.scope))
+}
+export function updateTagRetention(source: { catalog: string, db: string, table: string }, row: import('@/types/tag.type').TableTag, body: import('@/types/tag.type').TagRetentionUpdateRequest, expected: import('@/types/tag.type').TagRetention) {
+  return tagMutation(() => request.post(`${tagTablePath(source)}/tags/${encodeURIComponent(row.name)}/retention`, body, { headers: { 'If-Match': `"${row.observationToken}"` }, handleError: false, returnCode: true }), updatedTag(row, expected))
 }
 export function getConsumers(params: { catalog: string, db: string, table: string }) {
   const { catalog, db, table } = params

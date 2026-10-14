@@ -1,0 +1,27 @@
+{
+  "message": "success",
+  "code": 200,
+  "result": {
+    "name": "fix_receipt_1001",
+    "type": "tag",
+    "scope": {
+      "kind": "BRANCH",
+      "branch": "main"
+    },
+    "target": {
+      "id": "3",
+      "branch": "main"
+    },
+    "versionCommittedAtMillis": 1790780461032,
+    "retention": {
+      "state": "KNOWN",
+      "model": "TAG_CREATION_AGE",
+      "ageLimit": "UNSET"
+    },
+    "observationToken": "4KLH1Yi1FohTFGydjAys11bbDBAP4wuUZcFCag5VOcU",
+    "snapshotId": 3,
+    "minSnapshotsToKeep": 0,
+    "maxSnapshotAgeMs": 0,
+    "maxRefAgeMs": 0
+  }
+}

@@ -47,10 +47,10 @@ import java.util.List;
 import java.util.Map;
 
 /** Fixed candidate range with streaming delta-list statistics; never opens manifest entry files. */
-final class PaimonSnapshotMetadata {
+public final class PaimonSnapshotMetadata {
   private PaimonSnapshotMetadata() {}
 
-  static String ref(String ref) {
+  public static String ref(String ref) {
     if (ref == null) {
       return "main";
     }
@@ -59,7 +59,8 @@ final class PaimonSnapshotMetadata {
         || ref.equals("..")
         || ref.contains("/")
         || ref.contains("\\")
-        || ref.indexOf('\0') >= 0) {
+        || ref.length() > 255
+        || ref.chars().anyMatch(Character::isISOControl)) {
       throw new SnapshotReadException(INVALID_REQUEST, "Invalid snapshot ref");
     }
     return ref;
@@ -88,6 +89,26 @@ final class PaimonSnapshotMetadata {
     Snapshot snapshot = tag(table, ref, deadline);
     if (snapshot.id() != id) {
       throw new SnapshotReadException(INVALID_REQUEST, "Snapshot ID does not match the tag");
+    }
+    return snapshot;
+  }
+
+  static Snapshot resolveBranch(
+      FileStoreTable table, String ref, long id, PaimonSnapshotReadDeadline deadline) {
+    if (!branch(table, ref, deadline)) {
+      throw new SnapshotReadException(NOT_FOUND, "Snapshot branch no longer exists");
+    }
+    if (!deadline.call(() -> table.snapshotManager().copyWithBranch(ref).snapshotExists(id))) {
+      throw new SnapshotReadException(NOT_FOUND, "Snapshot no longer exists in this branch");
+    }
+    return resolve(table, ref, id, deadline);
+  }
+
+  static Snapshot resolveTag(
+      FileStoreTable table, String ref, long id, PaimonSnapshotReadDeadline deadline) {
+    Snapshot snapshot = tag(table, ref, deadline);
+    if (id < 1 || snapshot.id() != id) {
+      throw new SnapshotReadException(INVALID_REQUEST, "Snapshot ID does not match the Tag");
     }
     return snapshot;
   }

@@ -26,6 +26,7 @@ import { getBranches, getConsumers, getTags } from '@/services/table.service'
 const props = defineProps({ catalog: String, db: String, table: String, disabled: Boolean, bounded: Boolean })
 const emit = defineEmits(['refChange', 'consumerChange', 'loadingChange'])
 
+const menuOpen = ref(false)
 const pending = ref(false)
 const disabled = computed(() => props.disabled || pending.value)
 const loadError = ref(false)
@@ -41,7 +42,9 @@ const tagSearchKey = ref<string>('')
 const consumerSearchKey = ref<string>('')
 const tabActiveKey = ref<string>(branchTypeMap.BRANCH)
 const branchList = ref<IBranchItem[]>([])
-const tagList = ref<IBranchItem[]>([])
+const tagList = ref<(IBranchItem & { targetId?: string })[]>([])
+const tagPage = ref(1)
+const tagTotal = ref(0)
 const consumerList = ref<IBranchItem[]>([])
 const actualBranchList = computed(() => branchList.value.filter(item => !branchSearchKey.value || item.label.includes(branchSearchKey.value)))
 const actualTagList = computed(() => tagList.value.filter(item => !tagSearchKey.value || item.label.includes(tagSearchKey.value)))
@@ -62,13 +65,15 @@ function getPopupContainer(triggerNode: any) {
 function selectObject(obj: IBranchItem) {
   if (disabled.value)
     return
+  menuOpen.value = false
   selectedObj.value = obj
   operation.value = operationMap.ALL
-  emit('refChange', { ref: obj.value, operation: operationMap.ALL })
+  emit('refChange', { ref: obj.value, operation: operationMap.ALL, refType: obj.type === branchTypeMap.TAG ? 'TAG' : 'BRANCH', targetId: (obj as IBranchItem & { targetId?: string }).targetId })
 }
 function selectConsumer(obj: IBranchItem) {
   if (disabled.value || !obj.amoroCurrentSnapshotsOfTable)
     return
+  menuOpen.value = false
   if (sameSnapshotSelection(obj, selectedObj.value))
     return
   selectedObj.value = obj
@@ -76,7 +81,7 @@ function selectConsumer(obj: IBranchItem) {
   emit('consumerChange', { ref: obj.value, amoroCurrentSnapshotsItem, operation: operationMap.ALL })
 }
 function onChange(val: string) {
-  emit('refChange', { ref: selectedObj.value.value, operation: val })
+  emit('refChange', { ref: selectedObj.value.value, operation: val, refType: selectedObj.value.type === branchTypeMap.TAG ? 'TAG' : 'BRANCH', targetId: (selectedObj.value as IBranchItem & { targetId?: string }).targetId })
 }
 
 async function getBranchList() {
@@ -90,11 +95,21 @@ async function getBranchList() {
 }
 
 async function getTagList() {
-  const result = await getTags(props as any)
+  const result = await getTags({ catalog: props.catalog || '', db: props.db || '', table: props.table || '', page: tagPage.value, pageSize: 20, keyword: tagSearchKey.value })
   if (!alive)
     return
   loaded.tag = true
-  tagList.value = (result.list || []).map((l: IServiceBranchItem) => ({ value: l.name, label: l.name, type: branchTypeMap.TAG }))
+  tagTotal.value = result.total
+  tagList.value = (result.list || []).map(l => ({ value: l.name, label: l.name, type: branchTypeMap.TAG, targetId: l.target.id }))
+}
+async function reloadTags(page = 1) {
+  if (pending.value) return
+  tagPage.value = page
+  pending.value = true
+  emit('loadingChange', true)
+  try { await getTagList() }
+  catch { if (alive) loadError.value = true }
+  finally { if (alive) { pending.value = false; emit('loadingChange', false) } }
 }
 async function getConsumerList() {
   const result = await getConsumers(props as any)
@@ -159,17 +174,17 @@ onMounted(() => {
 
 <template>
   <div class="branch-selector">
-    <a-dropdown :trigger="['click']" placement="bottomLeft" :get-popup-container="getPopupContainer">
+    <a-dropdown v-model:open="menuOpen" :trigger="['click']" placement="bottomLeft" :get-popup-container="getPopupContainer">
       <a-button class="branch-btn" :disabled="(!selectedObj.value && !props.bounded) || disabled">
         <svg-icon class-name="branch-selector-icon" :icon-class="selectedObj.type" class="g-mr-8" />
         <span class="branch-btn-label">{{ selectedObj.label || $t('branches') }}</span>
         <down-outlined />
       </a-button>
       <template #overlay>
-        <div>
+        <div @click.stop>
           <div class="branch-selector-search">
             <a-input v-show="tabActiveKey === branchTypeMap.BRANCH" v-model:value="branchSearchKey" :placeholder="$t('filterBranchesOrTagsOrConsumers')" @click="onClickInput" />
-            <a-input v-show="tabActiveKey === branchTypeMap.TAG" v-model:value="tagSearchKey" :placeholder="$t('filterBranchesOrTagsOrConsumers')" @click="onClickInput" />
+            <a-input v-show="tabActiveKey === branchTypeMap.TAG" v-model:value="tagSearchKey" :disabled="pending" @press-enter="reloadTags(1)" :placeholder="$t('filterBranchesOrTagsOrConsumers')" @click="onClickInput" />
             <a-input
               v-show="tabActiveKey === branchTypeMap.CONSUMER" v-model:value="consumerSearchKey" :placeholder="$t('filterBranchesOrTagsOrConsumers')"
               @click="onClickInput"
@@ -202,6 +217,7 @@ onMounted(() => {
                   </div>
                 </template>
                 <span v-else class="empty-tips">{{ $t('nothingToShow') }}</span>
+                <a-pagination :current="tagPage" :total="tagTotal" :page-size="20" :disabled="pending" size="small" show-quick-jumper :show-size-changer="false" @change="reloadTags" />
               </a-tab-pane>
               <a-tab-pane v-if="props.bounded || consumerList.length !== 0" :key="branchTypeMap.CONSUMER" :tab="$t('consumers')" :disabled="pending">
                 <template v-if="!!actualConsumerList.length">
@@ -227,7 +243,7 @@ onMounted(() => {
     </div>
     <div>
       <svg-icon class-name="branch-selector-icon" icon-class="tag" class="g-mr-4 g-ml-16" />
-      <span class="g-mr-4">{{ props.bounded && !loaded.tag ? '—' : tagList.length }}</span>
+      <span class="g-mr-4">{{ props.bounded && !loaded.tag ? '—' : tagTotal }}</span>
       <span>{{ $t('tags') }}</span>
     </div>
     <div class="g-ml-24">

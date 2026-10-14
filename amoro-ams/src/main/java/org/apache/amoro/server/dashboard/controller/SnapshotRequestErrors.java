@@ -64,12 +64,20 @@ final class SnapshotRequestErrors {
           default:
             status = 500;
         }
+      } else if (failure instanceof org.apache.amoro.table.tag.TagOperationException) {
+        org.apache.amoro.table.tag.TagOperationException tag =
+            (org.apache.amoro.table.tag.TagOperationException) failure;
+        status = tag.getStatus();
+        message = tag.getMessage();
       } else if (failure instanceof IllegalArgumentException) {
         status = 400;
         message = "Invalid snapshot request parameters";
       }
       if (status == 500) {
         LOG.warn("Snapshot metadata request failed", failure);
+      }
+      if ("TAG".equals(ctx.queryParam("refType"))) {
+        ctx.attribute(ErrorResponse.HTTP_ERROR_HANDLED, true);
       }
       ctx.status(status).json(new ErrorResponse(status, message, null));
     }

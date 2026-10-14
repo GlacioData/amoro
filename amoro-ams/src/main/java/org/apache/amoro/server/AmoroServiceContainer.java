@@ -40,7 +40,6 @@ import org.apache.amoro.server.catalog.CatalogManager;
 import org.apache.amoro.server.catalog.DefaultCatalogManager;
 import org.apache.amoro.server.dashboard.DashboardServer;
 import org.apache.amoro.server.dashboard.JavalinJsonMapper;
-import org.apache.amoro.server.dashboard.response.ErrorResponse;
 import org.apache.amoro.server.dashboard.utils.AmsUtil;
 import org.apache.amoro.server.ha.HighAvailabilityContainer;
 import org.apache.amoro.server.ha.HighAvailabilityContainerFactory;
@@ -473,7 +472,7 @@ public class AmoroServiceContainer {
         ctx -> {
           Optional<RestExtension> extension = handleExceptionByExtension.apply(ctx);
           if (!extension.isPresent()) {
-            ctx.json(new ErrorResponse(HttpCode.NOT_FOUND, "page not found!", ""));
+            DashboardServer.handleHttpError(ctx, HttpCode.NOT_FOUND, "page not found!");
           }
         });
 
@@ -482,7 +481,7 @@ public class AmoroServiceContainer {
         ctx -> {
           Optional<RestExtension> extension = handleExceptionByExtension.apply(ctx);
           if (!extension.isPresent()) {
-            ctx.json(new ErrorResponse(HttpCode.INTERNAL_SERVER_ERROR, "internal error!", ""));
+            DashboardServer.handleHttpError(ctx, HttpCode.INTERNAL_SERVER_ERROR, "internal error!");
           }
         });
   }

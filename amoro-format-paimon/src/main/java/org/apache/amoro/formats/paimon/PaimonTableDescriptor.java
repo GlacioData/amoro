@@ -20,6 +20,7 @@ package org.apache.amoro.formats.paimon;
 
 import org.apache.amoro.AmoroTable;
 import org.apache.amoro.TableFormat;
+import org.apache.amoro.formats.paimon.tag.PaimonTagReader;
 import org.apache.amoro.formats.paimon.utils.SnapShotsScanUtils;
 import org.apache.amoro.process.ProcessStatus;
 import org.apache.amoro.process.ProcessTaskStatus;
@@ -79,7 +80,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import java.util.SortedMap;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.regex.Matcher;
@@ -112,6 +112,11 @@ public class PaimonTableDescriptor implements FormatTableDescriptor {
   @Override
   public List<TableFormat> supportFormat() {
     return Lists.newArrayList(TableFormat.PAIMON);
+  }
+
+  @Override
+  public boolean supportsTypedSnapshotReferences() {
+    return true;
   }
 
   @Override
@@ -238,6 +243,33 @@ public class PaimonTableDescriptor implements FormatTableDescriptor {
   @Override
   public org.apache.amoro.table.descriptor.SnapshotDetailPage getSnapshotDetailPage(
       AmoroTable<?> amoroTable, String snapshotId, String ref, int limit, String cursor) {
+    return getSnapshotDetailPage(
+        amoroTable,
+        snapshotId,
+        ref,
+        null,
+        new org.apache.amoro.table.tag.TagScope(),
+        limit,
+        cursor);
+  }
+
+  @Override
+  public org.apache.amoro.table.descriptor.SnapshotDetailPage getSnapshotDetailPage(
+      AmoroTable<?> amoroTable,
+      String snapshotId,
+      String ref,
+      String refType,
+      org.apache.amoro.table.tag.TagScope scope,
+      int limit,
+      String cursor) {
+    if (refType != null && !"TAG".equals(refType) && !"BRANCH".equals(refType)) {
+      throw new org.apache.amoro.table.descriptor.SnapshotReadException(
+          org.apache.amoro.table.descriptor.SnapshotReadException.Reason.INVALID_REQUEST,
+          "Invalid reference type");
+    }
+    if ("TAG".equals(refType)) {
+      PaimonTagReader.validateScope(scope);
+    }
     PaimonSnapshotReadDeadline deadline = new PaimonSnapshotReadDeadline();
     String normalizedRef = PaimonSnapshotMetadata.ref(ref);
     final long id;
@@ -254,16 +286,26 @@ public class PaimonTableDescriptor implements FormatTableDescriptor {
             doAs(
                 amoroTable,
                 () -> {
-                  FileStoreTable table = getTable(amoroTable);
+                  FileStoreTable loaded = getTable(amoroTable);
+                  // Tag coordinates are main-scoped, including when loaded through $branch_*. Use
+                  // the native switch so reference, schema and manifest/path context agree.
+                  // https://github.com/apache/paimon/blob/release-1.4.2/paimon-core/src/main/java/org/apache/paimon/table/AbstractFileStoreTable.java
+                  FileStoreTable table =
+                      "TAG".equals(refType) ? loaded.switchToBranch("main") : loaded;
                   Snapshot snapshot =
-                      PaimonSnapshotMetadata.resolve(table, normalizedRef, id, deadline);
+                      "TAG".equals(refType)
+                          ? PaimonSnapshotMetadata.resolveTag(table, normalizedRef, id, deadline)
+                          : "BRANCH".equals(refType)
+                              ? PaimonSnapshotMetadata.resolveBranch(
+                                  table, normalizedRef, id, deadline)
+                              : PaimonSnapshotMetadata.resolve(table, normalizedRef, id, deadline);
                   FileStore<?> store = table.store();
                   return new PaimonSnapshotDetailReader(deadline)
                       .read(
                           store,
                           snapshot,
                           amoroTable.id().toString() + "|" + table.location(),
-                          normalizedRef,
+                          refType == null ? normalizedRef : refType + "\0main\0" + normalizedRef,
                           limit,
                           cursor,
                           entry ->
@@ -680,22 +722,15 @@ public class PaimonTableDescriptor implements FormatTableDescriptor {
   }
 
   @Override
-  public List<TagOrBranchInfo> getTableTags(AmoroTable<?> amoroTable) {
-    return doAs(amoroTable, () -> getTableTagsInternal(amoroTable));
+  public org.apache.commons.lang3.tuple.Pair<
+          java.util.List<org.apache.amoro.table.tag.TableTagInfo>, Long>
+      getTableTags(AmoroTable<?> table, org.apache.amoro.table.tag.TagQuery query) {
+    return doAs(table, () -> PaimonTagReader.page((PaimonTable) table, getTable(table), query));
   }
 
-  private List<TagOrBranchInfo> getTableTagsInternal(AmoroTable<?> amoroTable) {
-    FileStoreTable table = getTable(amoroTable);
-    SortedMap<Snapshot, List<String>> tags = table.tagManager().tags();
-    List<TagOrBranchInfo> tagOrBranchInfos = new ArrayList<>();
-    tags.forEach(
-        (snapshot, tagList) -> {
-          for (String tagName : tagList) {
-            tagOrBranchInfos.add(
-                new TagOrBranchInfo(tagName, snapshot.id(), 0, 0L, 0L, TagOrBranchInfo.TAG));
-          }
-        });
-    return tagOrBranchInfos;
+  @Override
+  public List<TagOrBranchInfo> getTableTags(AmoroTable<?> amoroTable) {
+    return doAs(amoroTable, () -> PaimonTagReader.legacy(getTable(amoroTable)));
   }
 
   @Override
