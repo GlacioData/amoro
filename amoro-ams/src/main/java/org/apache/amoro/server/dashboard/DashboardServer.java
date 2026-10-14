@@ -303,6 +303,18 @@ public class DashboardServer {
                 "/catalogs/{catalog}/dbs/{db}/tables/{table}/operations",
                 tableController::getTableOperations);
             get("/catalogs/{catalog}/dbs/{db}/tables/{table}/tags", tableController::getTableTags);
+            post(
+                "/catalogs/{catalog}/dbs/{db}/tables/{table}/tags",
+                tableController::createTableTag);
+            post(
+                "/catalogs/{catalog}/dbs/{db}/tables/{table}/tags/{sourceName}/copy",
+                tableController::copyTableTag);
+            post(
+                "/catalogs/{catalog}/dbs/{db}/tables/{table}/tags/{name}/retention",
+                tableController::updateTableTagRetention);
+            delete(
+                "/catalogs/{catalog}/dbs/{db}/tables/{table}/tags/{name}",
+                tableController::deleteTableTag);
             get(
                 "/catalogs/{catalog}/dbs/{db}/tables/{table}/branches",
                 tableController::getTableBranches);
@@ -497,6 +509,13 @@ public class DashboardServer {
       ctx.json(new ErrorResponse(HttpCode.INTERNAL_SERVER_ERROR, e.getMessage(), ""));
     }
     LOG.error("An error occurred while processing the url:{}", ctx.url(), e);
+  }
+
+  /** Preserve endpoint-local typed errors instead of overwriting their outcome in Javalin. */
+  public static void handleHttpError(Context ctx, HttpCode status, String message) {
+    if (!Boolean.TRUE.equals(ctx.attribute(ErrorResponse.HTTP_ERROR_HANDLED))) {
+      ctx.json(new ErrorResponse(status, message, ""));
+    }
   }
 
   private static final String[] URL_WHITE_LIST = {

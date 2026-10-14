@@ -19,6 +19,7 @@ limitations under the License.
 <script lang="ts">
 import { computed, defineComponent, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowReactive, toRefs, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import UTags from './components/Tags.vue'
 import UDetails from './components/Details.vue'
 import UFiles from './components/Files.vue'
 import UOperations from './components/Operations.vue'
@@ -38,6 +39,7 @@ export default defineComponent({
   name: 'Tables',
   components: {
     UDetails,
+    UTags,
     UFiles,
     UOperations,
     USnapshots,
@@ -113,6 +115,7 @@ export default defineComponent({
     }
 
     const tabConfigs = shallowReactive([
+      { key: 'Tags', label: 'tags' },
       { key: 'Snapshots', label: 'snapshots' },
       { key: 'Optimizing', label: 'optimizing' },
       { key: 'Operations', label: 'operations' },
@@ -349,7 +352,8 @@ export default defineComponent({
                     :initialization-error="snapshotInitializationError"
                     @retry-initialization="detailRef?.getTableDetails()"
                   />
-                  <component :is="`U${tab.key}`" v-else />
+                  <UTags v-else-if="tab.key === 'Tags' && detailLoaded" :key="tableKey" />
+                  <component :is="`U${tab.key}`" v-else-if="tab.key !== 'Tags'" />
                 </a-tab-pane>
               </a-tabs>
             </div>

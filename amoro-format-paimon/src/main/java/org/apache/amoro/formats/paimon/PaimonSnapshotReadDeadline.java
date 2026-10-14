@@ -29,12 +29,12 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.LongSupplier;
 
 /** Cooperative request budget. Blocking FileIO still needs finite client timeouts. */
-final class PaimonSnapshotReadDeadline {
+public final class PaimonSnapshotReadDeadline {
   private final LongSupplier clock;
   private final long started;
   private final long budget;
 
-  PaimonSnapshotReadDeadline() {
+  public PaimonSnapshotReadDeadline() {
     this(System::nanoTime, TimeUnit.SECONDS.toNanos(30));
   }
 
@@ -44,7 +44,7 @@ final class PaimonSnapshotReadDeadline {
     this.budget = budget;
   }
 
-  void check() {
+  public void check() {
     if (Thread.currentThread().isInterrupted()) {
       throw new SnapshotReadException(UNAVAILABLE, "Snapshot read interrupted");
     }

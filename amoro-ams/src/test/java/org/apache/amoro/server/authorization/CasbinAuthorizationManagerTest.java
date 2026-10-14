@@ -40,10 +40,12 @@ public class CasbinAuthorizationManagerTest {
     Set<String> viewerPrivileges = manager.resolvePrivileges(Collections.singleton(Role.VIEWER));
     assertTrue(viewerPrivileges.contains(Privilege.VIEW_TABLE.name()));
     assertFalse(viewerPrivileges.contains(Privilege.VIEW_SYSTEM.name()));
+    assertFalse(viewerPrivileges.contains(Privilege.MANAGE_TABLE.name()));
 
     Set<String> adminPrivileges =
         manager.resolvePrivileges(Collections.singleton(Role.SERVICE_ADMIN));
     assertTrue(adminPrivileges.contains(Privilege.VIEW_SYSTEM.name()));
     assertTrue(adminPrivileges.contains(Privilege.EXECUTE_SQL.name()));
+    assertTrue(adminPrivileges.contains(Privilege.MANAGE_TABLE.name()));
   }
 }

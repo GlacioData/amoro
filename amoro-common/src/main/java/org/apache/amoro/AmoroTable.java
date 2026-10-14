@@ -29,6 +29,11 @@ import java.util.Optional;
 
 public interface AmoroTable<T> {
 
+  /** Optional format-owned Tag mutation capability; existing formats remain read-only. */
+  default Optional<org.apache.amoro.table.tag.TableTagOperations> tagOperations() {
+    return Optional.empty();
+  }
+
   /**
    * Whether refresh may replace demand that has not started executing; AMS validates status and
    * ownership.

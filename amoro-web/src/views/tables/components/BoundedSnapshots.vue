@@ -17,8 +17,8 @@ limitations under the License.
 / -->
 
 <script lang="ts" setup>
-import { computed, onBeforeUnmount, reactive, ref } from 'vue'
-import { useRoute } from 'vue-router'
+import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import axios from 'axios'
 import { CaretDownOutlined, CaretRightOutlined } from '@ant-design/icons-vue'
@@ -34,6 +34,10 @@ import { generateLineChartOption } from '@/utils/chart'
 
 const { t } = useI18n()
 const route = useRoute()
+const router = useRouter()
+const selectedRefType = ref<string | undefined>()
+const fixedTag = ref(false)
+const selectedScope = reactive({ kind: 'BRANCH', branch: 'main' as string | undefined })
 // The parent keys this component by table identity; no state is shared between tables.
 const source = {
   catalog: String(route.query.catalog),
@@ -105,11 +109,19 @@ function clearDetail() {
   retry = () => {}
 }
 
-function selectRef(selection: { ref: string, operation: string }) {
+function selectRef(selection: { ref: string, operation: string, refType?: string, targetId?: string }) {
   clearDetail()
   rows.value = []
   consumerSelected.value = false
   selectedRef.value = selection.ref
+  selectedScope.kind = 'BRANCH'
+  selectedScope.branch = 'main'
+  selectedRefType.value = selection.refType
+  if (selection.refType === 'TAG' && selection.targetId) {
+    selectedSnapshot.value = selection.targetId
+    void loadDetail(0, null)
+    return
+  }
   operation.value = selection.operation
   pagination.current = 1
   pagination.total = 0
@@ -170,6 +182,8 @@ async function loadDetail(index: number, cursor: string | null) {
       ...source,
       snapshotId: selectedSnapshot.value,
       ref: selectedRef.value,
+      refType: selectedRefType.value,
+      ...(selectedRefType.value === 'TAG' ? { scopeKind: selectedScope.kind, branch: selectedScope.branch } : {}),
       pageSize: 25,
       ...(cursor === null ? {} : { cursor }),
     })
@@ -204,6 +218,35 @@ function openSnapshot(id: string) {
   void loadDetail(0, null)
 }
 
+// Restore the complete Tag coordinate before starting any main-branch request.
+// Vue 3.5: https://vuejs.org/guide/essentials/watchers.html#side-effect-cleanup
+watch(() => [route.query.snapshotId, route.query.refType, route.query.ref, route.query.scopeKind, route.query.branch], () => {
+  if (route.query.refType === 'TAG' && typeof route.query.snapshotId === 'string' && typeof route.query.ref === 'string') {
+    clearDetail()
+    fixedTag.value = true
+    selectedScope.kind = typeof route.query.scopeKind === 'string' ? route.query.scopeKind : 'DEFAULT'
+    selectedScope.branch = typeof route.query.branch === 'string' ? route.query.branch : undefined
+    selectedRef.value = route.query.ref
+    selectedRefType.value = 'TAG'
+    selectedSnapshot.value = route.query.snapshotId
+    void loadDetail(0, null)
+  }
+  else if (fixedTag.value) {
+    clearDetail()
+    fixedTag.value = false
+    selectedRef.value = 'main'
+    selectedRefType.value = undefined
+  }
+}, { immediate: true })
+function returnToList() {
+  clearDetail()
+  if (fixedTag.value) {
+    fixedTag.value = false
+    const { snapshotId, refType, ref, scopeKind, branch, ...query } = route.query
+    void router.push({ query: { ...query, tab: 'Tags' } })
+  }
+}
+
 onBeforeUnmount(() => {
   clearDetail()
   rows.value = []
@@ -219,7 +262,7 @@ onBeforeUnmount(() => {
         </a-button>
       </template>
     </a-alert>
-    <div v-show="selectedSnapshot === null">
+    <div v-if="selectedSnapshot === null">
       <Selector
         v-bind="source" bounded :disabled="loading"
         @ref-change="selectRef" @consumer-change="selectConsumer"
@@ -276,7 +319,7 @@ onBeforeUnmount(() => {
     </div>
     <div v-if="selectedSnapshot !== null">
       <a-breadcrumb separator=">">
-        <a-breadcrumb-item><a @click="clearDetail">{{ $t('all') }}</a></a-breadcrumb-item>
+        <a-breadcrumb-item><a @click="returnToList">{{ $t(fixedTag ? 'tags' : 'all') }}</a></a-breadcrumb-item>
         <a-breadcrumb-item>{{ $t('snapshotId') }} {{ selectedSnapshot }}</a-breadcrumb-item>
       </a-breadcrumb>
       <a-table row-key="rowKey" :columns="detailColumns" :data-source="detailRows" :pagination="false" :loading="loading" class="g-mt-8">
