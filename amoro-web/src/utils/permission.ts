@@ -26,7 +26,6 @@ export type UserPrivilege =
   | 'MANAGE_CATALOG'
   | 'MANAGE_TABLE'
   | 'MANAGE_OPTIMIZER'
-  | 'EXECUTE_SQL'
   | 'MANAGE_PLATFORM'
 
 export function getRoles(): string[] {
@@ -75,10 +74,6 @@ export function canManageOptimizer(): boolean {
   return hasPrivilege('MANAGE_OPTIMIZER')
 }
 
-export function canExecuteSql(): boolean {
-  return hasPrivilege('EXECUTE_SQL')
-}
-
 export function canManagePlatform(): boolean {
   return hasPrivilege('MANAGE_PLATFORM')
 }
@@ -95,9 +90,6 @@ export function getDefaultRoute(): string {
   }
   if (canViewSystem()) {
     return '/overview'
-  }
-  if (canExecuteSql()) {
-    return '/terminal'
   }
   if (canManagePlatform()) {
     return '/settings'

@@ -126,7 +126,11 @@ You may need to wait for up to 30 seconds for the optimizer to register with AMS
 
 ### Initialize tables
 
-Click on `Terminal` in the sidebar, you can create the test tables here using SQL. Terminal supports executing Spark SQL statements for now.
+Prepare an external Spark SQL client with the connector matching your Spark version and the chosen table format; see [Spark Getting Started](/docs/latest/spark-getting-started/) and [Spark Configuration](/docs/latest/spark-configuration/).
+
+For Iceberg, use the [Iceberg Spark connector](https://iceberg.apache.org/docs/1.6.1/spark-getting-started/#catalog-configuration) and configure a REST catalog against `http://${AMS_HOST}:1630/api/iceberg/rest`, with the catalog option `warehouse=demo_catalog` to select the internal catalog created above. Supply the authentication required by your [AMS REST configuration](/docs/latest/deployment/#configure-the-service-address). For Mixed-Iceberg, configure the Amoro Spark catalog with `ams.uri=thrift://${AMS_HOST}:1260/demo_catalog`, following the Spark guides above.
+
+In both cases, name the Spark catalog `demo_catalog` and select it as the current catalog before executing the SQL below. The Spark client must reach AMS and MinIO and use the same warehouse, storage endpoint and credentials as the catalog. When Spark runs outside the Docker network, use addresses reachable from that client rather than Docker-only hostnames.
 
 {{% codetabs "CreateATable" %}}
 {{% addtab "Iceberg Format" "spark-queries" "spark-sql" %}}
@@ -170,11 +174,11 @@ SELECT * FROM db.user;
 {{% /tabcontent %}}
 {{% /codetabs %}}
 
-Click on the `RUN` button uppon the SQL editor, and wait for the SQL query to finish executing. You can then see the query results under the SQL editor.
+Execute the statements in the external Spark SQL client and inspect the results there. Refresh the AMS `Tables` page to view the new tables and their metadata.
 
 ### Make some changes
 
-Execute the following SQL statements one by one in the `Terminal`:
+Execute the following SQL statements one by one in the same external Spark SQL client and `demo_catalog`:
 
 ```sql
 -- insert a few rows first

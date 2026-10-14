@@ -267,7 +267,7 @@
 
         <dependency>
             <groupId>org.apache.logging.log4j</groupId>
-            <artifactId>log4j-slf4j-impl</artifactId>
+            <artifactId>log4j-slf4j2-impl</artifactId>
         </dependency>
 
         <dependency>
@@ -284,11 +284,6 @@
             <!-- API bridge between log4j 1 and 2 -->
             <groupId>org.apache.logging.log4j</groupId>
             <artifactId>log4j-1.2-api</artifactId>
-        </dependency>
-
-        <dependency>
-            <groupId>org.apache.kyuubi</groupId>
-            <artifactId>kyuubi-hive-jdbc-shaded</artifactId>
         </dependency>
 
         <!-- aws dependencies -->

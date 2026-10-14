@@ -19,7 +19,6 @@
  import common from './modules/common'
  import catalogs from './modules/catalogs'
  import database from './modules/database'
- import terminal from './modules/terminal'
  import db from './modules/db'
  import overview from './modules/overview'
  import settings from './modules/settings'
@@ -29,7 +28,6 @@ export default [
   ...common,
   ...catalogs,
   ...database,
-  ...terminal,
   ...db,
   ...overview,
   ...settings,

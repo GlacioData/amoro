@@ -23,6 +23,5 @@ public enum ResourceType {
   CATALOG,
   TABLE,
   OPTIMIZER,
-  TERMINAL,
   PLATFORM
 }

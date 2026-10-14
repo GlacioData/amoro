@@ -55,12 +55,10 @@ import org.apache.amoro.server.dashboard.controller.PlatformFileInfoController;
 import org.apache.amoro.server.dashboard.controller.ProcessController;
 import org.apache.amoro.server.dashboard.controller.SettingController;
 import org.apache.amoro.server.dashboard.controller.TableController;
-import org.apache.amoro.server.dashboard.controller.TerminalController;
 import org.apache.amoro.server.dashboard.controller.VersionController;
 import org.apache.amoro.server.dashboard.response.ErrorResponse;
 import org.apache.amoro.server.resource.OptimizerManager;
 import org.apache.amoro.server.table.TableManager;
-import org.apache.amoro.server.terminal.TerminalManager;
 import org.apache.amoro.shade.guava32.com.google.common.base.Preconditions;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -94,7 +92,6 @@ public class DashboardServer {
   private final SettingController settingController;
   private final ProcessController processController;
   private final TableController tableController;
-  private final TerminalController terminalController;
   private final VersionController versionController;
   private final OverviewController overviewController;
   private final ApiTokenController apiTokenController;
@@ -110,7 +107,6 @@ public class DashboardServer {
       CatalogManager catalogManager,
       TableManager tableManager,
       OptimizerManager optimizerManager,
-      TerminalManager terminalManager,
       AmoroServiceContainer ams) {
     PlatformFileManager platformFileManager = new PlatformFileManager();
     this.catalogController = new CatalogController(catalogManager, platformFileManager);
@@ -128,7 +124,6 @@ public class DashboardServer {
     this.tableController =
         new TableController(
             catalogManager, tableManager, tableDescriptor, serviceConfig, ams::getTableService);
-    this.terminalController = new TerminalController(terminalManager);
     this.versionController = new VersionController();
     OverviewManager manager = new OverviewManager(serviceConfig, ams::getTableService);
     this.overviewController = new OverviewController(manager);
@@ -380,19 +375,6 @@ public class DashboardServer {
             get("/containers/get", optimizerGroupController::getContainers);
           });
 
-      // console apis
-      path(
-          "/terminal",
-          () -> {
-            get("/examples", terminalController::getExamples);
-            get("/examples/{exampleName}", terminalController::getSqlExamples);
-            post("/catalogs/{catalog}/execute", terminalController::executeScript);
-            get("/{sessionId}/logs", terminalController::getLogs);
-            get("/{sessionId}/result", terminalController::getSqlResult);
-            put("/{sessionId}/stop", terminalController::stopSql);
-            get("/latestInfos/", terminalController::getLatestInfo);
-          });
-
       // file apis
       path(
           "/files",
@@ -529,7 +511,6 @@ public class DashboardServer {
     "/tables",
     "/optimizers",
     "/login",
-    "/terminal",
     "/hive-tables/upgrade",
     "/hive-tables",
     "/index.html",

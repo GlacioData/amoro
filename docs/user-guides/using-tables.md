@@ -26,11 +26,11 @@ menu:
  -->
 # Using Tables
 
-The SQL execution tool `Terminal` is provided in AMS dashboard to help users quickly create, modify and delete tables.
-It is also available in [Spark](../spark-ddl/) and [Flink](../flink-ddl/) and other engines to manage tables using SQL.
+Use external [Spark](../spark-ddl/) or [Flink](../flink-ddl/) clients to create, modify and delete tables with SQL.
+The examples below use Spark SQL. Prepare the appropriate connector and configure the same catalog managed by AMS, following [Spark Getting Started](../spark-getting-started/) and [Spark Configuration](../spark-configuration/). Select that catalog in Spark before running the examples, and ensure the client can access its warehouse with the required storage configuration and credentials.
 
 ## Create table
-After logging into AMS dashboard, go to `Terminal`, enter the table creation statement and execute it to complete the table creation.
+Run the table creation statement in the configured external Spark SQL client. Create the `test_db` database in that catalog first.
 The following is an example of table creation:
 
 ```sql
@@ -50,7 +50,7 @@ tblproperties(
   'table.watermark-allowed-lateness-second' = '60');
 ```
 
-Currently, terminal uses Spark Engine for SQL execution. For more information on the syntax of creating tables, refer to [Spark DDL](../spark-ddl/#create-table). Different Catalogs create different table formats, refer to [Create Catalog](../managing-catalogs/#create-catalog)
+For more information on Spark SQL table creation syntax, refer to [Spark DDL](../spark-ddl/#create-table). Different Catalogs create different table formats, refer to [Create Catalog](../managing-catalogs/#create-catalog)
 
 ### Configure LogStore
 As described in [Mixed-Iceberg format](../mixed-iceberg-format/), Mixed-Iceberg format may consist of several components, and BaseStore and ChangeStore will be automatically created upon table creation.
@@ -70,7 +70,7 @@ You can view the current watermark of the table in the table details on the AMS 
 
 ![mixed-format-table-watermark](../images/admin/watermark_table_detail.png)
 
-You can also use the following SQL statement in the `Terminal` to query the watermark of a table:
+You can also query the watermark from the external Spark SQL client using the same Mixed-Format catalog:
 
 ```sql
 SHOW TBLPROPERTIES test_db.test_log_store ('watermark.table');
@@ -92,8 +92,7 @@ Watermark configuration is only supported in Mixed-Hive format and Mixed-Iceberg
     
 ## Modify table
 
-After logging into the AMS dashboard, go to the `Terminal` and enter the 
-modification statement to complete the table modification. The current `Terminal` uses Spark Engine to execute SQL. For 
+Run modification statements in the external Spark SQL client using the configured catalog. For
 more information on modifying tables, please refer to the syntax guide [Spark DDL](../spark-ddl#alter-statement).
 
 ## Upgrade a Hive table
@@ -222,7 +221,7 @@ ALTER TABLE test_db.test_log_store set tblproperties (
 
 ## Delete table
 
-After logging into the AMS Dashboard. To modify a table, enter the modification statement in the `terminal` and execute it.
+Run the deletion statement in the external Spark SQL client using the configured catalog.
 
 
 Here is an example of how to delete a table：
@@ -231,7 +230,7 @@ Here is an example of how to delete a table：
 DROP TABLE test_db.test_log_store;
 ```
 
-The current terminal is using the Spark engine to execute SQL. For more information about deleting tables, you can refer to  [Spark DDL](../spark-ddl/#drop-table).
+For more information about deleting tables with Spark SQL, you can refer to  [Spark DDL](../spark-ddl/#drop-table).
 
 ## Explore table details
 The Amoro Tables details page provides multiple tabs to display the status of the table from various dimensions, mainly including:

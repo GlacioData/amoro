@@ -161,7 +161,6 @@
         <commons-dbcp2.version>2.9.0</commons-dbcp2.version>
         <netty.version>4.1.129.Final</netty.version>
         <javalin.version>4.6.8</javalin.version>
-        <kyuubi-hive-jdbc-shaded.version>1.10.2</kyuubi-hive-jdbc-shaded.version>
         <rocksdb.version>7.10.2</rocksdb.version>
         <kryo.version>4.0.3</kryo.version>
         <lucene.version>8.11.2</lucene.version>
@@ -636,6 +635,12 @@
 
             <dependency>
                 <groupId>org.apache.logging.log4j</groupId>
+                <artifactId>log4j-slf4j2-impl</artifactId>
+                <version>${log4j.version}</version>
+            </dependency>
+
+            <dependency>
+                <groupId>org.apache.logging.log4j</groupId>
                 <artifactId>log4j-api</artifactId>
                 <version>${log4j.version}</version>
             </dependency>
@@ -860,12 +865,6 @@
                 <groupId>io.netty</groupId>
                 <artifactId>netty-codec-http2</artifactId>
                 <version>${netty.version}</version>
-            </dependency>
-
-            <dependency>
-                <groupId>org.apache.kyuubi</groupId>
-                <artifactId>kyuubi-hive-jdbc-shaded</artifactId>
-                <version>${kyuubi-hive-jdbc-shaded.version}</version>
             </dependency>
 
             <dependency>

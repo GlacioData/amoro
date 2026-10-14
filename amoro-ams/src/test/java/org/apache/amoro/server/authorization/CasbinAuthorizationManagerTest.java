@@ -18,34 +18,51 @@
 
 package org.apache.amoro.server.authorization;
 
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import org.apache.amoro.config.Configurations;
 import org.apache.amoro.server.AmoroManagementConf;
 import org.junit.jupiter.api.Test;
 
+import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.Set;
 
 public class CasbinAuthorizationManagerTest {
+  private static final Set<String> ADMIN_PRIVILEGES =
+      new HashSet<>(
+          Arrays.asList(
+              "VIEW_SYSTEM",
+              "VIEW_CATALOG",
+              "VIEW_TABLE",
+              "VIEW_OPTIMIZER",
+              "MANAGE_CATALOG",
+              "MANAGE_TABLE",
+              "MANAGE_OPTIMIZER",
+              "MANAGE_PLATFORM"));
 
   @Test
   public void testResolvePrivilegesForBuiltInRoles() {
     Configurations conf = new Configurations();
     conf.set(AmoroManagementConf.AUTHORIZATION_ENABLED, true);
-
     CasbinAuthorizationManager manager = new CasbinAuthorizationManager(conf);
+    assertEquals(
+        new HashSet<>(Arrays.asList("VIEW_CATALOG", "VIEW_TABLE", "VIEW_OPTIMIZER")),
+        manager.resolvePrivileges(Collections.singleton(Role.VIEWER)));
+    assertEquals(
+        ADMIN_PRIVILEGES, manager.resolvePrivileges(Collections.singleton(Role.SERVICE_ADMIN)));
+    assertEquals(Collections.emptySet(), manager.resolvePrivileges(Collections.emptySet()));
+  }
 
-    Set<String> viewerPrivileges = manager.resolvePrivileges(Collections.singleton(Role.VIEWER));
-    assertTrue(viewerPrivileges.contains(Privilege.VIEW_TABLE.name()));
-    assertFalse(viewerPrivileges.contains(Privilege.VIEW_SYSTEM.name()));
-    assertFalse(viewerPrivileges.contains(Privilege.MANAGE_TABLE.name()));
-
-    Set<String> adminPrivileges =
-        manager.resolvePrivileges(Collections.singleton(Role.SERVICE_ADMIN));
-    assertTrue(adminPrivileges.contains(Privilege.VIEW_SYSTEM.name()));
-    assertTrue(adminPrivileges.contains(Privilege.EXECUTE_SQL.name()));
-    assertTrue(adminPrivileges.contains(Privilege.MANAGE_TABLE.name()));
+  @Test
+  public void testAuthorizationDisabledRetainsAllManagementPrivileges() {
+    Configurations conf = new Configurations();
+    conf.set(AmoroManagementConf.AUTHORIZATION_ENABLED, false);
+    CasbinAuthorizationManager manager = new CasbinAuthorizationManager(conf);
+    assertEquals(ADMIN_PRIVILEGES, manager.resolvePrivileges(Collections.singleton(Role.VIEWER)));
+    assertEquals(
+        ADMIN_PRIVILEGES, manager.resolvePrivileges(Collections.singleton(Role.SERVICE_ADMIN)));
+    assertEquals(ADMIN_PRIVILEGES, manager.resolvePrivileges(Collections.emptySet()));
   }
 }

@@ -62,7 +62,6 @@ import org.apache.amoro.server.table.DefaultTableService;
 import org.apache.amoro.server.table.RuntimeHandlerChain;
 import org.apache.amoro.server.table.TableManager;
 import org.apache.amoro.server.table.TableService;
-import org.apache.amoro.server.terminal.TerminalManager;
 import org.apache.amoro.server.utils.ThriftServiceProxy;
 import org.apache.amoro.shade.guava32.com.google.common.annotations.VisibleForTesting;
 import org.apache.amoro.shade.guava32.com.google.common.collect.Maps;
@@ -118,7 +117,6 @@ public class AmoroServiceContainer {
   private TableService tableService;
   private DefaultOptimizingService optimizingService;
   private ProcessService processService;
-  private TerminalManager terminalManager;
   private Configurations serviceConfig;
   private TServer tableManagementServer;
   private TServer optimizingServiceServer;
@@ -202,7 +200,6 @@ public class AmoroServiceContainer {
     catalogManager = new DefaultCatalogManager(serviceConfig);
     tableManager = new DefaultTableManager(serviceConfig, catalogManager);
     optimizerManager = new DefaultOptimizerManager(serviceConfig, catalogManager);
-    terminalManager = new TerminalManager(serviceConfig, catalogManager);
 
     initHttpService();
     startHttpService();
@@ -382,11 +379,6 @@ public class AmoroServiceContainer {
         LOG.error("Error stopping http server", e);
       }
     }
-    if (terminalManager != null) {
-      LOG.info("Stopping terminal manager...");
-      terminalManager.dispose();
-      terminalManager = null;
-    }
     if (amsServiceMetrics != null) {
       amsServiceMetrics.unregister();
     }
@@ -425,8 +417,7 @@ public class AmoroServiceContainer {
 
   private void initHttpService() {
     DashboardServer dashboardServer =
-        new DashboardServer(
-            serviceConfig, catalogManager, tableManager, optimizerManager, terminalManager, this);
+        new DashboardServer(serviceConfig, catalogManager, tableManager, optimizerManager, this);
     RestExtensionManager restExtensionManager = new RestExtensionManager();
     restExtensionManager.initialize();
     List<RestExtension> restExtensions =

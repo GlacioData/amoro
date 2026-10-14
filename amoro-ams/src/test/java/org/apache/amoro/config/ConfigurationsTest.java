@@ -81,7 +81,7 @@ public class ConfigurationsTest {
           "| `SERVICE_ADMIN` | Platform administrator | All privileges |",
           "| `VIEWER` | Read-only resource viewer | `VIEW_CATALOG`, `VIEW_TABLE`, `VIEW_OPTIMIZER` |",
           "",
-          "`VIEWER` does not include `VIEW_SYSTEM`, so it cannot access `Overview` or `Terminal`.",
+          "`VIEWER` does not include `VIEW_SYSTEM`, so it cannot access `Overview`.",
           "After login succeeds, `/login/current` returns both `roles` and effective `privileges`.",
           "",
           "If you need additional roles, define them by Casbin policy and map LDAP groups to those",

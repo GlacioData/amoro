@@ -49,30 +49,71 @@ tests:
           pattern:
             |
             bind-port: 1260
-  - it: Amoro configMap should reflect terminal iceberg params if terminal.backend is set to local
+  - it: Amoro configMap should omit Terminal by default
+    asserts:
+      - notMatchRegex:
+          path: data["config.yaml"]
+          pattern: '(?m)^\s*terminal:'
+  - it: Amoro configMap should ignore legacy local Terminal values
     set:
       amoroConf:
         terminal:
           backend: local
           icebergHandleTimestampWithoutTimezone: true
+          kyuubiJdbcUrl: jdbc:hive2://127.0.0.1:1/
+          kyuubiLdapEnabled: true
     asserts:
-      - matchRegex:
+      - notMatchRegex:
           path: data["config.yaml"]
-          pattern:
-            |
-            spark.sql.iceberg.handle-timestamp-without-timezone: true
-  - it: Amoro configMap should show kyuubi url if terminal.backend is set to kyuubi
+          pattern: '(?m)^\s*terminal:'
+      - notMatchRegex:
+          path: data["config.yaml"]
+          pattern: 'kyuubi\.|using-session-catalog-for-hive|spark.sql.iceberg.handle-timestamp-without-timezone'
+  - it: Amoro configMap should ignore legacy kyuubi Terminal values
     set:
       amoroConf:
         terminal:
           backend: kyuubi
-          kyuubiJdbcUrl: jdbc:hive2://127.0.0.1:10009/
+          icebergHandleTimestampWithoutTimezone: true
+          kyuubiJdbcUrl: jdbc:hive2://127.0.0.1:1/
+          kyuubiLdapEnabled: true
     asserts:
-      - matchRegex:
+      - notMatchRegex:
           path: data["config.yaml"]
-          pattern:
-            |
-            kyuubi.jdbc.url: "jdbc:hive2://127.0.0.1:10009/"
+          pattern: '(?m)^\s*terminal:'
+      - notMatchRegex:
+          path: data["config.yaml"]
+          pattern: 'kyuubi\.|using-session-catalog-for-hive|spark.sql.iceberg.handle-timestamp-without-timezone'
+  - it: Amoro configMap should ignore legacy custom Terminal values
+    set:
+      amoroConf:
+        terminal:
+          backend: custom
+          icebergHandleTimestampWithoutTimezone: true
+          kyuubiJdbcUrl: jdbc:hive2://127.0.0.1:1/
+          kyuubiLdapEnabled: true
+    asserts:
+      - notMatchRegex:
+          path: data["config.yaml"]
+          pattern: '(?m)^\s*terminal:'
+      - notMatchRegex:
+          path: data["config.yaml"]
+          pattern: 'kyuubi\.|using-session-catalog-for-hive|spark.sql.iceberg.handle-timestamp-without-timezone'
+  - it: Amoro configMap should ignore legacy invalid_terminal_backend Terminal values
+    set:
+      amoroConf:
+        terminal:
+          backend: invalid_terminal_backend
+          icebergHandleTimestampWithoutTimezone: true
+          kyuubiJdbcUrl: jdbc:hive2://127.0.0.1:1/
+          kyuubiLdapEnabled: true
+    asserts:
+      - notMatchRegex:
+          path: data["config.yaml"]
+          pattern: '(?m)^\s*terminal:'
+      - notMatchRegex:
+          path: data["config.yaml"]
+          pattern: 'kyuubi\.|using-session-catalog-for-hive|spark.sql.iceberg.handle-timestamp-without-timezone'
   - it: Amoro configMap should show shade configs if shade.identifier is set
     set:
       amoroConf:

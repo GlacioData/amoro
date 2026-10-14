@@ -39,7 +39,7 @@ sectionPagesMenu = "main"
   icon = "Catalog-Service"
 [[params.features]]
   title = "Rich Plugins"
-  desc = "Provide various plugins to integrate with other systems, like continuously optimizing with Flink and data analysis with Spark and Kyuubi."
+  desc = "Provide various plugins to integrate with other systems, like continuously optimizing with Flink and Spark."
   icon = "Rich-Plugins"
 [[params.features]]
   title = "Management Tools"
