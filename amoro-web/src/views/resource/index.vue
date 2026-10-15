@@ -145,7 +145,7 @@ export default defineComponent({
       <div class="resource-wrap">
         <div class="content">
           <a-tabs
-            v-model:activeKey="activeTab"
+            v-model:active-key="activeTab"
             destroy-inactive-tab-pane
             @change="onChangeTab"
           >

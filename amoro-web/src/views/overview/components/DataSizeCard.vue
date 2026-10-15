@@ -65,7 +65,7 @@ async function updateData() {
     const times: string[] = []
     const dataSizeList: number[] = []
 
-    const startTime = new Date().getTime() - Number.parseFloat(timeRange.value) * 60 * 60 * 1000
+    const startTime = Date.now() - Number.parseFloat(timeRange.value) * 60 * 60 * 1000
     const result: DataSizeItem[] = await getDataSizeList(startTime)
     result.forEach((item) => {
       times.push(dateFormat(item.ts))

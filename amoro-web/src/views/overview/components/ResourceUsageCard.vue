@@ -62,7 +62,7 @@ async function updateData() {
     const cpu: number[] = []
     const memory: number[] = []
 
-    const startTime = new Date().getTime() - Number.parseFloat(timeRange.value) * 60 * 60 * 1000
+    const startTime = Date.now() - Number.parseFloat(timeRange.value) * 60 * 60 * 1000
     const result: ResourceUsageItem[] = await getResourceUsageList(startTime)
     result.forEach((item) => {
       times.push(dateFormat(item.ts))

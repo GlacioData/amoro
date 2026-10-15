@@ -18,15 +18,15 @@
 
 import useStore from '@/store'
 
-export type UserPrivilege =
-  | 'VIEW_SYSTEM'
-  | 'VIEW_CATALOG'
-  | 'VIEW_TABLE'
-  | 'VIEW_OPTIMIZER'
-  | 'MANAGE_CATALOG'
-  | 'MANAGE_TABLE'
-  | 'MANAGE_OPTIMIZER'
-  | 'MANAGE_PLATFORM'
+export type UserPrivilege
+  = 'VIEW_SYSTEM'
+    | 'VIEW_CATALOG'
+    | 'VIEW_TABLE'
+    | 'VIEW_OPTIMIZER'
+    | 'MANAGE_CATALOG'
+    | 'MANAGE_TABLE'
+    | 'MANAGE_OPTIMIZER'
+    | 'MANAGE_PLATFORM'
 
 export function getRoles(): string[] {
   const store = useStore()

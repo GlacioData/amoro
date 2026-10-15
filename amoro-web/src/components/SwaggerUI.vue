@@ -16,7 +16,7 @@
   limitations under the License.
  / -->
 <template>
-  <div id="swagger-ui"></div>
+  <div id="swagger-ui" />
 </template>
 
 <script>
