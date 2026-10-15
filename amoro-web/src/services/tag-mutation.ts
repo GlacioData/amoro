@@ -21,7 +21,7 @@ function record(value: unknown): value is Record<string, unknown> {
 function scope(value: unknown): value is TagScope {
   return record(value) && (value.kind === 'DEFAULT' || value.kind === 'TABLE'
     || (value.kind === 'BRANCH' && typeof value.branch === 'string' && value.branch.length > 0))
-    && (value.kind === 'BRANCH' || value.branch === undefined)
+  && (value.kind === 'BRANCH' || value.branch === undefined)
 }
 
 function matchesScope(value: unknown, expected: TagScope): value is TagScope {

@@ -190,7 +190,7 @@ export default defineComponent({
         </div>
       </div>
       <div class="content">
-        <a-tabs v-model:activeKey="activeKey">
+        <a-tabs v-model:active-key="activeKey">
           <a-tab-pane key="Details" tab="Details">
             <UDetails :partition-column-list="partitionColumnList" :schema="schema" />
           </a-tab-pane>

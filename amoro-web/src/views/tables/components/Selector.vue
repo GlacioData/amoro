@@ -195,7 +195,7 @@ onMounted(() => {
             {{ $t('snapshotRetry') }}
           </a-button>
           <a-spin :spinning="pending">
-            <a-tabs v-model:activeKey="tabActiveKey" type="card" @change="loadTab(String($event))">
+            <a-tabs v-model:active-key="tabActiveKey" type="card" @change="loadTab(String($event))">
               <a-tab-pane :key="branchTypeMap.BRANCH" :tab="$t('branches')" :disabled="pending">
                 <template v-if="!!actualBranchList.length">
                   <div v-for="(item, key) in actualBranchList" :key="key" class="branch-selector-item" @click="selectObject(item)">

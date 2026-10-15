@@ -57,7 +57,7 @@ export async function loadTablesWithCache<T>(
   fetchTables: () => Promise<T[]>,
 ): Promise<T[]> {
   const key = tableCacheKey(catalog, database)
-  if (Object.prototype.hasOwnProperty.call(cache.values, key)) {
+  if (Object.hasOwn(cache.values, key)) {
     return cache.values[key]
   }
 

@@ -121,7 +121,7 @@ function getSettingInfo() {
 <template>
   <div :ref="el => { pageScrollRef = el as HTMLElement | null }" class="page-scroll">
     <div class="setting-wrap">
-      <a-tabs v-model:activeKey="activeKeyTab" @change="onChangeTab">
+      <a-tabs v-model:active-key="activeKeyTab" @change="onChangeTab">
         <a-tab-pane :key="tabMap.system.key" :tab="tabMap.system.title">
           <div class="system-setting">
             <a-table
@@ -135,7 +135,7 @@ function getSettingInfo() {
         </a-tab-pane>
         <a-tab-pane :key="tabMap.container.key" :tab="tabMap.container.title">
           <div class="container-setting">
-            <a-collapse v-model:activeKey="activeKey">
+            <a-collapse v-model:active-key="activeKey">
               <a-collapse-panel v-for="container in containerSetting" :key="container.name" :header="container.name">
                 <ul class="content">
                   <li class="item">

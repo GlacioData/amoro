@@ -220,7 +220,7 @@ export default defineComponent({
       <img v-show="!collapsed" src="../assets/images/arctic-dashboard1.svg" class="arctic-name" alt="">
     </div>
     <a-menu
-      v-model:selectedKeys="selectedKeys"
+      v-model:selected-keys="selectedKeys"
       mode="inline"
       theme="dark"
       :inline-collapsed="collapsed"

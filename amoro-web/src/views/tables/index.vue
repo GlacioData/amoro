@@ -338,7 +338,7 @@ export default defineComponent({
               </div>
             </div>
             <div class="tables-main-body">
-              <a-tabs v-model:activeKey="activeKey" destroy-inactive-tab-pane @change="onChangeTab">
+              <a-tabs v-model:active-key="activeKey" destroy-inactive-tab-pane @change="onChangeTab">
                 <a-tab-pane key="Details" :tab="$t('details')" force-render>
                   <UDetails :key="tableKey" ref="detailRef" @set-base-detail-info="setBaseDetailInfo" @table-not-found="handleTableNotFound" @initialization-error="snapshotInitializationError = $event" />
                 </a-tab-pane>

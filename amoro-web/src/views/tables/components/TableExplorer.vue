@@ -395,7 +395,7 @@ function getSearchTreeSource(): TreeNode[] {
 
     let catalogChanged = false
     const children = catalogNode.children.map((databaseNode) => {
-      if (!Object.prototype.hasOwnProperty.call(state.searchTablesByDatabase, databaseNode.key)) {
+      if (!Object.hasOwn(state.searchTablesByDatabase, databaseNode.key)) {
         return databaseNode
       }
 

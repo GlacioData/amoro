@@ -24,8 +24,50 @@ export default antfu({
     quotes: 'single',
   },
 
+  // Keep the v2 import-order policy; this migration does not reorder source imports.
+  // Source: https://github.com/antfu/eslint-config/blob/v2.21.1/src/configs/perfectionist.ts
+  perfectionist: {
+    overrides: {
+      // v9 replaced import/order with perfectionist; retain group-only ordering.
+      // Source: https://perfectionist.dev/rules/sort-imports#type
+      'perfectionist/sort-imports': ['error', {
+        type: 'unsorted',
+        groups: ['builtin', 'external', 'parent', 'sibling', 'index', ['internal', 'unknown']],
+        internalPattern: ['^@/'],
+        newlinesBetween: 'ignore',
+        newlinesInside: 'ignore',
+      }],
+      'perfectionist/sort-named-imports': 'off',
+    },
+  },
+
+  // Match the existing policy for intentionally ignored catch parameters.
+  // Other unused bindings remain checked; vue-tsc also retains noUnusedLocals.
+  rules: {
+    'sort-imports': ['error', { ignoreDeclarationSort: true }],
+    'unused-imports/no-unused-vars': ['error', {
+      args: 'after-used',
+      argsIgnorePattern: '^_',
+      caughtErrors: 'none',
+      ignoreRestSiblings: true,
+      vars: 'all',
+      varsIgnorePattern: '^_',
+    }],
+  },
+
   typescript: true,
-  vue: true,
+  vue: {
+    overrides: {
+      'unused-imports/no-unused-vars': ['error', {
+        args: 'after-used',
+        argsIgnorePattern: '^_',
+        caughtErrors: 'none',
+        ignoreRestSiblings: true,
+        vars: 'all',
+        varsIgnorePattern: '^_',
+      }],
+    },
+  },
 
   jsonc: false,
   yaml: false,

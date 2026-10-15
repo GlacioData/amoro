@@ -20,8 +20,8 @@ This is the Dashboard frontend for Amoro Management Service (AMS).
 
 ## Requirements
 
-- node >= `22.12.0`
-- pnpm
+- Node.js `^22.13.0 || >=24.0.0`（满足 Vite 8 与 ESLint 10 的运行要求）。Maven 构建及本轮验收固定使用 `22.23.2`。
+- pnpm `9.6.0`，与 Maven 及 `packageManager` 声明保持一致。
 
 ## Installing Dependencies
 

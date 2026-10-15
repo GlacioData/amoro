@@ -16,7 +16,7 @@
   * limitations under the License.
   */
 
-import type { AxiosRequestConfig, AxiosResponse } from 'axios'
+import type { AxiosRequestConfig, AxiosResponse, Canceler } from 'axios'
 import axios from 'axios'
 import { message } from 'ant-design-vue'
 import useStore from '@/store'
@@ -30,7 +30,7 @@ export const baseURL = import.meta.env.PROD ? '' : (import.meta.env.MODE === 'mo
 // Used to store request identification information whose current status is pending
 export const pendingRequest: {
   name: string
-  cancel: Function // request cancel function
+  cancel: Canceler // request cancel function
   routeChangeCancel: boolean // Whether to cancel the request when the route is switched
 }[] = []
 
@@ -208,8 +208,8 @@ const request: any = function (options: CustomAxiosRequestConfig) {
   ;['post', 'put'].forEach((method) => {
     request[method] = function (
       url: string,
-      data: Record<string, any> = {},
-      options: CustomAxiosRequestConfig = {},
+    data: Record<string, any> = {},
+    options: CustomAxiosRequestConfig = {},
     ) {
       options = Object.assign({}, options, {
         url,
