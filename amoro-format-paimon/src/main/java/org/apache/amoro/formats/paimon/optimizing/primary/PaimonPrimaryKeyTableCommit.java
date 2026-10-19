@@ -41,7 +41,6 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
-import java.util.concurrent.TimeUnit;
 
 /**
  * AMS-side committer for Paimon primary-key table compaction.
@@ -73,6 +72,7 @@ public class PaimonPrimaryKeyTableCommit implements TableOptimizingCommitter {
 
   static final int MAX_IDENTITY_SNAPSHOT_PROBES = 256;
 
+  private final Logger timingLogger;
   private final PaimonTable paimonTable;
   private final FileStoreTable table;
   private final Collection<PaimonPrimaryKeyCompactionTask> successTasks;
@@ -86,11 +86,24 @@ public class PaimonPrimaryKeyTableCommit implements TableOptimizingCommitter {
       PaimonTable paimonTable,
       FileStoreTable table,
       Collection<PaimonPrimaryKeyCompactionTask> successTasks) {
+    this(paimonTable, table, successTasks, LOG);
+  }
+
+  PaimonPrimaryKeyTableCommit(
+      PaimonTable paimonTable,
+      FileStoreTable table,
+      Collection<PaimonPrimaryKeyCompactionTask> successTasks,
+      Logger timingLogger) {
+    this.timingLogger = timingLogger;
     this.paimonTable = paimonTable;
+    // This copy only publishes prepared messages. Keep compaction enabled on the executor copy.
+    // Paimon 1.4.2 skips snapshot/changelog, tag, partition and consumer maintenance when
+    // write-only.
+    // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/table/AbstractFileStoreTable.java#L469-L508
     this.table =
         table == null
             ? null
-            : table.copy(Collections.singletonMap(CoreOptions.WRITE_ONLY.key(), "false"));
+            : table.copy(Collections.singletonMap(CoreOptions.WRITE_ONLY.key(), "true"));
     this.successTasks = successTasks;
   }
 
@@ -101,10 +114,36 @@ public class PaimonPrimaryKeyTableCommit implements TableOptimizingCommitter {
 
   @Override
   public ReconciliationResult reconcile() throws OptimizingCommitException {
+    long start = System.nanoTime();
+    PaimonCommitObservation observation = observation("RECONCILE");
+    try {
+      ReconciliationResult result = reconcileObserved(observation);
+      observation.outcome =
+          result == ReconciliationResult.PUBLISHED ? "already_published" : "replan";
+      return result;
+    } finally {
+      observation.record("committer_total", "reconcile", start, observation.outcome);
+    }
+  }
+
+  private ReconciliationResult reconcileObserved(PaimonCommitObservation observation)
+      throws OptimizingCommitException {
     if (successTasks == null || successTasks.isEmpty()) {
       return ReconciliationResult.REPLAN;
     }
-    CommitIdentity identity = extractCommitIdentity();
+    CommitIdentity identity;
+    long prepareStart = System.nanoTime();
+    boolean prepared = false;
+    try {
+      identity = extractCommitIdentity(observation);
+      prepared = true;
+    } finally {
+      observation.record(
+          "prepare_messages",
+          "reconcile_identity_only",
+          prepareStart,
+          prepared ? "returned" : "failed");
+    }
     if (table == null || identity.optimizingType != OptimizingType.FULL) {
       throw new OptimizingCommitException(
           "Read-only reconciliation requires a FULL table process", false);
@@ -117,8 +156,8 @@ public class PaimonPrimaryKeyTableCommit implements TableOptimizingCommitter {
     try {
       FullStatus status =
           paimonTable == null
-              ? inspectFull(identity)
-              : paimonTable.doAs(() -> inspectFull(identity));
+              ? inspectFull(identity, observation, "reconcile")
+              : paimonTable.doAs(() -> inspectFull(identity, observation, "reconcile"));
       return status == FullStatus.ALREADY_PUBLISHED
           ? ReconciliationResult.PUBLISHED
           : ReconciliationResult.REPLAN;
@@ -130,8 +169,27 @@ public class PaimonPrimaryKeyTableCommit implements TableOptimizingCommitter {
 
   @Override
   public void commit(CommitMode mode) throws OptimizingCommitException {
+    long start = System.nanoTime();
+    PaimonCommitObservation observation = observation(String.valueOf(mode));
+    try {
+      commitObserved(mode, observation);
+    } catch (OptimizingCommitSkippedException skipped) {
+      observation.outcome = skipped.isPublicationUncertain() ? "publication_uncertain" : "skipped";
+      throw skipped;
+    } finally {
+      observation.record("committer_total", "commit", start, observation.outcome);
+    }
+  }
+
+  private PaimonCommitObservation observation(String mode) {
+    return new PaimonCommitObservation(
+        timingLogger, table, mode, successTasks == null ? 0 : successTasks.size());
+  }
+
+  private void commitObserved(CommitMode mode, PaimonCommitObservation observation)
+      throws OptimizingCommitException {
     if (successTasks == null || successTasks.isEmpty()) {
-      LOG.info("PaimonPrimaryKeyTableCommit: no success tasks for table={} - skip commit.", name());
+      observation.outcome = "no_tasks";
       return;
     }
     if (table == null) {
@@ -139,9 +197,20 @@ public class PaimonPrimaryKeyTableCommit implements TableOptimizingCommitter {
           "Paimon primary-key success tasks have no Paimon table", false);
     }
 
-    CommitIdentity identity = extractCommitIdentity();
-    List<CommitMessage> messages = collectCommitMessages();
-    boolean skippedBeforeExecute = hasSkippedOutput(identity);
+    CommitIdentity identity;
+    List<CommitMessage> messages;
+    boolean skippedBeforeExecute;
+    long prepareStart = System.nanoTime();
+    boolean prepared = false;
+    try {
+      identity = extractCommitIdentity(observation);
+      messages = collectCommitMessages(observation);
+      skippedBeforeExecute = hasSkippedOutput(identity);
+      prepared = true;
+    } finally {
+      observation.record(
+          "prepare_messages", "prepare", prepareStart, prepared ? "returned" : "failed");
+    }
     if (mode == null) {
       throw new OptimizingCommitException(
           "Paimon primary-key commit mode must not be null for table=" + name(), false);
@@ -149,11 +218,11 @@ public class PaimonPrimaryKeyTableCommit implements TableOptimizingCommitter {
 
     try {
       if (paimonTable == null) {
-        commitInScope(messages, identity, mode, skippedBeforeExecute);
+        commitInScope(messages, identity, mode, skippedBeforeExecute, observation);
       } else {
         paimonTable.doAs(
             () -> {
-              commitInScope(messages, identity, mode, skippedBeforeExecute);
+              commitInScope(messages, identity, mode, skippedBeforeExecute, observation);
               return null;
             });
       }
@@ -170,11 +239,12 @@ public class PaimonPrimaryKeyTableCommit implements TableOptimizingCommitter {
       List<CommitMessage> messages,
       CommitIdentity identity,
       CommitMode mode,
-      boolean skippedBeforeExecute)
+      boolean skippedBeforeExecute,
+      PaimonCommitObservation observation)
       throws OptimizingCommitException {
     FullStatus fullStatus;
     try {
-      fullStatus = inspectFull(identity);
+      fullStatus = inspectFull(identity, observation, "preflight");
     } catch (RuntimeException failure) {
       // Only this NORMAL preflight is known not to have attempted publication. Do not apply
       // this conversion to reconciliation, recovery replay, or the post-commit identity probe.
@@ -207,14 +277,15 @@ public class PaimonPrimaryKeyTableCommit implements TableOptimizingCommitter {
           identity, skippedBeforeExecute ? "executor skipped a bucket" : fullStatus.name());
     }
     if (fullStatus == FullStatus.ALREADY_PUBLISHED) {
+      observation.outcome = "already_published";
       return;
     }
     if (messages.isEmpty()) {
-      LOG.info(
-          "PaimonPrimaryKeyTableCommit: empty CommitMessage list for table={} - no-op.", name());
+      observation.outcome = "no_messages";
       return;
     }
-    commitMessages(messages, identity.commitUser, identity.commitIdentifier, mode, identity);
+    commitMessages(
+        messages, identity.commitUser, identity.commitIdentifier, mode, identity, observation);
   }
 
   private boolean hasSkippedOutput(CommitIdentity identity) throws OptimizingCommitException {
@@ -236,7 +307,8 @@ public class PaimonPrimaryKeyTableCommit implements TableOptimizingCommitter {
     return skipped;
   }
 
-  private List<CommitMessage> collectCommitMessages() throws OptimizingCommitException {
+  private List<CommitMessage> collectCommitMessages(PaimonCommitObservation observation)
+      throws OptimizingCommitException {
     List<CommitMessage> messages = new ArrayList<>();
     for (PaimonPrimaryKeyCompactionTask task : successTasks) {
       PaimonPrimaryKeyCompactionOutput output = task == null ? null : task.getOutput();
@@ -255,6 +327,7 @@ public class PaimonPrimaryKeyTableCommit implements TableOptimizingCommitter {
             partition(task));
         continue;
       }
+      observation.output(output);
       try {
         messages.addAll(CommitMessageSerializer.deserializeAll(bytesList));
       } catch (Exception e) {
@@ -264,10 +337,12 @@ public class PaimonPrimaryKeyTableCommit implements TableOptimizingCommitter {
             e);
       }
     }
+    observation.messageCount = messages.size();
     return messages;
   }
 
-  private CommitIdentity extractCommitIdentity() throws OptimizingCommitException {
+  private CommitIdentity extractCommitIdentity(PaimonCommitObservation observation)
+      throws OptimizingCommitException {
     String commitUser = null;
     Long commitIdentifier = null;
     OptimizingType optimizingType = null;
@@ -281,6 +356,7 @@ public class PaimonPrimaryKeyTableCommit implements TableOptimizingCommitter {
                 + " has no PaimonPrimaryKeyCompactionInput",
             false);
       }
+      observation.input(input);
       String taskCommitUser = input.getCommitUser();
       if (taskCommitUser == null || taskCommitUser.isEmpty()) {
         throw new OptimizingCommitException(
@@ -340,6 +416,11 @@ public class PaimonPrimaryKeyTableCommit implements TableOptimizingCommitter {
             "Paimon primary-key success tasks have inconsistent targetSnapshotId", false);
       }
     }
+    observation.inputsComplete = true;
+    observation.user = commitUser;
+    observation.identifier = commitIdentifier;
+    observation.type = optimizingType;
+    observation.target = targetSnapshotId;
     return new CommitIdentity(commitUser, commitIdentifier, optimizingType, targetSnapshotId);
   }
 
@@ -355,6 +436,23 @@ public class PaimonPrimaryKeyTableCommit implements TableOptimizingCommitter {
    *
    * @return the freshness or bounded exact-identity result; never publishes messages
    */
+  private FullStatus inspectFull(
+      CommitIdentity identity, PaimonCommitObservation observation, String phase) {
+    if (identity == null || identity.optimizingType != OptimizingType.FULL) {
+      observation.record("full_inspection", phase, -1, "not_applicable");
+      return FullStatus.FRESH;
+    }
+    long start = System.nanoTime();
+    String result = "failed";
+    try {
+      FullStatus status = inspectFull(identity);
+      result = status.name();
+      return status;
+    } finally {
+      observation.record("full_inspection", phase, start, result);
+    }
+  }
+
   private FullStatus inspectFull(CommitIdentity identity) {
     if (identity == null || identity.optimizingType != OptimizingType.FULL) {
       return FullStatus.FRESH;
@@ -428,7 +526,11 @@ public class PaimonPrimaryKeyTableCommit implements TableOptimizingCommitter {
   void commitMessages(
       List<CommitMessage> messages, String commitUser, long commitIdentifier, CommitMode mode)
       throws OptimizingCommitException {
-    commitMessages(messages, commitUser, commitIdentifier, mode, null);
+    PaimonCommitObservation observation = observation(String.valueOf(mode));
+    observation.user = commitUser;
+    observation.identifier = commitIdentifier;
+    observation.messageCount = messages.size();
+    commitMessages(messages, commitUser, commitIdentifier, mode, null, observation);
   }
 
   private void commitMessages(
@@ -436,59 +538,34 @@ public class PaimonPrimaryKeyTableCommit implements TableOptimizingCommitter {
       String commitUser,
       long commitIdentifier,
       CommitMode mode,
-      CommitIdentity identity)
+      CommitIdentity identity,
+      PaimonCommitObservation observation)
       throws OptimizingCommitException {
     if (mode == CommitMode.RECOVERY_REPLAY) {
       try {
-        filterAndCommitOnce(messages, commitUser, commitIdentifier, mode, "recovery");
+        filterAndCommitOnce(messages, commitUser, commitIdentifier, "recovery", observation);
       } catch (Exception failure) {
         throw filterFailure(commitIdentifier, mode, "recovery", failure);
       }
       return;
     }
 
-    long directStartNanos = System.nanoTime();
-    LOG.info(
-        "PaimonPrimaryKeyTableCommit: commit start mode={} api=commit stage=direct table={} "
-            + "commitUser={} identifier={} messageCount={}",
-        mode,
-        name(),
-        commitUser,
-        commitIdentifier,
-        messages.size());
     Exception directFailure;
     try {
-      directCommitOnce(messages, commitUser, commitIdentifier);
-      LOG.info(
-          "PaimonPrimaryKeyTableCommit: commit success mode={} api=commit stage=direct table={} "
-              + "commitUser={} identifier={} messageCount={} elapsedMs={}",
-          mode,
-          name(),
-          commitUser,
-          commitIdentifier,
-          messages.size(),
-          elapsedMillis(directStartNanos));
+      directCommitOnce(messages, commitUser, commitIdentifier, observation);
+      observation.outcome = "returned";
       return;
     } catch (Exception failure) {
       directFailure = failure;
-      LOG.warn(
-          "PaimonPrimaryKeyTableCommit: commit failed mode={} api=commit stage=direct table={} "
-              + "commitUser={} identifier={} messageCount={} elapsedMs={}, "
-              + "trying one idempotent fallback",
-          mode,
-          name(),
-          commitUser,
-          commitIdentifier,
-          messages.size(),
-          elapsedMillis(directStartNanos),
-          failure);
+      observation.directFailure(failure);
     }
 
     // A direct attempt may publish and then fail while closing, or race with another writer.
     // Recheck under the same doAs before allowing native fallback to publish anything.
     try {
-      FullStatus fullStatus = inspectFull(identity);
+      FullStatus fullStatus = inspectFull(identity, observation, "before_fallback");
       if (fullStatus == FullStatus.ALREADY_PUBLISHED) {
+        observation.outcome = "already_published";
         return;
       }
       if (fullStatus != FullStatus.FRESH) {
@@ -501,7 +578,7 @@ public class PaimonPrimaryKeyTableCommit implements TableOptimizingCommitter {
       throw unresolved;
     }
     try {
-      filterAndCommitOnce(messages, commitUser, commitIdentifier, mode, "fallback");
+      filterAndCommitOnce(messages, commitUser, commitIdentifier, "fallback", observation);
     } catch (Exception fallbackFailure) {
       OptimizingCommitException finalFailure =
           new OptimizingCommitException(
@@ -516,9 +593,21 @@ public class PaimonPrimaryKeyTableCommit implements TableOptimizingCommitter {
   }
 
   private void directCommitOnce(
-      List<CommitMessage> messages, String commitUser, long commitIdentifier) throws Exception {
-    try (StreamTableCommit directCommit = table.newCommit(commitUser)) {
-      directCommit.commit(commitIdentifier, messages);
+      List<CommitMessage> messages,
+      String commitUser,
+      long commitIdentifier,
+      PaimonCommitObservation observation)
+      throws Exception {
+    long start = System.nanoTime();
+    boolean returned = false;
+    try {
+      try (StreamTableCommit directCommit = table.newCommit(commitUser)) {
+        directCommit.commit(commitIdentifier, messages);
+      }
+      returned = true;
+    } finally {
+      observation.record(
+          "native_attempt", "direct:commit", start, returned ? "returned" : "failed");
     }
   }
 
@@ -526,67 +615,26 @@ public class PaimonPrimaryKeyTableCommit implements TableOptimizingCommitter {
       List<CommitMessage> messages,
       String commitUser,
       long commitIdentifier,
-      CommitMode mode,
-      String stage)
+      String stage,
+      PaimonCommitObservation observation)
       throws Exception {
-    long startNanos = System.nanoTime();
-    LOG.info(
-        "PaimonPrimaryKeyTableCommit: commit start mode={} api=filterAndCommit stage={} table={} "
-            + "commitUser={} identifier={} messageCount={}",
-        mode,
-        stage,
-        name(),
-        commitUser,
-        commitIdentifier,
-        messages.size());
-    int committed;
-    try (StreamTableCommit commit = table.newCommit(commitUser)) {
-      committed = commit.filterAndCommit(Collections.singletonMap(commitIdentifier, messages));
-    } catch (Exception failure) {
-      LOG.warn(
-          "PaimonPrimaryKeyTableCommit: commit failed mode={} api=filterAndCommit stage={} table={} "
-              + "commitUser={} identifier={} messageCount={} elapsedMs={}",
-          mode,
-          stage,
-          name(),
-          commitUser,
-          commitIdentifier,
-          messages.size(),
-          elapsedMillis(startNanos),
-          failure);
-      throw failure;
+    long start = System.nanoTime();
+    String result = "failed";
+    try {
+      int committed;
+      try (StreamTableCommit commit = table.newCommit(commitUser)) {
+        committed = commit.filterAndCommit(Collections.singletonMap(commitIdentifier, messages));
+      }
+      if (committed != 0 && committed != 1) {
+        throw new IllegalStateException(
+            "filterAndCommit returned " + committed + " for one commit identity; expected 0 or 1");
+      }
+      result = committed == 0 ? "already_committed" : "returned";
+      observation.outcome = result;
+      return committed;
+    } finally {
+      observation.record("native_attempt", stage + ":filterAndCommit", start, result);
     }
-    if (committed != 0 && committed != 1) {
-      IllegalStateException failure =
-          new IllegalStateException(
-              "filterAndCommit returned "
-                  + committed
-                  + " for one commit identity; expected 0 or 1");
-      LOG.warn(
-          "PaimonPrimaryKeyTableCommit: commit failed mode={} api=filterAndCommit stage={} table={} "
-              + "commitUser={} identifier={} messageCount={} elapsedMs={}",
-          mode,
-          stage,
-          name(),
-          commitUser,
-          commitIdentifier,
-          messages.size(),
-          elapsedMillis(startNanos),
-          failure);
-      throw failure;
-    }
-    LOG.info(
-        "PaimonPrimaryKeyTableCommit: commit success mode={} api=filterAndCommit stage={} table={} "
-            + "commitUser={} identifier={} messageCount={} committedIdentifiers={} elapsedMs={}",
-        mode,
-        stage,
-        name(),
-        commitUser,
-        commitIdentifier,
-        messages.size(),
-        committed,
-        elapsedMillis(startNanos));
-    return committed;
   }
 
   private OptimizingCommitException filterFailure(
@@ -603,10 +651,6 @@ public class PaimonPrimaryKeyTableCommit implements TableOptimizingCommitter {
             + ": "
             + failure.getMessage(),
         failure);
-  }
-
-  private static long elapsedMillis(long startNanos) {
-    return TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
   }
 
   private String name() {
