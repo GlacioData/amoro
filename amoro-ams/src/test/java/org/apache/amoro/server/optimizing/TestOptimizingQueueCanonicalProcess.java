@@ -41,6 +41,7 @@ import org.apache.amoro.AmoroTable;
 import org.apache.amoro.ServerTableIdentifier;
 import org.apache.amoro.TableFormat;
 import org.apache.amoro.api.OptimizingTaskResult;
+import org.apache.amoro.exception.PersistenceException;
 import org.apache.amoro.optimizing.OptimizingPlanResult;
 import org.apache.amoro.optimizing.OptimizingType;
 import org.apache.amoro.optimizing.RewriteFilesInput;
@@ -78,10 +79,17 @@ import org.apache.amoro.utils.SerializationUtil;
 import org.apache.ibatis.session.SqlSession;
 import org.apache.iceberg.ContentFile;
 import org.apache.iceberg.DataFile;
+import org.apache.logging.log4j.Level;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.core.LogEvent;
+import org.apache.logging.log4j.core.Logger;
+import org.apache.logging.log4j.core.appender.AbstractAppender;
+import org.apache.logging.log4j.core.config.Property;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
@@ -877,6 +885,79 @@ class TestOptimizingQueueCanonicalProcess extends PersistentBase {
     assertEquals(ProcessStatus.FAILED, persistedProcess(failed).getStatus());
     assertEquals(TaskRuntime.Status.SUCCESS, persistedTask(successful).getStatus());
     assertEquals(TaskRuntime.Status.FAILED, persistedTask(failed).getStatus());
+  }
+
+  @ParameterizedTest
+  @ValueSource(booleans = {false, true})
+  void taskFailureCompletionRemainsPendingUntilOuterCommit(boolean rollbackOuterTransaction) {
+    DefaultTableRuntime runtime = createRuntimeAndQueue();
+    TaskRuntime<?> task = queue.pollTask(optimizer, 5000L);
+    assertNotNull(task);
+    queue.ackTask(task.getTaskId(), optimizer);
+    runtime
+        .store()
+        .begin()
+        .updateTableConfig(
+            config -> {
+              config.put(TableProperties.SELF_OPTIMIZING_ALLOW_PARTIAL_COMMIT, "false");
+              config.put(TableProperties.SELF_OPTIMIZING_EXECUTE_RETRY_NUMBER, "0");
+            })
+        .commit();
+
+    Logger backend = (Logger) LogManager.getLogger(OptimizingQueue.class);
+    Level previousLevel = backend.getLevel();
+    List<String> events = new ArrayList<>();
+    AtomicBoolean observedOuterTransaction = new AtomicBoolean();
+    AbstractAppender capture =
+        new AbstractAppender("nested-completion-timing", null, null, false, Property.EMPTY_ARRAY) {
+          @Override
+          public void append(LogEvent event) {
+            String message = event.getMessage().getFormattedMessage();
+            if (message.contains("stage=persist_completion")
+                && message.contains("processId=" + task.getProcessId() + " ")) {
+              events.add(message);
+              observedOuterTransaction.set(NestedSqlSession.hasActiveSession());
+            }
+          }
+        };
+    capture.start();
+    backend.addAppender(capture);
+    backend.setLevel(Level.INFO);
+    try {
+      Runnable complete =
+          () ->
+              queue.completeTask(
+                  optimizer,
+                  new OptimizingTaskResult(task.getTaskId(), optimizer.getThreadId())
+                      .setErrorMessage("task exhausted retries"));
+      if (rollbackOuterTransaction) {
+        assertThrows(
+            PersistenceException.class,
+            () ->
+                doAsTransaction(
+                    complete,
+                    () -> {
+                      throw new IllegalStateException("outer transaction failed after callback");
+                    }));
+      } else {
+        complete.run();
+      }
+      assertTrue(observedOuterTransaction.get());
+      assertEquals(1, events.size());
+      assertTrue(events.get(0).contains("outcome=pending_outer_commit"));
+      assertTrue(events.get(0).contains("committing_end_to_end_ms=unavailable"));
+      assertEquals(
+          rollbackOuterTransaction ? ProcessStatus.RUNNING : ProcessStatus.FAILED,
+          persistedProcess(task).getStatus());
+      assertEquals(
+          rollbackOuterTransaction ? TaskRuntime.Status.ACKED : TaskRuntime.Status.FAILED,
+          persistedTask(task).getStatus());
+      assertEquals(0, commits.get());
+    } finally {
+      backend.removeAppender(capture);
+      backend.setLevel(previousLevel);
+      capture.stop();
+    }
   }
 
   private void completeSuccessfully(OptimizingQueue target, TaskRuntime<?> task) {

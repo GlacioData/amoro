@@ -62,6 +62,7 @@ import org.apache.amoro.server.resource.OptimizerInstance;
 import org.apache.amoro.server.resource.OptimizerThread;
 import org.apache.amoro.server.resource.QuotaProvider;
 import org.apache.amoro.server.table.DefaultTableRuntime;
+import org.apache.amoro.server.table.DefaultTableRuntimeStore;
 import org.apache.amoro.server.table.FullCompactionCompletion;
 import org.apache.amoro.server.table.OptimizingCommitGuard;
 import org.apache.amoro.server.table.OptimizingOwnerConflictException;
@@ -2314,8 +2315,13 @@ public class OptimizingQueue extends PersistentBase {
 
     @Override
     public void commit() {
+      long committingSince = committingStartTime();
+      long entryMillis = System.currentTimeMillis();
+      long invocationStart = System.nanoTime();
       lock.lock();
       try {
+        recordCommitStage(
+            "process_lock_wait", invocationStart, "acquired", committingSince, false, entryMillis);
         if (detached) {
           return;
         }
@@ -2397,6 +2403,7 @@ public class OptimizingQueue extends PersistentBase {
         }
       } finally {
         lock.unlock();
+        recordCommitStage("commit_invocation", invocationStart, "exited", committingSince, false);
       }
     }
 
@@ -2532,8 +2539,12 @@ public class OptimizingQueue extends PersistentBase {
     }
 
     private void persistSkippedFull() {
+      long start = System.nanoTime();
+      long committingSince = committingStartTime();
+      boolean persisted = false;
       try {
         tableRuntime.completeSkippedFull(processId, fullSkipDecision, summaryForPersistence());
+        persisted = true;
         // Tasks may be partial at close. Cancel only after the terminal decision is durable.
         cancelTasks();
         clearProcess(this);
@@ -2541,6 +2552,13 @@ public class OptimizingQueue extends PersistentBase {
       } catch (RuntimeException failure) {
         registerPendingRecovery(tableRuntime, processId, "FULL_SKIP_COMPLETION", failure);
         throw failure;
+      } finally {
+        recordCommitStage(
+            "persist_completion",
+            start,
+            persisted ? "skipped" : "persistence_failed",
+            committingSince,
+            persisted);
       }
     }
 
@@ -2570,23 +2588,76 @@ public class OptimizingQueue extends PersistentBase {
       return MetricsSummary.aggregate(taskSummaries);
     }
 
+    private long committingStartTime() {
+      try {
+        if (tableRuntime.getOptimizingStatus() == OptimizingStatus.COMMITTING
+            && tableRuntime.store() instanceof DefaultTableRuntimeStore) {
+          return ((DefaultTableRuntimeStore) tableRuntime.store()).getStatusCodeUpdateTime();
+        }
+      } catch (RuntimeException ignored) {
+        // Missing observation context is not a process failure.
+      }
+      return -1L;
+    }
+
+    private void recordCommitStage(
+        String stage, long start, String outcome, long committingSince, boolean completed) {
+      recordCommitStage(stage, start, outcome, committingSince, completed, -1L);
+    }
+
+    private void recordCommitStage(
+        String stage,
+        long start,
+        String outcome,
+        long committingSince,
+        boolean completed,
+        long entryMillis) {
+      try {
+        OptimizingCommitObservation.record(
+            LOG,
+            tableRuntime.getTableIdentifier(),
+            processId,
+            optimizingType,
+            commitMode,
+            stage,
+            start,
+            outcome,
+            committingSince,
+            completed,
+            entryMillis);
+      } catch (RuntimeException ignored) {
+        // Even obtaining diagnostic context must not change SQL completion or publication.
+      }
+    }
+
     private TableOptimizingCommitter buildCommit() {
-      AmoroTable<?> table =
-          catalogManager.loadTable(tableRuntime.getTableIdentifier().getIdentifier());
-      List<? extends StagedTaskDescriptor<?, ?, ?>> taskDescriptors =
-          taskMap.values().stream()
-              .filter(task -> task.getStatus() == Status.SUCCESS)
-              .map(TaskRuntime::getTaskDescriptor)
-              .collect(Collectors.toList());
-      return router
-          .forFormat(format)
-          .createCommitter(
-              table,
-              targetSnapshotId,
-              targetChangeSnapshotId,
-              taskDescriptors,
-              fromSequence,
-              toSequence);
+      long start = System.nanoTime();
+      long committingSince = committingStartTime();
+      boolean built = false;
+      try {
+        AmoroTable<?> table =
+            catalogManager.loadTable(tableRuntime.getTableIdentifier().getIdentifier());
+        List<? extends StagedTaskDescriptor<?, ?, ?>> taskDescriptors =
+            taskMap.values().stream()
+                .filter(task -> task.getStatus() == Status.SUCCESS)
+                .map(TaskRuntime::getTaskDescriptor)
+                .collect(Collectors.toList());
+        TableOptimizingCommitter committer =
+            router
+                .forFormat(format)
+                .createCommitter(
+                    table,
+                    targetSnapshotId,
+                    targetChangeSnapshotId,
+                    taskDescriptors,
+                    fromSequence,
+                    toSequence);
+        built = true;
+        return committer;
+      } finally {
+        recordCommitStage(
+            "committer_build", start, built ? "returned" : "failed", committingSince, false);
+      }
     }
 
     private void beginAndPersistProcess() {
@@ -2646,35 +2717,48 @@ public class OptimizingQueue extends PersistentBase {
     }
 
     private void persistAndSetCompleted(boolean success, boolean strictOwner) {
-      doAsTransaction(
-          () -> {
-            if (!success) {
-              cancelTasks();
-            }
-          },
-          () ->
-              doAs(
-                  TableProcessMapper.class,
-                  mapper ->
-                      mapper.updateProcess(
-                          tableRuntime.getTableIdentifier().getId(),
-                          processId,
-                          "",
-                          status,
-                          tableRuntime.getOptimizingStatus().name().toLowerCase(),
-                          0,
-                          System.currentTimeMillis(),
-                          getFailedReason(),
-                          new HashMap<>(),
-                          summaryForPersistence())),
-          () -> {
-            if (strictOwner) {
-              tableRuntime.completeProcessStrict(this, success);
-            } else {
-              tableRuntime.completeProcess(this, success);
-            }
-          },
-          () -> clearProcess(this));
+      long start = System.nanoTime();
+      long committingSince = committingStartTime();
+      boolean topLevel = !NestedSqlSession.hasActiveSession();
+      boolean persisted = false;
+      String outcome = "persistence_failed";
+      try {
+        doAsTransaction(
+            () -> {
+              if (!success) {
+                cancelTasks();
+              }
+            },
+            () ->
+                doAs(
+                    TableProcessMapper.class,
+                    mapper ->
+                        mapper.updateProcess(
+                            tableRuntime.getTableIdentifier().getId(),
+                            processId,
+                            "",
+                            status,
+                            tableRuntime.getOptimizingStatus().name().toLowerCase(),
+                            0,
+                            System.currentTimeMillis(),
+                            getFailedReason(),
+                            new HashMap<>(),
+                            summaryForPersistence())),
+            () -> {
+              if (strictOwner) {
+                tableRuntime.completeProcessStrict(this, success);
+              } else {
+                tableRuntime.completeProcess(this, success);
+              }
+            },
+            () -> clearProcess(this));
+        persisted = true;
+        // NestedSqlSession only commits JDBC at the outermost transaction boundary.
+        outcome = topLevel ? status.name() : "pending_outer_commit";
+      } finally {
+        recordCommitStage(
+            "persist_completion", start, outcome, committingSince, persisted && topLevel);
+      }
     }
 
     private void cancelTasks() {

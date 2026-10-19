@@ -32,9 +32,13 @@ import org.apache.amoro.api.OptimizingTaskId;
 import org.apache.amoro.api.OptimizingTaskResult;
 import org.apache.amoro.config.Configurations;
 import org.apache.amoro.exception.PersistenceException;
+import org.apache.amoro.formats.paimon.PaimonTable;
 import org.apache.amoro.formats.paimon.optimizing.PaimonCompactionExecutorFactory;
 import org.apache.amoro.formats.paimon.optimizing.PaimonCompactionInput;
 import org.apache.amoro.formats.paimon.optimizing.PaimonCompactionTask;
+import org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeyCommitTestSupport;
+import org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeyCompactionTask;
+import org.apache.amoro.formats.paimon.process.PaimonProcessFactory;
 import org.apache.amoro.optimizing.BaseOptimizingInput;
 import org.apache.amoro.optimizing.OptimizingType;
 import org.apache.amoro.optimizing.RewriteFilesInput;
@@ -64,13 +68,23 @@ import org.apache.amoro.server.resource.OptimizerThread;
 import org.apache.amoro.server.table.DefaultTableRuntime;
 import org.apache.amoro.server.table.DefaultTableRuntimeStore;
 import org.apache.amoro.table.StateKey;
+import org.apache.amoro.table.TableIdentifier;
 import org.apache.amoro.utils.SerializationUtil;
 import org.apache.iceberg.ContentFile;
 import org.apache.iceberg.DataFile;
+import org.apache.logging.log4j.Level;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.core.LogEvent;
+import org.apache.logging.log4j.core.Logger;
+import org.apache.logging.log4j.core.appender.AbstractAppender;
+import org.apache.logging.log4j.core.config.Property;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.Mockito;
 import org.testcontainers.containers.MySQLContainer;
 import org.testcontainers.junit.jupiter.Container;
@@ -78,6 +92,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 
 import javax.sql.DataSource;
 
+import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -116,6 +131,11 @@ class TestOptimizingRecoveryWithMySQL {
     configurations.set(AmoroManagementConf.DB_AUTO_CREATE_TABLES, true);
     dataSource = DataSourceFactory.createDataSource(configurations);
     SqlSessionFactoryProvider.getInstance().init(dataSource);
+    assertEquals(
+        "mysql",
+        SqlSessionFactoryProvider.getInstance().get().getConfiguration().getDatabaseId(),
+        "Run this MySQL fixture in a separate Maven invocation or with reuseForks=false; "
+            + "the production SQL factory is a process-wide singleton");
   }
 
   @AfterAll
@@ -448,6 +468,149 @@ class TestOptimizingRecoveryWithMySQL {
     }
   }
 
+  @ParameterizedTest
+  @CsvSource({"false,false", "false,true", "true,false", "true,true"})
+  void primaryKeyPublicationSurvivesSqlCompletionFailure(
+      boolean dynamic, boolean restart, @TempDir Path warehouse) throws Exception {
+    long tableId = 801L;
+    long processId = 8001L;
+    try (PaimonPrimaryKeyCommitTestSupport fixture =
+        new PaimonPrimaryKeyCommitTestSupport(warehouse, dynamic, Collections.emptyMap())) {
+      fixture.writeGeneration(0);
+      fixture.writeGeneration(1);
+      List<String> expected = PaimonPrimaryKeyCommitTestSupport.rows(fixture.table());
+      List<PaimonPrimaryKeyCompactionTask> tasks = fixture.prepareTasks(tableId, processId);
+      DefaultTableRuntime runtime =
+          Mockito.spy(runtime(tableId, processId, TableFormat.PAIMON, false, 0L));
+      ((DefaultTableRuntimeStore) runtime.store()).setTableRuntime(runtime);
+      Map<String, String> options = fixture.table().options();
+      runtime
+          .store()
+          .begin()
+          .updateStatusCode(code -> OptimizingStatus.COMMITTING.getCode())
+          .updateTableConfig(config -> config.putAll(options))
+          .commit();
+      Map<Integer, BaseOptimizingInput> inputs = new HashMap<>();
+      for (int i = 0; i < tasks.size(); i++) {
+        inputs.put(i + 1, tasks.get(i).getInput());
+      }
+      insertProcess(runtime, processId, OptimizingPayloadCodec.encode(inputs));
+      for (int i = 0; i < tasks.size(); i++) {
+        PaimonPrimaryKeyCompactionTask task = tasks.get(i);
+        insertTask(
+            tableId,
+            processId,
+            i + 1,
+            TaskRuntime.Status.SUCCESS,
+            OptimizingPayloadCodec.encode(task.getOutput()),
+            GSON.toJson(task.getProperties()));
+      }
+      // The SQL process update occurs first; failing completion must roll the transaction back.
+      AtomicInteger completions = new AtomicInteger();
+      Mockito.doAnswer(
+              call -> {
+                if (completions.getAndIncrement() == 0) {
+                  throw new PersistenceException("injected SQL completion failure");
+                }
+                return call.callRealMethod();
+              })
+          .when(runtime)
+          .completeProcess(Mockito.any(), Mockito.anyBoolean());
+      CatalogManager manager = Mockito.mock(CatalogManager.class);
+      PaimonTable table =
+          new PaimonTable(TableIdentifier.of("mysql", "db", "table_801"), fixture.table());
+      Mockito.doReturn(table).when(manager).loadTable(Mockito.any());
+      PaimonProcessFactory factory = new PaimonProcessFactory();
+      factory.open(Collections.singletonMap(PaimonProcessFactory.OPTIMIZER_ENABLED.key(), "true"));
+      ProcessFactoryRouter router = new ProcessFactoryRouter(Collections.singletonList(factory));
+      OptimizingQueue first = queue(runtime, manager, router, null);
+      OptimizingQueue second = null;
+      Logger backend = (Logger) LogManager.getLogger(OptimizingQueue.class);
+      Level previousLevel = backend.getLevel();
+      List<String> events = new java.util.concurrent.CopyOnWriteArrayList<>();
+      AbstractAppender capture =
+          new AbstractAppender("commit-timing-capture", null, null, false, Property.EMPTY_ARRAY) {
+            @Override
+            public void append(LogEvent event) {
+              events.add(event.getMessage().getFormattedMessage());
+            }
+          };
+      capture.start();
+      backend.addAppender(capture);
+      backend.setLevel(Level.INFO);
+      try {
+        OptimizingProcess process = runtime.getOptimizingProcess();
+        assertNotNull(process);
+        process.commit();
+        long published = fixture.table().snapshotManager().latestSnapshotId();
+        assertEquals(
+            processId, fixture.table().snapshotManager().latestSnapshot().commitIdentifier());
+        assertEquals(
+            tasks.get(0).getInput().getCommitUser(),
+            fixture.table().snapshotManager().latestSnapshot().commitUser());
+        assertEquals(ProcessStatus.RUNNING, PERSISTENCE.process(processId).getStatus());
+        assertEquals(OptimizingStatus.COMMITTING, runtime.getOptimizingStatus());
+        assertTrue(
+            events.stream()
+                .anyMatch(
+                    event ->
+                        event.contains("stage=persist_completion outcome=persistence_failed")
+                            && event.contains("committing_end_to_end_ms=unavailable")));
+        assertTrue(
+            events.stream()
+                .noneMatch(event -> event.contains("stage=persist_completion outcome=SUCCESS")));
+        if (restart) {
+          // Discard the old process and reconstruct both runtime and task descriptors from MySQL.
+          first.dispose();
+          List<StateKey<?>> keys = new ArrayList<>(DefaultTableRuntime.REQUIRED_STATES);
+          keys.add(DefaultTableRuntime.DEFAULT_PENDING_INPUT_KEY);
+          DefaultTableRuntimeStore restored =
+              new DefaultTableRuntimeStore(
+                  runtime.getTableIdentifier(),
+                  PERSISTENCE.runtimeMeta(tableId),
+                  keys,
+                  PERSISTENCE.runtimeStates());
+          DefaultTableRuntime fresh = new DefaultTableRuntime(restored, () -> null);
+          restored.setTableRuntime(fresh);
+          second = queue(fresh, manager, router, null);
+          assertNotNull(fresh.getOptimizingProcess());
+          fresh.getOptimizingProcess().commit();
+          assertEquals(0L, fresh.getProcessId());
+        } else {
+          org.junit.jupiter.api.Assertions.assertThrows(
+              IllegalStateException.class, process::commit);
+          assertEquals(0L, runtime.getProcessId());
+        }
+        assertEquals(ProcessStatus.SUCCESS, PERSISTENCE.process(processId).getStatus());
+        assertEquals(published, fixture.table().snapshotManager().latestSnapshotId());
+        assertEquals(expected, PaimonPrimaryKeyCommitTestSupport.rows(fixture.table()));
+        assertTrue(
+            events.stream()
+                .anyMatch(
+                    event ->
+                        event.contains("stage=process_lock_wait outcome=acquired")
+                            && !event.contains("committing_status_age_ms=unavailable")));
+        assertTrue(
+            events.stream()
+                .anyMatch(event -> event.contains("stage=committer_build outcome=returned")));
+        assertTrue(
+            events.stream()
+                .anyMatch(
+                    event ->
+                        event.contains("stage=persist_completion outcome=SUCCESS")
+                            && !event.contains("committing_end_to_end_ms=unavailable")));
+      } finally {
+        backend.removeAppender(capture);
+        backend.setLevel(previousLevel);
+        capture.stop();
+        first.dispose();
+        if (second != null) {
+          second.dispose();
+        }
+      }
+    }
+  }
+
   private static OptimizingQueue queue(
       DefaultTableRuntime runtime,
       CatalogManager catalogManager,
@@ -655,6 +818,14 @@ class TestOptimizingRecoveryWithMySQL {
   }
 
   private static final class Persistence extends PersistentBase {
+    private TableRuntimeMeta runtimeMeta(long tableId) {
+      return getAs(TableRuntimeMapper.class, mapper -> mapper.selectRuntime(tableId));
+    }
+
+    private List<org.apache.amoro.server.persistence.TableRuntimeState> runtimeStates() {
+      return getAs(TableRuntimeMapper.class, TableRuntimeMapper::selectAllStates);
+    }
+
     private void insertRuntime(TableRuntimeMeta meta) {
       doAs(TableRuntimeMapper.class, mapper -> mapper.insertRuntime(meta));
     }
