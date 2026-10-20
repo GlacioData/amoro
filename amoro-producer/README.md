@@ -492,9 +492,30 @@ Job/Task 事件时间；若 Listener 事件尚未到达则留空。Task 的 `exe
 `file-operation.thread-num=32` 涉及 Paimon JVM 内文件线程池，不能简单将总存储并发写成
 `tableConcurrency × 32`。
 
-本地真实表与两个独立 Executor JVM 的验证见
-[实施验证记录](../tasks/producer-snapshot-validation-evidence.md)。YARN、Hive、认证 HDFS/对象存储
-和生产性能尚未验收，当前文档不声明这些环境已通过验证。
+Executor 模式支持 Spark 动态资源分配。例如每个 Executor 配置 2 核，以
+`--tableConcurrency 4` 配合以下 Spark 参数，可在资源允许时从 1 个扩展到 2 个 Executor：
+
+```text
+--executor-cores 2
+--conf spark.task.cpus=1
+--conf spark.dynamicAllocation.enabled=true
+--conf spark.dynamicAllocation.minExecutors=1
+--conf spark.dynamicAllocation.initialExecutors=1
+--conf spark.dynamicAllocation.maxExecutors=2
+--conf spark.dynamicAllocation.shuffleTracking.enabled=true
+--conf spark.dynamicAllocation.schedulerBacklogTimeout=1s
+--conf spark.dynamicAllocation.executorIdleTimeout=120s
+```
+
+仍须保留前述 `spark.speculation=false`、`spark.task.maxFailures=1`；YARN 提交建议设置
+`spark.yarn.maxAppAttempts=1`，避免应用整体自动重启再次执行清理。不要同时设置更大的
+`spark.executor.instances` 或 `--num-executors`，以免抬高动态分配的初始规模。
+动态扩容由已提交的等待 Task 触发；未派发的表不会计入 Spark backlog。清理并发受
+`tableConcurrency` 与可用 Task 槽位共同限制，仅提高 `maxExecutors` 不会提高表并发上限。
+单张表仍串行执行，动态分配不保证比固定相同峰值资源更快。
+
+本地真实表和独立 Executor JVM 测试已覆盖动态扩容。YARN、Hive、认证 HDFS/对象存储
+和生产性能尚未验收，不能将本地测试结果视为这些环境已通过验证。
 
 实现依据：[Paimon 1.3.2 Procedure](https://github.com/apache/paimon/blob/release-1.3.2/paimon-spark/paimon-spark-common/src/main/java/org/apache/paimon/spark/procedure/ExpireSnapshotsProcedure.java)、
 [Spark 3.5.4 应用内并发调度](https://github.com/apache/spark/blob/v3.5.4/docs/job-scheduling.md#scheduling-within-an-application)、

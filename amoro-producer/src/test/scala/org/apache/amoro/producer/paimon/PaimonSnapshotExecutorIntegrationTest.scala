@@ -281,7 +281,63 @@ class PaimonSnapshotExecutorIntegrationTest {
     }
   }
 
-  private def session(master: String): SparkSession = {
+  @Test def dynamicAllocationGrowsFromOneToTwoExecutorsForPendingTables(): Unit = {
+    assumeTrue(
+      java.lang.Boolean.getBoolean("producer.snapshot.clusterTest"),
+      "Opt-in local-cluster test")
+    (0 until 4).foreach(i => create(s"dynamic_$i", 4))
+    val preparation = new PaimonSnapshotSparkBackend(
+      ProducerContext(spark, common, PaimonFormatAdapter),
+      PaimonExpireSnapshotsConfig(20, 10, 550, ""),
+      SparkPaimonSqlRunner)
+    // Prepare fixtures before starting the dynamic cluster so metadata jobs cannot cause expansion.
+    val prepared =
+      try {
+        (0 until 4).map { i =>
+          val table = target(s"dynamic_$i")
+          table -> preparation.prepare(table, "fixture", s"fixture-$i")
+        }.toMap
+      } finally preparation.close()
+    spark.stop()
+    spark = session("local-cluster[2,2,1024]", dynamicAllocation = true)
+    val sc = spark.sparkContext
+    val initialIds = sc.parallelize(Seq(1), 1)
+      .map(_ => org.apache.spark.SparkEnv.get.executorId).collect().toSet
+    assertEquals(1, initialIds.size)
+    assertFalse(initialIds.contains("driver"))
+    assertEquals(2, sc.getExecutorMemoryStatus.size, "Expected Driver plus one initial Executor")
+    val barrierPath = directory.resolve("dynamic-barrier")
+    Files.createDirectory(barrierPath)
+    val barrier = barrierPath.toString
+    val backend = new PaimonSnapshotBackend {
+      override def prepare(t: TargetTable, r: String, w: String): PaimonSnapshotWork =
+        prepared(t).copy(runId = r, workId = w)
+      override def execute(work: PaimonSnapshotWork): ActionResult = sc.parallelize(Seq(work), 1)
+        .mapPartitions(SnapshotTaskBarrier.afterProcessBarrier(barrier, 4)).collect().head
+      override def available: Boolean = !sc.isStopped
+      override def cancel(id: String): Unit = sc.cancelAllJobs()
+      override def close(): Unit = ()
+    }
+    val results = new PaimonSnapshotExecutor(4, true, backend).execute(
+      (0 until 4).map(i => target(s"dynamic_$i")),
+      (_, _) => ())
+    assertTrue(results.forall(_._2.status == ActionStatus.Success), results.toString)
+    val finalIds = results.map(_._2.metrics("executorId")).toSet
+    assertEquals(2, finalIds.size)
+    assertTrue(initialIds.subsetOf(finalIds))
+    assertFalse(finalIds.contains("driver"))
+    assertEquals(4, results.map(_._2.metrics("taskAttemptId")).distinct.size)
+    results.foreach { case (table, result) =>
+      assertEquals("0", result.metrics("taskAttemptNumber"))
+      assertEquals(3L, result.taskTotals.get.success)
+      assertEquals(4, snapshotCount(table.table))
+      assertEquals(Seq(1, 2, 3, 4, 5, 6), data(table.table))
+    }
+    println(s"SNAPSHOT_DYNAMIC_ALLOCATION initial=${initialIds.toSeq.sorted.mkString(",")} " +
+      s"final=${finalIds.toSeq.sorted.mkString(",")} tables=${results.size}")
+  }
+
+  private def session(master: String, dynamicAllocation: Boolean = false): SparkSession = {
     val builder = SparkSession.builder().master(master).appName("producer-snapshot-test")
       .config("spark.ui.enabled", "false")
       .config("spark.driver.host", "127.0.0.1").config("spark.driver.bindAddress", "127.0.0.1")
@@ -298,6 +354,16 @@ class PaimonSnapshotExecutorIntegrationTest {
       builder.config(
         "spark.executor.extraClassPath",
         System.getProperty("surefire.test.class.path"))
+    }
+    if (dynamicAllocation) {
+      builder.config("spark.dynamicAllocation.enabled", "true")
+        .config("spark.dynamicAllocation.minExecutors", "1")
+        .config("spark.dynamicAllocation.initialExecutors", "1")
+        .config("spark.dynamicAllocation.maxExecutors", "2")
+        .config("spark.dynamicAllocation.shuffleTracking.enabled", "true")
+        .config("spark.dynamicAllocation.schedulerBacklogTimeout", "1s")
+        .config("spark.dynamicAllocation.executorIdleTimeout", "120s")
+        .config("spark.executor.instances", "1")
     }
     val session = builder.getOrCreate()
     session.sparkContext.setLogLevel("WARN")
