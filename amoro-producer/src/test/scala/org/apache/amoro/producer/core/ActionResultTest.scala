@@ -19,12 +19,28 @@
 package org.apache.amoro.producer.core
 
 import org.apache.spark.sql.SparkSession
-import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.{assertEquals, assertFalse}
 import org.junit.jupiter.api.Test
 
 import org.apache.amoro.producer.spi.{ActionConfig, LakeFormatAdapter, ProducerAction}
 
 class ActionResultTest {
+
+  @Test
+  def summaryKeepsCumulativeCountsBeyondIntRangeAndMarksPartialResults(): Unit = {
+    val table = TargetTable("db.t", "db", "t")
+    val result = ActionResult(
+      ActionStatus.Failed,
+      Seq(ActionTaskResult("round-1", ActionStatus.Success, None, Map.empty)),
+      Some("Unknown remaining progress"),
+      Map("countsComplete" -> "false"),
+      0,
+      Some(ActionTaskTotals(Int.MaxValue.toLong + 150, 1, complete = false)))
+    val summary = ProducerSummary.fromResults(Seq(table -> result))
+    assertEquals(Int.MaxValue.toLong + 150, summary.taskSuccessCount)
+    assertEquals(1L, summary.taskFailedCount)
+    assertFalse(summary.taskCountsComplete)
+  }
 
   @Test
   def taskResultUsesSpecDefinedFields(): Unit = {

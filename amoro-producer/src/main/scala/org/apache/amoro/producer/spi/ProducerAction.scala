@@ -34,6 +34,12 @@ trait ProducerAction {
 
   def validate(common: CommonProducerConfig, actionConfig: ActionConfig): Unit
 
+  def validateRuntime(context: ProducerContext, actionConfig: ActionConfig): Unit = ()
+
+  def batchExecutor(
+      context: ProducerContext,
+      actionConfig: ActionConfig): Option[ProducerBatchExecutor] = None
+
   def execute(
       context: ProducerContext,
       table: TargetTable,

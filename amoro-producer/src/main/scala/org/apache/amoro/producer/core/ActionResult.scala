@@ -18,7 +18,7 @@
 
 package org.apache.amoro.producer.core
 
-sealed trait ActionStatus
+sealed trait ActionStatus extends Serializable
 
 object ActionStatus {
   case object Success extends ActionStatus
@@ -37,4 +37,8 @@ final case class ActionResult(
     tasks: Seq[ActionTaskResult],
     message: Option[String],
     metrics: Map[String, String],
-    costMs: Double)
+    costMs: Double,
+    taskTotals: Option[ActionTaskTotals] = None)
+
+/** Cumulative counts independent of a potentially truncated task-detail list. */
+final case class ActionTaskTotals(success: Long, failed: Long, complete: Boolean)

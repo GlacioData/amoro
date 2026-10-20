@@ -24,9 +24,82 @@ import org.apache.spark.sql.SparkSession
 import org.junit.jupiter.api.Assertions.{assertEquals, assertFalse, assertThrows, assertTrue}
 import org.junit.jupiter.api.Test
 
-import org.apache.amoro.producer.spi.{ActionConfig, LakeFormatAdapter, ProducerAction}
+import org.apache.amoro.producer.spi.{ActionConfig, LakeFormatAdapter, ProducerAction, ProducerBatchExecutor, ProducerRuntimeValidationException}
 
 class ProducerAppTest {
+
+  @Test
+  def batchExecutionPublishesEachResultOnceWithoutCallingSingleTableRetry(): Unit = {
+    val action = new BatchOnlyAction
+    val targets = Seq(TargetTable("db.a", "db", "a"), TargetTable("db.b", "db", "b"))
+    val output = new ByteArrayOutputStream()
+    val results = Console.withOut(new PrintStream(output)) {
+      ProducerApp.executeTables(fakeContext(action), action, NoopConfig, targets)
+    }
+    assertEquals(2, results.size)
+    assertEquals(
+      2,
+      output.toString("UTF-8").split("lakehouse_producer_table_action", -1).length - 1)
+    assertEquals(12.5, results.head._2.costMs)
+  }
+
+  @Test
+  def runtimeValidationFailureReturnsTwoBeforeListingTablesAndStopsSpark(): Unit = {
+    val spark = org.mockito.Mockito.mock(classOf[SparkSession])
+    val action = new BatchOnlyAction(failValidation = true)
+    val adapter = new LakeFormatAdapter {
+      override def format: String = "paimon"
+      override def actions: Seq[ProducerAction] = Seq(action)
+      override def listTables(
+          s: SparkSession,
+          c: CommonProducerConfig,
+          d: String): Seq[TargetTable] =
+        throw new AssertionError("Runtime validation must happen before listing tables")
+    }
+    val code = ProducerApp.runInternal(
+      Array(
+        "--format",
+        "paimon",
+        "--action",
+        "batch",
+        "--catalogName",
+        "paimon",
+        "--databaseName",
+        "db"),
+      Seq(adapter),
+      () => spark)
+    assertEquals(2, code)
+    org.mockito.Mockito.verify(spark).stop()
+  }
+
+  private class BatchOnlyAction(failValidation: Boolean = false) extends ProducerAction {
+    override def name: String = "batch"
+    override def retryMode: RetryMode = RetryMode.ActionManagedRetry
+    override def options: Seq[ActionOption] = Seq.empty
+    override def parse(options: ProducerParsedOptions): ActionConfig = NoopConfig
+    override def validate(common: CommonProducerConfig, config: ActionConfig): Unit = ()
+    override def validateRuntime(context: ProducerContext, config: ActionConfig): Unit = {
+      if (failValidation) throw new ProducerRuntimeValidationException("Unsupported runtime")
+    }
+    override def batchExecutor(
+        context: ProducerContext,
+        config: ActionConfig): Option[ProducerBatchExecutor] =
+      Some(new ProducerBatchExecutor {
+        override def execute(
+            targets: Seq[TargetTable],
+            onResult: (TargetTable, ActionResult) => Unit): Seq[(TargetTable, ActionResult)] =
+          targets.map { table =>
+            val result = ActionResult(ActionStatus.Success, Seq.empty, None, Map.empty, 12.5)
+            onResult(table, result)
+            table -> result
+          }
+      })
+    override def execute(
+        context: ProducerContext,
+        table: TargetTable,
+        config: ActionConfig): ActionResult =
+      throw new AssertionError("Single-table execution must not run")
+  }
 
   @Test
   def tableActionJsonIncludesEffectiveVersionAndFailedTaskDetails(): Unit = {
