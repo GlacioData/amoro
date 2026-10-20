@@ -1,0 +1,133 @@
+{
+  "command": "SPARK_TESTING=1 SPARK_SCALA_VERSION=2.12 ./mvnw -pl amoro-producer test -Pproducer-paimon-1.3.2 -Dtest=PaimonSnapshotExecutorTest,PaimonSnapshotSubmissionTest,PaimonSnapshotExecutorIntegrationTest -Dproducer.snapshot.clusterTest=true -Djacoco.skip=true",
+  "jdk": "11.0.28",
+  "suites": [
+    {
+      "suite": {
+        "{http://www.w3.org/2001/XMLSchema-instance}noNamespaceSchemaLocation": "https://maven.apache.org/surefire/maven-surefire-plugin/xsd/surefire-test-report-3.0.xsd",
+        "version": "3.0",
+        "name": "org.apache.amoro.producer.paimon.PaimonSnapshotExecutorIntegrationTest",
+        "time": "13.198",
+        "tests": "5",
+        "errors": "0",
+        "skipped": "0",
+        "failures": "0"
+      },
+      "cases": [
+        {
+          "name": "realTableAndFileIOSurviveSerializationWithoutDriverContext",
+          "classname": "org.apache.amoro.producer.paimon.PaimonSnapshotExecutorIntegrationTest",
+          "time": "4.64"
+        },
+        {
+          "name": "twoTasksOverlapInOneExecutorAndKeepTheirOwnPolicies",
+          "classname": "org.apache.amoro.producer.paimon.PaimonSnapshotExecutorIntegrationTest",
+          "time": "0.64"
+        },
+        {
+          "name": "multiJvmTasksExecuteOnTwoExecutors",
+          "classname": "org.apache.amoro.producer.paimon.PaimonSnapshotExecutorIntegrationTest",
+          "time": "6.192"
+        },
+        {
+          "name": "consumerAndTagProtectOldDataAcrossOverwriteSnapshots",
+          "classname": "org.apache.amoro.producer.paimon.PaimonSnapshotExecutorIntegrationTest",
+          "time": "0.506"
+        },
+        {
+          "name": "cliBatchPreservesPerTablePolicyAndSameAttemptAcrossRounds",
+          "classname": "org.apache.amoro.producer.paimon.PaimonSnapshotExecutorIntegrationTest",
+          "time": "1.218"
+        }
+      ]
+    },
+    {
+      "suite": {
+        "{http://www.w3.org/2001/XMLSchema-instance}noNamespaceSchemaLocation": "https://maven.apache.org/surefire/maven-surefire-plugin/xsd/surefire-test-report-3.0.xsd",
+        "version": "3.0",
+        "name": "org.apache.amoro.producer.paimon.PaimonSnapshotExecutorTest",
+        "time": "0.22",
+        "tests": "9",
+        "errors": "0",
+        "skipped": "0",
+        "failures": "0"
+      },
+      "cases": [
+        {
+          "name": "boundsPreparationAndExecutionAndReusesSlots",
+          "classname": "org.apache.amoro.producer.paimon.PaimonSnapshotExecutorTest",
+          "time": "0.172"
+        },
+        {
+          "name": "reportsPreparationFailureWithoutUnknownDeletes",
+          "classname": "org.apache.amoro.producer.paimon.PaimonSnapshotExecutorTest",
+          "time": "0.011"
+        },
+        {
+          "name": "unavailableContextDoesNotSucceedOrSubmitWork",
+          "classname": "org.apache.amoro.producer.paimon.PaimonSnapshotExecutorTest",
+          "time": "0.001"
+        },
+        {
+          "name": "emptyTargetsCloseBackendAndSucceed",
+          "classname": "org.apache.amoro.producer.paimon.PaimonSnapshotExecutorTest",
+          "time": "0"
+        },
+        {
+          "name": "deduplicatesPhysicalTargetsEvenAfterFailure",
+          "classname": "org.apache.amoro.producer.paimon.PaimonSnapshotExecutorTest",
+          "time": "0.006"
+        },
+        {
+          "name": "contextLossAfterSuccessStillFailsTheRun",
+          "classname": "org.apache.amoro.producer.paimon.PaimonSnapshotExecutorTest",
+          "time": "0.002"
+        },
+        {
+          "name": "cancellationMarksActiveCleanupUnknownAndStopsAdmission",
+          "classname": "org.apache.amoro.producer.paimon.PaimonSnapshotExecutorTest",
+          "time": "0.002"
+        },
+        {
+          "name": "stopsAfterFailureOrContinuesAccordingToPolicy",
+          "classname": "org.apache.amoro.producer.paimon.PaimonSnapshotExecutorTest",
+          "time": "0.008"
+        },
+        {
+          "name": "cancellationAfterSuccessCannotReportSuccessWithQueuedTargets",
+          "classname": "org.apache.amoro.producer.paimon.PaimonSnapshotExecutorTest",
+          "time": "0.003"
+        }
+      ]
+    },
+    {
+      "suite": {
+        "{http://www.w3.org/2001/XMLSchema-instance}noNamespaceSchemaLocation": "https://maven.apache.org/surefire/maven-surefire-plugin/xsd/surefire-test-report-3.0.xsd",
+        "version": "3.0",
+        "name": "org.apache.amoro.producer.paimon.PaimonSnapshotSubmissionTest",
+        "time": "0.238",
+        "tests": "3",
+        "errors": "0",
+        "skipped": "0",
+        "failures": "0"
+      },
+      "cases": [
+        {
+          "name": "cancelBeforeSubmissionPreventsTheAction",
+          "classname": "org.apache.amoro.producer.paimon.PaimonSnapshotSubmissionTest",
+          "time": "0.001"
+        },
+        {
+          "name": "closeCancelsRegisteredJobsAndPermanentlyClosesSubmission",
+          "classname": "org.apache.amoro.producer.paimon.PaimonSnapshotSubmissionTest",
+          "time": "0.234"
+        },
+        {
+          "name": "cancellationDuringSubmissionCannotMissTheHandle",
+          "classname": "org.apache.amoro.producer.paimon.PaimonSnapshotSubmissionTest",
+          "time": "0.002"
+        }
+      ]
+    }
+  ]
+}

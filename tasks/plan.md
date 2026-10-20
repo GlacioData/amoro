@@ -22,14 +22,14 @@
 
 - 日期：2026-10-20；分支：`hotifx/producer-snapshot-retention`；计划基线：`f43ca2191`。
 - 依据：[Spec](../SPEC-producer-distributed-snapshot-expiration.md)、当前 Producer 源码、Paimon `release-1.3.2`（`16faabbddbe30477a7e2c3bacde5e541c8f1cf9c`）以及本地 Spark 3.5.4 / Paimon 0.9.0、1.3.2 源码包。
-- 本次交付为计划、任务清单及计划审查；**没有实现功能、运行清理或测量性能**。后续实施状态统一维护在 [todo.md](todo.md)。
+- 原计划已完成审查；2026-10-20 按后续授权开始实现。实施状态统一维护在 [todo.md](todo.md)，执行证据见 [验证记录](producer-snapshot-validation-evidence.md)；本地测试不代表生产性能验收。
 - 首版按 Spec 的推荐方向规划：默认 `driver`；显式 `executor`；并发上限默认 4、首次验证 2；Executor 仅支持 Spark 3.5.4 / Paimon 1.3.2。旧 profile 是 Spark **3.2.1** / Paimon 0.9.0，仍需编译并通过 Driver 回归。
 - 生产版本、权限、资源模板和性能 SLO 尚未取得，不阻碍编写计划；真实环境验证依赖这些输入。不得将计划评审通过等同于运行验收通过。
 
 ## 2. 不变的执行契约
 
 1. 一个 Executor 可同时执行多个 Task；每个 Task 只绑定一张表；达到该表最终 `maxDeletes` 后，在同一个 Task 内继续下一轮。轮次之间不创建 Job，不换 Task，不向空闲 Task 转移剩余工作。
-2. 每张表一个单分区清理 Job，只触发一次清理结果收集；Driver 最多维持 `tableConcurrency` 个在途工作单元。一次只有一个表的巨大积压不会因本设计自动提速。
+2. 每张表一个单分区清理 Job，只触发一次 `collectAsync` 清理结果收集；Driver 最多维持 `tableConcurrency` 个在途工作单元。一次只有一个表的巨大积压不会因本设计自动提速。
 3. Driver 读取元数据、准备任务、提交和汇总；Task 直接调用原生 Paimon API。禁止在 Task 中调用 Spark SQL 或创建 SparkSession。
 4. 不增加执行状态目录、锁、租约、授权 RPC 或外部协调服务；runId/workId 仅用于本次内存关联和日志。
 5. 保留显式表属性优先、时间保留规则、Tag/Consumer 保护。不同应用针对同表的互斥由既有外部调度保证；不声称 exactly-once。
@@ -147,3 +147,10 @@ T03、T06、T08 可在接口契约明确后独立准备；它们共享 core/测�
 | 日志或异常泄漏敏感配置 | options/凭据禁止输出；使用合成敏感值验证错误路径脱敏 |
 
 计划方向明确，但绝对安全和收益必须靠实现、故障注入及真实环境证据证明。目前不作“100% 已验证”的承诺。实现前审阅本计划即可；不再重新询问已确认的无状态存储、每 Task 一表和同 Task 多轮决策。生产环境信息只阻塞对应的集群验收，不阻塞已授权的本地设计工作。
+
+## 8. 实施时的调整
+
+- 单轮原生 API/SQL 等价测试放在既有 `PaimonExpireSnapshotsIntegrationTest`；工作对象往返测试放在 `PaimonSnapshotExecutorIntegrationTest`，没有增加仅包装这些测试的新类。
+- 原生过期使用系统时钟，未增加生产时钟注入接口。SQL/原生对照使用远离边界的 24 小时保留窗口；旧快照默认时间测试使用隔离 fixture 修改时间并失效缓存。
+- 独立审查指出取消先于 `collect` 提交时会漏掉 Job，故实现改为单次 `collectAsync`，由内存提交门禁原子登记 FutureAction，取消与关闭共用该门禁。仍然每表一个 Job、一个 Task、无执行状态目录。
+- 本地多 JVM 验证复用 JUnit 的 opt-in `local-cluster[2,2,1024]` fixture；只在测试中使用临时文件 barrier 证明四个 Task 同时到达，不构成产品状态配置。YARN 和目标存储故障注入仍须独立验收。

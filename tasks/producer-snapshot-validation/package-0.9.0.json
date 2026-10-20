@@ -1,0 +1,8 @@
+{
+  "paimon": "0.9.0",
+  "jar": "amoro-producer-1.0.0-jar-with-dependencies.jar",
+  "bytes": 176625744,
+  "sha256": "748a8a1261825c9567d2f1102c930e296f2a954e162ee044429130c905d01728",
+  "exitCode": 0,
+  "output": "PACKAGED_RUNTIME paimon=0.9.0 accepted=false source=amoro-producer-1.0.0-jar-with-dependencies.jar"
+}
