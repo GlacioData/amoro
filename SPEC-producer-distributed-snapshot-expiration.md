@@ -21,7 +21,7 @@
 ## 1. 状态与版本边界
 
 - 状态：**DRAFT / 待评审**。本文描述待实现能力；没有实现分布式执行，没有执行生产清理，也没有性能测试结果。
-- 日期：2026-10-19（Asia/Singapore）。
+- 创建日期：2026-10-19；修订日期：2026-10-20（Asia/Singapore）。
 - 工作分支：`hotifx/producer-snapshot-retention`，保留用户指定的分支拼写。
 - Rebase 目标：本地 `dev`，提交 `6631bfe106af0540eb703f5166359bafeafd81a5`；本次没有 fetch 或修改远端。
 - Rebase 后代码基线：`7b257cd8f0fc48bccb66df805d94799a2ef5d838`。
@@ -35,6 +35,9 @@
 1. 分析并改善整库快照过期耗时。
 2. 将各表实际清理工作下发到 Spark Executor Task，Driver 负责编排和汇总。
 3. 在指定分支 rebase 本地 dev 后编写并保存 Spec；本轮不实现代码。
+4. 不引入额外执行状态目录、持久化占用、跨作业去重记录或人工解除占用流程。
+5. 一个 Executor 可以同时执行多个 Task；每个 Task 只负责下发的一张表。
+6. 一张表需要多轮快照清理时，全部轮次在同一个 Task 内顺序完成，不按轮次拆分或重新派发。
 
 ### 1.2 本文采用的设计假设
 
@@ -42,9 +45,8 @@
 
 1. 首版 Executor 模式只覆盖 Spark 3.5.4 / Paimon 1.3.2；保留 0.9.0 Driver 模式。
 2. 新模式显式启用，默认仍使用 Driver；新增表级并发上限默认 4，首次验证使用 2。
-3. 首版一个表的完整清理循环属于一个逻辑工作单元，不实现按轮抢占或同表跨 Task 并发。
-4. 为防止 Task 重放和重复作业清理同表，引入持久化占用及结果记录；建议首版使用独立 HDFS 状态目录，禁止按超时自动抢占。该运维成本需评审确认。
-5. 保留当前分支的“显式表保留配置优先”规则。Executor 模式的失败重试受副作用安全约束，不能无条件复制旧 SQL 重试循环。
+3. 每表独立提交一个单分区 Spark Job，以保留逐表 Job 描述和失败后停止派发的语义；不同 Job 的 Task 可以由同一个 Executor 执行。
+4. 保留当前分支的“显式表保留配置优先”规则。Executor 模式的失败重试受副作用安全约束，不能无条件复制旧 SQL 重试循环。
 
 ## 2. 问题、目标和非目标
 
@@ -63,11 +65,11 @@ Paimon 1.3.2 的 Procedure 同步调用原生 `ExpireSnapshots.expire()`。跨�
 
 目标：
 
-- 不同表在多个 Executor JVM 上并发清理，降低整库耗时与后续表的等待时间。
-- Driver 不执行 Executor 模式的快照／数据／Manifest 删除，只做元数据准备、调度和控制状态管理。
+- 不同表以不同 Task 在一个或多个 Executor 中并发清理，降低整库耗时与后续表的等待时间。
+- Driver 不执行 Executor 模式的快照／数据／Manifest 删除，只做元数据准备、调度和内存中的结果汇总。
 - 保持现有分支的保留策略、Tag／Consumer 原生保护规则、表筛选以及退出码语义。
 - 输出可归因到具体表、工作单元和 Spark Task attempt 的执行证据。
-- 对重复执行和结果未知采取明确的恢复协议，避免把 Spark 重试当成 exactly-once。
+- 明确失败和结果未知时的报告及重跑边界，不提供跨应用恢复或 exactly-once 保证。
 
 非目标：
 
@@ -75,7 +77,8 @@ Paimon 1.3.2 的 Procedure 同步调用原生 `ExpireSnapshots.expire()`。跨�
 - 不修改 compact、compact-manifest、remove-orphan-files 或 AMS 的调度逻辑。
 - 不修改表的保留属性、write-only、生产写入任务或认证配置。
 - 不自动缩短保留时间／数量；不承诺单张大表加速或固定倍数提升。
-- 不在首版实现轮转、公平抢占、固定启动快照清理范围、自动清理异常占用记录。
+- 不实现按轮轮转、公平抢占或固定启动快照清理范围；同表循环由同一 Task 控制。
+- 不引入持久化执行状态、分布式锁、租约、Driver 授权 RPC 或替代性外部协调服务。
 - 不把过期数量当作全部物理文件删除成功的证明；原生清理可能记录告警并跳过部分文件。
 
 ## 3. 保留策略兼容契约
@@ -108,12 +111,11 @@ Paimon 1.3.2 的 Procedure 同步调用原生 `ExpireSnapshots.expire()`。跨�
 |---|---|---|
 | `--executionMode` | `driver` | `driver` 或 `executor`；仅 expire-snapshots 使用 |
 | `--tableConcurrency` | `4` | Executor 模式同时在途的表工作单元上限，必须为正整数 |
-| `--executionStatePath` | 无 | Executor 模式必填；所有参与该协议的 Producer 共用的独立 HDFS 控制目录 |
 
 - 显式在 driver 模式使用 Executor 专用参数应报参数错误，避免看起来配置成功但不生效。
 - `--procedureOptions file-operation.thread-num=32,...` 继续控制原生文件操作；它不是表并发度。
-- 新模式在创建 SparkSession 后、任何删除前校验实际配置和依赖：首版只接受已验证的 1.3.2 / 3.5.4 组合、禁用 speculation、具备状态目录访问权限。
-- 首版建议要求 `spark.task.maxFailures=1`，减少 Spark 自动重试；它不是互斥或 exactly-once 保证，持久化协议仍必须成立。
+- 新模式在创建 SparkSession 后、任何删除前校验实际配置和依赖：首版只接受已验证的 1.3.2 / 3.5.4 组合并禁用 speculation。
+- 首版建议要求 `spark.task.maxFailures=1`，减少 Spark 自动重试；同时按第 6 节拒绝非首次 Task／Stage attempt 执行删除。不能把配置值当成跨作业互斥或 exactly-once 保证。
 - 不通过 `snapshot.expire.execution-mode=async` 绕过任务完成确认；直接调用原生 API 仍同步等待。
 - 无目标表直接成功；参数／模式校验失败返回 2；运行失败或结果未知返回 1；只有全部成功／正常跳过时返回 0。
 
@@ -123,13 +125,13 @@ Paimon 1.3.2 的 Procedure 同步调用原生 `ExpireSnapshots.expire()`。跨�
 
 1. 使用原有 TableResolver 枚举并筛选表，生成稳定的目标集合。
 2. 通过 Spark Catalog 加载真实 FileStoreTable，读取显式属性，解析最终保留配置。
-3. 为每表生成 `runId + workId` 和规范化物理表标识；同一物理表在目标集合中只保留一个逻辑工作单元。Catalog 别名不能绕过互斥。
+3. 为每表生成 `runId + workId` 和物理表标识，用于本次运行的关联日志与结果汇总；对目标集合中的同一物理表去重，不提供跨应用锁。
 4. 使用独立有界线程池提交最多 tableConcurrency 个表 Job，某表完成后立即补充下一张表，不等待整批结束。
 5. 每表一个 Spark Job、一个分区、一个清理 Task；只触发一次收集结果的 Action。Driver 线程只等待调度／结果，不运行过期 API。
 6. 设置并恢复各提交线程的 Spark active session、类加载器及 job group／description 等本地属性；不能在线程间串用表描述。
-7. 将 Task 结果与持久化工作记录对账，逐表输出日志并汇总退出码。Spark Job 成功但表结果失败时，应用仍失败。
+7. 收集 Task 返回结果，在 Driver 内存中按 workId 汇总并逐表输出日志。Spark Job 成功但表结果失败时，应用仍失败。
 
-表准备和提交使用有界缓冲，不在 Driver 同时保留整库所有表的重量级对象。持久化状态中的 workId 在 Spark attempt 重放时保持不变，不能在 Task 内重新生成随机 workId 绕过去重。
+表准备和提交使用有界缓冲，不在 Driver 同时保留整库所有表的重量级对象。workId 在提交前生成，用于关联不同 Spark attempt 的日志，不具有持久化去重或恢复含义。
 
 选择每表独立 Job，是为了保留该分支的逐表 Job 描述、控制在途数量和首个失败后的停止派发。它会增加 Job 提交开销，必须纳入小表场景基准测试。
 
@@ -138,17 +140,18 @@ Paimon 1.3.2 的 Procedure 同步调用原生 `ExpireSnapshots.expire()`。跨�
 ### 5.2 Executor 职责
 
 1. 反序列化表工作单元，校验运行时版本、表身份、FileIO 和参数指纹。
-2. 按第 6 节获取同表独占执行资格，再创建原生 ExpireSnapshots 对象。
+2. 校验 Task／Stage attempt 后，为当前表创建独立的原生 ExpireSnapshots 对象；没有获取锁或请求 Driver 授权的步骤。
 3. 按最终配置同步执行单轮 API，记录轮次与返回数量；满足继续条件时在当前 Task 内进入下一轮。
-4. 记录持久化终态，确认所有本次清理工作结束后才释放占用，返回结构化结果。
+4. 同表循环结束后返回一份表级结果；Task 内不读取下一张表，不为下一轮创建新 Job／Task。
 5. 不创建 SparkSession／SparkContext，不调用 spark.sql，不在 Task 内提交嵌套 Spark Job，不携带 Driver 的 ProducerContext 或活动 Catalog 连接。
 
-表对象可序列化不代表所有部署的 FileIO／认证都已验证。优先采用原生 FileStoreTable 的传输方式，并以多 JVM 测试证明配置、插件、delegation token 和文件访问正确；禁止把 keytab 或明文凭据写入工作记录。
+表对象可序列化不代表所有部署的 FileIO／认证都已验证。优先采用原生 FileStoreTable 的传输方式，并以多 JVM 测试证明配置、插件、delegation token 和文件访问正确；禁止把 keytab 或明文凭据写入日志或结果。
 
 Driver 可在准备阶段和 Task 启动时做身份核验；对运行中 DROP／重建／路径迁移不能靠一次快照校验保证安全。首版要求运维期间不执行这些管理操作。
 
 ### 5.3 并发与资源
 
+- 一个 Executor 可以同时运行多个清理 Task，每个 Task 绑定一张不同的表；不要求“一张表独占一个 Executor”，也不要求每个 Executor 只运行一个 Task。
 - 运行表数不超过在途上限、可用 Spark Task 槽位和待处理表数三者的最小值。
 - 相同 Executor JVM 的表 Task 共享 Paimon 文件操作池，不同 JVM 的池独立。
 - 原生池初始大小与可见 CPU 数有关，后续请求可能扩容而不缩容；配置 32 不能被当成全应用严格的 32 请求上限。
@@ -156,67 +159,57 @@ Driver 可在准备阶段和 Task 启动时做身份核验；对运行中 DROP�
 - 一个 Task 占用一个 Spark 槽位，但内部可能产生多个 I/O 线程，不能用 executor cores 直接估计文件系统并发。
 - 首版沿用完整单表循环。持续写入的大表仍可能长期占槽；本 Spec 不承诺最大等待时间或作业必然在固定时间内结束。
 
-## 6. 副作用、重放与恢复协议
-
-### 6.1 必须成立的安全条件
-
-Spark Task 可能重放，Executor 失联也不代表进程和底层 I/O 已停止。关闭 speculation、设置 maxFailures=1、Java 锁或只用 Driver 内存去重都不足以构成同表互斥。
-
-执行资格的粒度为规范化物理表根路径。首版保守地让该表不同 branch 也共享互斥键，避免把可能共享文件的分支误当成完全独立资源。URI 别名、不同 Catalog 指向相同路径的识别必须测试；不能证明唯一身份时拒绝执行。
-
-### 6.2 建议首版控制存储
-
-使用用户指定、位于所有被清理表目录之外的 HDFS 控制目录：
+例如两个 Executor 各有两个可用 Task 槽位，tableConcurrency=4 时可以出现以下分配；实际落点由 Spark 调度，不保证均匀：
 
 ```text
-<state-root>/owners/<physical-table-key>        当前占用声明
-<state-root>/runs/<run-id>/<work-id>/...        参数指纹、轮次和不可变终态记录
+Driver：最多 4 个表 Job 在途，每 Job 一个单表 Task
+  Executor 1
+    Task A → 表 A：round 1 → round 2 → round 3 → 返回表 A 结果
+    Task B → 表 B：round 1 → 返回表 B 结果
+  Executor 2
+    Task C → 表 C：round 1 → round 2 → 返回表 C 结果
+    Task D → 表 D：round 1 → 返回表 D 结果
 ```
 
-- 全部 Producer 实例必须使用同一控制目录；不同目录不能提供跨作业互斥。
-- 所有权使用经验证的原子“不覆盖创建”获取，记录唯一 owner token、applicationId、workId、taskAttemptId 和目标指纹。
-- 读取损坏、不完整或未知格式的所有权记录时，按“仍被占用”处理，不能当成文件不存在。
-- HDFS 实现的原子性需做竞争与故障测试；不能把普通 exists-then-create 当成原子操作，也不能把泛化 FileIO 接口直接当作所有后端均支持同样语义的证明。
-- 控制目录不可在本作业运行时被外部清理。首版不提供自动 GC；保留记录，后续独立定义安全回收协议。
+Task B 完成后，Driver 可以提交表 E 对应的新 Task，Spark 可以复用 Executor 1 上空出的槽位。这是创建并调度新的 Task，不是让 Task B 继续处理表 E。表 A 的所有轮次始终保留在 Task A 内。正常执行期间，同表各轮的 taskAttemptId 不变，只有 round 增加。
 
-### 6.3 状态与重复执行
+每个 Task 的循环变量、轮次结果和原生过期对象独立，不能因多个 Task 同处一个 JVM 就共享可变的单表清理上下文。共享的原生文件操作线程池仍按 Paimon 自身行为使用。
 
-| 状态 | 含义 | 再次看到相同 workId 时 |
-|---|---|---|
-| PREPARED | Driver 已准备，无删除 | 可由唯一获得所有权的 attempt 执行 |
-| RUNNING | 已获得占用，可能有删除副作用 | 其他 attempt 不得执行删除 |
-| SUCCEEDED | 原生调用结束，结果已持久化 | 返回已保存的结果，不再次清理 |
-| FAILED | 明确失败且确认本工作没有遗留在途删除 | 返回失败，不自动启动第二轮完整工作 |
-| UNKNOWN | 失联、中断或无法确定副作用结束 | 保留占用，禁止自动接管，应用失败 |
+Task 内循环的控制规则为：执行当前表一轮 → 记录结果 → 若返回数量达到该表最终生效的 maxDeletes，则在当前 Task 继续下一轮；否则结束该表 Task。maxDeletes 限制的是单轮快照数量，不是 Task 的累计删除数量或轮数。即使另一张表先完成，也不把当前表的剩余轮次迁移到空闲 Task。
 
-执行顺序必须为：获取独占资格 → 记录运行身份 → 执行原生清理 → 等待清理完成 → 原子发布终态 → 释放自己的占用 → 返回结果。
+## 6. 无持久化协调的执行边界
 
-- 同一 workId 的成功结果发布在释放占用之前；返回结果丢失后重放只读取记录。
-- 获得所有权后必须再次检查该 workId 终态，关闭“先读无结果、旧 attempt 随后完成、再抢到占用”的窗口。
-- 相同 workId 但参数／表身份指纹不同是协议错误，拒绝执行。
-- 释放必须验证 owner token；存在不确定性时保留占用。异常恢复不得删除其他执行者的占用。
-- 不提供 TTL 自动抢占。只有确认旧执行进程及其文件操作已停止，才允许人工核验并解除异常占用；仅心跳过期或租约过期不够。
-- UNKNOWN 的人工恢复应终结旧 workId，保留不可变的恢复记录后再以新 workId 提交。迟到的旧 attempt 必须被拒绝；不能只删除占用文件后任由旧工作重新开始。
-- 原生调用返回异常／Task 收到中断时，底层线程池可能仍有删除任务，不能在 finally 中无条件释放占用。
-- 已落盘成功但未返回 Driver 的结果，通过工作记录恢复；未记录的删除数量不得猜测或补算成精确值。
+### 6.1 本次运行内的任务约束
 
-这是一种保守的“结果未知时停止接管”策略，不宣称实现所有故障下的 exactly-once。若不接受持久化控制目录或人工恢复成本，必须另行批准等价的协调方案，不能退回无保护 Task 重试后直接上线。
+- Driver 对目标表去重，每张表只主动提交一个逻辑工作单元，且只触发一次结果收集 Action；不能先 count 再 collect 导致同一副作用逻辑重复计算。
+- 关闭 Spark speculation。首版不依赖 Spark 自动重试恢复清理：非首次 Task attempt 或非首次 Stage attempt 在调用过期 API 前返回失败／结果未知，不执行删除。需要核对 Spark 3.5.4 的 attempt 标识并以故障注入验证这些路径。
+- Driver 收到失败或不确定结果后，不在本次应用内为该表另建 Job 重投，也不把剩余轮次转移到另一个 Task。
+- 正常续轮与失败重放是不同概念：达到单轮上限后的下一轮属于原 Task 的 while 循环，继续执行不需要重新调度。
+- 不引入额外执行状态目录、锁文件、租约、授权 RPC 或外部协调组件。
 
-### 6.4 与其他维护任务的边界
+### 6.2 失败后的能力边界
 
-该协议只能协调遵守相同协议的 Producer。原有 Driver 模式、AMS 过期任务、写入端自动过期等不会自动识别此占用。
+Executor 失联不证明清理没有执行，Driver 也不能仅凭没有收到返回值认定删除数量为零。无法确定完成情况时，以结果未知说明该表失败，并返回非零退出码；此处是日志与结果分类，不是持久化状态机。
 
-首版 Executor 运行前须由调度配置保证目标表没有其他过期执行者；不能同时运行覆盖相同表的 Driver 清理任务。普通写入和合并不因本功能自动停用，但保留策略必须满足这些作业的读取时间窗口，Consumer／Tag 保护和并发写入需要原生语义回归验证。不能把表级占用当作对其他系统的全局锁。
+Driver 崩溃后内存中的进度和结果不会恢复，首版不提供断点续跑或跨应用完成记录去重。需要重跑时，先由集群管理及外部调度确认旧应用及其清理执行已结束，再启动新应用；新应用从 Paimon 当前元数据重新判断，不恢复上次轮号或旧待删文件清单。该流程不需要创建、清理或人工解除任何控制目录记录。
+
+关闭 speculation 和限制重试不是所有故障下的 exactly-once 证明。本功能只承诺上述派发和拒绝重放规则，不声称提供跨应用分布式互斥。
+
+### 6.3 与其他维护任务的边界
+
+相同物理表的多个 Producer 应用不得重叠执行，由外部调度保证；也不与覆盖相同表的 Driver 模式、AMS 或写入端自动过期同时运行。本功能不新增检测／协调这些外部执行者的机制。
+
+普通写入和合并不因本功能自动停用，但保留策略必须满足这些作业的读取时间窗口，Consumer／Tag 保护和并发写入需要原生语义回归验证。
 
 ## 7. 重试、失败及取消
 
 - `retryTimes` 仍表示包含首次尝试的次数上限，但 Executor 模式仅对读取／准备及已经证明没有遗留副作用的失败使用自动重试。
-- 重试原生过期前必须确认前一次调用的文件任务全部结束，并重新读取快照状态。若无法证明，则记录 UNKNOWN，不能仅因为异常属于 NonFatal 就继续。
+- 重试原生过期前必须确认前一次调用的文件任务全部结束，并重新读取快照状态。若无法证明，则将该表报告为结果未知，不能仅因为异常属于 NonFatal 就继续。允许的单轮重试仍在原 Task 内执行，不创建新 Task。
 - 不嵌套“整表框架重试 × Spark Task 重试 × 单轮重试”；各层尝试次数分别记录。
 - `continueOnTableFailure=true`：明确的单表错误转成失败结果，继续派发其他不冲突的表；最终只要有失败或未知结果，退出码为 1。
 - `continueOnTableFailure=false`：Driver 观察到首个失败后不再派发新的表，等待已经在途的表收敛。竞态中此前已提交的 Job 算在途，不能承诺“一个失败瞬间其他 Task 都不再启动”。
-- SparkContext 丢失、集群不可用或状态存储整体不可用时允许停止整个运行；不能承诺基础设施故障下仍执行所有表。
-- 用户取消／超时不回滚已删文件。Driver 不在收到取消后立刻宣称底层删除全部停止；已提交但无可信终态的工作归为 UNKNOWN。
+- SparkContext 丢失或集群不可用时允许停止整个运行；不能承诺基础设施故障下仍执行所有表。
+- 用户取消／超时不回滚已删文件。Driver 不在收到取消后立刻宣称底层删除全部停止；已提交但无可信结果的工作报告为结果未知。
 - 没有被提交的表统计为 notExecuted；已提交但结果不明的表不得统计为正常 skipped。
 
 ## 8. 结果与可观测性
@@ -228,7 +221,7 @@ Spark Task 可能重放，Executor 失联也不代表进程和底层 I/O 已停�
 - submittedAt、startedAt、finishedAt、queueWaitMs、executionMs、endToEndMs。
 - Spark applicationId、jobId、stageId、partitionId、taskAttemptId、Executor ID；拿不到的字段明确为空，不伪造。
 - 每轮 round、耗时、返回的过期数量、安全重试次数及异常阶段。
-- completionState、计数是否完整、是否从持久化结果恢复；UNKNOWN 对旧 ActionStatus 映射为 Failed，并以新增字段区分。
+- completionState、计数是否完整；UNKNOWN 只作为结果未知的标记，对旧 ActionStatus 映射为 Failed，不关联持久化记录。
 
 现有 `tasks` 代表清理轮次，不改成 Spark Task 个数；Spark attempt 信息使用独立字段。结果统计按 workId 去重，不用 accumulator 作为成功数量或副作用恰好执行一次的依据。
 
@@ -236,7 +229,7 @@ Spark Task 可能重放，Executor 失联也不代表进程和底层 I/O 已停�
 
 原生返回数量沿用 `deletedSnapshotsTotal` 字段，但注明它是被确认调用的返回值累计，不是精确文件删除审计。结果未知时标记计数不完整，不能把缺失的进度显示为 0 次删除。
 
-日志与状态记录不保存完整敏感 options、token、keytab 或口令；逐轮日志实时输出，Driver 内存中的历史详情必须有界，并给出截断标志和累计计数。
+日志与结果不保存完整敏感 options、token、keytab 或口令；逐轮日志实时输出，Driver 内存中的历史详情必须有界，并给出截断标志和累计计数。
 
 本机耗时使用单调时钟计算；跨 Driver／Executor 的排队时间优先使用 Spark 调度事件。未经时钟同步验证，不直接用两台机器的墙上时钟相减生成精确延迟。
 
@@ -249,7 +242,6 @@ Spark Task 可能重放，Executor 失联也不代表进程和底层 I/O 已停�
 | `.../paimon/PaimonSqlRunner.scala` | Driver 端原生表／Procedure 能力访问，不发送到 Executor |
 | 拟新增 `.../paimon/PaimonSnapshotExpirationExecutor.scala` | 纯 Executor 原生清理逻辑 |
 | 拟新增 `.../paimon/PaimonSnapshotExpirationCoordinator.scala` | Driver 有界提交与结果汇总 |
-| 拟新增 `.../paimon/SnapshotExpirationStateStore.scala` | 占用、结果、重复执行及异常恢复契约 |
 | `amoro-producer/src/test/scala/org/apache/amoro/producer/paimon/` | 策略、集成、多 JVM 和故障测试 |
 | `amoro-producer/README.md` | 模式、参数、生效策略、失败和恢复说明 |
 
@@ -266,7 +258,7 @@ final case class SnapshotExpirationWork(
   extends Serializable
 ```
 
-原生过期调用只存在于 Executor runner；Driver mode 的旧路径独立保留。状态存储访问不能包在吞异常后继续删除的逻辑中。
+Executor 模式的原生过期调用只存在于 Executor runner；Driver mode 的旧路径独立保留。每个工作单元只有一个表对象，Task 内只循环清理该表，不迭代其他表的工作单元。
 
 ## 10. 验收与测试策略
 
@@ -279,23 +271,23 @@ final case class SnapshotExpirationWork(
 | A03 | 配置非法或读取耗尽 | 删除前失败，不降低保留要求 |
 | A04 | 多表、并发上限 2 | 至少两个不同表有真实执行重叠，最多两个表 Job 在途 |
 | A05 | Executor 位置验证 | 原生清理日志含非 Driver Executor ID；Driver 无清理删除调用 |
-| A06 | 多轮清理与持续写入 | 使用有效 maxDeletes 续轮；不隐式固定最新快照或时间边界 |
+| A06 | 同表多轮清理与持续写入 | 使用有效 maxDeletes 在同一 taskAttemptId 内续轮；不新增 Job／Task，不隐式固定快照或时间边界 |
 | A07 | 原生结果对照 | 相同初始表副本和固定时钟下与 SQL 路径保留快照集合一致，存活数据可读 |
 | A08 | Tag、Consumer、changelog 及合并后文件 | 保护语义与当前 1.3.2 Procedure 一致，无新误删 |
-| A09 | 同表重复 Task／重复 application | 只有一个获准进入原生清理；别名不绕过互斥 |
-| A10 | 完成后丢失返回结果 | 重放读取持久化成功记录，不再次清理，结果不重复统计 |
-| A11 | 删除中途失联／中断 | 其他 attempt 不接管，状态未知且占用保留，最终非零退出 |
-| A12 | 状态文件部分写入／存储失败 | 不把损坏记录当作空闲；无可靠资格则不删除 |
-| A13 | 原子占用竞争及终态发布竞态 | 多 JVM 压力下无双持有者；获取后复查 workId 终态 |
+| A09 | 同应用目标去重及 Spark 重放 | 重复目标不主动重复派发；非首次 Task／Stage attempt 在删除前拒绝，不宣称跨应用互斥 |
+| A10 | 完成后丢失返回结果 | 无可信结果则报告未知，不补造成功记录或精确计数，不由 Driver 新建 Job 重投 |
+| A11 | 删除中途失联／中断 | 不主动转移剩余轮次，重放 attempt 不执行删除，最终非零退出 |
+| A12 | 同一 Executor 多 Task | 至少两个不同表 Task 在同一 Executor 上重叠运行，参数／轮次／结果互不串用 |
+| A13 | 单 Task 的表绑定与槽位复用 | 一个 Task 只处理一张表；原 Task 完成后，后续表由新的 Task 执行，Executor 可以复用 |
 | A14 | continueOnTableFailure true／false | 分别继续新表／停止新派发，在途任务和 notExecuted 正确统计 |
 | A15 | Paimon 0.9.0 | Driver 既有保留策略及时区用例通过，Executor 请求在删除前拒绝 |
 | A16 | Hive Catalog、HDFS／对象存储权限 | Executor 与 Driver 目标和身份一致，无凭据泄漏；具体后端分别验收 |
 | A17 | 类冲突、缺少依赖、不同运行版本 | 删除前明确失败，报告实际版本，不自动切换算法 |
-| A18 | 用户取消／Driver 崩溃及重启 | 已知结果可回读，未知工作不自动恢复删除 |
+| A18 | 用户取消／Driver 崩溃及重启 | 不宣称恢复内存进度；重跑前确认旧执行已结束，新应用重新读取表状态 |
 | A19 | 真实 YARN 多 Executor 运行 | 核验 JAR 指纹、最终 application 状态及表数据，不能只看 UI 成功 |
 | A20 | 性能与存储压力 | 达到第 11 节门槛，无新增错误、限流或明显 GC 问题 |
 
-必须特别注入“底层删除 Future 尚未完成但上层已抛异常”的故障，验证不会错误释放占用或再次删除。
+必须特别注入“底层删除 Future 尚未完成但上层已抛异常”的故障，验证不会在原操作仍在途时启动下一次清理。A06、A12、A13 必须同时验证“一 Executor 多 Task、一 Task 一表、一表多轮不换 Task”的用户确认契约。
 
 ### 10.1 实施阶段命令
 
@@ -327,7 +319,6 @@ Surefire 配置允许指定测试不存在时不失败，必须检查报告实�
 --retainMax 20 --retainMin 10 --maxDeletes 550
 --procedureOptions file-operation.thread-num=32,snapshot.expire.execution-mode=sync
 --executionMode executor --tableConcurrency 2
---executionStatePath hdfs://<nameservice>/<shared-producer-control-directory>
 ```
 
 Spark 提交侧显式禁用 speculation，首版使用 maxFailures=1 和固定 Executor 数；JAR、catalog、warehouse、HDFS 配置及认证沿用经核对的部署模板。本 Spec 未获得完整生产 spark-submit 模板，不伪造可直接用于生产的资源和身份参数。
@@ -346,23 +337,21 @@ Spark 提交侧显式禁用 speculation，首版使用 maxFailures=1 和固定 E
 
 若存储已饱和、均为极小任务或单个超大表占主导，允许性能假设不成立；此时不能仅因实现完成就启用 Executor 模式。
 
-回退通过显式使用 driver 模式完成，但必须先确认旧 Executor 清理已停止、相关占用已核验，不能在 UNKNOWN 时启动旧 Driver 绕过互斥。持久化控制记录保留用于追溯，不随回退删除。
+回退通过显式使用 driver 模式完成，先确认旧应用及 Executor 清理已结束，避免与仍在执行的清理重叠。无需迁移或清理额外的执行状态目录。
 
 ## 12. 操作边界与待确认事项
 
-始终执行：版本和身份预检、参数策略一致性校验、同表互斥、结构化结果、日志脱敏、真实多 JVM 故障测试。
+始终执行：版本和身份预检、参数策略一致性校验、本次运行目标去重、一 Task 一表及同 Task 内多轮清理、结构化结果、日志脱敏、真实多 JVM 故障测试。
 
-需要评审确认：引入 HDFS 控制目录和人工解除 UNKNOWN 的运维流程；扩展 Executor 模式到 0.9.0／其他版本；改变保留默认值；增加外部协调服务或运行时依赖。
+需要评审确认：扩展 Executor 模式到 0.9.0／其他版本、改变保留默认值或增加运行时依赖。无持久化协调和同 Task 内循环已由用户确认，不再列为待确认项。
 
-禁止：未知状态自动抢占、同表并行分段过期、删除过程中盲目重试、伪造成功／精确删除数量、以过期租约证明旧进程已停、把 local 模式通过当作集群验收。
+禁止：增加额外状态存储或替代协调系统、同表并行分段过期、按轮另建 Task、同一 Task 串行处理多张表、删除过程中盲目重试、伪造成功／精确删除数量、把 local 模式通过当作集群验收。
 
 进入实现计划前需要确认：
 
 1. 是否接受首版默认 driver、显式启用 executor，且只支持 1.3.2 / 3.5.4。
-2. 是否接受共享 HDFS 控制目录、无自动超时接管及 UNKNOWN 人工恢复；若环境已有等价持久化协调设施，替换前需核实其原子性和失联行为。
-3. 是否接受首版完整表循环、暂不做轮转；若要求最长等待时间，应另行定义每表工作预算和续调度语义。
-4. 生产实际版本、认证、存储类型、可用 Executor 资源及可用于恢复的控制目录。
-5. 性能验收的 20% 耗时改善与 10% RPC 延迟劣化上限是否符合目标环境要求。
+2. 生产实际版本、认证、存储类型、Executor 资源，以及外部调度如何保证不同清理应用不重叠。
+3. 性能验收的 20% 耗时改善与 10% RPC 延迟劣化上限是否符合目标环境要求。
 
 本文已明确推荐方向和安全边界；仍需通过上述评审及原型／故障验证，不能宣称当前已达到生产执行的绝对安全保证。
 
