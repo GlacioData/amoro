@@ -389,11 +389,13 @@ Compaction completed: {"catalog":"paimon","database":"ods","table":"orders","sql
 
 ## expire-snapshots
 
-执行 Paimon `expire_snapshots` procedure。每张表先读取 `$options` 中显式保存的 snapshot
+默认在 Driver 执行 Paimon `expire_snapshots` procedure；可显式启用下述 Executor 模式。每张表先读取 `$options` 中显式保存的 snapshot
 配置，按参数分别解析；表配置优先于命令行参数，未配置的参数才使用命令行值或下表默认值。
 
 | 参数 | 是否必填 | 默认值 | 说明 |
 |------|----------|--------|------|
+| `--executionMode` | 否 | `driver` | `driver` 保留原 SQL 路径；`executor` 将每张表交给独立 Spark Task。 |
+| `--tableConcurrency` | 否 | `4` | Executor 模式的表级在途上限，包含元数据准备；正整数，Driver 模式禁止显式设置。 |
 | `--retainMax` | 否 | `20` | 表未配置 `snapshot.num-retained.max` 时，作为 `retain_max`。 |
 | `--retainMin` | 否 | `10` | 表未配置 `snapshot.num-retained.min` 时，作为 `retain_min`。 |
 | `--maxDeletes` | 否 | `550` | 表未配置 `snapshot.expire.limit` 时，作为单轮删除上限；达到最终生效的上限会继续下一轮。 |
@@ -441,6 +443,62 @@ Producer 自动改为通过带 UTC 偏移的 `older_than` timestamp 传递时间
   --maxDeletes 550 \
   --procedureOptions file-operation.thread-num=32,snapshot.expire.execution-mode=sync
 ```
+
+### Executor 模式
+
+首版要求运行时 **Spark 3.5.4 / Paimon 1.3.2**。使用
+`./mvnw -pl amoro-producer clean package -Pproducer-paimon-1.3.2 -DskipTests`
+构建，产物为 `amoro-producer/target/amoro-producer-1.0.0-jar-with-dependencies.jar`。
+Driver 和 Task 分别校验实际加载类所在 JAR 的版本资源；缺失或不匹配时拒绝清理。
+Spark 3.2.1 / Paimon 0.9.0 继续使用 Driver 模式。
+
+在 `spark-submit` 的应用 JAR **之前**加上：
+
+```bash
+--conf spark.speculation=false \
+--conf spark.task.maxFailures=1
+```
+
+在用户的应用参数中追加 `--executionMode executor --tableConcurrency 2`，完整应用参数例如：
+
+```bash
+--format paimon --action expire-snapshots \
+--catalogName paimon --databaseName sl_oki_prod \
+--retryTimes 3 --continueOnTableFailure true \
+--retainMax 20 --retainMin 10 --maxDeletes 550 \
+--procedureOptions file-operation.thread-num=32,snapshot.expire.execution-mode=sync \
+--executionMode executor --tableConcurrency 2
+```
+
+Driver 有界准备并提交任务。每张表只提交一个单分区清理 Job，只执行一次 `collectAsync`；
+一个 Executor 可同时处理多个 Task。每个 Task 只清理一张表，所有轮次均在该 Task 内顺序完成，
+达到该表最终生效的 `maxDeletes` 才继续下一轮。Task 调用原生 Paimon API，不启动 Spark SQL。
+本次运行中指向相同规范化物理路径的别名只清理一次，其他别名输出 `Skipped`。
+
+`--retryTimes` 在 Executor 模式仅用于只读准备阶段。进入原生清理后发生异常、取消或返回丢失，
+不会重新调用失败轮次，也不会重投该表；非首次 Task/Stage attempt 在删除前拒绝。
+结果使用 `Failed` + `completionState=UNKNOWN`，已确认的计数保留，未知计数不伪造为 0，
+汇总标记 `countsComplete=false`。`continueOnTableFailure=false` 在观察到失败后停止派发，
+已运行表继续收敛；true 可继续其他表。基础设施失效和取消始终停止后续派发并返回失败。
+
+每表结果保留最近 100 轮明细，Long 累计计数不受截断影响。日志提供 runId/workId、
+Job/Task/Executor 标识、有效保留参数和来源、单轮删除数及耗时。`queueWaitMs` 使用 Driver 的
+Job/Task 事件时间；若 Listener 事件尚未到达则留空。Task 的 `executionMs`、Driver 的
+`endToEndMs` 分别使用各自单调时钟，不能通过跨 JVM 墙钟相减计算耗时。
+
+取消通过本次进程内的提交门禁和 Spark FutureAction/JobGroup 完成，不增加状态路径或外部服务。
+取消成功不证明原生 FileIO 已完全停止。重跑或切回 Driver 前，须由外部调度确认旧应用已经结束；
+不同应用对同一张表的互斥仍由外部调度负责。单张超大表仍串行清理，持续写入表可能长期占用一个槽。
+`file-operation.thread-num=32` 涉及 Paimon JVM 内文件线程池，不能简单将总存储并发写成
+`tableConcurrency × 32`。
+
+本地真实表与两个独立 Executor JVM 的验证见
+[实施验证记录](../tasks/producer-snapshot-validation-evidence.md)。YARN、Hive、认证 HDFS/对象存储
+和生产性能尚未验收，当前文档不声明这些环境已通过验证。
+
+实现依据：[Paimon 1.3.2 Procedure](https://github.com/apache/paimon/blob/release-1.3.2/paimon-spark/paimon-spark-common/src/main/java/org/apache/paimon/spark/procedure/ExpireSnapshotsProcedure.java)、
+[Spark 3.5.4 应用内并发调度](https://github.com/apache/spark/blob/v3.5.4/docs/job-scheduling.md#scheduling-within-an-application)、
+[Spark 异步收集与取消句柄](https://github.com/apache/spark/blob/v3.5.4/core/src/main/scala/org/apache/spark/rdd/AsyncRDDActions.scala)。
 
 ## remove-orphan-files
 

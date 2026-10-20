@@ -22,6 +22,7 @@ import scala.collection.JavaConverters._
 
 import org.apache.paimon.spark.SparkTable
 import org.apache.paimon.spark.catalog.ProcedureCatalog
+import org.apache.paimon.table.FileStoreTable
 import org.apache.spark.sql.{Row, SparkSession}
 import org.apache.spark.sql.connector.catalog.{Identifier, TableCatalog}
 import org.apache.spark.sql.internal.SQLConf
@@ -62,10 +63,54 @@ trait PaimonSqlRunner {
     }
   }
 
+  def readExplicitProperties(
+      spark: SparkSession,
+      catalogName: String,
+      table: TargetTable): Map[String, String] = {
+    // OptionsTable reads schema options, without filling native defaults.
+    // https://github.com/apache/paimon/blob/release-1.3.2/paimon-core/src/main/java/org/apache/paimon/table/system/OptionsTable.java
+    import PaimonSqlUtils.quoteIdent
+    val optionsTable = s"${quoteIdent(catalogName)}.${quoteIdent(table.database)}." +
+      quoteIdent(table.table + "$options")
+    val pairs = run(spark, s"SELECT `key`, `value` FROM $optionsTable").map { row =>
+      require(row.size == 2 && !row.isNullAt(0) && !row.isNullAt(1), "Invalid Paimon options row")
+      row.getString(0) -> row.getString(1)
+    }
+    require(pairs.map(_._1).distinct.size == pairs.size, "Duplicate Paimon option keys")
+    pairs.toMap
+  }
+
+  def loadFileStoreTable(
+      spark: SparkSession,
+      catalogName: String,
+      table: TargetTable): FileStoreTable = {
+    withSparkTable(spark, catalogName, table) { loaded =>
+      loaded.getTable match {
+        case fileTable: FileStoreTable => fileTable
+        case _ =>
+          throw new IllegalArgumentException("Snapshot expiration requires a FileStoreTable")
+      }
+    }
+  }
+
   def loadTableMetadata(
       spark: SparkSession,
       catalogName: String,
       table: TargetTable): PaimonTableMetadata = {
+    withSparkTable(spark, catalogName, table) { loaded =>
+      val paimonTable = loaded.getTable
+      PaimonTableMetadata(
+        paimonTable.primaryKeys().asScala.toVector,
+        paimonTable.partitionKeys().asScala.toVector,
+        loaded.schema,
+        loaded.properties().asScala.toMap)
+    }
+  }
+
+  private def withSparkTable[T](
+      spark: SparkSession,
+      catalogName: String,
+      table: TargetTable)(body: SparkTable => T): T = {
     val previousSession = SparkSession.getActiveSession
     SparkSession.setActiveSession(spark)
     try {
@@ -73,17 +118,12 @@ trait PaimonSqlRunner {
         spark.sessionState.catalogManager.catalog(catalogName) match {
           case catalog: TableCatalog =>
             catalog.loadTable(Identifier.of(Array(table.database), table.table)) match {
-              case loaded: SparkTable =>
-                val paimonTable = loaded.getTable
-                PaimonTableMetadata(
-                  paimonTable.primaryKeys().asScala.toVector,
-                  paimonTable.partitionKeys().asScala.toVector,
-                  loaded.schema,
-                  loaded.properties().asScala.toMap)
+              case loaded: SparkTable => body(loaded)
               case other => throw new IllegalArgumentException(
                   s"Expected a Paimon SparkTable, got ${other.getClass.getName}")
             }
-          case _ => throw new IllegalArgumentException(s"Catalog $catalogName cannot load tables")
+          case _ =>
+            throw new IllegalArgumentException(s"Catalog $catalogName cannot load tables")
         }
       }
     } finally {
@@ -93,6 +133,7 @@ trait PaimonSqlRunner {
       }
     }
   }
+
 }
 
 object SparkPaimonSqlRunner extends PaimonSqlRunner {

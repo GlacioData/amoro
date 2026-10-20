@@ -30,6 +30,24 @@ import org.apache.amoro.producer.spi.{ActionConfig, LakeFormatAdapter, ProducerA
 class PaimonExpireSnapshotsActionTest {
 
   @Test
+  def executorOptionsAreOptInAndValidated(): Unit = {
+    val action = new PaimonExpireSnapshotsAction()
+    assertEquals("driver", parse(action).executionMode)
+    val executor = parse(action, Array("--executionMode", " executor ", "--tableConcurrency", "2"))
+    assertEquals("executor", executor.executionMode)
+    assertEquals(2, executor.tableConcurrency)
+    action.validate(commonConfig(), executor)
+    Seq(
+      Array("--executionMode", "unknown"),
+      Array("--tableConcurrency", "2"),
+      Array("--executionMode", "executor", "--tableConcurrency", "0")).foreach { args =>
+      assertThrows(
+        classOf[IllegalArgumentException],
+        () => action.validate(commonConfig(), parse(action, args)))
+    }
+  }
+
+  @Test
   def parseUsesDefaultsAndTrimsArguments(): Unit = {
     val action = new PaimonExpireSnapshotsAction()
 

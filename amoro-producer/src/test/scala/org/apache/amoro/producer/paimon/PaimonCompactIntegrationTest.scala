@@ -522,6 +522,14 @@ abstract class CompactIntegrationSupport {
 }
 
 class PaimonCompactIntegrationTest extends CompactIntegrationSupport {
+  @BeforeEach
+  override def startSpark(): Unit = {
+    org.junit.jupiter.api.Assumptions.assumeTrue(
+      org.apache.spark.SPARK_VERSION == "3.5.4",
+      "The 1.3 compaction procedure suite requires the Spark 3.5.4 / Paimon 1.3.2 profile")
+    super.startSpark()
+  }
+
   @Test
   def unpartitionedPrimaryKeyDefaultMinorAndExplicitStrategiesReachNativeProcedure(): Unit = {
     Seq(None, Some("full"), Some("minor")).zipWithIndex.foreach { case (explicit, index) =>

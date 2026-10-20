@@ -234,6 +234,35 @@ class PaimonExpireSnapshotsIntegrationTest {
     assertEquals(spark.version.startsWith("3.5"), supported)
   }
 
+  @Test
+  def nativeExpirationMatchesSqlAndRetainsReadableData(): Unit = {
+    org.junit.jupiter.api.Assumptions.assumeTrue(
+      SparkPaimonSqlRunner.expireSnapshotsSupportsOptions(spark, "paimon"))
+    val properties = Map(
+      "snapshot.num-retained.min" -> "3",
+      "snapshot.num-retained.max" -> "4",
+      "snapshot.time-retained" -> "24 h",
+      "snapshot.expire.limit" -> "1")
+    val ddl = properties.map { case (k, v) => s",'$k'='$v'" }.mkString
+    createTable("native_policy", ddl)
+    createTable("sql_policy", ddl)
+    val before = data("native_policy")
+    val policy = PaimonSnapshotRetention.resolveConfig(
+      PaimonExpireSnapshotsConfig(20, 10, 550, "file-operation.thread-num=2"),
+      properties)
+    val loaded = spark.sessionState.catalogManager.catalog("paimon")
+      .asInstanceOf[TableCatalog].loadTable(Identifier.of(Array("db"), "native_policy"))
+      .asInstanceOf[SparkTable].getTable.asInstanceOf[FileStoreTable]
+    val native = PaimonSnapshotNativeExpire.create(loaded, policy)
+    assertEquals(1, native.expire())
+    assertEquals(1, native.expire())
+    assertEquals(0, native.expire())
+    val sql = expire("sql_policy", SparkPaimonSqlRunner)
+    assertEquals("2", sql.metrics("deletedSnapshotsTotal"))
+    assertEquals(snapshots("sql_policy"), snapshots("native_policy"))
+    assertEquals(before, data("native_policy"))
+  }
+
   private def createTable(name: String, options: String): Unit = {
     spark.sql(s"CREATE TABLE paimon.db.$name (id INT) USING paimon " +
       s"TBLPROPERTIES ('bucket'='-1','write-only'='true'$options)")

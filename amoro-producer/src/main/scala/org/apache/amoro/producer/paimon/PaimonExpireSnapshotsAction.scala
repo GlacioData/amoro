@@ -20,6 +20,7 @@ package org.apache.amoro.producer.paimon
 
 import java.time.{Duration, Instant, ZoneOffset}
 import java.time.format.DateTimeFormatter
+import java.util.Locale
 
 import scala.collection.JavaConverters._
 import scala.util.control.NonFatal
@@ -30,14 +31,17 @@ import org.apache.spark.sql.Row
 
 import org.apache.amoro.producer.core.{ActionOption, ActionResult, ActionStatus, ActionTaskResult, CommonProducerConfig, ProducerContext, ProducerParsedOptions, RetryMode, TargetTable}
 import org.apache.amoro.producer.paimon.PaimonSqlUtils.{fieldOpt, quoteIdent, sqlString, valueAt}
-import org.apache.amoro.producer.spi.{ActionConfig, ProducerAction}
+import org.apache.amoro.producer.spi.{ActionConfig, ProducerAction, ProducerBatchExecutor}
 
 final case class PaimonExpireSnapshotsConfig(
     retainMax: Int,
     retainMin: Int,
     maxDeletes: Long,
     procedureOptions: String,
-    timeRetained: Option[Duration] = None)
+    timeRetained: Option[Duration] = None,
+    executionMode: String = "driver",
+    tableConcurrency: Int = 4,
+    tableConcurrencyExplicit: Boolean = false)
   extends ActionConfig
 
 class PaimonExpireSnapshotsAction(runner: PaimonSqlRunner = SparkPaimonSqlRunner)
@@ -52,7 +56,13 @@ class PaimonExpireSnapshotsAction(runner: PaimonSqlRunner = SparkPaimonSqlRunner
       ActionOption("retainMax", description = "Paimon expire_snapshots retain max"),
       ActionOption("retainMin", description = "Paimon expire_snapshots retain min"),
       ActionOption("maxDeletes", description = "Paimon expire_snapshots max deletes"),
-      ActionOption("procedureOptions", description = "Paimon expire_snapshots procedure options"))
+      ActionOption("procedureOptions", description = "Paimon expire_snapshots procedure options"),
+      ActionOption(
+        "executionMode",
+        description = "Snapshot cleanup location: driver (default) or executor"),
+      ActionOption(
+        "tableConcurrency",
+        description = "Executor mode in-flight table limit (default 4)"))
   }
 
   override def parse(commandLine: ProducerParsedOptions): ActionConfig = {
@@ -80,12 +90,24 @@ class PaimonExpireSnapshotsAction(runner: PaimonSqlRunner = SparkPaimonSqlRunner
           .getOptionValue(
             "procedureOptions",
             PaimonExpireSnapshotsAction.DefaultProcedureOptions)
-          .trim)
+          .trim,
+      executionMode =
+        commandLine.getOptionValue("executionMode", "driver").trim.toLowerCase(Locale.ROOT),
+      tableConcurrency =
+        parseInt(commandLine.getOptionValue("tableConcurrency", "4"), "--tableConcurrency"),
+      tableConcurrencyExplicit = commandLine.hasOption("tableConcurrency"))
   }
 
   override def validate(common: CommonProducerConfig, actionConfig: ActionConfig): Unit = {
     val config = asExpireSnapshotsConfig(actionConfig)
     validateRetryTimes(common.retryTimes)
+    require(
+      Set("driver", "executor").contains(config.executionMode),
+      "--executionMode must be driver or executor")
+    require(config.tableConcurrency > 0, "--tableConcurrency must be positive")
+    require(
+      config.executionMode == "executor" || !config.tableConcurrencyExplicit,
+      "--tableConcurrency is only supported in executor mode")
     if (config.retainMax < 0) {
       throw new IllegalArgumentException("--retainMax 不能小于 0")
     }
@@ -98,6 +120,27 @@ class PaimonExpireSnapshotsAction(runner: PaimonSqlRunner = SparkPaimonSqlRunner
     require(config.maxDeletes <= Int.MaxValue, "--maxDeletes 不能超过 Integer.MAX_VALUE")
   }
 
+  override def validateRuntime(context: ProducerContext, actionConfig: ActionConfig): Unit = {
+    if (asExpireSnapshotsConfig(actionConfig).executionMode == "executor") {
+      PaimonSnapshotRuntime.validate(context.spark.version, context.spark.sparkContext.getConf)
+    }
+  }
+
+  override def batchExecutor(
+      context: ProducerContext,
+      actionConfig: ActionConfig): Option[ProducerBatchExecutor] = {
+    val config = asExpireSnapshotsConfig(actionConfig)
+    if (config.executionMode == "driver") None
+    else {
+      validate(context.common, actionConfig)
+      validateRuntime(context, actionConfig)
+      Some(new PaimonSnapshotExecutor(
+        config.tableConcurrency,
+        context.common.continueOnTableFailure,
+        new PaimonSnapshotSparkBackend(context, config, runner)))
+    }
+  }
+
   override def execute(
       context: ProducerContext,
       table: TargetTable,
@@ -105,13 +148,14 @@ class PaimonExpireSnapshotsAction(runner: PaimonSqlRunner = SparkPaimonSqlRunner
     validate(context.common, actionConfig)
     val startNs = System.nanoTime()
     val requested = asExpireSnapshotsConfig(actionConfig)
+    require(requested.executionMode == "driver", "Executor mode requires the batch execution path")
     val (properties, _) = withRetry(context, table, "读取 snapshot 配置") {
-      readProperties(context, table)
+      runner.readExplicitProperties(context.spark, context.common.catalogName, table)
     }
     val (supportsOptions, _) = withRetry(context, table, "读取 expire_snapshots 参数") {
       runner.expireSnapshotsSupportsOptions(context.spark, context.common.catalogName)
     }
-    val config = PaimonExpireSnapshotsAction.resolveConfig(requested, properties, supportsOptions)
+    val config = PaimonSnapshotRetention.resolveConfig(requested, properties, supportsOptions)
     if (!supportsOptions) {
       val options = ParameterUtils.parseCommaSeparatedKeyValues(config.procedureOptions).asScala
       val defaults = ParameterUtils.parseCommaSeparatedKeyValues(
@@ -190,19 +234,6 @@ class PaimonExpireSnapshotsAction(runner: PaimonSqlRunner = SparkPaimonSqlRunner
         parseDeletedCount(runner.run(context.spark, sqlText))
       }
     } finally sparkContext.foreach(_.setJobDescription(previous.orNull))
-  }
-
-  private def readProperties(context: ProducerContext, table: TargetTable): Map[String, String] = {
-    // $options reads explicitly stored schema options, without filling native defaults.
-    // https://github.com/apache/paimon/blob/release-1.3.2/paimon-core/src/main/java/org/apache/paimon/table/system/OptionsTable.java
-    val optionsTable = s"${quoteIdent(context.common.catalogName)}.${quoteIdent(table.database)}." +
-      quoteIdent(table.table + "$options")
-    val pairs = runner.run(context.spark, s"SELECT `key`, `value` FROM $optionsTable").map { row =>
-      require(row.size == 2 && !row.isNullAt(0) && !row.isNullAt(1), "Invalid Paimon options row")
-      row.getString(0) -> row.getString(1)
-    }
-    require(pairs.map(_._1).distinct.size == pairs.size, "Duplicate Paimon option keys")
-    pairs.toMap
   }
 
   private def withRetry[T](
@@ -309,54 +340,6 @@ object PaimonExpireSnapshotsAction {
   private val DefaultMaxDeletes = 550L
   private val DefaultProcedureOptions =
     "file-operation.thread-num=32,snapshot.expire.execution-mode=sync"
-
-  private[paimon] def resolveConfig(
-      requested: PaimonExpireSnapshotsConfig,
-      properties: Map[String, String],
-      supportsOptions: Boolean = true): PaimonExpireSnapshotsConfig = {
-    val procedureOptions = ParameterUtils.parseCommaSeparatedKeyValues(requested.procedureOptions)
-      .asScala.toMap
-    val tableOptions = new CoreOptions(properties.asJava)
-    val retainMin = if (properties.contains(CoreOptions.SNAPSHOT_NUM_RETAINED_MIN.key()))
-      tableOptions.snapshotNumRetainMin()
-    else requested.retainMin
-    val retainMax = if (properties.contains(CoreOptions.SNAPSHOT_NUM_RETAINED_MAX.key()))
-      tableOptions.snapshotNumRetainMax()
-    else requested.retainMax
-    val maxDeletes = if (properties.contains(CoreOptions.SNAPSHOT_EXPIRE_LIMIT.key()))
-      tableOptions.snapshotExpireLimit().toLong
-    else requested.maxDeletes
-    val timeOptions = procedureOptions ++ properties
-    // Unlike 1.3, the 0.9 procedure has unlimited time retention unless older_than is supplied.
-    // https://github.com/apache/paimon/blob/release-0.9.0/paimon-common/src/main/java/org/apache/paimon/options/ExpireConfig.java
-    val timeRetained =
-      if (!supportsOptions && !timeOptions.contains(CoreOptions.SNAPSHOT_TIME_RETAINED.key()))
-        UnlimitedRetention
-      else new CoreOptions(timeOptions.asJava).snapshotTimeRetain()
-    require(retainMin >= 1, "snapshot 最少保留数量必须大于等于 1")
-    require(retainMax >= retainMin, s"snapshot 最大保留数量 $retainMax 不能小于最少保留数量 $retainMin")
-    require(
-      maxDeletes > 0 && maxDeletes <= Int.MaxValue,
-      "snapshot 单轮删除数量必须在 1 到 Integer.MAX_VALUE 之间")
-    require(!timeRetained.isNegative, "snapshot 保留时间不能小于 0")
-
-    // Explicit CALL arguments win inside Paimon, so resolve table precedence before building SQL.
-    // Also pin the options used by table.copy to the same values as the CALL arguments.
-    // https://github.com/apache/paimon/blob/release-1.3.2/paimon-common/src/main/java/org/apache/paimon/utils/ProcedureUtils.java
-    val effectiveOptions = procedureOptions ++ Map(
-      CoreOptions.SNAPSHOT_NUM_RETAINED_MIN.key() -> retainMin.toString,
-      CoreOptions.SNAPSHOT_NUM_RETAINED_MAX.key() -> retainMax.toString,
-      CoreOptions.SNAPSHOT_EXPIRE_LIMIT.key() -> maxDeletes.toString,
-      CoreOptions.SNAPSHOT_TIME_RETAINED.key() -> s"${timeRetained.toMillis} ms")
-    requested.copy(
-      retainMin = retainMin,
-      retainMax = retainMax,
-      maxDeletes = maxDeletes,
-      procedureOptions = effectiveOptions.toSeq.sortBy(_._1).map { case (key, value) =>
-        s"$key=$value"
-      }.mkString(","),
-      timeRetained = Some(timeRetained))
-  }
 
   private def retainedTimeDescription(config: PaimonExpireSnapshotsConfig): String = {
     val duration = config.timeRetained.get
