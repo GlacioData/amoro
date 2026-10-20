@@ -21,7 +21,7 @@
 ## 1. 状态与版本边界
 
 - 状态：**DRAFT / 待评审**。本文描述待实现能力；没有实现分布式执行，没有执行生产清理，也没有性能测试结果。
-- 创建日期：2026-10-19；修订日期：2026-10-20（Asia/Singapore）。
+- 创建日期：2026-10-19；修订日期：2026-10-20（Asia/Singapore）。实施任务和具体接口见 [Plan](tasks/plan.md) 与 [任务清单](tasks/todo.md)；计划审查不代表运行验收。
 - 工作分支：`hotifx/producer-snapshot-retention`，保留用户指定的分支拼写。
 - Rebase 目标：本地 `dev`，提交 `6631bfe106af0540eb703f5166359bafeafd81a5`；本次没有 fetch 或修改远端。
 - Rebase 后代码基线：`7b257cd8f0fc48bccb66df805d94799a2ef5d838`。
@@ -115,7 +115,7 @@ Paimon 1.3.2 的 Procedure 同步调用原生 `ExpireSnapshots.expire()`。跨�
 - 显式在 driver 模式使用 Executor 专用参数应报参数错误，避免看起来配置成功但不生效。
 - `--procedureOptions file-operation.thread-num=32,...` 继续控制原生文件操作；它不是表并发度。
 - 新模式在创建 SparkSession 后、任何删除前校验实际配置和依赖：首版只接受已验证的 1.3.2 / 3.5.4 组合并禁用 speculation。
-- 首版建议要求 `spark.task.maxFailures=1`，减少 Spark 自动重试；同时按第 6 节拒绝非首次 Task／Stage attempt 执行删除。不能把配置值当成跨作业互斥或 exactly-once 保证。
+- 首版要求 `spark.task.maxFailures=1`，减少 Spark 自动重试；同时按第 6 节拒绝非首次 Task／Stage attempt 执行删除。不能把配置值当成跨作业互斥或 exactly-once 保证。
 - 不通过 `snapshot.expire.execution-mode=async` 绕过任务完成确认；直接调用原生 API 仍同步等待。
 - 无目标表直接成功；参数／模式校验失败返回 2；运行失败或结果未知返回 1；只有全部成功／正常跳过时返回 0。
 
@@ -125,9 +125,9 @@ Paimon 1.3.2 的 Procedure 同步调用原生 `ExpireSnapshots.expire()`。跨�
 
 1. 使用原有 TableResolver 枚举并筛选表，生成稳定的目标集合。
 2. 通过 Spark Catalog 加载真实 FileStoreTable，读取显式属性，解析最终保留配置。
-3. 为每表生成 `runId + workId` 和物理表标识，用于本次运行的关联日志与结果汇总；对目标集合中的同一物理表去重，不提供跨应用锁。
+3. 为每表生成 `runId + workId` 和物理表标识，用于本次运行的关联日志与结果汇总；对目标集合中的同一物理表去重，不提供跨应用锁。同路径别名只派发首个工作单元，其他逻辑目标记为 duplicateTarget 跳过，并保留主 workId 关联。
 4. 使用独立有界线程池提交最多 tableConcurrency 个表 Job，某表完成后立即补充下一张表，不等待整批结束。
-5. 每表一个 Spark Job、一个分区、一个清理 Task；只触发一次收集结果的 Action。Driver 线程只等待调度／结果，不运行过期 API。
+5. 每表一个清理 Spark Job、一个分区、一个清理 Task；只触发一次收集结果的 Action。Driver 线程只等待调度／结果，不运行过期 API。准备阶段的 `$options` 等只读查询可能产生额外 Job，需用独立的准备阶段标识区分，不计为重复清理。
 6. 设置并恢复各提交线程的 Spark active session、类加载器及 job group／description 等本地属性；不能在线程间串用表描述。
 7. 收集 Task 返回结果，在 Driver 内存中按 workId 汇总并逐表输出日志。Spark Job 成功但表结果失败时，应用仍失败。
 
@@ -152,7 +152,7 @@ Driver 可在准备阶段和 Task 启动时做身份核验；对运行中 DROP�
 ### 5.3 并发与资源
 
 - 一个 Executor 可以同时运行多个清理 Task，每个 Task 绑定一张不同的表；不要求“一张表独占一个 Executor”，也不要求每个 Executor 只运行一个 Task。
-- 运行表数不超过在途上限、可用 Spark Task 槽位和待处理表数三者的最小值。
+- 正常执行时运行表数不超过在途上限、可用 Spark Task 槽位和待处理表数三者的最小值；该上限约束派发的工作单元，不能限制失联或异常后仍未结束的底层 I/O。
 - 相同 Executor JVM 的表 Task 共享 Paimon 文件操作池，不同 JVM 的池独立。
 - 原生池初始大小与可见 CPU 数有关，后续请求可能扩容而不缩容；配置 32 不能被当成全应用严格的 32 请求上限。
 - 固定 Executor 数量做首轮验证；不要让动态扩容同时改变测试的存储请求压力。
@@ -203,8 +203,8 @@ Driver 崩溃后内存中的进度和结果不会恢复，首版不提供断点�
 
 ## 7. 重试、失败及取消
 
-- `retryTimes` 仍表示包含首次尝试的次数上限，但 Executor 模式仅对读取／准备及已经证明没有遗留副作用的失败使用自动重试。
-- 重试原生过期前必须确认前一次调用的文件任务全部结束，并重新读取快照状态。若无法证明，则将该表报告为结果未知，不能仅因为异常属于 NonFatal 就继续。允许的单轮重试仍在原 Task 内执行，不创建新 Task。
+- `retryTimes` 仍表示包含首次尝试的次数上限；首版 Executor 模式仅对删除前只读准备使用自动重试，旧 Driver 重试不变。
+- 首版原生过期调用一旦抛异常，不自动重试该调用，也不重投整表；无法确认副作用完成情况时报告结果未知。成功返回达到单轮上限后的续轮是原 Task 内的正常循环，不属于失败重试。若未来增加原生调用重试，必须另行证明前次文件任务全部结束并重新评审。
 - 不嵌套“整表框架重试 × Spark Task 重试 × 单轮重试”；各层尝试次数分别记录。
 - `continueOnTableFailure=true`：明确的单表错误转成失败结果，继续派发其他不冲突的表；最终只要有失败或未知结果，退出码为 1。
 - `continueOnTableFailure=false`：Driver 观察到首个失败后不再派发新的表，等待已经在途的表收敛。竞态中此前已提交的 Job 算在途，不能承诺“一个失败瞬间其他 Task 都不再启动”。
@@ -229,7 +229,7 @@ Driver 崩溃后内存中的进度和结果不会恢复，首版不提供断点�
 
 原生返回数量沿用 `deletedSnapshotsTotal` 字段，但注明它是被确认调用的返回值累计，不是精确文件删除审计。结果未知时标记计数不完整，不能把缺失的进度显示为 0 次删除。
 
-日志与结果不保存完整敏感 options、token、keytab 或口令；逐轮日志实时输出，Driver 内存中的历史详情必须有界，并给出截断标志和累计计数。
+日志与结果不保存完整敏感 options、token、keytab 或口令；异常消息也需脱敏。逐轮日志实时输出，Executor 模式每表仅保留最近 100 条轮次详情，并给出截断标志、独立 Long 累计计数及计数完整性。汇总不从截断后的明细重新计算累计轮数。
 
 本机耗时使用单调时钟计算；跨 Driver／Executor 的排队时间优先使用 Spark 调度事件。未经时钟同步验证，不直接用两台机器的墙上时钟相减生成精确延迟。
 
@@ -240,8 +240,9 @@ Driver 崩溃后内存中的进度和结果不会恢复，首版不提供断点�
 | `amoro-producer/src/main/scala/org/apache/amoro/producer/core/ProducerApp.scala` | 接入专用执行路径、汇总语义；其他 action 不改变 |
 | `.../paimon/PaimonExpireSnapshotsAction.scala` | CLI、保留策略解析及 Driver 兼容路径 |
 | `.../paimon/PaimonSqlRunner.scala` | Driver 端原生表／Procedure 能力访问，不发送到 Executor |
-| 拟新增 `.../paimon/PaimonSnapshotExpirationExecutor.scala` | 纯 Executor 原生清理逻辑 |
-| 拟新增 `.../paimon/PaimonSnapshotExpirationCoordinator.scala` | Driver 有界提交与结果汇总 |
+| 拟新增 `.../paimon/PaimonSnapshotTask.scala` / `PaimonSnapshotNativeExpire.scala` | 单表 Task 循环及原生清理边界 |
+| 拟新增 `.../paimon/PaimonSnapshotExecutor.scala` | Driver 有界提交与结果汇总 |
+| 拟新增 `.../spi/ProducerBatchExecutor.scala` | 通用可选批执行契约；core 不引用 Paimon 调度实现 |
 | `amoro-producer/src/test/scala/org/apache/amoro/producer/paimon/` | 策略、集成、多 JVM 和故障测试 |
 | `amoro-producer/README.md` | 模式、参数、生效策略、失败和恢复说明 |
 
@@ -272,7 +273,7 @@ Executor 模式的原生过期调用只存在于 Executor runner；Driver mode �
 | A04 | 多表、并发上限 2 | 至少两个不同表有真实执行重叠，最多两个表 Job 在途 |
 | A05 | Executor 位置验证 | 原生清理日志含非 Driver Executor ID；Driver 无清理删除调用 |
 | A06 | 同表多轮清理与持续写入 | 使用有效 maxDeletes 在同一 taskAttemptId 内续轮；不新增 Job／Task，不隐式固定快照或时间边界 |
-| A07 | 原生结果对照 | 相同初始表副本和固定时钟下与 SQL 路径保留快照集合一致，存活数据可读 |
+| A07 | 原生结果对照 | 相同初始表副本、固定快照时间戳且不跨越时间保留边界的 fixture 下，与 SQL 路径保留快照集合一致，存活数据可读 |
 | A08 | Tag、Consumer、changelog 及合并后文件 | 保护语义与当前 1.3.2 Procedure 一致，无新误删 |
 | A09 | 同应用目标去重及 Spark 重放 | 重复目标不主动重复派发；非首次 Task／Stage attempt 在删除前拒绝，不宣称跨应用互斥 |
 | A10 | 完成后丢失返回结果 | 无可信结果则报告未知，不补造成功记录或精确计数，不由 Driver 新建 Job 重投 |
@@ -347,11 +348,10 @@ Spark 提交侧显式禁用 speculation，首版使用 maxFailures=1 和固定 E
 
 禁止：增加额外状态存储或替代协调系统、同表并行分段过期、按轮另建 Task、同一 Task 串行处理多张表、删除过程中盲目重试、伪造成功／精确删除数量、把 local 模式通过当作集群验收。
 
-进入实现计划前需要确认：
+用户已要求开展计划和审查，计划按本文推荐的默认 driver、显式启用 executor、首版仅支持 1.3.2 / 3.5.4 编写。下列输入在真实环境验收时补齐，不阻塞计划文档交付：
 
-1. 是否接受首版默认 driver、显式启用 executor，且只支持 1.3.2 / 3.5.4。
-2. 生产实际版本、认证、存储类型、Executor 资源，以及外部调度如何保证不同清理应用不重叠。
-3. 性能验收的 20% 耗时改善与 10% RPC 延迟劣化上限是否符合目标环境要求。
+1. 生产实际版本、认证、存储类型、Executor 资源，以及外部调度如何保证不同清理应用不重叠。
+2. 性能验收的 20% 耗时改善与 10% RPC 延迟劣化上限是否符合目标环境要求。
 
 本文已明确推荐方向和安全边界；仍需通过上述评审及原型／故障验证，不能宣称当前已达到生产执行的绝对安全保证。
 
