@@ -26,21 +26,28 @@ final case class ProducerSummary(
     failedTables: Seq[TargetTable],
     skippedTables: Seq[TargetTable],
     failedTableSummaries: Seq[FailedTableSummary],
-    taskSuccessCount: Int,
-    taskFailedCount: Int)
+    taskSuccessCount: Long,
+    taskFailedCount: Long,
+    taskCountsComplete: Boolean = true)
 
 object ProducerSummary {
 
   def fromResults(results: Seq[(TargetTable, ActionResult)]): ProducerSummary = {
-    val taskResults = results.flatMap(_._2.tasks)
+    val totals = results.map { case (_, result) =>
+      result.taskTotals.getOrElse(ActionTaskTotals(
+        result.tasks.count(_.status == ActionStatus.Success).toLong,
+        result.tasks.count(_.status == ActionStatus.Failed).toLong,
+        complete = true))
+    }
     ProducerSummary(
       tableCount = results.size,
       successTables = tablesWithStatus(results, ActionStatus.Success),
       failedTables = tablesWithStatus(results, ActionStatus.Failed),
       skippedTables = tablesWithStatus(results, ActionStatus.Skipped),
       failedTableSummaries = failedTableSummaries(results),
-      taskSuccessCount = taskResults.count(_.status == ActionStatus.Success),
-      taskFailedCount = taskResults.count(_.status == ActionStatus.Failed))
+      taskSuccessCount = totals.map(_.success).sum,
+      taskFailedCount = totals.map(_.failed).sum,
+      taskCountsComplete = totals.forall(_.complete))
   }
 
   private def tablesWithStatus(

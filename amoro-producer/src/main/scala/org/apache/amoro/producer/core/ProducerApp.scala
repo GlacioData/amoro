@@ -24,7 +24,7 @@ import scala.util.control.NonFatal
 
 import org.apache.spark.sql.SparkSession
 
-import org.apache.amoro.producer.spi.{ActionConfig, LakeFormatAdapter, ProducerAction}
+import org.apache.amoro.producer.spi.{ActionConfig, LakeFormatAdapter, ProducerAction, ProducerRuntimeValidationException}
 
 object ProducerApp {
 
@@ -77,13 +77,17 @@ object ProducerApp {
     var spark: SparkSession = null
     try {
       spark = sparkBuilder()
+      val context = ProducerContext(spark, common, adapter)
+      action.validateRuntime(context, actionConfig)
       val targets = TableResolver.resolveTargets(spark, adapter, common)
       printTargets(common, targets)
-      val context = ProducerContext(spark, common, adapter)
       val results = executeTables(context, action, actionConfig, targets)
       val summary = printSummary(common, results, targets.size)
       if (summary.failedTables.nonEmpty) 1 else 0
     } catch {
+      case exception: ProducerRuntimeValidationException =>
+        println(s"运行配置错误: ${exception.getMessage}")
+        2
       case NonFatal(exception) =>
         println(s"执行失败: ${exception.getClass.getSimpleName}: ${exception.getMessage}")
         1
@@ -144,6 +148,14 @@ object ProducerApp {
       actionConfig: ActionConfig,
       targets: Seq[TargetTable]): Seq[(TargetTable, ActionResult)] = {
     validateRetryTimesForFrameworkRetry(context, action)
+    action.batchExecutor(context, actionConfig) match {
+      case Some(executor) =>
+        return executor.execute(
+          targets,
+          (table, result) =>
+            printTableAction(context.common, table, result))
+      case None =>
+    }
     val results = Seq.newBuilder[(TargetTable, ActionResult)]
     val remaining = targets.iterator
     var stopped = false
@@ -280,6 +292,9 @@ object ProducerApp {
     println(s"tables skipped     = ${summary.skippedTables.size}")
     println(s"task success count = ${summary.taskSuccessCount}")
     println(s"task failed count  = ${summary.taskFailedCount}")
+    if (!summary.taskCountsComplete) {
+      println("task counts complete = false (confirmed lower bounds only)")
+    }
     if (summary.failedTableSummaries.nonEmpty) {
       println("failed tables:")
       summary.failedTableSummaries.foreach { failedTable =>
