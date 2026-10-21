@@ -600,6 +600,8 @@ class TestPaimonPrimaryKeyCompactionExecutor {
 
     long targetSnapshotId = 10L;
     when(snapshotManager.snapshot(targetSnapshotId)).thenReturn(plannedSnapshot);
+    when(snapshotManager.snapshotExists(targetSnapshotId)).thenReturn(true);
+    when(plannedSnapshot.id()).thenReturn(targetSnapshotId);
     if (optimizingType == OptimizingType.FULL) {
       Snapshot snapshot = mock(Snapshot.class);
       when(snapshot.id()).thenReturn(targetSnapshotId);

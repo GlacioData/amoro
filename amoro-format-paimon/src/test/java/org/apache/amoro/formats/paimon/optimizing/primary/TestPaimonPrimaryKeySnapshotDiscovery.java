@@ -54,60 +54,60 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.file.Path;
 import java.util.Collections;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Stream;
 
 class TestPaimonPrimaryKeySnapshotDiscovery {
   @ParameterizedTest
-  @CsvSource({"0,1", "2,3", "31,32"})
+  @CsvSource({"0,2", "2,4", "31,33"})
   void shortGapDoesNotUseNativeFallback(int gap, int expectedProbes) throws Exception {
     Fixture fixture = new Fixture(10, 10 + gap, null);
     assertEquals(10 + gap, fixture.restore().snapshotId());
     assertEquals(expectedProbes, fixture.probes.get());
-    verify(fixture.manager, never()).latestSnapshotFromFileSystem();
+    verify(fixture.manager, never()).snapshotIdStream();
   }
 
   @Test
   void currentHintKeepsFastPath() throws Exception {
     Fixture fixture = new Fixture(10, 1010, "1010");
     assertEquals(1010, fixture.restore().snapshotId());
-    assertEquals(2, fixture.probes.get());
-    verify(fixture.manager, never()).latestSnapshotFromFileSystem();
+    assertEquals(3, fixture.probes.get());
+    verify(fixture.manager, never()).snapshotIdStream();
   }
 
   @ParameterizedTest
   @ValueSource(ints = {32, 1000})
   void longGapUsesOneNativeLookupAndStopsProbing(int gap) throws Exception {
     Fixture fixture = new Fixture(10, 10 + gap, null);
-    Snapshot latest = snapshot(10 + gap);
-    when(fixture.manager.latestSnapshotFromFileSystem()).thenReturn(latest);
     assertEquals(10 + gap, fixture.restore().snapshotId());
-    assertEquals(32, fixture.probes.get());
-    verify(fixture.manager).latestSnapshotFromFileSystem();
-    verify(fixture.manager, never()).snapshot(anyLong());
+    assertEquals(33, fixture.probes.get());
+    verify(fixture.manager).snapshotIdStream();
+    verify(fixture.manager).snapshot(10L + gap);
   }
 
   @Test
   void staleHintAlsoHasBoundedProbes() throws Exception {
     Fixture fixture = new Fixture(10, 1010, "100");
-    doReturn(snapshot(1010)).when(fixture.manager).latestSnapshotFromFileSystem();
     assertEquals(1010, fixture.restore().snapshotId());
-    assertEquals(33, fixture.probes.get(), "One hint validation plus 32 consecutive probes");
-    verify(fixture.manager).latestSnapshotFromFileSystem();
+    assertEquals(
+        34, fixture.probes.get(), "Hint validation, 32 successors and selected snapshot check");
+    verify(fixture.manager).snapshotIdStream();
   }
 
   @Test
   void repeatedTaskDiscoveryDoesNotScaleWithSnapshotGap() throws Exception {
     Fixture fixture = new Fixture(10, 1010, null);
-    doReturn(snapshot(1010)).when(fixture.manager).latestSnapshotFromFileSystem();
     for (int i = 0; i < 16; i++) {
       assertEquals(1010, fixture.restore().snapshotId());
     }
-    assertEquals(512, fixture.probes.get());
-    verify(fixture.manager, times(16)).latestSnapshotFromFileSystem();
+    assertEquals(528, fixture.probes.get());
+    verify(fixture.manager, times(16)).snapshotIdStream();
     System.out.println(
         "SNAPSHOT_DISCOVERY tasks=16 gap=1000 directExists="
             + fixture.probes.get()
@@ -118,7 +118,7 @@ class TestPaimonPrimaryKeySnapshotDiscovery {
   void fallbackFailureDoesNotRestoreAnOlderSnapshot() throws Exception {
     Fixture fixture = new Fixture(10, 1010, null);
     IllegalStateException failure = new IllegalStateException("listing unavailable");
-    when(fixture.manager.latestSnapshotFromFileSystem()).thenThrow(failure);
+    when(fixture.manager.snapshotIdStream()).thenThrow(failure);
     assertSame(failure, assertThrows(IllegalStateException.class, fixture::restore));
     verify(fixture.manager, never()).snapshot(anyLong());
     assertEquals(32, fixture.probes.get());
@@ -128,9 +128,8 @@ class TestPaimonPrimaryKeySnapshotDiscovery {
   @ValueSource(longs = {-1, 10, 41})
   void missingOrRegressedFallbackCannotUsePartialProgress(long result) throws Exception {
     Fixture fixture = new Fixture(10, 1010, null);
-    doReturn(result < 0 ? null : snapshot(result))
-        .when(fixture.manager)
-        .latestSnapshotFromFileSystem();
+    when(fixture.manager.snapshotIdStream())
+        .thenAnswer(ignored -> result < 0 ? Stream.empty() : Stream.of(result));
     assertThrows(IllegalStateException.class, fixture::restore);
     verify(fixture.manager, never()).snapshot(anyLong());
   }
@@ -139,8 +138,8 @@ class TestPaimonPrimaryKeySnapshotDiscovery {
   void maximumSnapshotIdDoesNotOverflow() throws Exception {
     Fixture fixture = new Fixture(Long.MAX_VALUE, Long.MAX_VALUE, null);
     assertEquals(Long.MAX_VALUE, fixture.restore().snapshotId());
-    assertEquals(0, fixture.probes.get());
-    verify(fixture.manager, never()).latestSnapshotFromFileSystem();
+    assertEquals(1, fixture.probes.get());
+    verify(fixture.manager, never()).snapshotIdStream();
   }
 
   @ParameterizedTest
@@ -163,10 +162,52 @@ class TestPaimonPrimaryKeySnapshotDiscovery {
       HintFileUtils.deleteLatestHint(manager.fileIO(), manager.snapshotDirectory());
       PaimonPrimaryKeyCompactionOutput output =
           new PaimonPrimaryKeyCompactionExecutor(planned).execute();
-      verify(manager).latestSnapshotFromFileSystem();
+      verify(manager).snapshotIdStream();
       commit(raw, planned, output);
       assertEquals(Collections.singletonList("1|41|41|41"), rows(raw));
     }
+  }
+
+  @Test
+  void expiredPlannedSnapshotListsOnceEvenWhenItsSuccessorIsAbsent() throws Exception {
+    Fixture fixture = new Fixture(10, 1010, "10");
+    doReturn(false).when(fixture.manager).snapshotExists(10L);
+    doReturn(false).when(fixture.manager).snapshotExists(11L);
+    assertEquals(1010, fixture.restore().snapshotId());
+    verify(fixture.manager).snapshotIdStream();
+    verify(fixture.manager, never()).snapshot(10L);
+  }
+
+  @Test
+  void selectedMaximumExpiringDoesNotFallBackOrListAgain() throws Exception {
+    Fixture fixture = new Fixture(10, 1010, null);
+    when(fixture.manager.snapshotIdStream()).thenReturn(Stream.of(1009L, 1010L));
+    doReturn(false).when(fixture.manager).snapshotExists(1010L);
+    assertThrows(IllegalStateException.class, fixture::restore);
+    verify(fixture.manager).snapshotIdStream();
+    verify(fixture.manager, never()).snapshot(anyLong());
+  }
+
+  @Test
+  void enumerationIoFailurePreservesCause() throws Exception {
+    Fixture fixture = new Fixture(10, 1010, null);
+    IOException failure = new IOException("permission denied");
+    when(fixture.manager.snapshotIdStream()).thenThrow(failure);
+    assertSame(failure, assertThrows(UncheckedIOException.class, fixture::restore).getCause());
+    verify(fixture.manager).snapshotIdStream();
+  }
+
+  @Test
+  void existsAndSnapshotReadFailuresDoNotTriggerRetryListing() throws Exception {
+    Fixture fixture = new Fixture(10, 12, null);
+    IllegalStateException failure = new IllegalStateException("storage timeout");
+    when(fixture.manager.snapshotExists(11L)).thenThrow(failure);
+    assertSame(failure, assertThrows(IllegalStateException.class, fixture::restore));
+    verify(fixture.manager, never()).snapshotIdStream();
+    Fixture listed = new Fixture(10, 1010, null);
+    when(listed.manager.snapshot(1010L)).thenThrow(failure);
+    assertSame(failure, assertThrows(IllegalStateException.class, listed::restore));
+    verify(listed.manager).snapshotIdStream();
   }
 
   private static Snapshot snapshot(long id) {
@@ -203,6 +244,7 @@ class TestPaimonPrimaryKeySnapshotDiscovery {
                 return id > 0 && id <= latest;
               });
       doReturn(snapshot(latest)).when(manager).snapshot(latest);
+      when(manager.snapshotIdStream()).thenAnswer(ignored -> Stream.of(latest));
     }
 
     PaimonPrimaryKeySnapshotWriteRestore restore() {
