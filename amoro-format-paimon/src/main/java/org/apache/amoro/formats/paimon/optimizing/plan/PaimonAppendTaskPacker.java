@@ -111,8 +111,15 @@ final class PaimonAppendTaskPacker {
         total = 0L;
       }
     }
-    if (bin.size() >= context.minorMinFileNum()
-        || (bin.size() > 1 && context.reachMinorInterval())) {
+    // Paimon 1.4.2 source:
+    // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/append/AppendCompactTask.java#L70-L74
+    // The native executor permits a singleton only when the table enables deletion vectors,
+    // including files without an actual DV. Leave an illegal singleton in the current snapshot.
+    boolean validInput =
+        bin.size() > 1 || (!bin.isEmpty() && context.coreOptions().deletionVectorsEnabled());
+    if (validInput
+        && (bin.size() >= context.minorMinFileNum()
+            || (bin.size() > 1 && context.reachMinorInterval()))) {
       addTask(tasks, evaluation, bin);
     }
     return tasks;
