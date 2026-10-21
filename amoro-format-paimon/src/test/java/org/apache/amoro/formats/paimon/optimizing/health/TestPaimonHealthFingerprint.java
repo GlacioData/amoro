@@ -62,6 +62,25 @@ class TestPaimonHealthFingerprint {
   @TempDir Path warehouse;
 
   @ParameterizedTest
+  @ValueSource(strings = {"compaction.offpeak.start.hour", "compaction.offpeak-ratio"})
+  void appendIgnoresUnrelatedOffPeakValues(String option) throws Exception {
+    try (Catalog catalog =
+        PaimonCatalogFactory.paimonCatalog(
+            Collections.singletonMap("warehouse", warehouse.toUri().toString()),
+            new Configuration())) {
+      AppendOnlyFileStoreTable table = fixedTable(catalog);
+      FileStoreTable invalidOffPeak = table.copy(Collections.singletonMap(option, "invalid"));
+      PaimonHealthEvaluationContext original =
+          PaimonHealthEvaluationContext.captureAt(table, "t", null, null, 0);
+      PaimonHealthEvaluationContext captured =
+          PaimonHealthEvaluationContext.captureAt(invalidOffPeak, "t", null, null, 0);
+      assertEquals(0, captured.offPeakRatioNow());
+      assertEquals(original.key(), captured.key());
+      assertFalse(captured.configurationError().isPresent());
+    }
+  }
+
+  @ParameterizedTest
   @ValueSource(ints = {-1, 2})
   void clockTransitionsInvalidateOnlyPlanningAndAreConsumedOnce(int buckets) throws Exception {
     try (Catalog catalog =

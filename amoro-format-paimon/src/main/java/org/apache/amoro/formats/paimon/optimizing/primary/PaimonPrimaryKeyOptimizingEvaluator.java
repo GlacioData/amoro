@@ -224,6 +224,7 @@ public class PaimonPrimaryKeyOptimizingEvaluator {
       List<PaimonBucketCompactionUnit> normalCandidates = new ArrayList<>();
       List<PaimonBucketCompactionUnit> majorCandidates = new ArrayList<>();
       int stopTrigger = coreOptions.numSortedRunStopTrigger();
+      int offPeakRatio = PaimonHealthEvaluationContext.offPeakRatioAt(coreOptions, planTime);
 
       for (BucketFiles bucketFiles : snapshotFiles.buckets.values()) {
         Levels levels =
@@ -231,7 +232,7 @@ public class PaimonPrimaryKeyOptimizingEvaluator {
         long sortedRunCount = levels.numberOfSortedRuns();
         PaimonBucketCompactionUnit unit = bucketFiles.toUnit(sortedRunCount);
         allUnits.add(unit);
-        if (hasNormalCompactionCandidate(coreOptions, levels)) {
+        if (hasNormalCompactionCandidate(coreOptions, levels, offPeakRatio)) {
           normalCandidates.add(unit);
           if (sortedRunCount > stopTrigger) {
             majorCandidates.add(unit);
@@ -372,7 +373,8 @@ public class PaimonPrimaryKeyOptimizingEvaluator {
       for (PaimonPrimaryKeySnapshotAnalysis.BucketFacts facts : analysis.bucketFacts()) {
         PaimonBucketCompactionUnit unit = facts.unit();
         allUnits.add(unit);
-        if (hasNormalCompactionCandidate(coreOptions, facts.levels())) {
+        if (hasNormalCompactionCandidate(
+            coreOptions, facts.levels(), healthContext.offPeakRatioNow())) {
           normalCandidates.add(unit);
           if (unit.getSortedRunCount() > stopTrigger) {
             majorCandidates.add(unit);
@@ -461,8 +463,9 @@ public class PaimonPrimaryKeyOptimizingEvaluator {
     return snapshotFiles;
   }
 
-  private static boolean hasNormalCompactionCandidate(CoreOptions options, Levels levels) {
-    CompactStrategy strategy = createCompactStrategy(options);
+  private static boolean hasNormalCompactionCandidate(
+      CoreOptions options, Levels levels, int offPeakRatio) {
+    CompactStrategy strategy = createCompactStrategy(options, offPeakRatio);
     for (int pick = 0; pick < 2; pick++) {
       if (strategy.pick(levels.numberOfLevels(), levels.levelSortedRuns()).isPresent()) {
         return true;
@@ -471,14 +474,17 @@ public class PaimonPrimaryKeyOptimizingEvaluator {
     return false;
   }
 
-  private static CompactStrategy createCompactStrategy(CoreOptions options) {
+  private static CompactStrategy createCompactStrategy(CoreOptions options, int offPeakRatio) {
     UniversalCompaction universal =
         new UniversalCompaction(
             options.maxSizeAmplificationPercent(),
             options.sortedRunSizeRatio(),
             options.numSortedRunCompactionTrigger(),
             EarlyFullCompaction.create(options),
-            OffPeakHours.create(options));
+            // Freeze this strategy's ratio even if native pick() crosses an hour boundary.
+            // Paimon 1.4.2 OffPeakHours.create accepts [0, 24), covering every JVM-local hour.
+            // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/mergetree/compact/OffPeakHours.java#L37-L65
+            offPeakRatio == 0 ? null : OffPeakHours.create(0, 24, offPeakRatio));
     if (options.needLookup()) {
       Integer compactMaxInterval = null;
       switch (options.lookupCompact()) {

@@ -202,8 +202,12 @@ public class PaimonPrimaryKeyOptimizingPlanner implements TableOptimizingPlanner
       return cacheEmpty(false);
     }
     PaimonHealthEvaluationContext healthContext =
-        PaimonHealthEvaluationContext.capture(
-            table, paimonTable.id().toString(), runtimeInputs.healthContext(), tableProperties);
+        PaimonHealthEvaluationContext.captureAt(
+            table,
+            paimonTable.id().toString(),
+            runtimeInputs.healthContext(),
+            tableProperties,
+            planTime);
     PaimonPrimaryKeyOptimizingEvaluation evaluation =
         suppliedAnalysis instanceof PaimonPrimaryKeySnapshotAnalysis
                 && reusable(healthContext, (PaimonPrimaryKeySnapshotAnalysis) suppliedAnalysis)
