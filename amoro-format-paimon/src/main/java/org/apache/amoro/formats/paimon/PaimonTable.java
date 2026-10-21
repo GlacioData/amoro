@@ -343,11 +343,12 @@ public class PaimonTable implements AmoroTable<Table>, Serializable {
     // validation remain authoritative.
     pending.setFullCompactionPending(
         optimizingNecessary && evaluation.optimizingType() == OptimizingType.FULL);
-    // Only confirmed MINOR demand may bypass the unchanged-snapshot queue gate. The planner
+    // Confirmed MINOR or MAJOR demand may bypass the unchanged-snapshot queue gate. The planner
     // still rechecks current configuration, interval and native candidates before creating work.
     pending.setSameSnapshotPlanningPending(
         optimizingNecessary
-            && evaluation.optimizingType() == OptimizingType.MINOR
+            && (evaluation.optimizingType() == OptimizingType.MINOR
+                || evaluation.optimizingType() == OptimizingType.MAJOR)
             && !CoreOptions.fromMap(fileStoreTable.options()).isChainTable());
     pending.setGentleMinorCompactionPending(
         optimizingNecessary

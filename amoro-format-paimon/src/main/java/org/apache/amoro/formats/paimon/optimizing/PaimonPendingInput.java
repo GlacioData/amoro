@@ -54,8 +54,8 @@ public class PaimonPendingInput implements FormatPendingInput {
   private boolean fullCompactionPending;
 
   // Planning demand can arise without a new snapshot: an Append capability/config change or
-  // MINOR/FULL interval expiry, or primary-key MINOR becoming due. Older JSON defaults this to
-  // false.
+  // MINOR/FULL interval expiry, or confirmed primary-key MINOR/MAJOR demand. Older JSON defaults
+  // this to false.
   private boolean sameSnapshotPlanningPending;
 
   // Confirmed MINOR demand for an affected, originally GENTLE primary-key table.
