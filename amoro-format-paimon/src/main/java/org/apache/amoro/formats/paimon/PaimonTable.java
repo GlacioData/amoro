@@ -280,21 +280,27 @@ public class PaimonTable implements AmoroTable<Table>, Serializable {
             && (appendTable.bucketMode() == BucketMode.BUCKET_UNAWARE || fixedSupported);
     PaimonPendingInput pendingInput = analysis.pendingInput();
     PaimonPendingInput optimizingPendingInput = copyPendingInput(pendingInput);
-    // Paimon ac223f47, FileSystemCatalog.java:167-171 and SchemaManager.java:252-280 publish option
-    // changes through a new schema without a data snapshot. Keep exactly one planning demand for a
-    // fixed Append capability change until beginProcess or empty-plan completion consumes
-    // pending_input.
+    // Paimon 1.4.2 source:
+    // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/schema/SchemaManager.java#L252-L280
+    // Option changes do not require a data snapshot; interval expiry also leaves it unchanged.
+    // Keep one planning demand for both Append modes until DefaultTableRuntime.beginProcess or
+    // completeEmptyProcess consumes pending_input.
     optimizingPendingInput.setSameSnapshotPlanningPending(
-        appendTable.bucketMode() == BucketMode.HASH_FIXED && optimizingNecessary);
+        (appendTable.bucketMode() == BucketMode.HASH_FIXED
+                || appendTable.bucketMode() == BucketMode.BUCKET_UNAWARE)
+            && optimizingNecessary);
     return new PendingInputResult(
         pendingInput, optimizingPendingInput, optimizingNecessary, analysis);
   }
 
   @Override
   public boolean supportsPendingInputRefresh() {
+    // DefaultTableRuntime.applyRefreshableEvaluation retains changed planning demand while an old
+    // planner is PLANNING. Both Append modes must use that guarded refresh path.
     return PaimonFullScheduling.isPrimaryKeyTable(this)
         || (table instanceof AppendOnlyFileStoreTable
-            && ((AppendOnlyFileStoreTable) table).bucketMode() == BucketMode.HASH_FIXED);
+            && (((AppendOnlyFileStoreTable) table).bucketMode() == BucketMode.HASH_FIXED
+                || ((AppendOnlyFileStoreTable) table).bucketMode() == BucketMode.BUCKET_UNAWARE));
   }
 
   @Override

@@ -61,13 +61,14 @@ import java.util.Map;
 class TestPaimonHealthFingerprint {
   @TempDir Path warehouse;
 
-  @Test
-  void clockTransitionsInvalidateOnlyPlanningAndAreConsumedOnce() throws Exception {
+  @ParameterizedTest
+  @ValueSource(ints = {-1, 2})
+  void clockTransitionsInvalidateOnlyPlanningAndAreConsumedOnce(int buckets) throws Exception {
     try (Catalog catalog =
         PaimonCatalogFactory.paimonCatalog(
             Collections.singletonMap("warehouse", warehouse.toUri().toString()),
             new Configuration())) {
-      AppendOnlyFileStoreTable table = fixedTable(catalog);
+      AppendOnlyFileStoreTable table = appendTable(catalog, buckets);
       write(table, 1);
       OptimizationContext runtime = mock(OptimizationContext.class);
       when(runtime.getOptimizingConfig())
@@ -205,18 +206,23 @@ class TestPaimonHealthFingerprint {
   }
 
   private static AppendOnlyFileStoreTable fixedTable(Catalog catalog) throws Exception {
+    return appendTable(catalog, 2);
+  }
+
+  private static AppendOnlyFileStoreTable appendTable(Catalog catalog, int buckets)
+      throws Exception {
     catalog.createDatabase("d", false);
     Identifier id = Identifier.create("d", "fixed");
-    catalog.createTable(
-        id,
+    Schema.Builder schema =
         Schema.newBuilder()
             .column("id", DataTypes.INT())
             .column("other", DataTypes.INT())
-            .option("bucket", "2")
-            .option("bucket-key", "id")
-            .option("write-only", "true")
-            .build(),
-        false);
+            .option("bucket", String.valueOf(buckets))
+            .option("write-only", "true");
+    if (buckets > 0) {
+      schema.option("bucket-key", "id");
+    }
+    catalog.createTable(id, schema.build(), false);
     return (AppendOnlyFileStoreTable) catalog.getTable(id);
   }
 

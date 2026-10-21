@@ -53,8 +53,9 @@ public class PaimonPendingInput implements FormatPendingInput {
   // false.
   private boolean fullCompactionPending;
 
-  // Confirmed demand can arise without a new snapshot: a fixed-bucket Append capability/config
-  // change, or primary-key MINOR becoming due. Older pending_input JSON defaults this to false.
+  // Planning demand can arise without a new snapshot: an Append capability/config change or
+  // MINOR/FULL interval expiry, or primary-key MINOR becoming due. Older JSON defaults this to
+  // false.
   private boolean sameSnapshotPlanningPending;
 
   // Confirmed MINOR demand for an affected, originally GENTLE primary-key table.

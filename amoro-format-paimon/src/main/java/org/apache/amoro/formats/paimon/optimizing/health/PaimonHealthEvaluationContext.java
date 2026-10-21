@@ -323,12 +323,16 @@ public final class PaimonHealthEvaluationContext {
                 eligibilityOptions.get(PaimonOptimizingEligibility.SELF_OPTIMIZING_ENABLED));
     if (shape == TableShape.APPEND && bucketMode == BucketMode.HASH_FIXED) {
       addFixedAppendPlanningOptions(builder, (AppendOnlyFileStoreTable) table, eligibilityOptions);
+    }
+    if (shape == TableShape.APPEND
+        && (bucketMode == BucketMode.HASH_FIXED || bucketMode == BucketMode.BUCKET_UNAWARE)) {
       if (context != null && optimizingConfig != null) {
         // Source:
         // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/operation/BaseAppendFileStoreWrite.java#L187-L222
         // Native rewriting has no AMS clock wakeup. Encode only interval transitions in the
         // planning digest: unchanged overdue state is consumed once, without manifest polling.
         // The structural health digest below intentionally excludes these scheduling flags.
+        // Keep the existing digest labels so fixed-bucket planning keys remain stable.
         builder
             .add(
                 "fixedAppendMinorDue",
