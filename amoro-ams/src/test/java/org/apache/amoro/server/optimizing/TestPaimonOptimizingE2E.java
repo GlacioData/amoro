@@ -149,9 +149,8 @@ public class TestPaimonOptimizingE2E {
         new PaimonTable(TableIdentifier.of("test_catalog", "db1", "t_e2e"), catalog.getTable(id));
 
     // === Planner ===
-    // availableCore=1, maxInputSizePerThread=128MB — deliberately wide so the quota path (C7) does
-    // not defer the single BUCKET_UNAWARE task this small fixture produces. Quota is exhaustively
-    // unit-tested on its own in TestPaimonOptimizingPlanner; here we only exercise the full chain.
+    // One core releases one task per tick; remaining files stay available for later plans.
+    // Here the selected task exercises the real execute/commit chain without changing the quota.
     PaimonOptimizingPlanner planner =
         new PaimonOptimizingPlanner(
             wrapped, /* tableId= */ 1L, /* processId= */ 1L, 1.0, 128L * 1024L * 1024L);
@@ -238,19 +237,19 @@ public class TestPaimonOptimizingE2E {
     createBucketUnawareAppendTable(catalog, "t_restart", /* commits= */ 8);
     Identifier id = Identifier.create("db1", "t_restart");
     long filesBefore = countDataFiles((AppendOnlyFileStoreTable) catalog.getTable(id));
+    List<String> rowsBefore = readRowStrings(catalog.getTable(id));
 
     PaimonTable wrapped =
         new PaimonTable(
             TableIdentifier.of("test_catalog", "db1", "t_restart"), catalog.getTable(id));
     PaimonOptimizingPlanner planner =
         new PaimonOptimizingPlanner(
-            wrapped, /* tableId= */ 7L, /* processId= */ 42L, 1.0, 128L * 1024L * 1024L);
+            wrapped, /* tableId= */ 7L, /* processId= */ 42L, 4.0, 128L * 1024L * 1024L);
     OptimizingPlanResult<PaimonCompactionTask> plan = planner.plan();
     List<PaimonCompactionTask> original = new ArrayList<>(plan.getTasks());
-    // Need at least 2 tasks to simulate "one done, rest pending". Small tables fuse into a single
-    // task — retry with a wider table if needed.
+    // A restart must resume at least one unfinished task after the first task succeeds.
     assertTrue(
-        original.size() >= 1,
+        original.size() >= 2,
         "Planner produced no tasks; fixture should create enough small files to plan");
 
     // --- Phase 1: complete task #0 in-process (output already bound on its descriptor) ---
@@ -267,6 +266,7 @@ public class TestPaimonOptimizingE2E {
     for (int i = 1; i < original.size(); i++) {
       toPersist.put(i, original.get(i).getInput());
     }
+    assertFalse(toPersist.isEmpty(), "Restart must persist unfinished task inputs");
     ByteBuffer persisted = SerializationUtil.simpleSerialize(toPersist);
     byte[] persistedBytes = new byte[persisted.remaining()];
     persisted.get(persistedBytes);
@@ -282,7 +282,7 @@ public class TestPaimonOptimizingE2E {
     original = null;
     planner = null;
     plan = null;
-    // Note: firstTask kept intentionally — it is the already-committed success that the committer
+    // Note: firstTask kept intentionally — it has executed but is not committed. The committer
     // needs in its input collection (a real AMS keeps it on TableOptimizingProcess.taskMap too).
 
     // --- Phase 4: re-materialise tasks the way OptimizingQueue.loadTaskRuntimes does. ---
@@ -319,6 +319,7 @@ public class TestPaimonOptimizingE2E {
       resumedTasks.add(paimonDescriptor);
     }
 
+    assertFalse(resumedTasks.isEmpty(), "Restart must execute restored tasks");
     // --- Phase 5: execute the resumed tasks; each should have a valid input wired up. ---
     for (PaimonCompactionTask t : resumedTasks) {
       PaimonCompactionInput in = t.getInput();
@@ -355,6 +356,8 @@ public class TestPaimonOptimizingE2E {
             Collections.emptyMap());
     committer.commit();
 
+    assertEquals(
+        rowsBefore, readRowStrings(catalog.getTable(id)), "Recovery must preserve all rows");
     long filesAfter = countDataFiles((AppendOnlyFileStoreTable) catalog.getTable(id));
     assertTrue(
         filesAfter < filesBefore,
@@ -579,6 +582,9 @@ public class TestPaimonOptimizingE2E {
   private static Table createBucketUnawareAppendTable(
       Catalog catalog, String tableName, int commits) throws Exception {
     catalog.createDatabase("db1", true);
+    // Match PaimonOptimizingEligibility's explicit admission flags. Paimon's write-only option
+    // skips native compaction and snapshot expiration; Amoro self-optimizing must be enabled:
+    // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-api/src/main/java/org/apache/paimon/CoreOptions.java#L634-L641
     Schema schema =
         Schema.newBuilder()
             .column("id", DataTypes.INT())
@@ -586,6 +592,8 @@ public class TestPaimonOptimizingE2E {
             .option("bucket", "-1")
             .option("target-file-size", "1 kb")
             .option("compaction.min.file-num", "2")
+            .option("write-only", "true")
+            .option("self-optimizing.enabled", "true")
             .build();
     Identifier id = Identifier.create("db1", tableName);
     catalog.createTable(id, schema, true);
