@@ -20,6 +20,7 @@ package org.apache.amoro.formats.paimon.optimizing.commit;
 
 import org.apache.amoro.exception.OptimizingCommitException;
 import org.apache.amoro.formats.paimon.PaimonTable;
+import org.apache.amoro.formats.paimon.optimizing.PaimonAppendCapabilities;
 import org.apache.amoro.formats.paimon.optimizing.PaimonCompactionOutput;
 import org.apache.amoro.formats.paimon.optimizing.PaimonCompactionTask;
 import org.apache.amoro.formats.paimon.optimizing.PaimonFixedBucketCommitGuard;
@@ -36,6 +37,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -129,6 +131,14 @@ public class PaimonTableCommit implements TableOptimizingCommitter {
           table.name(),
           commitUser);
       return;
+    }
+
+    // SUCCESS recovery bypasses the executor, so persisted outputs need the same capability
+    // fence before either native commit API can publish a snapshot.
+    Optional<String> rejection =
+        PaimonAppendCapabilities.dataEvolutionRejection(table.coreOptions());
+    if (rejection.isPresent()) {
+      throw new OptimizingCommitException(rejection.get(), false);
     }
 
     List<CommitMessage> messages = new ArrayList<>(successTasks.size());

@@ -61,6 +61,7 @@ import org.apache.paimon.table.sink.BatchWriteBuilder;
 import org.apache.paimon.types.DataTypes;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
@@ -181,7 +182,26 @@ class TestPaimonAppendPlanningDemand extends PersistentBase {
     assertEquals(pending, restored.isSameSnapshotPlanningPending());
   }
 
+  @Test
+  void dataEvolutionNeverBecomesPendingAndDoesNotRepeatUnchangedScans() throws Exception {
+    initialize(-1, OptimizingType.MINOR, 2, true);
+    refresh.execute(runtime);
+    assertEquals(OptimizingStatus.IDLE, runtime.getOptimizingStatus());
+    assertFalse(pending().isSameSnapshotPlanningPending());
+    assertFalse(pending().canPlanWithoutSnapshotChange(runtime, System.currentTimeMillis()));
+    assertPersistedDemand(OptimizingStatus.IDLE, false);
+    assertTrue(runtime.getRuntimeHealthSnapshot().get().getCurrentHealthScore() >= 0);
+    refresh.execute(runtime);
+    refresh.execute(runtime);
+    assertEquals(1, table.evaluations, "unsupported unchanged tables must not poll manifests");
+  }
+
   private void initialize(int buckets, OptimizingType type, int batches) throws Exception {
+    initialize(buckets, type, batches, false);
+  }
+
+  private void initialize(int buckets, OptimizingType type, int batches, boolean evolution)
+      throws Exception {
     catalog =
         PaimonCatalogFactory.paimonCatalog(
             Collections.singletonMap("warehouse", warehouse.toUri().toString()),
@@ -204,6 +224,9 @@ class TestPaimonAppendPlanningDemand extends PersistentBase {
             .option("self-optimizing.full.rewrite-all-files", "false");
     if (buckets > 0) {
       schema.option("bucket-key", "id").option("bucket-append-ordered", "true");
+    }
+    if (evolution) {
+      schema.option("row-tracking.enabled", "true").option("data-evolution.enabled", "true");
     }
     catalog.createTable(identifier, schema.build(), false);
     AppendOnlyFileStoreTable nativeTable = (AppendOnlyFileStoreTable) catalog.getTable(identifier);

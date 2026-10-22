@@ -285,6 +285,13 @@ public class PaimonOptimizingPlanner implements TableOptimizingPlanner {
         logPlanFinish("isNecessary", startTime, "necessary=false,reason=ineligible");
         return false;
       }
+      Optional<String> rejection = PaimonAppendCapabilities.appendRejection(table);
+      if (rejection.isPresent()) {
+        necessary = false;
+        cachedTasks = Collections.emptyList();
+        logPlanFinish("isNecessary", startTime, "necessary=false,reason=" + rejection.get());
+        return false;
+      }
       PaimonHealthEvaluationContext healthContext =
           PaimonHealthEvaluationContext.captureAt(
               table,

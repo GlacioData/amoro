@@ -135,6 +135,13 @@ public class PaimonCompactionExecutor implements OptimizingExecutor<PaimonCompac
     if (table.bucketMode() != BucketMode.BUCKET_UNAWARE) {
       throw new IllegalStateException("Append compaction requires BUCKET_UNAWARE table");
     }
+    // A recovered task can predate the planner's capability gate. Refuse it before opening a
+    // writer. PaimonCompactionSchema also preserves and validates these bound execution options.
+    PaimonAppendCapabilities.dataEvolutionRejection(table.coreOptions())
+        .ifPresent(
+            reason -> {
+              throw new IllegalStateException(reason);
+            });
     // Paimon 1.4.2 AppendCompactTask#doCompact 只重写 compactBefore；不得另扫 latest 扩大输入。
     // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/append/AppendCompactTask.java
     long requiredSchemaId =

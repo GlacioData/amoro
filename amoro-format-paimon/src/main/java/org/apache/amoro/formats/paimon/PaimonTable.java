@@ -261,23 +261,18 @@ public class PaimonTable implements AmoroTable<Table>, Serializable {
       Map<String, String> tableProperties) {
     PaimonAppendSnapshotAnalysis analysis =
         PaimonAppendFileScanner.analyze(appendTable, healthContext, null);
-    boolean fixedSupported = false;
+    Optional<String> rejection = PaimonAppendCapabilities.appendRejection(appendTable);
+    boolean appendSupported = !rejection.isPresent();
+    rejection.ifPresent(
+        reason ->
+            LOG.info("Paimon table [{}] Append optimization is unsupported: {}", id(), reason));
     if (appendTable.bucketMode() == BucketMode.HASH_FIXED) {
       // Paimon ac223f47, operation/BucketedAppendFileStoreWrite.java:75-85 and
       // CoreOptions.java:3654-3658 define the native ordered/unordered and clustering modes.
       // Reuse the same current capability gate as planning; refusal is not a health read failure.
-      Optional<String> rejection = PaimonAppendCapabilities.fixedBucketRejection(appendTable);
-      if (rejection.isPresent()) {
-        LOG.info(
-            "Paimon table [{}] fixed Append optimization is unsupported: {}",
-            id(),
-            rejection.get());
-      }
-      fixedSupported = !rejection.isPresent() && analysis.plannerFactsAvailable();
+      appendSupported = appendSupported && analysis.plannerFactsAvailable();
     }
-    boolean optimizingNecessary =
-        isOptimizingEligible(tableProperties, context)
-            && (appendTable.bucketMode() == BucketMode.BUCKET_UNAWARE || fixedSupported);
+    boolean optimizingNecessary = isOptimizingEligible(tableProperties, context) && appendSupported;
     PaimonPendingInput pendingInput = analysis.pendingInput();
     PaimonPendingInput optimizingPendingInput = copyPendingInput(pendingInput);
     // Paimon 1.4.2 source:

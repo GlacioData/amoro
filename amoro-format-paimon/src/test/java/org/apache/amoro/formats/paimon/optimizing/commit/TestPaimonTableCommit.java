@@ -45,6 +45,7 @@ import org.apache.amoro.optimizing.TableOptimizingCommitter.CommitMode;
 import org.apache.amoro.table.TableIdentifier;
 import org.apache.amoro.utils.SerializationUtil;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.paimon.CoreOptions;
 import org.apache.paimon.Snapshot;
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.Identifier;
@@ -309,7 +310,7 @@ public class TestPaimonTableCommit {
   @Test
   @DisplayName("NORMAL mode uses direct commit without historical filtering")
   void testNormalModeUsesDirectCommit() throws Exception {
-    AppendOnlyFileStoreTable table = mock(AppendOnlyFileStoreTable.class);
+    AppendOnlyFileStoreTable table = mockOrdinaryAppendTable();
     TableCommitImpl directCommit = mock(TableCommitImpl.class);
     List<CommitMessage> messages = Collections.singletonList(mock(CommitMessage.class));
     when(table.name()).thenReturn("direct-table");
@@ -327,7 +328,7 @@ public class TestPaimonTableCommit {
   @Test
   @DisplayName("NORMAL failure retries once with a fresh filterAndCommit")
   void testNormalFailureFallsBackWithFreshCommit() throws Exception {
-    AppendOnlyFileStoreTable table = mock(AppendOnlyFileStoreTable.class);
+    AppendOnlyFileStoreTable table = mockOrdinaryAppendTable();
     TableCommitImpl directCommit = mock(TableCommitImpl.class);
     TableCommitImpl fallbackCommit = mock(TableCommitImpl.class);
     List<CommitMessage> messages = Collections.singletonList(mock(CommitMessage.class));
@@ -353,7 +354,7 @@ public class TestPaimonTableCommit {
   @Test
   @DisplayName("RECOVERY_REPLAY mode only uses filterAndCommit")
   void testRecoveryReplayOnlyUsesFilterAndCommit() throws Exception {
-    AppendOnlyFileStoreTable table = mock(AppendOnlyFileStoreTable.class);
+    AppendOnlyFileStoreTable table = mockOrdinaryAppendTable();
     TableCommitImpl replayCommit = mock(TableCommitImpl.class);
     List<CommitMessage> messages = Collections.singletonList(mock(CommitMessage.class));
     when(table.name()).thenReturn("replay-table");
@@ -372,7 +373,7 @@ public class TestPaimonTableCommit {
   @Test
   @DisplayName("A direct close failure triggers the idempotent fallback")
   void testDirectCloseFailureTriggersFallback() throws Exception {
-    AppendOnlyFileStoreTable table = mock(AppendOnlyFileStoreTable.class);
+    AppendOnlyFileStoreTable table = mockOrdinaryAppendTable();
     TableCommitImpl directCommit = mock(TableCommitImpl.class);
     TableCommitImpl fallbackCommit = mock(TableCommitImpl.class);
     List<CommitMessage> messages = Collections.singletonList(mock(CommitMessage.class));
@@ -393,7 +394,7 @@ public class TestPaimonTableCommit {
   @Test
   @DisplayName("Error bypasses fallback and propagates unchanged")
   void testErrorBypassesFallback() {
-    AppendOnlyFileStoreTable table = mock(AppendOnlyFileStoreTable.class);
+    AppendOnlyFileStoreTable table = mockOrdinaryAppendTable();
     TableCommitImpl directCommit = mock(TableCommitImpl.class);
     List<CommitMessage> messages = Collections.singletonList(mock(CommitMessage.class));
     AssertionError directError = new AssertionError("direct-error");
@@ -415,7 +416,7 @@ public class TestPaimonTableCommit {
   @Test
   @DisplayName("filterAndCommit rejects an impossible committed count")
   void testFilterAndCommitRejectsImpossibleCount() {
-    AppendOnlyFileStoreTable table = mock(AppendOnlyFileStoreTable.class);
+    AppendOnlyFileStoreTable table = mockOrdinaryAppendTable();
     TableCommitImpl replayCommit = mock(TableCommitImpl.class);
     List<CommitMessage> messages = Collections.singletonList(mock(CommitMessage.class));
     when(table.name()).thenReturn("invalid-count-table");
@@ -436,7 +437,7 @@ public class TestPaimonTableCommit {
   @Test
   @DisplayName("Dual failure keeps fallback as cause and direct failure as suppressed")
   void testDualFailurePreservesBothCauses() {
-    AppendOnlyFileStoreTable table = mock(AppendOnlyFileStoreTable.class);
+    AppendOnlyFileStoreTable table = mockOrdinaryAppendTable();
     TableCommitImpl directCommit = mock(TableCommitImpl.class);
     TableCommitImpl fallbackCommit = mock(TableCommitImpl.class);
     List<CommitMessage> messages = Collections.singletonList(mock(CommitMessage.class));
@@ -652,5 +653,12 @@ public class TestPaimonTableCommit {
         snapshotBefore,
         ((AppendOnlyFileStoreTable) catalog.getTable(id)).snapshotManager().latestSnapshot().id(),
         "Commit must not create a snapshot when any success task output is missing");
+  }
+
+  private static AppendOnlyFileStoreTable mockOrdinaryAppendTable() {
+    AppendOnlyFileStoreTable table = mock(AppendOnlyFileStoreTable.class);
+    when(table.coreOptions())
+        .thenReturn(CoreOptions.fromMap(Collections.singletonMap("bucket", "-1")));
+    return table;
   }
 }

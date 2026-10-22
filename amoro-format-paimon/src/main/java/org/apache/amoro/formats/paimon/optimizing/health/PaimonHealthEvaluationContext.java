@@ -222,6 +222,7 @@ public final class PaimonHealthEvaluationContext {
             eligibilityOptions,
             optimizingConfig,
             configurationError,
+            coreOptions,
             context,
             now);
     // Keep the full planning digest in the key, but identify structural diagnostics separately.
@@ -307,6 +308,7 @@ public final class PaimonHealthEvaluationContext {
       Map<String, String> eligibilityOptions,
       @Nullable OptimizingConfig optimizingConfig,
       @Nullable String configurationError,
+      @Nullable CoreOptions coreOptions,
       @Nullable OptimizationContext context,
       long now) {
     FingerprintBuilder builder =
@@ -323,6 +325,15 @@ public final class PaimonHealthEvaluationContext {
                 eligibilityOptions.get(PaimonOptimizingEligibility.SELF_OPTIMIZING_ENABLED));
     if (shape == TableShape.APPEND && bucketMode == BucketMode.HASH_FIXED) {
       addFixedAppendPlanningOptions(builder, (AppendOnlyFileStoreTable) table, eligibilityOptions);
+    }
+    if (shape == TableShape.APPEND
+        && bucketMode == BucketMode.BUCKET_UNAWARE
+        && configurationError == null
+        && coreOptions != null) {
+      // Invalidate previously cached planning facts for unsupported tables at the capability
+      // boundary. Supported unaware tables keep their existing digest and structural health.
+      PaimonAppendCapabilities.dataEvolutionRejection(coreOptions)
+          .ifPresent(reason -> builder.add("unawareAppendPlanningRejection", reason));
     }
     if (shape == TableShape.APPEND
         && (bucketMode == BucketMode.HASH_FIXED || bucketMode == BucketMode.BUCKET_UNAWARE)) {
