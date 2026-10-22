@@ -19,7 +19,6 @@
 package org.apache.amoro.formats.paimon.optimizing.plan;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -381,10 +380,12 @@ class TestPaimonAppendTaskPacker {
         assertTimeoutPreemptively(
             Duration.ofSeconds(5), () -> new PaimonAppendTaskPacker(context).pack(evaluation));
 
-    assertFalse(tasks.isEmpty());
-    for (AppendCompactTask task : tasks) {
-      assertTrue(task.compactBefore().size() > 1);
-      assertTrue(task.compactBefore().stream().filter(file -> file.fileSize() > 900L).count() <= 1);
+    assertEquals(30_000, tasks.size());
+    for (int i = 0; i < tasks.size(); i++) {
+      AppendCompactTask task = tasks.get(i);
+      assertEquals(2, task.compactBefore().size());
+      assertEquals("small-" + i, task.compactBefore().get(0).fileName());
+      assertEquals("large-" + i, task.compactBefore().get(1).fileName());
     }
   }
 
