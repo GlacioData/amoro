@@ -28,9 +28,27 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.TreeMap;
 
-/** Capability checks for the new fixed-bucket path; existing paths keep their own policy. */
+/** Capability checks for Amoro's Append optimizing paths. */
 public final class PaimonAppendCapabilities {
   private PaimonAppendCapabilities() {}
+
+  public static Optional<String> appendRejection(FileStoreTable table) {
+    if (table instanceof AppendOnlyFileStoreTable
+        && table.bucketMode() == BucketMode.BUCKET_UNAWARE) {
+      return dataEvolutionRejection(table.coreOptions());
+    }
+    return fixedBucketRejection(table);
+  }
+
+  public static Optional<String> dataEvolutionRejection(CoreOptions options) {
+    // Paimon 1.4.2 requires a different read/write path for Data Evolution:
+    // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/append/dataevolution/DataEvolutionCompactTask.java#L79-L117
+    // Amoro's ordinary Append task does not support that path. This capability gate applies
+    // to optimizing only; table health and maintenance retain their own eligibility rules.
+    return options.dataEvolutionEnabled()
+        ? Optional.of("APPEND_DATA_EVOLUTION_UNSUPPORTED")
+        : Optional.empty();
+  }
 
   public static Optional<String> fixedBucketRejection(FileStoreTable table) {
     if (!(table instanceof AppendOnlyFileStoreTable)) {

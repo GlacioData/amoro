@@ -29,6 +29,7 @@ import org.apache.amoro.table.health.TableAnalysisKey;
 import org.apache.amoro.utils.DigestUtil;
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.Snapshot;
+import org.apache.paimon.mergetree.compact.OffPeakHours;
 import org.apache.paimon.options.Options;
 import org.apache.paimon.schema.TableSchema;
 import org.apache.paimon.table.AppendOnlyFileStoreTable;
@@ -40,6 +41,8 @@ import javax.annotation.Nullable;
 
 import java.math.BigDecimal;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneId;
 import java.util.Collections;
 import java.util.Map;
 import java.util.Objects;
@@ -67,6 +70,7 @@ public final class PaimonHealthEvaluationContext {
   private final String scoringConfigFingerprint;
   @Nullable private final String configurationError;
   private final TableAnalysisKey key;
+  private final int offPeakRatioNow;
 
   private PaimonHealthEvaluationContext(
       String tableId,
@@ -81,7 +85,8 @@ public final class PaimonHealthEvaluationContext {
       long optimizingCheckpointSnapshotId,
       String formulaVersion,
       String scoringConfigFingerprint,
-      @Nullable String configurationError) {
+      @Nullable String configurationError,
+      int offPeakRatioNow) {
     this.tableShape = tableShape;
     this.bucketMode = bucketMode;
     this.schemaId = schemaId;
@@ -94,6 +99,7 @@ public final class PaimonHealthEvaluationContext {
     this.formulaVersion = formulaVersion;
     this.scoringConfigFingerprint = scoringConfigFingerprint;
     this.configurationError = configurationError;
+    this.offPeakRatioNow = offPeakRatioNow;
     this.key =
         new TableAnalysisKey(
             tableId,
@@ -210,6 +216,23 @@ public final class PaimonHealthEvaluationContext {
     } else {
       formulaVersion = UNSUPPORTED_FORMULA_VERSION;
     }
+    boolean realtimeHashPlanning =
+        fixedSnapshot == null
+            && shape == TableShape.PRIMARY_KEY
+            && (bucketMode == BucketMode.HASH_FIXED || bucketMode == BucketMode.HASH_DYNAMIC)
+            && configurationError == null
+            && coreOptions != null
+            && !coreOptions.isChainTable()
+            && !coreOptions.pkClusteringOverride();
+    // Preserve native strategy semantics for excluded shapes; only ordinary realtime HASH
+    // planning gains clock-driven invalidation. Historical keys remain snapshot-fixed.
+    int offPeakRatioNow =
+        shape == TableShape.PRIMARY_KEY
+                && (bucketMode == BucketMode.HASH_FIXED || bucketMode == BucketMode.HASH_DYNAMIC)
+                && configurationError == null
+                && coreOptions != null
+            ? offPeakRatioAt(coreOptions, now)
+            : 0;
     String fingerprint =
         fingerprint(
             table,
@@ -222,8 +245,11 @@ public final class PaimonHealthEvaluationContext {
             eligibilityOptions,
             optimizingConfig,
             configurationError,
+            coreOptions,
             context,
-            now);
+            now,
+            realtimeHashPlanning,
+            offPeakRatioNow);
     // Keep the full planning digest in the key, but identify structural diagnostics separately.
     // The versioned pair stays opaque to other formats and to the public key implementation.
     if (configurationError == null) {
@@ -246,7 +272,8 @@ public final class PaimonHealthEvaluationContext {
         baselineId,
         formulaVersion,
         fingerprint,
-        configurationError);
+        configurationError,
+        offPeakRatioNow);
   }
 
   /** Legacy digests stay distinct until their facts have been evaluated under this identity. */
@@ -307,8 +334,11 @@ public final class PaimonHealthEvaluationContext {
       Map<String, String> eligibilityOptions,
       @Nullable OptimizingConfig optimizingConfig,
       @Nullable String configurationError,
+      @Nullable CoreOptions coreOptions,
       @Nullable OptimizationContext context,
-      long now) {
+      long now,
+      boolean realtimeHashPlanning,
+      int offPeakRatioNow) {
     FingerprintBuilder builder =
         new FingerprintBuilder()
             .add("tableFormat", TableFormat.PAIMON.name())
@@ -323,12 +353,25 @@ public final class PaimonHealthEvaluationContext {
                 eligibilityOptions.get(PaimonOptimizingEligibility.SELF_OPTIMIZING_ENABLED));
     if (shape == TableShape.APPEND && bucketMode == BucketMode.HASH_FIXED) {
       addFixedAppendPlanningOptions(builder, (AppendOnlyFileStoreTable) table, eligibilityOptions);
+    }
+    if (shape == TableShape.APPEND
+        && bucketMode == BucketMode.BUCKET_UNAWARE
+        && configurationError == null
+        && coreOptions != null) {
+      // Invalidate previously cached planning facts for unsupported tables at the capability
+      // boundary. Supported unaware tables keep their existing digest and structural health.
+      PaimonAppendCapabilities.dataEvolutionRejection(coreOptions)
+          .ifPresent(reason -> builder.add("unawareAppendPlanningRejection", reason));
+    }
+    if (shape == TableShape.APPEND
+        && (bucketMode == BucketMode.HASH_FIXED || bucketMode == BucketMode.BUCKET_UNAWARE)) {
       if (context != null && optimizingConfig != null) {
         // Source:
         // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/operation/BaseAppendFileStoreWrite.java#L187-L222
         // Native rewriting has no AMS clock wakeup. Encode only interval transitions in the
         // planning digest: unchanged overdue state is consumed once, without manifest polling.
         // The structural health digest below intentionally excludes these scheduling flags.
+        // Keep the existing digest labels so fixed-bucket planning keys remain stable.
         builder
             .add(
                 "fixedAppendMinorDue",
@@ -353,6 +396,9 @@ public final class PaimonHealthEvaluationContext {
     }
 
     builder.add("configurationState", "VALID");
+    if (realtimeHashPlanning) {
+      builder.add("offPeakRatioNow", offPeakRatioNow);
+    }
     if (shape == TableShape.APPEND) {
       addAppendOptions(builder, options, optimizingConfig);
     } else if (shape == TableShape.PRIMARY_KEY) {
@@ -516,6 +562,20 @@ public final class PaimonHealthEvaluationContext {
 
   private static String canonicalDecimal(double value) {
     return BigDecimal.valueOf(value).stripTrailingZeros().toPlainString();
+  }
+
+  /** Effective native ratio at the captured instant, never the advancing wall clock. */
+  public int offPeakRatioNow() {
+    return offPeakRatioNow;
+  }
+
+  public static int offPeakRatioAt(CoreOptions options, long now) {
+    // Match Paimon 1.4.2 UniversalCompaction.ratioForOffPeak's JVM-local hour semantics.
+    // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/mergetree/compact/UniversalCompaction.java#L184-L185
+    OffPeakHours hours = OffPeakHours.create(options);
+    return hours == null
+        ? 0
+        : hours.currentRatio(Instant.ofEpochMilli(now).atZone(ZoneId.systemDefault()).getHour());
   }
 
   public TableShape tableShape() {

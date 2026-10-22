@@ -334,8 +334,7 @@ public final class PaimonAppendFileScanner {
   }
 
   private boolean planningShapeSupported() {
-    return table.bucketMode() == BucketMode.BUCKET_UNAWARE
-        || !PaimonAppendCapabilities.fixedBucketRejection(table).isPresent();
+    return !PaimonAppendCapabilities.appendRejection(table).isPresent();
   }
 
   @Nullable

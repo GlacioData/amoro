@@ -261,40 +261,41 @@ public class PaimonTable implements AmoroTable<Table>, Serializable {
       Map<String, String> tableProperties) {
     PaimonAppendSnapshotAnalysis analysis =
         PaimonAppendFileScanner.analyze(appendTable, healthContext, null);
-    boolean fixedSupported = false;
+    Optional<String> rejection = PaimonAppendCapabilities.appendRejection(appendTable);
+    boolean appendSupported = !rejection.isPresent();
+    rejection.ifPresent(
+        reason ->
+            LOG.info("Paimon table [{}] Append optimization is unsupported: {}", id(), reason));
     if (appendTable.bucketMode() == BucketMode.HASH_FIXED) {
       // Paimon ac223f47, operation/BucketedAppendFileStoreWrite.java:75-85 and
       // CoreOptions.java:3654-3658 define the native ordered/unordered and clustering modes.
       // Reuse the same current capability gate as planning; refusal is not a health read failure.
-      Optional<String> rejection = PaimonAppendCapabilities.fixedBucketRejection(appendTable);
-      if (rejection.isPresent()) {
-        LOG.info(
-            "Paimon table [{}] fixed Append optimization is unsupported: {}",
-            id(),
-            rejection.get());
-      }
-      fixedSupported = !rejection.isPresent() && analysis.plannerFactsAvailable();
+      appendSupported = appendSupported && analysis.plannerFactsAvailable();
     }
-    boolean optimizingNecessary =
-        isOptimizingEligible(tableProperties, context)
-            && (appendTable.bucketMode() == BucketMode.BUCKET_UNAWARE || fixedSupported);
+    boolean optimizingNecessary = isOptimizingEligible(tableProperties, context) && appendSupported;
     PaimonPendingInput pendingInput = analysis.pendingInput();
     PaimonPendingInput optimizingPendingInput = copyPendingInput(pendingInput);
-    // Paimon ac223f47, FileSystemCatalog.java:167-171 and SchemaManager.java:252-280 publish option
-    // changes through a new schema without a data snapshot. Keep exactly one planning demand for a
-    // fixed Append capability change until beginProcess or empty-plan completion consumes
-    // pending_input.
+    // Paimon 1.4.2 source:
+    // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/schema/SchemaManager.java#L252-L280
+    // Option changes do not require a data snapshot; interval expiry also leaves it unchanged.
+    // Keep one planning demand for both Append modes until DefaultTableRuntime.beginProcess or
+    // completeEmptyProcess consumes pending_input.
     optimizingPendingInput.setSameSnapshotPlanningPending(
-        appendTable.bucketMode() == BucketMode.HASH_FIXED && optimizingNecessary);
+        (appendTable.bucketMode() == BucketMode.HASH_FIXED
+                || appendTable.bucketMode() == BucketMode.BUCKET_UNAWARE)
+            && optimizingNecessary);
     return new PendingInputResult(
         pendingInput, optimizingPendingInput, optimizingNecessary, analysis);
   }
 
   @Override
   public boolean supportsPendingInputRefresh() {
+    // DefaultTableRuntime.applyRefreshableEvaluation retains changed planning demand while an old
+    // planner is PLANNING. Both Append modes must use that guarded refresh path.
     return PaimonFullScheduling.isPrimaryKeyTable(this)
         || (table instanceof AppendOnlyFileStoreTable
-            && ((AppendOnlyFileStoreTable) table).bucketMode() == BucketMode.HASH_FIXED);
+            && (((AppendOnlyFileStoreTable) table).bucketMode() == BucketMode.HASH_FIXED
+                || ((AppendOnlyFileStoreTable) table).bucketMode() == BucketMode.BUCKET_UNAWARE));
   }
 
   @Override
@@ -342,11 +343,12 @@ public class PaimonTable implements AmoroTable<Table>, Serializable {
     // validation remain authoritative.
     pending.setFullCompactionPending(
         optimizingNecessary && evaluation.optimizingType() == OptimizingType.FULL);
-    // Only confirmed MINOR demand may bypass the unchanged-snapshot queue gate. The planner
+    // Confirmed MINOR or MAJOR demand may bypass the unchanged-snapshot queue gate. The planner
     // still rechecks current configuration, interval and native candidates before creating work.
     pending.setSameSnapshotPlanningPending(
         optimizingNecessary
-            && evaluation.optimizingType() == OptimizingType.MINOR
+            && (evaluation.optimizingType() == OptimizingType.MINOR
+                || evaluation.optimizingType() == OptimizingType.MAJOR)
             && !CoreOptions.fromMap(fileStoreTable.options()).isChainTable());
     pending.setGentleMinorCompactionPending(
         optimizingNecessary

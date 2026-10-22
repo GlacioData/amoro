@@ -37,15 +37,21 @@ import org.apache.paimon.utils.HintFileUtils;
 import org.apache.paimon.utils.SerializationUtils;
 import org.apache.paimon.utils.SnapshotManager;
 
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Stream;
 
 /**
- * 为全部合并单元准备同一执行时快照的数据文件与索引，writer 只消费已检查的恢复结果。 正常快照发现避免列举目录，追赶超限时使用原生发现；准备完成后不再读取 latest。
+ * Prepares data files and indexes from one execution-time snapshot for all compaction units.
+ * Writers consume only validated restore results. Snapshot discovery avoids directory listing on
+ * its fast path and lists once for retention gaps or when the probe budget is exhausted. The
+ * snapshot remains fixed after preparation.
  *
  * <p>Paimon's default restore resolves the latest filesystem snapshot for every writer restore and
  * restores its data files, hash index, and deletion vectors. See Paimon 1.4.2 {@code
@@ -57,8 +63,8 @@ import java.util.Map;
  *
  * <p>Amoro already knows the snapshot used by the optimizing plan. This restore treats that ID as a
  * lower bound, consults the {@code LATEST} hint, and probes a bounded number of consecutive paths.
- * Long gaps use native filesystem discovery once, which may list the snapshot directory. This is
- * valid because Paimon assigns every committed snapshot {@code latestSnapshot.id() + 1}. See {@code
+ * Long gaps or expired intervals enumerate the native snapshot directory once. This is valid
+ * because Paimon assigns every committed snapshot {@code latestSnapshot.id() + 1}. See {@code
  * FileStoreCommitImpl}:
  * https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/operation/FileStoreCommitImpl.java#L806-L814.
  */
@@ -107,8 +113,10 @@ final class PaimonPrimaryKeySnapshotWriteRestore implements WriteRestore {
     this.snapshot = latestReachableSnapshot();
     this.dynamicIndex = table.bucketMode() == BucketMode.HASH_DYNAMIC;
     this.deletionVectors = CoreOptions.fromMap(table.options()).deletionVectorsEnabled();
-    // Paimon 1.4.2 AbstractFileStoreWrite#createWriterContainer 在恢复后创建 bucket writer。
-    // 全部单元必须先成功读取同一 snapshot 的 data/hash/DV，再允许创建任何 writer。
+    // Paimon 1.4.2 AbstractFileStoreWrite#createWriterContainer creates a bucket writer after
+    // restore.
+    // Read data files, hash indexes, and deletion vectors for every unit from the same snapshot
+    // before allowing any writer to be created.
     // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/operation/AbstractFileStoreWrite.java#L446-L504
     for (PaimonBucketCompactionUnit unit : units) {
       if (unit == null || unit.getPartitionBytes() == null || unit.getBucket() < 0) {
@@ -169,8 +177,9 @@ final class PaimonPrimaryKeySnapshotWriteRestore implements WriteRestore {
       boolean scanDynamicBucketIndex,
       boolean scanDeleteVectorsIndex) {
     List<DataFileMeta> dataFiles = new ArrayList<>();
-    // Paimon 1.4.2 iterator 分批读取 ADD manifest，避免 plan 物化全部 ManifestEntry。
-    // 此恢复 scan 不设置 value filter/limit，因而没有 KeyValueFileStoreScan 的 plan 后置过滤。
+    // Paimon 1.4.2 reads ADD manifests in batches through the iterator, avoiding materializing
+    // all ManifestEntry objects in a plan. This restore scan sets no value filter or limit,
+    // so KeyValueFileStoreScan's post-plan filtering does not apply.
     // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/operation/AbstractFileStoreScan.java#L390-L433
     Iterator<ManifestEntry> entries =
         scanLease == null
@@ -196,8 +205,9 @@ final class PaimonPrimaryKeySnapshotWriteRestore implements WriteRestore {
             : Collections.unmodifiableList(new ArrayList<>(deletionVectorIndexes)));
   }
 
-  // 与 Paimon 1.4.2 WriteRestore#extractDataFiles 的桶数校验及空结果 null 语义保持一致。
-  // 原生 helper 只接收 List；这里接受 iterator，避免重新物化 entry 列表。
+  // Match Paimon 1.4.2 WriteRestore#extractDataFiles: validate bucket counts and return null
+  // for empty input. Unlike the native List-based helper, accept an iterator to avoid
+  // materializing the entries again.
   // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/operation/WriteRestore.java#L41-L54
   static Integer extractDataFiles(Iterator<ManifestEntry> entries, List<DataFileMeta> dataFiles) {
     Integer totalBuckets = null;
@@ -235,21 +245,49 @@ final class PaimonPrimaryKeySnapshotWriteRestore implements WriteRestore {
         probes < MAX_CONSECUTIVE_SNAPSHOT_PROBES && latestKnownSnapshotId < Long.MAX_VALUE;
         probes++) {
       if (!snapshotManager.snapshotExists(latestKnownSnapshotId + 1)) {
-        return snapshotManager.snapshot(latestKnownSnapshotId);
+        return readCurrentOrDiscover();
       }
       latestKnownSnapshotId++;
     }
     if (latestKnownSnapshotId == Long.MAX_VALUE) {
-      return snapshotManager.snapshot(latestKnownSnapshotId);
+      return readCurrentOrDiscover();
     }
 
-    // Paimon 1.4.2 resolves missing/stale hints by listing instead of chasing every snapshot ID.
-    // Freeze its result for this restore; do not chase concurrent writes again after relocation.
-    // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/utils/HintFileUtils.java#L43-L55
-    Snapshot latest = snapshotManager.latestSnapshotFromFileSystem();
-    if (latest == null || latest.id() < latestKnownSnapshotId) {
+    return discoverLatestSnapshot();
+  }
+
+  private Snapshot readCurrentOrDiscover() {
+    // An absent successor proves latest only while the current snapshot still exists. Retention
+    // may remove the entire interval between the planned lower bound and the live snapshots.
+    return snapshotManager.snapshotExists(latestKnownSnapshotId)
+        ? snapshotManager.snapshot(latestKnownSnapshotId)
+        : discoverLatestSnapshot();
+  }
+
+  private Snapshot discoverLatestSnapshot() {
+    // Do not use latestSnapshotFromFileSystem here: 1.4.2 HintFileUtils.findLatest accepts a
+    // positive expired LATEST if hint+1 is absent. Enumerate once, validate and freeze the maximum;
+    // a concurrent expiry or read failure must fail this attempt, never restore an older snapshot.
+    // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/utils/SnapshotManager.java#L502-L503
+    final long latestId;
+    try (Stream<Long> ids = snapshotManager.snapshotIdStream()) {
+      latestId = ids.mapToLong(Long::longValue).max().orElse(-1L);
+    } catch (IOException e) {
+      throw new UncheckedIOException("Failed to enumerate Paimon snapshots for compaction", e);
+    }
+    if (latestId < Snapshot.FIRST_SNAPSHOT_ID
+        || latestId < latestKnownSnapshotId
+        || !snapshotManager.snapshotExists(latestId)) {
       throw new IllegalStateException(
-          "Latest Paimon snapshot discovery did not reach known snapshot " + latestKnownSnapshotId);
+          "Paimon snapshot enumeration did not reach a live snapshot at or above "
+              + latestKnownSnapshotId
+              + "; maximum="
+              + latestId);
+    }
+    Snapshot latest = snapshotManager.snapshot(latestId);
+    if (latest.id() != latestId) {
+      throw new IllegalStateException(
+          "Paimon snapshot contents do not match enumerated id " + latestId);
     }
     return latest;
   }

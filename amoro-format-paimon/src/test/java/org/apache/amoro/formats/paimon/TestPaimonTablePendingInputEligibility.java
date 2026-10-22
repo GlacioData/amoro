@@ -127,9 +127,9 @@ class TestPaimonTablePendingInputEligibility {
             .orElseThrow(AssertionError::new);
 
     assertTrue(result.optimizingNecessary());
-    assertFalse(paimonTable.supportsPendingInputRefresh());
+    assertTrue(paimonTable.supportsPendingInputRefresh());
     assertTrue(result.pendingInput() instanceof PaimonPendingInput);
-    assertFalse(
+    assertTrue(
         ((PaimonPendingInput) result.optimizingPendingInput()).isSameSnapshotPlanningPending());
     assertTrue(result.tableAnalysis().get() instanceof PaimonAppendSnapshotAnalysis);
     assertTrue(

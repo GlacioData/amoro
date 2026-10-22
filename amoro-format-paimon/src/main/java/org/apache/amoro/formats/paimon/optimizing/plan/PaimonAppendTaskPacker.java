@@ -24,11 +24,13 @@ import org.apache.paimon.utils.BinPacking;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.AbstractList;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.RandomAccess;
 import java.util.stream.Collectors;
 
 final class PaimonAppendTaskPacker {
@@ -111,8 +113,15 @@ final class PaimonAppendTaskPacker {
         total = 0L;
       }
     }
-    if (bin.size() >= context.minorMinFileNum()
-        || (bin.size() > 1 && context.reachMinorInterval())) {
+    // Paimon 1.4.2 source:
+    // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/append/AppendCompactTask.java#L70-L74
+    // The native executor permits a singleton only when the table enables deletion vectors,
+    // including files without an actual DV. Leave an illegal singleton in the current snapshot.
+    boolean validInput =
+        bin.size() > 1 || (!bin.isEmpty() && context.coreOptions().deletionVectorsEnabled());
+    if (validInput
+        && (bin.size() >= context.minorMinFileNum()
+            || (bin.size() > 1 && context.reachMinorInterval()))) {
       addTask(tasks, evaluation, bin);
     }
     return tasks;
@@ -131,7 +140,7 @@ final class PaimonAppendTaskPacker {
     }
     MajorFullLookahead lookahead = new MajorFullLookahead(units, limit);
     List<AppendCompactTask> tasks = new ArrayList<>();
-    List<AtomicUnit> bin = new ArrayList<>();
+    MajorFullBin bin = new MajorFullBin();
     long total = 0L;
     for (int i = 0; i < units.size(); i++) {
       AtomicUnit unit = units.get(i);
@@ -164,7 +173,7 @@ final class PaimonAppendTaskPacker {
           && legal(bin)
           && canStartNewBin(bin, units, i, lookahead, limit)) {
         addTaskFromUnits(tasks, evaluation, bin);
-        bin = new ArrayList<>();
+        bin = new MajorFullBin();
         total = 0L;
       }
       bin.add(unit);
@@ -176,7 +185,7 @@ final class PaimonAppendTaskPacker {
       LOG.info(
           "Skip illegal Paimon compact bin for partition {} with {} file(s).",
           evaluation.partition(),
-          fileCount(bin));
+          bin.fileCount);
     }
     return tasks;
   }
@@ -228,7 +237,7 @@ final class PaimonAppendTaskPacker {
 
   private PackResult packOversizedRegular(
       PaimonPartitionEvaluation evaluation,
-      List<AtomicUnit> bin,
+      MajorFullBin bin,
       long binTotal,
       AtomicUnit unit,
       MajorFullLookahead lookahead,
@@ -244,7 +253,7 @@ final class PaimonAppendTaskPacker {
       if (legal(prefix)) {
         addTaskFromUnits(tasks, evaluation, prefix);
         workingTotal -= totalSizeOfUnits(prefix);
-        bin.subList(0, prefixSize).clear();
+        bin.removePrefix(prefixSize);
       }
     }
 
@@ -260,7 +269,7 @@ final class PaimonAppendTaskPacker {
     }
     addTaskFromUnits(tasks, evaluation, currentTask);
     long remainingTotal = workingTotal - totalSizeOfUnits(bin, 0, currentTaskSize);
-    bin.subList(0, currentTaskSize).clear();
+    bin.removePrefix(currentTaskSize);
     return PackResult.packed(tasks, bin, remainingTotal);
   }
 
@@ -333,6 +342,10 @@ final class PaimonAppendTaskPacker {
     return fileCount(bin) > 1 || bin.stream().anyMatch(AtomicUnit::hasDeletionVector);
   }
 
+  private boolean legal(MajorFullBin bin) {
+    return bin.fileCount > 1 || bin.deletionVectorUnits > 0;
+  }
+
   private int fileCount(List<AtomicUnit> units) {
     return units.stream().mapToInt(unit -> unit.files().size()).sum();
   }
@@ -377,13 +390,13 @@ final class PaimonAppendTaskPacker {
   private static class PackResult {
     private final boolean packed;
     private final List<AppendCompactTask> tasks;
-    private final List<AtomicUnit> remainingBin;
+    private final MajorFullBin remainingBin;
     private final long remainingTotal;
 
     private PackResult(
         boolean packed,
         List<AppendCompactTask> tasks,
-        List<AtomicUnit> remainingBin,
+        MajorFullBin remainingBin,
         long remainingTotal) {
       this.packed = packed;
       this.tasks = tasks;
@@ -392,12 +405,62 @@ final class PaimonAppendTaskPacker {
     }
 
     private static PackResult packed(
-        List<AppendCompactTask> tasks, List<AtomicUnit> remainingBin, long remainingTotal) {
+        List<AppendCompactTask> tasks, MajorFullBin remainingBin, long remainingTotal) {
       return new PackResult(true, tasks, remainingBin, remainingTotal);
     }
 
     private static PackResult notPacked() {
-      return new PackResult(false, new ArrayList<>(), new ArrayList<>(), 0L);
+      return new PackResult(false, new ArrayList<>(), new MajorFullBin(), 0L);
+    }
+  }
+
+  /**
+   * A live suffix of the ordered bin. Cached counts avoid rescanning a growing reservation;
+   * advancing the head avoids shifting every remaining partner for each oversized file. Prefix/task
+   * copies still follow the existing decision and publication order exactly.
+   *
+   * <p>Paimon 1.4.2's ordered packing does not implement Amoro's oversized regular-file partner
+   * reservation, so retain the custom decisions and change only their storage:
+   * https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-common/src/main/java/org/apache/paimon/utils/BinPacking.java#L33-L62
+   */
+  private static class MajorFullBin extends AbstractList<AtomicUnit> implements RandomAccess {
+    private final List<AtomicUnit> units = new ArrayList<>();
+    private int first;
+    private int fileCount;
+    private int deletionVectorUnits;
+
+    @Override
+    public AtomicUnit get(int index) {
+      if (index < 0 || index >= size()) {
+        throw new IndexOutOfBoundsException("Index: " + index + ", size: " + size());
+      }
+      return units.get(first + index);
+    }
+
+    @Override
+    public int size() {
+      return units.size() - first;
+    }
+
+    @Override
+    public boolean add(AtomicUnit unit) {
+      units.add(unit);
+      fileCount += unit.files().size();
+      deletionVectorUnits += unit.hasDeletionVector() ? 1 : 0;
+      modCount++;
+      return true;
+    }
+
+    private void removePrefix(int count) {
+      if (count < 0 || count > size()) {
+        throw new IndexOutOfBoundsException("Prefix: " + count + ", size: " + size());
+      }
+      for (int i = 0; i < count; i++) {
+        AtomicUnit unit = units.get(first++);
+        fileCount -= unit.files().size();
+        deletionVectorUnits -= unit.hasDeletionVector() ? 1 : 0;
+      }
+      modCount++;
     }
   }
 

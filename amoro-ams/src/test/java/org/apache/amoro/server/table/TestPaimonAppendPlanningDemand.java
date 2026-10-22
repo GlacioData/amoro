@@ -21,6 +21,7 @@ package org.apache.amoro.server.table;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doReturn;
@@ -29,6 +30,7 @@ import static org.mockito.Mockito.mock;
 import org.apache.amoro.ServerTableIdentifier;
 import org.apache.amoro.TableFormat;
 import org.apache.amoro.formats.paimon.PaimonCatalogFactory;
+import org.apache.amoro.formats.paimon.PaimonRuntimeSupport;
 import org.apache.amoro.formats.paimon.PaimonTable;
 import org.apache.amoro.formats.paimon.optimizing.PaimonPendingInput;
 import org.apache.amoro.formats.paimon.process.PaimonProcessFactory;
@@ -40,6 +42,7 @@ import org.apache.amoro.optimizing.TableOptimizingPlanner;
 import org.apache.amoro.server.optimizing.OptimizingStatus;
 import org.apache.amoro.server.persistence.PersistentBase;
 import org.apache.amoro.server.persistence.TableRuntimeMeta;
+import org.apache.amoro.server.persistence.TableRuntimeState;
 import org.apache.amoro.server.persistence.mapper.TableMetaMapper;
 import org.apache.amoro.server.persistence.mapper.TableRuntimeMapper;
 import org.apache.amoro.server.scheduler.inline.TableRuntimeRefreshExecutor;
@@ -57,22 +60,29 @@ import org.apache.paimon.table.sink.BatchTableWrite;
 import org.apache.paimon.table.sink.BatchWriteBuilder;
 import org.apache.paimon.types.DataTypes;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.nio.file.Path;
 import java.util.Collections;
 import java.util.Optional;
 
-class TestPaimonFixedBucketPlanningDemand extends PersistentBase {
-  private final DerbyPersistence derby = new DerbyPersistence();
+class TestPaimonAppendPlanningDemand extends PersistentBase {
+  private ServerTableIdentifier tableId;
   @TempDir Path warehouse;
   private Catalog catalog;
   private CountingTable table;
   private DefaultTableRuntime runtime;
   private DefaultTableRuntimeStore store;
   private TableRuntimeRefreshExecutor refresh;
+
+  @BeforeAll
+  static void initializeDatabase() {
+    FullSkipTestDatabase.initialize();
+  }
 
   @AfterEach
   void cleanup() throws Exception {
@@ -82,15 +92,18 @@ class TestPaimonFixedBucketPlanningDemand extends PersistentBase {
     if (catalog != null) {
       catalog.close();
     }
-    derby.after();
+    if (tableId != null) {
+      doAs(TableRuntimeMapper.class, mapper -> mapper.removeAllTableStates(tableId.getId()));
+      doAs(TableRuntimeMapper.class, mapper -> mapper.deleteRuntime(tableId.getId()));
+      doAs(TableMetaMapper.class, mapper -> mapper.deleteTableIdById(tableId.getId()));
+    }
   }
 
   @ParameterizedTest
-  @EnumSource(
-      value = OptimizingType.class,
-      names = {"MINOR", "FULL"})
-  void dueDemandObservedDuringPlanningSurvivesOldEmptyPlan(OptimizingType type) throws Exception {
-    initialize(type, 2);
+  @CsvSource({"1,MINOR", "1,FULL", "-1,MINOR", "-1,FULL"})
+  void dueDemandObservedDuringPlanningSurvivesOldEmptyPlan(int buckets, OptimizingType type)
+      throws Exception {
+    initialize(buckets, type, 2);
     refresh.execute(runtime);
     TableAnalysisKey before = runtime.getCurrentAnalysisKey().get();
     TableOptimizingPlanner oldPlanner = startPlanning();
@@ -117,6 +130,7 @@ class TestPaimonFixedBucketPlanningDemand extends PersistentBase {
     assertEquals(runtime.getCurrentSnapshotId(), runtime.getLastOptimizedSnapshotId());
     assertEquals(OptimizingStatus.PENDING, runtime.getOptimizingStatus());
     assertTrue(pending().isSameSnapshotPlanningPending());
+    assertPersistedDemand(OptimizingStatus.PENDING, true);
     assertTrue(pending().canPlanWithoutSnapshotChange(runtime, System.currentTimeMillis()));
     assertEquals(3, table.evaluations, "deferred demand needs exactly one new evaluation");
     refresh.execute(runtime);
@@ -130,11 +144,10 @@ class TestPaimonFixedBucketPlanningDemand extends PersistentBase {
   }
 
   @ParameterizedTest
-  @EnumSource(
-      value = OptimizingType.class,
-      names = {"MINOR", "FULL"})
-  void unchangedBeforeDueAndDueEmptyPlansDoNotRepeatScans(OptimizingType type) throws Exception {
-    initialize(type, 1);
+  @CsvSource({"1,MINOR", "1,FULL", "-1,MINOR", "-1,FULL"})
+  void unchangedBeforeDueAndDueEmptyPlansDoNotRepeatScans(int buckets, OptimizingType type)
+      throws Exception {
+    initialize(buckets, type, 1);
     refresh.execute(runtime);
     finishEmpty(startPlanning());
     refresh.execute(runtime);
@@ -153,21 +166,52 @@ class TestPaimonFixedBucketPlanningDemand extends PersistentBase {
     assertFalse(pending().isSameSnapshotPlanningPending());
     assertFalse(runtime.shouldEvaluateCurrentPlanningAnalysis());
     assertEquals(2, table.evaluations, "unchanged due empty plans must not poll manifests");
+    assertPersistedDemand(OptimizingStatus.IDLE, false);
   }
 
-  private void initialize(OptimizingType type, int batches) throws Exception {
+  private void assertPersistedDemand(OptimizingStatus status, boolean pending) {
+    TableRuntimeMeta meta =
+        getAs(TableRuntimeMapper.class, mapper -> mapper.selectRuntime(tableId.getId()));
+    assertEquals(status.getCode(), meta.getStatusCode());
+    TableRuntimeState state =
+        getAs(
+            TableRuntimeMapper.class, mapper -> mapper.getState(tableId.getId(), "pending_input"));
+    assertNotNull(state);
+    PaimonPendingInput restored =
+        new PaimonRuntimeSupport().pendingInputKey().deserialize(state.getStateValue());
+    assertEquals(pending, restored.isSameSnapshotPlanningPending());
+  }
+
+  @Test
+  void dataEvolutionNeverBecomesPendingAndDoesNotRepeatUnchangedScans() throws Exception {
+    initialize(-1, OptimizingType.MINOR, 2, true);
+    refresh.execute(runtime);
+    assertEquals(OptimizingStatus.IDLE, runtime.getOptimizingStatus());
+    assertFalse(pending().isSameSnapshotPlanningPending());
+    assertFalse(pending().canPlanWithoutSnapshotChange(runtime, System.currentTimeMillis()));
+    assertPersistedDemand(OptimizingStatus.IDLE, false);
+    assertTrue(runtime.getRuntimeHealthSnapshot().get().getCurrentHealthScore() >= 0);
+    refresh.execute(runtime);
+    refresh.execute(runtime);
+    assertEquals(1, table.evaluations, "unsupported unchanged tables must not poll manifests");
+  }
+
+  private void initialize(int buckets, OptimizingType type, int batches) throws Exception {
+    initialize(buckets, type, batches, false);
+  }
+
+  private void initialize(int buckets, OptimizingType type, int batches, boolean evolution)
+      throws Exception {
     catalog =
         PaimonCatalogFactory.paimonCatalog(
             Collections.singletonMap("warehouse", warehouse.toUri().toString()),
             new Configuration());
     catalog.createDatabase("db", false);
-    Identifier identifier = Identifier.create("db", "fixed_append");
-    Schema schema =
+    Identifier identifier = Identifier.create("db", "append_demand");
+    Schema.Builder schema =
         Schema.newBuilder()
             .column("id", DataTypes.INT())
-            .option("bucket", "1")
-            .option("bucket-key", "id")
-            .option("bucket-append-ordered", "true")
+            .option("bucket", String.valueOf(buckets))
             .option("write-only", "true")
             .option("target-file-size", "64 mb")
             .option("compaction.min.file-num", "100")
@@ -177,9 +221,14 @@ class TestPaimonFixedBucketPlanningDemand extends PersistentBase {
                 "self-optimizing.minor.trigger.interval", type == OptimizingType.MINOR ? "1" : "-1")
             .option(
                 "self-optimizing.full.trigger.interval", type == OptimizingType.FULL ? "1" : "-1")
-            .option("self-optimizing.full.rewrite-all-files", "false")
-            .build();
-    catalog.createTable(identifier, schema, false);
+            .option("self-optimizing.full.rewrite-all-files", "false");
+    if (buckets > 0) {
+      schema.option("bucket-key", "id").option("bucket-append-ordered", "true");
+    }
+    if (evolution) {
+      schema.option("row-tracking.enabled", "true").option("data-evolution.enabled", "true");
+    }
+    catalog.createTable(identifier, schema.build(), false);
     AppendOnlyFileStoreTable nativeTable = (AppendOnlyFileStoreTable) catalog.getTable(identifier);
     for (int batch = 0; batch < batches; batch++) {
       BatchWriteBuilder builder = nativeTable.newBatchWriteBuilder();
@@ -191,7 +240,8 @@ class TestPaimonFixedBucketPlanningDemand extends PersistentBase {
     }
     table = new CountingTable(nativeTable);
     ServerTableIdentifier id =
-        ServerTableIdentifier.of("test", "db", "fixed_append", TableFormat.PAIMON);
+        ServerTableIdentifier.of("test", "db", "append_demand", TableFormat.PAIMON);
+    tableId = id;
     doAs(TableMetaMapper.class, mapper -> mapper.insertTable(id));
     TableRuntimeMeta meta = new TableRuntimeMeta();
     meta.setTableId(id.getId());
@@ -253,7 +303,7 @@ class TestPaimonFixedBucketPlanningDemand extends PersistentBase {
     private int evaluations;
 
     private CountingTable(AppendOnlyFileStoreTable table) {
-      super(TableIdentifier.of("test", "db", "fixed_append"), table);
+      super(TableIdentifier.of("test", "db", "append_demand"), table);
     }
 
     @Override
