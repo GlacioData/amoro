@@ -148,6 +148,26 @@ public class PaimonPrimaryKeyTableCommit implements TableOptimizingCommitter {
       throw new OptimizingCommitException(
           "Read-only reconciliation requires a FULL table process", false);
     }
+    if (PaimonPrimaryKeyCommitGuard.applies(table, successTasks)) {
+      try {
+        java.util.concurrent.Callable<ReconciliationResult> inspect =
+            () ->
+                inspectProtected(
+                        new PaimonPrimaryKeyCommitGuard(
+                            table,
+                            successTasks,
+                            identity.commitUser,
+                            identity.commitIdentifier,
+                            identity.targetSnapshotId),
+                        observation)
+                    ? ReconciliationResult.PUBLISHED
+                    : ReconciliationResult.REPLAN;
+        return paimonTable == null ? inspect.call() : paimonTable.doAs(inspect);
+      } catch (Exception failure) {
+        throw new OptimizingCommitException(
+            "Cannot reconcile protected Paimon publication", failure);
+      }
+    }
     // Paimon 1.4.2 StreamTableCommit#filterAndCommit publishes unfiltered messages and is not
     // read-only reconciliation.
     // FileStoreCommitImpl#filterCommitted returns all messages when history expires and cannot
@@ -242,6 +262,12 @@ public class PaimonPrimaryKeyTableCommit implements TableOptimizingCommitter {
       boolean skippedBeforeExecute,
       PaimonCommitObservation observation)
       throws OptimizingCommitException {
+    if (!skippedBeforeExecute
+        && !messages.isEmpty()
+        && PaimonPrimaryKeyCommitGuard.applies(table, successTasks)) {
+      commitProtected(messages, identity, mode, observation);
+      return;
+    }
     FullStatus fullStatus;
     try {
       fullStatus = inspectFull(identity, observation, "preflight");
@@ -286,6 +312,159 @@ public class PaimonPrimaryKeyTableCommit implements TableOptimizingCommitter {
     }
     commitMessages(
         messages, identity.commitUser, identity.commitIdentifier, mode, identity, observation);
+  }
+
+  private void commitProtected(
+      List<CommitMessage> messages,
+      CommitIdentity identity,
+      CommitMode mode,
+      PaimonCommitObservation observation)
+      throws OptimizingCommitException {
+    PaimonPrimaryKeyCommitGuard guard =
+        new PaimonPrimaryKeyCommitGuard(
+            table,
+            successTasks,
+            identity.commitUser,
+            identity.commitIdentifier,
+            identity.targetSnapshotId);
+    try {
+      if (inspectProtected(guard, observation)) {
+        return;
+      }
+      checkProtectedFull(identity, guard);
+      guard.prepare(messages);
+      guard.preflight();
+      FileStoreTable committingTable = guard.commitTable();
+      try {
+        protectedAttempt(
+            committingTable,
+            messages,
+            identity,
+            mode == CommitMode.RECOVERY_REPLAY,
+            mode == CommitMode.RECOVERY_REPLAY ? "recovery" : "direct",
+            guard,
+            observation);
+        return;
+      } catch (Exception failure) {
+        if (mode == CommitMode.RECOVERY_REPLAY) {
+          throw failure;
+        }
+        observation.directFailure(failure);
+        if (inspectProtected(guard, observation)) {
+          return;
+        }
+        // A rejected read set cannot become usable by replaying the same output.
+        if (guard.rejected()) {
+          throw failure;
+        }
+        checkProtectedFull(identity, guard);
+        guard.preflight();
+        try {
+          protectedAttempt(
+              committingTable, messages, identity, true, "fallback", guard, observation);
+          return;
+        } catch (Exception fallback) {
+          if (fallback != failure) {
+            fallback.addSuppressed(failure);
+          }
+          throw fallback;
+        }
+      }
+    } catch (OptimizingCommitSkippedException skipped) {
+      throw skipped;
+    } catch (Exception failure) {
+      try {
+        if (inspectProtected(guard, observation)) {
+          return;
+        }
+      } catch (Exception unresolved) {
+        if (unresolved != failure) {
+          unresolved.addSuppressed(failure);
+        }
+        throw new OptimizingCommitException(
+            "Cannot establish protected Paimon publication", unresolved);
+      }
+      if (guard.rejected()
+          && !guard.publicationUncertain()
+          && identity.optimizingType == OptimizingType.FULL) {
+        OptimizingCommitSkippedException skipped = staleFull(identity, failure.getMessage());
+        skipped.initCause(failure);
+        throw skipped;
+      }
+      throw new OptimizingCommitException(
+          "Protected Paimon primary-key commit failed: table="
+              + name()
+              + " identifier="
+              + identity.commitIdentifier,
+          failure);
+    }
+  }
+
+  private boolean inspectProtected(
+      PaimonPrimaryKeyCommitGuard guard, PaimonCommitObservation observation) throws IOException {
+    PaimonPrimaryKeyCommitGuard.Publication publication = guard.inspectPublication();
+    if (publication == PaimonPrimaryKeyCommitGuard.Publication.UNKNOWN) {
+      throw new IllegalStateException(
+          "Insufficient history to establish protected COMPACT publication");
+    }
+    if (publication == PaimonPrimaryKeyCommitGuard.Publication.PUBLISHED) {
+      observation.outcome = "already_published";
+      return true;
+    }
+    return false;
+  }
+
+  private void checkProtectedFull(CommitIdentity identity, PaimonPrimaryKeyCommitGuard guard)
+      throws OptimizingCommitSkippedException {
+    if (identity.optimizingType == OptimizingType.FULL
+        && !java.util.Objects.equals(
+            table.snapshotManager().latestSnapshotId(), identity.targetSnapshotId)) {
+      throw new OptimizingCommitSkippedException(
+          OptimizingCommitSkippedException.Reason.STALE_FULL,
+          "Paimon FULL target changed before protected publication",
+          guard.publicationUncertain());
+    }
+  }
+
+  private void protectedAttempt(
+      FileStoreTable committingTable,
+      List<CommitMessage> messages,
+      CommitIdentity identity,
+      boolean filter,
+      String stage,
+      PaimonPrimaryKeyCommitGuard guard,
+      PaimonCommitObservation observation)
+      throws Exception {
+    long start = System.nanoTime();
+    boolean returned = false;
+    try {
+      int committed = 1;
+      try (StreamTableCommit commit = committingTable.newCommit(identity.commitUser)) {
+        if (filter) {
+          committed =
+              commit.filterAndCommit(Collections.singletonMap(identity.commitIdentifier, messages));
+        } else {
+          commit.commit(identity.commitIdentifier, messages);
+        }
+      }
+      if (committed == 0) {
+        if (!inspectProtected(guard, observation)) {
+          throw new IllegalStateException(
+              "Native identifier filtering did not prove COMPACT publication");
+        }
+      } else if (committed != 1) {
+        throw new IllegalStateException("Unexpected protected snapshot count: " + committed);
+      } else {
+        observation.outcome = "returned";
+      }
+      returned = true;
+    } finally {
+      observation.record(
+          "native_attempt",
+          stage + (filter ? ":filterAndCommit" : ":commit"),
+          start,
+          returned ? "returned" : "failed");
+    }
   }
 
   private boolean hasSkippedOutput(CommitIdentity identity) throws OptimizingCommitException {

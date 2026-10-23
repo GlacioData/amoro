@@ -46,6 +46,7 @@ public class PaimonPrimaryKeyCompactionOutput implements TableOptimizing.Optimiz
 
   // Nullable for task outputs serialized by older optimizers.
   private String skipReason;
+  private PaimonPrimaryKeyReadDependency readDependency;
   private List<byte[]> commitMessageBytesList;
   private int compactedBucketCount;
   private long compactedFileCount;
@@ -72,6 +73,14 @@ public class PaimonPrimaryKeyCompactionOutput implements TableOptimizing.Optimiz
     this.compactedRecordCount = compactedRecordCount;
     this.producedFileCount = producedFileCount;
     this.producedFileSize = producedFileSize;
+  }
+
+  PaimonPrimaryKeyReadDependency getReadDependency() {
+    return readDependency;
+  }
+
+  void setReadDependency(PaimonPrimaryKeyReadDependency readDependency) {
+    this.readDependency = readDependency;
   }
 
   public List<byte[]> getCommitMessageBytesList() {

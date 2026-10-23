@@ -140,6 +140,12 @@ final class PaimonPrimaryKeySnapshotWriteRestore implements WriteRestore {
     }
   }
 
+  PaimonPrimaryKeyReadDependency readDependency(FileStoreTable table) {
+    return PaimonPrimaryKeyReadDependency.required(table)
+        ? new PaimonPrimaryKeyReadDependency(table, snapshot.id(), prepared)
+        : null;
+  }
+
   @Override
   public long latestCommittedIdentifier(String user) {
     // The compaction writer is short-lived and prepares exactly one commit. Returning MIN_VALUE

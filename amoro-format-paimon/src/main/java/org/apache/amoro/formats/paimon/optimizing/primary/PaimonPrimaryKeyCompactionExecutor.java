@@ -138,6 +138,7 @@ public class PaimonPrimaryKeyCompactionExecutor
               metrics.inputRecords(),
               metrics.outputFiles(),
               metrics.outputBytes());
+      output.setReadDependency(restore.readDependency(table));
       output.setRewriteRecords(metrics.inputRecords(), metrics.outputRecords());
       LOG.info(
           "Paimon primary-key compaction produced commit messages: table={}, type={}, "
