@@ -23,7 +23,7 @@
     <parent>
         <groupId>org.apache.amoro</groupId>
         <artifactId>amoro-parent</artifactId>
-        <version>1.0.0</version>
+        <version>1.0.1</version>
     </parent>
 
     <artifactId>amoro-ams</artifactId>
@@ -33,7 +33,7 @@
 
     <properties>
         <swagger-ui.version>5.17.14</swagger-ui.version>
-        <git-commit-id-plugin.fail-on-no-git-dir>false</git-commit-id-plugin.fail-on-no-git-dir>
+        <git-commit-id-plugin.fail-on-no-git-dir>true</git-commit-id-plugin.fail-on-no-git-dir>
     </properties>
 
     <dependencies>
@@ -536,6 +536,8 @@
                 <configuration>
                     <failOnNoGitDirectory>${git-commit-id-plugin.fail-on-no-git-dir}</failOnNoGitDirectory>
                     <failOnUnableToExtractRepoInfo>${git-commit-id-plugin.fail-on-no-git-dir}</failOnUnableToExtractRepoInfo>
+                    <!-- Native Git also supports linked worktrees. -->
+                    <useNativeGit>true</useNativeGit>
                     <dotGitDirectory>${project.basedir}/.git</dotGitDirectory>
                     <generateGitPropertiesFile>true</generateGitPropertiesFile>
                     <generateGitPropertiesFilename>${project.build.outputDirectory}/amoro/git.properties</generateGitPropertiesFilename>
@@ -543,6 +545,7 @@
                         <includeOnlyProperty>^git.build.(time|version)$</includeOnlyProperty>
                         <includeOnlyProperty>^git.commit.id.(abbrev|full)$</includeOnlyProperty>
                         <includeOnlyProperty>^git.commit.time$</includeOnlyProperty>
+                        <includeOnlyProperty>^git.(branch|dirty)$</includeOnlyProperty>
                     </includeOnlyProperties>
                     <commitIdGenerationMode>full</commitIdGenerationMode>
                 </configuration>
