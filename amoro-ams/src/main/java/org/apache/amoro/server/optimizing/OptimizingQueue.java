@@ -2667,6 +2667,8 @@ public class OptimizingQueue extends PersistentBase {
       // cannot repair two AMS instances created from an uncommitted owner read.
       lock.lock();
       try {
+        List<TaskRuntime<? extends StagedTaskDescriptor<? extends BaseOptimizingInput, ?, ?>>>
+            persistableTaskRuntimes = typedTaskRuntimes();
         doAsTransaction(
             () ->
                 doAs(
@@ -2698,8 +2700,8 @@ public class OptimizingQueue extends PersistentBase {
             () ->
                 doAs(
                     OptimizingProcessMapper.class,
-                    mapper -> mapper.insertTaskRuntimes(typedTaskRuntimes())),
-            () -> TaskFilesPersistence.persistTaskInputs(processId, typedTaskRuntimes()),
+                    mapper -> mapper.insertTaskRuntimes(persistableTaskRuntimes)),
+            () -> TaskFilesPersistence.persistTaskInputs(processId, persistableTaskRuntimes),
             () -> tableRuntime.beginProcess(this));
       } catch (RuntimeException | Error failure) {
         // The SQL transaction has rolled back. Do not issue a second durable close/cancel;
