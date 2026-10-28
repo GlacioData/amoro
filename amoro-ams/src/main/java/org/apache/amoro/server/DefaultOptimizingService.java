@@ -281,7 +281,7 @@ public class DefaultOptimizingService extends StatedPersistentBase
     OptimizingQueue queue = getQueueByToken(authToken);
     TaskRuntime<?> task = queue.pollTask(optimizerThread, pollingTimeout, breakQuotaLimit);
     if (task != null) {
-      LOG.info("OptimizerThread {} polled task {}", optimizerThread, task.getTaskId());
+      LOG.debug("OptimizerThread {} polled task {}", optimizerThread, task.getTaskId());
       return task.extractProtocolTask();
     }
     return null;

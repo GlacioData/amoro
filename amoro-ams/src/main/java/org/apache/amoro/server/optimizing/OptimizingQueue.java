@@ -1104,19 +1104,21 @@ public class OptimizingQueue extends PersistentBase {
         LOG.error("Failed to plan table {}", tableRuntime.getTableIdentifier(), throwable);
       }
       if (process != null && offerPlannedProcess(tableRuntime, process)) {
-        String skipIds =
-            skipTables.stream()
-                .map(ServerTableIdentifier::getId)
-                .sorted()
-                .map(String::valueOf)
-                .collect(Collectors.joining(","));
         LOG.info(
             "Completed planning on table {} with {} tasks with a total cost of {} ms, skipping {} tables.",
             tableRuntime.getTableIdentifier(),
             process.getTaskMap().size(),
             currentTime - startTime,
             skipTables.size());
-        LOG.debug("Skipped planning table IDs:{}", skipIds);
+        if (LOG.isDebugEnabled()) {
+          String skipIds =
+              skipTables.stream()
+                  .map(ServerTableIdentifier::getId)
+                  .sorted()
+                  .map(String::valueOf)
+                  .collect(Collectors.joining(","));
+          LOG.debug("Skipped planning table IDs:{}", skipIds);
+        }
       } else if (process != null) {
         LOG.info(
             "Skip offering planned process {} for table {} after final planning fence",
@@ -2930,7 +2932,7 @@ public class OptimizingQueue extends PersistentBase {
       for (T taskDescriptor : taskDescriptors) {
         TaskRuntime<T> taskRuntime =
             new TaskRuntime<>(new OptimizingTaskId(processId, taskId++), taskDescriptor);
-        LOG.info(
+        LOG.debug(
             "{} plan new task {}, summary {}",
             tableRuntime.getTableIdentifier(),
             taskRuntime.getTaskId(),
