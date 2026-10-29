@@ -25,9 +25,15 @@ import static org.apache.amoro.server.persistence.OptimizingPayloadException.Fai
 import org.apache.amoro.server.utils.CompressUtil;
 import org.apache.amoro.utils.SerializationUtil;
 
+import java.io.BufferedOutputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.util.zip.GZIPOutputStream;
+
 /** Codec for optimizing inputs and outputs persisted as database BLOBs. */
 public final class OptimizingPayloadCodec {
 
+  private static final int SERIALIZATION_BUFFER_SIZE = 1024;
   private static final int GZIP_MAGIC_FIRST = 0x1f;
   private static final int GZIP_MAGIC_SECOND = 0x8b;
   private static final int JAVA_MAGIC_FIRST = 0xac;
@@ -37,12 +43,24 @@ public final class OptimizingPayloadCodec {
 
   private OptimizingPayloadCodec() {}
 
-  /** New writes retain the existing Java-serialization plus GZIP wire format. */
+  /**
+   * New writes retain the existing Java-serialization plus GZIP wire format. Serialization streams
+   * through a bounded buffer into GZIP so the uncompressed byte array never resides in memory as a
+   * whole.
+   */
   public static byte[] encode(Object value) {
     if (value == null) {
       return null;
     }
-    return CompressUtil.gzip(SerializationUtil.simpleSerialize(value).array());
+    ByteArrayOutputStream out = new ByteArrayOutputStream();
+    try (GZIPOutputStream gzip = new GZIPOutputStream(out);
+        BufferedOutputStream buffered = new BufferedOutputStream(gzip, SERIALIZATION_BUFFER_SIZE)) {
+      // Batch small object-field writes before compression without retaining the full payload.
+      SerializationUtil.simpleSerialize(value, buffered);
+    } catch (IOException e) {
+      throw new RuntimeException(e);
+    }
+    return out.toByteArray();
   }
 
   /**

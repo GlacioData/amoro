@@ -21,10 +21,15 @@ package org.apache.amoro.server.persistence;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import org.apache.amoro.formats.paimon.optimizing.PaimonCompactionInput;
+import org.apache.amoro.formats.paimon.optimizing.primary.PaimonBucketCompactionUnit;
+import org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeyCompactionInput;
+import org.apache.amoro.optimizing.BaseOptimizingInput;
+import org.apache.amoro.optimizing.OptimizingType;
 import org.apache.amoro.optimizing.RewriteFilesInput;
 import org.apache.amoro.server.persistence.OptimizingPayloadException.FailureReason;
 import org.apache.amoro.server.utils.CompressUtil;
@@ -32,8 +37,15 @@ import org.apache.amoro.utils.SerializationUtil;
 import org.apache.iceberg.ContentFile;
 import org.apache.iceberg.DataFile;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Random;
 
 class TestOptimizingPayloadCodec {
 
@@ -143,14 +155,94 @@ class TestOptimizingPayloadCodec {
     assertFalse(failure.getMessage().contains(secret));
   }
 
+  @Test
+  void streamedEncodeMatchesLegacyByteFormat() {
+    PaimonCompactionInput input = paimonInput();
+
+    byte[] legacy = CompressUtil.gzip(SerializationUtil.simpleSerialize(input).array());
+    byte[] streamed = OptimizingPayloadCodec.encode(input);
+
+    assertArrayEquals(legacy, streamed);
+  }
+
+  @Test
+  void roundTripsMultiTaskInputMap() {
+    Map<Integer, BaseOptimizingInput> tasks = new HashMap<>();
+    for (int taskId = 1; taskId <= 3; taskId++) {
+      tasks.put(taskId, paimonInput("user-" + taskId, new byte[] {(byte) taskId}));
+    }
+
+    @SuppressWarnings("unchecked")
+    Map<Integer, BaseOptimizingInput> restored =
+        OptimizingPayloadCodec.decode(OptimizingPayloadCodec.encode(tasks));
+
+    assertEquals(3, restored.size());
+    for (int taskId = 1; taskId <= 3; taskId++) {
+      PaimonCompactionInput task = (PaimonCompactionInput) restored.get(taskId);
+      assertEquals("user-" + taskId, task.getCommitUser());
+      assertArrayEquals(new byte[] {(byte) taskId}, task.getTaskBytes());
+    }
+  }
+
+  @ParameterizedTest
+  @ValueSource(ints = {0, 1, 1023, 1024, 1025, 1048593})
+  void streamedEncodePreservesPayloadsAcrossBufferBoundaries(int size) {
+    byte[] taskBytes = new byte[size];
+    new Random(42).nextBytes(taskBytes);
+    PaimonCompactionInput input = paimonInput("large-input-user", taskBytes);
+
+    byte[] encoded = OptimizingPayloadCodec.encode(input);
+
+    assertArrayEquals(CompressUtil.gzip(SerializationUtil.simpleSerialize(input).array()), encoded);
+    PaimonCompactionInput restored = OptimizingPayloadCodec.decode(encoded);
+    assertArrayEquals(taskBytes, restored.getTaskBytes());
+    assertEquals(input.getCommitIdentifier(), restored.getCommitIdentifier());
+  }
+
+  @Test
+  void roundTripsLargePrimaryKeyTaskMapWithLegacyByteFormat() {
+    Map<Integer, BaseOptimizingInput> tasks = new HashMap<>();
+    for (int taskId = 1; taskId <= 10000; taskId++) {
+      List<PaimonBucketCompactionUnit> units = new ArrayList<>();
+      units.add(
+          new PaimonBucketCompactionUnit(new byte[] {1, 2, 3, 4}, taskId, 200, 100, 8192, 1000, 1));
+      tasks.put(
+          taskId,
+          new PaimonPrimaryKeyCompactionInput(
+              null, units, OptimizingType.MINOR, false, 9876L, "primary-key-user", 73L));
+    }
+
+    byte[] encoded = OptimizingPayloadCodec.encode(tasks);
+
+    assertArrayEquals(CompressUtil.gzip(SerializationUtil.simpleSerialize(tasks).array()), encoded);
+    Map<Integer, BaseOptimizingInput> restored = OptimizingPayloadCodec.decode(encoded);
+    assertEquals(tasks.size(), restored.size());
+    for (int taskId = 1; taskId <= 10000; taskId++) {
+      PaimonPrimaryKeyCompactionInput input =
+          assertInstanceOf(PaimonPrimaryKeyCompactionInput.class, restored.get(taskId));
+      assertEquals(OptimizingType.MINOR, input.getOptimizingType());
+      assertFalse(input.isFullCompaction());
+      assertEquals(9876L, input.getTargetSnapshotId());
+      assertEquals("primary-key-user", input.getCommitUser());
+      assertEquals(73L, input.getCommitIdentifier());
+      assertEquals(1, input.getUnits().size());
+      PaimonBucketCompactionUnit unit = input.getUnits().get(0);
+      assertArrayEquals(new byte[] {1, 2, 3, 4}, unit.getPartitionBytes());
+      assertEquals(taskId, unit.getBucket());
+      assertEquals(200, unit.getFileCount());
+      assertEquals(100, unit.getSortedRunCount());
+      assertEquals(8192, unit.getFileSizeInBytes());
+      assertEquals(1000, unit.getRecordCount());
+      assertEquals(1, unit.getLastFileCreationTime());
+    }
+  }
+
   private static PaimonCompactionInput paimonInput() {
+    return paimonInput("recovery-user", new byte[] {1, 2, 3, 4});
+  }
+
+  private static PaimonCompactionInput paimonInput(String commitUser, byte[] taskBytes) {
     return new PaimonCompactionInput(
-        null,
-        new byte[] {1, 2, 3, 4},
-        1,
-        "recovery-user",
-        "dt=2026-08-27",
-        9876L,
-        1464516326809600L);
+        null, taskBytes, 1, commitUser, "dt=2026-08-27", 9876L, 1464516326809600L);
   }
 }

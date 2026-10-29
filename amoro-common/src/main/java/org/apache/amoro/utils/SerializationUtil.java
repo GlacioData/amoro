@@ -23,6 +23,7 @@ import org.apache.amoro.serialization.KryoSerializer;
 import org.apache.amoro.serialization.ResourceSerde;
 import org.apache.amoro.serialization.SimpleSerializer;
 
+import java.io.OutputStream;
 import java.nio.ByteBuffer;
 
 @SuppressWarnings({"unchecked", "rawtypes"})
@@ -33,6 +34,15 @@ public class SerializationUtil {
 
   public static ByteBuffer simpleSerialize(Object obj) {
     return ByteBuffer.wrap(simpleSerialize.serializeResource(obj));
+  }
+
+  /**
+   * Streams the Java-serialized form of {@code obj} onto {@code out} without materializing an
+   * intermediate byte array. The stream is flushed but not closed; closing remains the caller's
+   * choice so it can chain compression around it.
+   */
+  public static void simpleSerialize(Object obj, OutputStream out) {
+    simpleSerialize.serializeResource(obj, out);
   }
 
   public static <R> R simpleDeserialize(byte[] bytes) {
