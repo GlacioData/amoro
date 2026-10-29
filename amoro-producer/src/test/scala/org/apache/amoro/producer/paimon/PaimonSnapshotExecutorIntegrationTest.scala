@@ -19,6 +19,7 @@
 package org.apache.amoro.producer.paimon
 
 import java.io.{ByteArrayInputStream, ByteArrayOutputStream, ObjectInputStream, ObjectOutputStream}
+import java.io.PrintStream
 import java.nio.file.{Files, Path, Paths}
 import java.util.concurrent.{CountDownLatch, TimeUnit}
 import java.util.concurrent.locks.LockSupport
@@ -47,6 +48,115 @@ class PaimonSnapshotExecutorIntegrationTest {
     SparkSession.clearActiveSession()
     SparkSession.clearDefaultSession()
   }
+
+  @Test def reusedKryoContextIsRejectedBeforeTableSelectionAndRemainsRunning(): Unit = {
+    spark.stop()
+    SparkSession.clearActiveSession()
+    SparkSession.clearDefaultSession()
+    spark = sessionBuilder("local[2]").config(
+      "spark.serializer",
+      "org.apache.spark.serializer.KryoSerializer").getOrCreate()
+    val adapter = new PaimonFormatAdapter() {
+      override def listTables(
+          s: SparkSession,
+          c: CommonProducerConfig,
+          d: String): Seq[TargetTable] =
+        throw new AssertionError("Cannot select tables using a rejected SparkContext")
+    }
+    val output = new ByteArrayOutputStream()
+    val code = Console.withOut(new PrintStream(output)) {
+      ProducerApp.runInternal(snapshotArgs, Seq(adapter))
+    }
+    assertEquals(2, code)
+    assertTrue(output.toString("UTF-8").contains("Restart the application"))
+    assertFalse(spark.sparkContext.isStopped)
+    assertEquals(
+      "org.apache.spark.serializer.KryoSerializer",
+      org.apache.spark.SparkEnv.get.serializer.getClass.getName)
+  }
+
+  @Test def startupOverridesKryoAndExpiresHadoopTablesInIndependentExecutors(): Unit = {
+    assumeTrue(
+      java.lang.Boolean.getBoolean("producer.snapshot.clusterTest"),
+      "Opt-in local-cluster test")
+    create("startup", 4)
+    val before = data("startup")
+    val properties = spark.sparkContext.getConf.getAll.toMap.filter { case (key, _) =>
+      key.startsWith("spark.sql.catalog.") || key == "spark.sql.extensions"
+    } ++ Map(
+      "spark.master" -> "local-cluster[2,2,1024]",
+      "spark.app.name" -> "snapshot-startup-test",
+      "spark.serializer" -> "org.apache.spark.serializer.KryoSerializer",
+      "spark.driver.host" -> "127.0.0.1",
+      "spark.driver.bindAddress" -> "127.0.0.1",
+      "spark.ui.enabled" -> "false",
+      "spark.speculation" -> "false",
+      "spark.task.maxFailures" -> "1",
+      "spark.executor.memory" -> "512m",
+      "spark.executor.cores" -> "2",
+      "spark.executor.extraClassPath" -> System.getProperty("surefire.test.class.path"))
+    val previous = properties.keys.map(key => key -> Option(System.getProperty(key))).toMap
+    spark.stop()
+    SparkSession.clearActiveSession()
+    SparkSession.clearDefaultSession()
+    val runner = new PaimonSqlRunner {
+      override def run(s: SparkSession, sql: String): Seq[org.apache.spark.sql.Row] =
+        SparkPaimonSqlRunner.run(s, sql)
+      override def loadFileStoreTable(
+          s: SparkSession,
+          catalog: String,
+          t: TargetTable): org.apache.paimon.table.FileStoreTable = {
+        val table = SparkPaimonSqlRunner.loadFileStoreTable(s, catalog, t)
+        assertEquals(
+          PaimonSnapshotRuntime.JavaSerializerClass,
+          s.sparkContext.getConf.get("spark.serializer"))
+        val io = new org.apache.paimon.fs.hadoop.HadoopFileIO()
+        io.configure(org.apache.paimon.catalog.CatalogContext.create(
+          new org.apache.paimon.options.Options(),
+          s.sparkContext.hadoopConfiguration))
+        org.apache.paimon.table.FileStoreTableFactory.create(io, table.location())
+      }
+    }
+    val output = new ByteArrayOutputStream()
+    val code =
+      try {
+        properties.foreach { case (key, value) => System.setProperty(key, value) }
+        Console.withOut(new PrintStream(output)) {
+          ProducerApp.runInternal(
+            snapshotArgs ++ Array("--tableName", "startup"),
+            Seq(new PaimonFormatAdapter(runner)))
+        }
+      } finally previous.foreach { case (key, value) =>
+          value match {
+            case Some(text) => System.setProperty(key, text)
+            case None => System.clearProperty(key)
+          }
+        }
+    val text = output.toString("UTF-8")
+    assertEquals(0, code, text)
+    val json = text.split("\n").find(_.contains("lakehouse_producer_table_action")).get
+    val result = new com.fasterxml.jackson.databind.ObjectMapper().readTree(json)
+    assertEquals("success", result.get("status").asText(), json)
+    assertEquals(2, result.get("deletedSnapshotsTotal").asInt(), json)
+    assertNotEquals("driver", result.get("metrics").get("executorId").asText(), json)
+    assertEquals("COMPLETED", result.get("metrics").get("completionState").asText(), json)
+    assertTrue(result.get("message").isNull, json)
+    spark = session("local[2]")
+    assertEquals(4, snapshotCount("startup"))
+    assertEquals(before, data("startup"))
+  }
+
+  private def snapshotArgs: Array[String] = Array(
+    "--format",
+    "paimon",
+    "--action",
+    "expire-snapshots",
+    "--executionMode",
+    "executor",
+    "--catalogName",
+    "paimon",
+    "--databaseName",
+    "db")
 
   @Test def cliBatchPreservesPerTablePolicyAndSameAttemptAcrossRounds(): Unit = {
     create("a", 4)
@@ -337,7 +447,9 @@ class PaimonSnapshotExecutorIntegrationTest {
       s"final=${finalIds.toSeq.sorted.mkString(",")} tables=${results.size}")
   }
 
-  private def session(master: String, dynamicAllocation: Boolean = false): SparkSession = {
+  private def sessionBuilder(
+      master: String,
+      dynamicAllocation: Boolean = false): SparkSession.Builder = {
     val builder = SparkSession.builder().master(master).appName("producer-snapshot-test")
       .config("spark.ui.enabled", "false")
       .config("spark.driver.host", "127.0.0.1").config("spark.driver.bindAddress", "127.0.0.1")
@@ -365,7 +477,11 @@ class PaimonSnapshotExecutorIntegrationTest {
         .config("spark.dynamicAllocation.executorIdleTimeout", "120s")
         .config("spark.executor.instances", "1")
     }
-    val session = builder.getOrCreate()
+    builder
+  }
+
+  private def session(master: String, dynamicAllocation: Boolean = false): SparkSession = {
+    val session = sessionBuilder(master, dynamicAllocation).getOrCreate()
     session.sparkContext.setLogLevel("WARN")
     session.sql("CREATE DATABASE IF NOT EXISTS paimon.db")
     session

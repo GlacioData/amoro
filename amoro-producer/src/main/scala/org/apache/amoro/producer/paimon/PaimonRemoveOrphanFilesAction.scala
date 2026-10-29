@@ -20,9 +20,13 @@ package org.apache.amoro.producer.paimon
 
 import org.apache.amoro.producer.core.{ActionOption, ActionResult, ActionStatus, ActionTaskResult, CommonProducerConfig, ProducerContext, ProducerParsedOptions, RetryMode, TargetTable}
 import org.apache.amoro.producer.paimon.PaimonSqlUtils.{fieldOpt, quoteIdent, sqlString, valueAt}
-import org.apache.amoro.producer.spi.{ActionConfig, ProducerAction}
+import org.apache.amoro.producer.spi.{ActionConfig, ProducerAction, ProducerBatchExecutor}
 
-final case class PaimonRemoveOrphanFilesConfig(parallelism: Int, mode: String)
+final case class PaimonRemoveOrphanFilesConfig(
+    parallelism: Int,
+    mode: String,
+    tableConcurrency: Int = 1,
+    tableConcurrencyExplicit: Boolean = false)
   extends ActionConfig
 
 class PaimonRemoveOrphanFilesAction(runner: PaimonSqlRunner = SparkPaimonSqlRunner)
@@ -35,13 +39,19 @@ class PaimonRemoveOrphanFilesAction(runner: PaimonSqlRunner = SparkPaimonSqlRunn
   override def options: Seq[ActionOption] = {
     Seq(
       ActionOption("parallelism", description = "Paimon remove_orphan_files parallelism"),
-      ActionOption("mode", description = "Paimon remove_orphan_files mode"))
+      ActionOption("mode", description = "Paimon remove_orphan_files mode"),
+      ActionOption(
+        "tableConcurrency",
+        description = "Concurrent distributed orphan-cleaning tables (default 1)"))
   }
 
   override def parse(commandLine: ProducerParsedOptions): ActionConfig = {
     PaimonRemoveOrphanFilesConfig(
       parallelism = parseInt(commandLine.getOptionValue("parallelism", "10"), "--parallelism"),
-      mode = commandLine.getOptionValue("mode", "distributed").trim)
+      mode = commandLine.getOptionValue("mode", "distributed").trim,
+      tableConcurrency =
+        parseInt(commandLine.getOptionValue("tableConcurrency", "1"), "--tableConcurrency"),
+      tableConcurrencyExplicit = commandLine.hasOption("tableConcurrency"))
   }
 
   override def validate(common: CommonProducerConfig, actionConfig: ActionConfig): Unit = {
@@ -52,21 +62,75 @@ class PaimonRemoveOrphanFilesAction(runner: PaimonSqlRunner = SparkPaimonSqlRunn
     if (config.mode.trim.isEmpty) {
       throw new IllegalArgumentException("--mode 的值不能为空")
     }
+    require(config.tableConcurrency > 0, "--tableConcurrency 必须大于 0")
+    require(
+      !concurrencyRequested(config) || config.mode.equalsIgnoreCase("distributed"),
+      "--tableConcurrency 仅支持 distributed 模式")
   }
+
+  override def sparkConfOverrides(actionConfig: ActionConfig): Map[String, String] = {
+    val config = asRemoveOrphanFilesConfig(actionConfig)
+    if (config.mode.equalsIgnoreCase("distributed") && PaimonOrphanFilesRuntime.supported)
+      PaimonOrphanFilesRuntime.StartupOverrides
+    else Map.empty
+  }
+
+  override def validateRuntime(context: ProducerContext, actionConfig: ActionConfig): Unit = {
+    val config = asRemoveOrphanFilesConfig(actionConfig)
+    if (concurrencyRequested(config) || modernDistributed(config))
+      PaimonOrphanFilesRuntime.validate(context.spark, config.tableConcurrency)
+  }
+
+  override def batchExecutor(
+      context: ProducerContext,
+      actionConfig: ActionConfig): Option[ProducerBatchExecutor] = {
+    val config = asRemoveOrphanFilesConfig(actionConfig)
+    validate(context.common, config)
+    validateRuntime(context, config)
+    if (!modernDistributed(config)) None
+    else {
+      Some(new PaimonOrphanFilesExecutor(
+        config.tableConcurrency,
+        context.common.continueOnTableFailure,
+        new PaimonOrphanFilesSparkBackend(context, config, runner, this)))
+    }
+  }
+
+  private def modernDistributed(config: PaimonRemoveOrphanFilesConfig): Boolean =
+    config.mode.equalsIgnoreCase("distributed") && PaimonOrphanFilesRuntime.supported
+
+  private def concurrencyRequested(config: PaimonRemoveOrphanFilesConfig): Boolean =
+    config.tableConcurrencyExplicit || config.tableConcurrency != 1
 
   override def execute(
       context: ProducerContext,
       table: TargetTable,
       actionConfig: ActionConfig): ActionResult = {
     val config = asRemoveOrphanFilesConfig(actionConfig)
+    executeOnce(context, table, config, strict = false)
+  }
+
+  private[paimon] def executeOnce(
+      context: ProducerContext,
+      table: TargetTable,
+      config: PaimonRemoveOrphanFilesConfig,
+      strict: Boolean): ActionResult = {
     val startNs = System.nanoTime()
     val sqlText =
       PaimonRemoveOrphanFilesAction.buildRemoveOrphanFilesSql(
         context.common.catalogName,
         config,
         table)
-    val (deletedFileCount, deletedFileTotalLenInBytes) = parseMetrics(
-      runner.run(context.spark, sqlText))
+    val rows = runner.run(context.spark, sqlText)
+    if (strict) {
+      require(
+        rows.nonEmpty && rows.forall(row => row.size == 2 && !row.isNullAt(0) && !row.isNullAt(1)),
+        "remove_orphan_files returned missing or invalid metrics")
+    }
+    val (deletedFileCount, deletedFileTotalLenInBytes) = parseMetrics(rows)
+    if (strict) require(
+      deletedFileCount >= 0 && deletedFileTotalLenInBytes >= 0,
+      "remove_orphan_files returned negative metrics")
     val metrics =
       Map(
         "table" -> table.raw,

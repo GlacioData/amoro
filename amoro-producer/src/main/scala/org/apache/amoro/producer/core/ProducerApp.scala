@@ -22,6 +22,7 @@ import java.util.Locale
 
 import scala.util.control.NonFatal
 
+import org.apache.spark.SparkEnv
 import org.apache.spark.sql.SparkSession
 
 import org.apache.amoro.producer.spi.{ActionConfig, LakeFormatAdapter, ProducerAction, ProducerRuntimeValidationException}
@@ -38,7 +39,13 @@ object ProducerApp {
   def runInternal(
       args: Array[String],
       adapters: Seq[LakeFormatAdapter],
-      sparkBuilder: () => SparkSession = () => SparkSession.builder().getOrCreate()): Int = {
+      sparkBuilder: () => SparkSession): Int =
+    runInternal(args, adapters, _ => sparkBuilder())
+
+  def runInternal(
+      args: Array[String],
+      adapters: Seq[LakeFormatAdapter],
+      sparkBuilder: Map[String, String] => SparkSession = createSparkSession): Int = {
     val peek = ProducerCliParser.peek(args)
     if (peek.help) {
       printUsage(adapters, peek)
@@ -75,8 +82,16 @@ object ProducerApp {
       }
 
     var spark: SparkSession = null
+    var stopSpark = true
     try {
-      spark = sparkBuilder()
+      val overrides = action.sparkConfOverrides(actionConfig)
+      overrides.toSeq.sortBy(_._1).foreach { case (key, value) =>
+        println(s"Producer Spark configuration override: $key=$value")
+      }
+      val previousEnv = SparkEnv.get
+      spark = sparkBuilder(overrides)
+      // A reused context belongs to the caller, including one rejected by runtime validation.
+      stopSpark = overrides.isEmpty || previousEnv == null || (previousEnv ne SparkEnv.get)
       val context = ProducerContext(spark, common, adapter)
       action.validateRuntime(context, actionConfig)
       val targets = TableResolver.resolveTargets(spark, adapter, common)
@@ -92,10 +107,16 @@ object ProducerApp {
         println(s"执行失败: ${exception.getClass.getSimpleName}: ${exception.getMessage}")
         1
     } finally {
-      if (spark != null) {
+      if (spark != null && stopSpark) {
         spark.stop()
       }
     }
+  }
+
+  private def createSparkSession(overrides: Map[String, String]): SparkSession = {
+    val builder = SparkSession.builder()
+    overrides.foreach { case (key, value) => builder.config(key, value) }
+    builder.getOrCreate()
   }
 
   def resolveAdapter(format: String, adapters: Seq[LakeFormatAdapter]): LakeFormatAdapter = {

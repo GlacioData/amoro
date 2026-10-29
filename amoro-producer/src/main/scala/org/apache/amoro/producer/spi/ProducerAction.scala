@@ -34,6 +34,9 @@ trait ProducerAction {
 
   def validate(common: CommonProducerConfig, actionConfig: ActionConfig): Unit
 
+  /** Overrides applied before creating the SparkContext, after validating application arguments. */
+  def sparkConfOverrides(actionConfig: ActionConfig): Map[String, String] = Map.empty
+
   def validateRuntime(context: ProducerContext, actionConfig: ActionConfig): Unit = ()
 
   def batchExecutor(

@@ -448,9 +448,16 @@ Producer 自动改为通过带 UTC 偏移的 `older_than` timestamp 传递时间
 
 首版要求运行时 **Spark 3.5.4 / Paimon 1.3.2**。使用
 `./mvnw -pl amoro-producer clean package -Pproducer-paimon-1.3.2 -DskipTests`
-构建，产物为 `amoro-producer/target/amoro-producer-1.0.0-jar-with-dependencies.jar`。
+构建，当前产物为 `amoro-producer/target/amoro-producer-1.0.1-jar-with-dependencies.jar`。
 Driver 和 Task 分别校验实际加载类所在 JAR 的版本资源；缺失或不匹配时拒绝清理。
 Spark 3.2.1 / Paimon 0.9.0 继续使用 Driver 模式。
+
+当 `--action expire-snapshots --executionMode executor` 时，Producer 在创建 SparkContext
+前固定 `spark.serializer=org.apache.spark.serializer.JavaSerializer`，覆盖提交参数或平台注入的
+Kryo 配置；启动日志显示固定配置及实际序列化器。其他 action 和 Driver 模式保持原有序列化配置。
+Paimon 的 Hadoop 配置依靠 Java 序列化恢复，默认 Kryo 传输可能丢失这些配置。
+Driver 和 Task 都检查实际序列化器；如果复用了已经采用 Kryo 的 SparkContext，任务会在选表和清理前
+拒绝执行，提示重新启动应用。Producer 不会自动停止或重建该共享 SparkContext。
 
 在 `spark-submit` 的应用 JAR **之前**加上：
 
@@ -480,6 +487,13 @@ Driver 有界准备并提交任务。每张表只提交一个单分区清理 Job
 结果使用 `Failed` + `completionState=UNKNOWN`，已确认的计数保留，未知计数不伪造为 0，
 汇总标记 `countsComplete=false`。`continueOnTableFailure=false` 在观察到失败后停止派发，
 已运行表继续收敛；true 可继续其他表。基础设施失效和取消始终停止后续派发并返回失败。
+
+分布式清理失败时，结果 `message` 包含失败阶段、异常完整类名、异常原因和关键堆栈。
+优先显示根因，最多展示 8 层异常、每层 8 个堆栈帧；单个异常文本最多 1024 字符，
+整个 message 最多 8192 字符，省略部分用 `[truncated]` 标记。密码、token、credential、
+访问密钥、URI 用户信息和已知敏感配置值会脱敏为 `[REDACTED]`，不会附加完整配置对象。
+堆栈换行经过 JSON 转义，因此每张表的事件仍为单行 JSON；成功结果保持 `message=null`。
+详细错误不改变禁止重放、已确认删除计数和 `UNKNOWN` 状态语义。
 
 每表结果保留最近 100 轮明细，Long 累计计数不受截断影响。日志提供 runId/workId、
 Job/Task/Executor 标识、有效保留参数和来源、单轮删除数及耗时。`queueWaitMs` 使用 Driver 的
@@ -529,6 +543,57 @@ Executor 模式支持 Spark 动态资源分配。例如每个 Executor 配置 2 
 |------|----------|--------|------|
 | `--parallelism` | 否 | `10` | 传给 `remove_orphan_files` 的 `parallelism`。 |
 | `--mode` | 否 | `distributed` | 传给 `remove_orphan_files` 的 `mode`。 |
+| `--tableConcurrency` | 否 | `1` | 同时准备或清理的表数；仅支持 Spark 3.5.4 / Paimon 1.3.2 的 distributed 模式。 |
+
+Spark 3.5.4 / Paimon 1.3.2 的 distributed 路径通过 Driver 有界工作槽并发提交多张表的
+原生 Procedure，每张表内部仍由 Paimon 使用 Executor 执行扫描、关联和删除。完成一张表后
+立即调度下一张表；默认 `tableConcurrency=1`，显式传 `--tableConcurrency 2` 可同时处理两张表。
+`parallelism` 是单表原生并行参数，不是表数，也不是所有阶段的 Task 数硬上限；
+最终 Shuffle 还受 `spark.sql.shuffle.partitions` 和 AQE 影响。
+
+该组合在创建 SparkContext 前固定 `spark.scheduler.mode=FAIR`、`spark.speculation=false`、
+`spark.task.maxFailures=1`。每个工作槽拥有独立的
+SparkSession/SQLConf，使用等权默认配置的固定 scheduler pool 和每表独立 JobGroup，共享
+SparkContext。已有上下文不满足实际调度配置时会在选表前拒绝执行；结束工作槽不停止共享上下文。
+本路径不固定序列化器。需要同时运行的 Task 槽位还受 Executor 核数及 `spark.task.cpus` 限制。
+
+YARN 提交必须在 JAR 路径之前显式指定 `--conf spark.yarn.maxAppAttempts=1`。
+YARN 在提交 Application 时确定重试次数，Driver 内修改此配置无法改变已提交的限制；
+Producer 不覆盖该参数，缺失或不等于 `1` 时在选表和清理前拒绝执行，提示重新提交。
+已有 FIFO SparkContext 允许 `tableConcurrency=1`，并发度大于 1 时要求实际调度模式为 FAIR，
+仅修改 SparkSession 中的配置值无法改变已有 SparkContext 的调度模式。
+
+只读表加载可使用 `--retryTimes` 重试；一旦进入原生 Procedure，不再自动重试整表，
+因为 Paimon 在 Driver 准备阶段也可能删除文件。异常或取消后的删除结果无法确认时输出
+`completionState=UNKNOWN`、`countsComplete=false`，不填充未知的删除文件数/字节数。
+详细异常沿用有长度限制的脱敏格式，完整遮蔽包含转义引号、反斜杠的敏感值；
+已知敏感配置值同时匹配原文、JSON 转义和 URL 编码形式，先脱敏再截断。
+返回计数标记为 `metricSemantics=paimon-reported`，
+代表 Paimon 的报告值，不代表逐文件物理删除验证。同一轮相同规范化物理路径的别名只清理一次。
+`continueOnTableFailure=false` 停止派发新表，已接纳表继续收敛；中断或基础设施失效则取消在途 JobGroup，
+并拦截取消后迟到的 Job。取消仅为尽力而为，不证明原生 FileIO 已停止；跨应用同表互斥仍由外部调度负责。
+
+Paimon 0.9.0 及 local 模式不启用上述调度器，也不注入上述 Spark 配置；省略新参数时保留
+原有 SQL、结果解析及整表重试逻辑。本次不修改 0.9.0 的 Procedure 兼容行为；
+显式在不支持的组合或 local 模式使用 `--tableConcurrency` 会报错。
+
+例如 2 个各 2 核的 Executor，可先以 `spark.task.cpus=1`、
+`spark.sql.shuffle.partitions=4` 配合以下应用参数验证，再依据存储请求量、Driver 内存及吞吐调节：
+
+```bash
+--format paimon --action remove-orphan-files \
+--catalogName paimon --databaseName ods \
+--mode distributed --parallelism 4 --tableConcurrency 2
+```
+
+独立 Executor 集成测试需配置 Spark 3.5.4 的 `SPARK_HOME`。关闭 JaCoCo 是为了避免仅对
+Driver 依赖类插桩引起 Java 序列化版本差异，不会跳过测试：
+
+```bash
+SPARK_SCALA_VERSION=2.12 ./mvnw -pl amoro-producer -Pproducer-paimon-1.3.2 \
+  -Djacoco.skip=true -Dproducer.orphan.clusterTest=true \
+  -Dtest=PaimonOrphanFilesIntegrationTest,PaimonOrphanFilesExecutorTest,PaimonRemoveOrphanFilesActionTest test
+```
 
 示例：
 
@@ -536,6 +601,7 @@ Executor 模式支持 Spark 动态资源分配。例如每个 Executor 配置 2 
 ./spark-submit \
   --master yarn \
   --deploy-mode cluster \
+  --conf spark.yarn.maxAppAttempts=1 \
   --conf spark.sql.catalog.paimon=org.apache.paimon.spark.SparkCatalog \
   --conf spark.sql.extensions=org.apache.paimon.spark.extensions.PaimonSparkSessionExtensions \
   --conf spark.sql.catalog.paimon.type=hive \

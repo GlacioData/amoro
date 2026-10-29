@@ -28,6 +28,35 @@ import org.apache.amoro.producer.spi.{ActionConfig, LakeFormatAdapter, ProducerA
 
 class ProducerAppTest {
 
+  @Test def passesActionOverridesToTheBuilderOnlyAfterValidation(): Unit = {
+    val action = new BatchOnlyAction(failValidation = true) {
+      override def sparkConfOverrides(config: ActionConfig): Map[String, String] =
+        Map("spark.serializer" -> "org.apache.spark.serializer.JavaSerializer")
+    }
+    val adapter = new FakeAdapter("paimon", Seq(action))
+    var captured = Map.empty[String, String]
+    val spark = org.mockito.Mockito.mock(classOf[SparkSession])
+    val builder: Map[String, String] => SparkSession = overrides => {
+      captured = overrides
+      spark
+    }
+    assertEquals(
+      2,
+      ProducerApp.runInternal(
+        Array("--format", "paimon", "--action", "batch", "--databaseName", "db"),
+        Seq(adapter),
+        builder))
+    assertEquals("org.apache.spark.serializer.JavaSerializer", captured("spark.serializer"))
+    captured = Map.empty
+    assertEquals(
+      2,
+      ProducerApp.runInternal(
+        Array("--format", "paimon", "--action", "batch"),
+        Seq(adapter),
+        builder))
+    assertTrue(captured.isEmpty)
+  }
+
   @Test
   def batchExecutionPublishesEachResultOnceWithoutCallingSingleTableRetry(): Unit = {
     val action = new BatchOnlyAction

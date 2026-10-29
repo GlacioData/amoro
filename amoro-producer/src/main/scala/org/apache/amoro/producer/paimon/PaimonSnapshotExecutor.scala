@@ -88,12 +88,27 @@ final private[paimon] class PaimonSnapshotExecutor(
         override def call(): Event = {
           try Prepared(pending, backend.prepare(target, runId, pending.workId))
           catch {
-            case _: InterruptedException =>
+            case error: InterruptedException =>
               Thread.currentThread().interrupt()
-              FailedPreparation(pending, "Preparation interrupted")
+              FailedPreparation(
+                pending,
+                PaimonSnapshotErrors.format(
+                  "Preparation interrupted",
+                  error,
+                  backend.sensitiveValues))
             case NonFatal(error) =>
-              FailedPreparation(pending, s"Preparation failed (${error.getClass.getSimpleName})")
-            case _: LinkageError => FailedPreparation(pending, "Preparation linkage failure")
+              FailedPreparation(
+                pending,
+                PaimonSnapshotErrors.format(
+                  "Preparation failed",
+                  error,
+                  backend.sensitiveValues))
+            case error: LinkageError => FailedPreparation(
+                pending,
+                PaimonSnapshotErrors.format(
+                  "Preparation linkage failure",
+                  error,
+                  backend.sensitiveValues))
           }
         }
       })
@@ -125,24 +140,33 @@ final private[paimon] class PaimonSnapshotExecutor(
                 val result =
                   try backend.execute(work)
                   catch {
-                    case _: InterruptedException =>
+                    case error: InterruptedException =>
                       Thread.currentThread().interrupt()
                       PaimonSnapshotTask.failure(
                         PaimonSnapshotTask.baseMetrics(work),
                         "job",
-                        "Cleanup interrupted; result unknown",
+                        PaimonSnapshotErrors.format(
+                          "Cleanup interrupted (phase=job); result unknown",
+                          error,
+                          work.redactionSecrets ++ backend.sensitiveValues),
                         unknown = true)
                     case NonFatal(error) =>
                       PaimonSnapshotTask.failure(
                         PaimonSnapshotTask.baseMetrics(work),
                         "job",
-                        s"Cleanup result unavailable (${error.getClass.getSimpleName}); no replay",
+                        PaimonSnapshotErrors.format(
+                          "Cleanup result unavailable (phase=job); no replay",
+                          error,
+                          work.redactionSecrets ++ backend.sensitiveValues),
                         unknown = true)
-                    case _: LinkageError =>
+                    case error: LinkageError =>
                       PaimonSnapshotTask.failure(
                         PaimonSnapshotTask.baseMetrics(work),
                         "job",
-                        "Cleanup linkage failure; result unknown",
+                        PaimonSnapshotErrors.format(
+                          "Cleanup linkage failure (phase=job); result unknown",
+                          error,
+                          work.redactionSecrets ++ backend.sensitiveValues),
                         unknown = true)
                   }
                 Completed(pending, result)
@@ -200,7 +224,7 @@ final private[paimon] class PaimonSnapshotExecutor(
         }
       }
     } catch {
-      case _: InterruptedException =>
+      case error: InterruptedException =>
         Thread.interrupted()
         restoreInterrupt = true
         cancelled = true
@@ -211,7 +235,10 @@ final private[paimon] class PaimonSnapshotExecutor(
             PaimonSnapshotTask.failure(
               Map.empty,
               "cancelled",
-              "Run interrupted; cleanup termination is not confirmed",
+              PaimonSnapshotErrors.format(
+                "Run interrupted; cleanup termination is not confirmed",
+                error,
+                backend.sensitiveValues),
               unknown = pending.cleanupSubmitted))
         }
         if (!results.exists(_._2.status == ActionStatus.Failed) && remaining.hasNext) {
@@ -224,7 +251,10 @@ final private[paimon] class PaimonSnapshotExecutor(
             PaimonSnapshotTask.failure(
               Map.empty,
               "cancelled",
-              "Run interrupted before submission",
+              PaimonSnapshotErrors.format(
+                "Run interrupted before submission",
+                error,
+                backend.sensitiveValues),
               unknown = false))
         }
       case NonFatal(error) =>
@@ -236,11 +266,18 @@ final private[paimon] class PaimonSnapshotExecutor(
             PaimonSnapshotTask.failure(
               Map.empty,
               "coordination",
-              s"Coordinator failed (${error.getClass.getSimpleName}); no replay",
+              PaimonSnapshotErrors.format(
+                "Coordinator failed; no replay",
+                error,
+                backend.sensitiveValues),
               unknown = pending.cleanupSubmitted))
         }
         if (!results.exists(_._2.status == ActionStatus.Failed)) {
-          throw new IllegalStateException("Snapshot coordinator failed")
+          throw new IllegalStateException(
+            PaimonSnapshotErrors.format(
+              "Snapshot coordinator failed",
+              error,
+              backend.sensitiveValues))
         }
     } finally {
       restoreInterrupt = Thread.interrupted() || restoreInterrupt
@@ -267,6 +304,7 @@ final private[paimon] class PaimonSnapshotExecutor(
 }
 
 private[paimon] trait PaimonSnapshotBackend extends AutoCloseable {
+  def sensitiveValues: Seq[String] = Seq.empty
   def prepare(target: TargetTable, runId: String, workId: String): PaimonSnapshotWork
   def execute(work: PaimonSnapshotWork): ActionResult
   def available: Boolean
