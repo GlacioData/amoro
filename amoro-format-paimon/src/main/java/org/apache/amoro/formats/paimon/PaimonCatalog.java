@@ -29,7 +29,10 @@ import org.apache.amoro.table.TableIdentifier;
 import org.apache.amoro.table.TableMetaStore;
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.Identifier;
+import org.apache.paimon.table.FileStoreTable;
+import org.apache.paimon.table.Table;
 
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Callable;
@@ -43,6 +46,8 @@ public class PaimonCatalog implements FormatCatalog {
   private final Map<String, String> catalogProperties;
 
   private final TableMetaStore tableMetaStore;
+
+  private final Map<String, String> tableDefaults;
 
   public PaimonCatalog(Catalog catalog, String name) {
     this(catalog, name, ImmutableMap.of());
@@ -61,7 +66,39 @@ public class PaimonCatalog implements FormatCatalog {
     this.name = name;
     this.catalogProperties =
         catalogProperties == null ? ImmutableMap.of() : ImmutableMap.copyOf(catalogProperties);
+    this.tableDefaults = parseTableDefaults(this.catalogProperties);
     this.tableMetaStore = tableMetaStore;
+  }
+
+  private static Map<String, String> parseTableDefaults(Map<String, String> properties) {
+    Map<String, String> defaults = new HashMap<>();
+    properties.forEach(
+        (key, value) -> {
+          if (key.startsWith(Catalog.TABLE_DEFAULT_OPTION_PREFIX)) {
+            String tableOption = key.substring(Catalog.TABLE_DEFAULT_OPTION_PREFIX.length());
+            if (tableOption.isEmpty()) {
+              throw new IllegalArgumentException(
+                  Catalog.TABLE_DEFAULT_OPTION_PREFIX + " must be followed by a table option name");
+            }
+            defaults.put(tableOption, value);
+          }
+        });
+    return ImmutableMap.copyOf(defaults);
+  }
+
+  private Table withRuntimeTableDefaults(Table table) {
+    if (tableDefaults.isEmpty() || !(table instanceof FileStoreTable)) {
+      return table;
+    }
+    FileStoreTable fileStoreTable = (FileStoreTable) table;
+    Map<String, String> tableOptions = fileStoreTable.options();
+    if (tableOptions.keySet().containsAll(tableDefaults.keySet())) {
+      return table;
+    }
+    Map<String, String> missingDefaults = new HashMap<>(tableDefaults);
+    missingDefaults.keySet().removeAll(tableOptions.keySet());
+    // Use native option validation without rebinding the captured schema through time travel.
+    return fileStoreTable.copyWithoutTimeTravel(missingDefaults);
   }
 
   @Override
@@ -132,7 +169,7 @@ public class PaimonCatalog implements FormatCatalog {
             PaimonTable result =
                 new PaimonTable(
                     TableIdentifier.of(name, database, table),
-                    catalog.getTable(identifier),
+                    withRuntimeTableDefaults(catalog.getTable(identifier)),
                     catalogProperties,
                     tableMetaStore);
             result.withTagContext(
@@ -140,7 +177,7 @@ public class PaimonCatalog implements FormatCatalog {
                     doAs(
                         () -> {
                           catalog.invalidateTable(identifier);
-                          return catalog.getTable(identifier);
+                          return withRuntimeTableDefaults(catalog.getTable(identifier));
                         }),
                 catalog.supportsVersionManagement());
             return result;
