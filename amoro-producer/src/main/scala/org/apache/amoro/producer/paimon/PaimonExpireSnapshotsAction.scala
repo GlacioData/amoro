@@ -27,6 +27,7 @@ import scala.util.control.NonFatal
 
 import org.apache.paimon.CoreOptions
 import org.apache.paimon.utils.ParameterUtils
+import org.apache.spark.SparkEnv
 import org.apache.spark.sql.Row
 
 import org.apache.amoro.producer.core.{ActionOption, ActionResult, ActionStatus, ActionTaskResult, CommonProducerConfig, ProducerContext, ProducerParsedOptions, RetryMode, TargetTable}
@@ -120,8 +121,18 @@ class PaimonExpireSnapshotsAction(runner: PaimonSqlRunner = SparkPaimonSqlRunner
     require(config.maxDeletes <= Int.MaxValue, "--maxDeletes 不能超过 Integer.MAX_VALUE")
   }
 
+  override def sparkConfOverrides(actionConfig: ActionConfig): Map[String, String] = {
+    if (asExpireSnapshotsConfig(actionConfig).executionMode == "executor")
+      Map("spark.serializer" -> PaimonSnapshotRuntime.JavaSerializerClass)
+    else Map.empty
+  }
+
   override def validateRuntime(context: ProducerContext, actionConfig: ActionConfig): Unit = {
     if (asExpireSnapshotsConfig(actionConfig).executionMode == "executor") {
+      val serializer = Option(SparkEnv.get).map(_.serializer).orNull
+      println(s"Snapshot expiration actual Spark serializer: ${Option(serializer).map(
+          _.getClass.getName).getOrElse("unavailable")}")
+      PaimonSnapshotRuntime.validateSerializer(serializer)
       PaimonSnapshotRuntime.validate(context.spark.version, context.spark.sparkContext.getConf)
     }
   }

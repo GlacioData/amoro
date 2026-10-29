@@ -42,6 +42,11 @@ final private[paimon] class PaimonSnapshotSparkBackend(
 
   override def available: Boolean = !sc.isStopped
 
+  override val sensitiveValues: Seq[String] = PaimonSnapshotErrors.sensitiveValues(
+    sc.getConf.getAll.toSeq ++ sc.hadoopConfiguration.asScala.map(entry =>
+      entry.getKey -> entry.getValue).toSeq ++
+      ParameterUtils.parseCommaSeparatedKeyValues(requested.procedureOptions).asScala)
+
   override def prepare(target: TargetTable, runId: String, workId: String): PaimonSnapshotWork = {
     withContext(workId + ":preparation", s"Prepare snapshot expiration: ${target.raw}") {
       var attempt = 1
@@ -75,7 +80,9 @@ final private[paimon] class PaimonSnapshotSparkBackend(
             PaimonSnapshotWork.physicalKey(table),
             table.fileIO().getClass.getName,
             PaimonSnapshotWork.fingerprint(policy),
-            sources)
+            sources,
+            (sensitiveValues ++ PaimonSnapshotErrors.sensitiveValues(table.options().asScala))
+              .distinct)
           work.validate()
           prepared = Some(work)
         } catch {

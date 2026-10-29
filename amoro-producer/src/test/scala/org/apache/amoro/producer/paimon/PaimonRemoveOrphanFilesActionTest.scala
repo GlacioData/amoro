@@ -21,13 +21,97 @@ package org.apache.amoro.producer.paimon
 import org.apache.spark.sql.{Row, SparkSession}
 import org.apache.spark.sql.catalyst.expressions.GenericRowWithSchema
 import org.apache.spark.sql.types.{LongType, StructField, StructType}
-import org.junit.jupiter.api.Assertions.{assertEquals, assertThrows, assertTrue}
+import org.junit.jupiter.api.Assertions.{assertEquals, assertFalse, assertThrows, assertTrue}
 import org.junit.jupiter.api.Test
 
 import org.apache.amoro.producer.core.{ActionStatus, CommonProducerConfig, ProducerCliParser, ProducerContext, RetryMode, TargetTable}
 import org.apache.amoro.producer.spi.{ActionConfig, LakeFormatAdapter, ProducerAction}
 
 class PaimonRemoveOrphanFilesActionTest {
+
+  @Test def startupOverridesPreserveTheYarnSubmissionRetryPolicy(): Unit = {
+    val action = new PaimonRemoveOrphanFilesAction()
+    Seq(None, Some("2"), Some("1")).foreach { attempts =>
+      val conf = new org.apache.spark.SparkConf(false).setMaster("yarn")
+      attempts.foreach(value => conf.set("spark.yarn.maxAppAttempts", value))
+      action.sparkConfOverrides(PaimonRemoveOrphanFilesConfig(2, "distributed"))
+        .foreach { case (key, value) => conf.set(key, value) }
+      assertEquals(attempts, conf.getOption("spark.yarn.maxAppAttempts"))
+    }
+  }
+
+  @Test def acceptsTableConcurrencyOption(): Unit = {
+    val config = parse(new PaimonRemoveOrphanFilesAction(), Array("--tableConcurrency", "2"))
+    assertEquals(2, config.tableConcurrency)
+    assertTrue(config.tableConcurrencyExplicit)
+  }
+
+  @Test def rejectsNonPositiveConcurrencyAndLocalModeBeforeCreatingSpark(): Unit = {
+    val action = new PaimonRemoveOrphanFilesAction()
+    Seq("0", "-1").foreach(value =>
+      assertThrows(
+        classOf[IllegalArgumentException],
+        () =>
+          action.validate(commonConfig(), parse(action, Array("--tableConcurrency", value)))))
+    assertThrows(
+      classOf[IllegalArgumentException],
+      () =>
+        action.validate(
+          commonConfig(),
+          parse(action, Array("--tableConcurrency", "2", "--mode", "local"))))
+  }
+
+  @Test def legacyAndLocalExecutionRetainOriginalStartupAndRetryBehavior(): Unit = {
+    val action = new PaimonRemoveOrphanFilesAction()
+    val local = PaimonRemoveOrphanFilesConfig(2, "local")
+    assertTrue(action.sparkConfOverrides(local).isEmpty)
+    assertTrue(action.batchExecutor(context(), local).isEmpty)
+    assertEquals(RetryMode.FrameworkTableRetry, action.retryMode)
+    if (!PaimonOrphanFilesRuntime.supported) {
+      val config = PaimonRemoveOrphanFilesConfig(10, "distributed")
+      assertTrue(action.sparkConfOverrides(config).isEmpty)
+      assertTrue(action.batchExecutor(context(), config).isEmpty)
+      assertThrows(
+        classOf[org.apache.amoro.producer.spi.ProducerRuntimeValidationException],
+        () =>
+          action.validateRuntime(
+            context(),
+            config.copy(tableConcurrency = 2, tableConcurrencyExplicit = true)))
+    } else {
+      assertEquals(
+        "FAIR",
+        action.sparkConfOverrides(PaimonRemoveOrphanFilesConfig(10, "distributed"))(
+          "spark.scheduler.mode"))
+    }
+  }
+
+  @Test def strictResultsRejectEmptyMetricsWhileLegacyResultsRemainUnchanged(): Unit = {
+    val action = new PaimonRemoveOrphanFilesAction(new FakeRunner(Seq.empty))
+    val config = PaimonRemoveOrphanFilesConfig(2, "distributed")
+    assertThrows(
+      classOf[IllegalArgumentException],
+      () => action.executeOnce(context(), table, config, strict = true))
+    assertEquals("0", action.execute(context(), table, config).metrics("deletedFileCount"))
+  }
+
+  @Test def originalLocalPathStillUsesFrameworkTableRetries(): Unit = {
+    var calls = 0
+    val runner = new PaimonSqlRunner {
+      override def run(spark: SparkSession, sql: String): Seq[Row] = {
+        calls += 1
+        if (calls < 3) throw new java.io.IOException("retry legacy call")
+        Seq(Row(1L, 10L))
+      }
+    }
+    val action = new PaimonRemoveOrphanFilesAction(runner)
+    val result = org.apache.amoro.producer.core.ProducerApp.executeOneTableWithRetry(
+      context(),
+      action,
+      PaimonRemoveOrphanFilesConfig(2, "local"),
+      table)
+    assertEquals(3, calls)
+    assertEquals(ActionStatus.Success, result.status)
+  }
 
   @Test
   def parseUsesDefaultsAndTrimsMode(): Unit = {

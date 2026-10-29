@@ -51,6 +51,7 @@ private[paimon] object PaimonSnapshotTask {
       metrics,
       () => context.isInterrupted() || Thread.currentThread().isInterrupted,
       () => {
+        PaimonSnapshotRuntime.validateSerializer(SparkEnv.get.serializer)
         PaimonSnapshotRuntime.validate(org.apache.spark.SPARK_VERSION, SparkEnv.get.conf)
         work.validate()
         val expire = PaimonSnapshotNativeExpire.create(work.table, work.policy)
@@ -137,22 +138,30 @@ private[paimon] object PaimonSnapshotTask {
       }
       result(ActionStatus.Success, None, complete = true)
     } catch {
-      case _: InterruptedException =>
+      case error: InterruptedException =>
         Thread.currentThread().interrupt()
         result(
           ActionStatus.Failed,
-          Some("Snapshot cleanup interrupted; no replay"),
+          Some(PaimonSnapshotErrors.format(
+            s"Snapshot cleanup interrupted (phase=$phase); no replay",
+            error,
+            work.redactionSecrets)),
           complete = !enteredNative)
       case NonFatal(error) =>
-        // Do not expose FileIO options, SQL, URLs or credentials from a nested exception message.
         result(
           ActionStatus.Failed,
-          Some(s"Snapshot cleanup failed (${error.getClass.getSimpleName}); no replay"),
+          Some(PaimonSnapshotErrors.format(
+            s"Snapshot cleanup failed (phase=$phase); no replay",
+            error,
+            work.redactionSecrets)),
           complete = !enteredNative)
-      case _: LinkageError =>
+      case error: LinkageError =>
         result(
           ActionStatus.Failed,
-          Some("Snapshot cleanup linkage failure; no replay"),
+          Some(PaimonSnapshotErrors.format(
+            s"Snapshot cleanup linkage failure (phase=$phase); no replay",
+            error,
+            work.redactionSecrets)),
           complete = !enteredNative)
     }
   }

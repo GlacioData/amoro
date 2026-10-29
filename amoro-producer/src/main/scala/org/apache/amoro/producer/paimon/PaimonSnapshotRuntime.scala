@@ -28,12 +28,22 @@ import org.apache.paimon.options.ExpireConfig
 import org.apache.paimon.spark.SparkTable
 import org.apache.paimon.table.{ExpireSnapshots, Table}
 import org.apache.spark.SparkConf
+import org.apache.spark.serializer.{JavaSerializer, Serializer}
 
 import org.apache.amoro.producer.spi.ProducerRuntimeValidationException
 
 private[paimon] object PaimonSnapshotRuntime {
   val SparkVersion = "3.5.4"
   val PaimonVersion = "1.3.2"
+  val JavaSerializerClass = "org.apache.spark.serializer.JavaSerializer"
+
+  def validateSerializer(serializer: Serializer): Unit = {
+    check(
+      serializer != null && serializer.getClass == classOf[JavaSerializer],
+      s"Executor expiration requires $JavaSerializerClass, actual serializer=" +
+        Option(serializer).map(_.getClass.getName).getOrElse("unavailable") +
+        ". Restart the application with a new SparkContext; an existing context cannot change its serializer.")
+  }
 
   def validate(sparkVersion: String, conf: SparkConf): Unit = {
     check(
@@ -60,10 +70,12 @@ private[paimon] object PaimonSnapshotRuntime {
       classOf[ExpireSnapshots].getMethod("config", classOf[ExpireConfig])
     } catch {
       case error: ProducerRuntimeValidationException => throw error
-      case NonFatal(_) => throw new ProducerRuntimeValidationException(
-          "Cannot verify loaded Paimon artifacts for Executor expiration")
-      case _: LinkageError => throw new ProducerRuntimeValidationException(
-          "Conflicting Paimon artifacts for Executor expiration")
+      case NonFatal(error) => throw validationFailure(
+          "Cannot verify loaded Paimon artifacts for Executor expiration",
+          error)
+      case error: LinkageError => throw validationFailure(
+          "Conflicting Paimon artifacts for Executor expiration",
+          error)
     }
   }
 
@@ -93,5 +105,13 @@ private[paimon] object PaimonSnapshotRuntime {
 
   private def check(condition: Boolean, message: => String): Unit = {
     if (!condition) throw new ProducerRuntimeValidationException(message)
+  }
+
+  private def validationFailure(
+      message: String,
+      cause: Throwable): ProducerRuntimeValidationException = {
+    val error = new ProducerRuntimeValidationException(message)
+    error.initCause(cause)
+    error
   }
 }

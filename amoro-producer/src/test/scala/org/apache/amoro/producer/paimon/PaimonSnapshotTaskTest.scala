@@ -92,6 +92,26 @@ class PaimonSnapshotTaskTest {
     assertFalse(result.message.get.contains("secret-value"))
   }
 
+  @Test def nativeFailureIncludesCauseAndLocationWithoutReplaying(): Unit = {
+    val root = new NullPointerException()
+    root.setStackTrace(Array(new StackTraceElement("example.FileIO", "open", "FileIO.java", 42)))
+    var calls = 0
+    val result = run(
+      work(2),
+      () => {
+        calls += 1
+        throw new IOException("password=secret-value", root)
+      })
+    assertEquals(1, calls)
+    val message = result.message.get
+    assertTrue(message.contains("java.lang.NullPointerException"), message)
+    assertTrue(message.contains("FileIO.java:42"), message)
+    assertTrue(message.contains("java.io.IOException"), message)
+    assertTrue(message.contains("no replay"), message)
+    assertFalse(message.contains("secret-value"), message)
+    assertEquals("UNKNOWN", result.metrics("completionState"))
+  }
+
   @Test def failureWithOutstandingFileWorkDoesNotStartAnotherCleanup(): Unit = {
     val started = new CountDownLatch(1)
     val release = new CountDownLatch(1)
@@ -110,6 +130,22 @@ class PaimonSnapshotTaskTest {
     } finally { release.countDown(); pool.shutdownNow() }
   }
 
+  @Test def linkageAndInitializationFailuresIncludeTheirCauses(): Unit = {
+    val linkage = run(work(1), () => throw new NoSuchMethodError("missing native method"))
+    assertTrue(linkage.message.get.contains("java.lang.NoSuchMethodError: missing native method"))
+    assertEquals("UNKNOWN", linkage.metrics("completionState"))
+    val initialization = PaimonSnapshotTask.execute(
+      work(1),
+      0,
+      0,
+      Map.empty,
+      () => false,
+      () => throw new IllegalStateException("cannot initialize", new IOException("bad config")))
+    assertTrue(initialization.message.get.contains("java.io.IOException: bad config"))
+    assertTrue(initialization.message.get.contains("phase=initialization"))
+    assertEquals("FAILED", initialization.metrics("completionState"))
+  }
+
   @Test def cancellationStopsBeforeTheNextRound(): Unit = {
     var calls = 0
     val result = PaimonSnapshotTask.execute(
@@ -123,6 +159,7 @@ class PaimonSnapshotTaskTest {
     assertEquals(ActionStatus.Failed, result.status)
     assertTrue(Thread.currentThread().isInterrupted)
     assertEquals("1", result.metrics("deletedSnapshotsTotal"))
+    assertTrue(result.message.get.contains("java.lang.InterruptedException"))
   }
 
   @Test def preparationFailureHasNoUncertainSideEffects(): Unit = {

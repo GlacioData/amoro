@@ -31,6 +31,38 @@ import org.junit.jupiter.api.Test
 import org.apache.amoro.producer.core._
 
 class PaimonSnapshotExecutorTest {
+  @Test def preparationAndJobFailuresRetainDiagnosticCausesAndRedactKnownValues(): Unit = {
+    val preparation = new Backend {
+      override def sensitiveValues: Seq[String] = Seq("known-config-value")
+      override def prepare(target: TargetTable, run: String, id: String): PaimonSnapshotWork =
+        throw new IllegalStateException("known-config-value", new IOException("unavailable store"))
+    }
+    val prepared =
+      new PaimonSnapshotExecutor(1, true, preparation).execute(targets(1), (_, _) => ()).head._2
+    assertTrue(prepared.message.get.contains("java.io.IOException: unavailable store"))
+    assertFalse(prepared.message.get.contains("known-config-value"))
+    assertEquals("FAILED", prepared.metrics("completionState"))
+    val jobs = new Backend {
+      override def execute(work: PaimonSnapshotWork): ActionResult =
+        throw new java.util.concurrent.ExecutionException(new IOException("cannot collect"))
+    }
+    val job = new PaimonSnapshotExecutor(1, true, jobs).execute(targets(1), (_, _) => ()).head._2
+    assertTrue(job.message.get.contains("java.io.IOException: cannot collect"))
+    assertTrue(job.message.get.contains("no replay"))
+    assertEquals("UNKNOWN", job.metrics("completionState"))
+  }
+
+  @Test def coordinationFailurePreservesItsCauseWhenNoTableResultExists(): Unit = {
+    val backend = new Backend {
+      override def available: Boolean = throw new IllegalStateException("coordinator failure")
+    }
+    val error = assertThrows(
+      classOf[IllegalStateException],
+      () =>
+        new PaimonSnapshotExecutor(1, true, backend).execute(targets(1), (_, _) => ()))
+    assertTrue(error.getMessage.contains("java.lang.IllegalStateException: coordinator failure"))
+  }
+
   @Test def boundsPreparationAndExecutionAndReusesSlots(): Unit = {
     val started = new CountDownLatch(2)
     val release = new CountDownLatch(1)
@@ -166,6 +198,7 @@ class PaimonSnapshotExecutorTest {
         (_, _) => Thread.currentThread().interrupt())
       assertEquals(Seq(ActionStatus.Success, ActionStatus.Failed), results.map(_._2.status))
       assertTrue(Thread.currentThread().isInterrupted)
+      assertTrue(results.last._2.message.get.contains("java.lang.InterruptedException"))
     } finally Thread.interrupted()
   }
 

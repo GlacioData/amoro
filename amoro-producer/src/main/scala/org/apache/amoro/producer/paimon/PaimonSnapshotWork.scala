@@ -36,7 +36,8 @@ final private[paimon] case class PaimonSnapshotWork(
     physicalKey: String,
     fileIOClass: String,
     policyFingerprint: String,
-    policySources: Map[String, String]) extends Serializable {
+    policySources: Map[String, String],
+    redactionSecrets: Seq[String] = Seq.empty) extends Serializable {
 
   def validate(): Unit = {
     require(table != null && table.fileIO() != null, "Missing Paimon table/FileIO")

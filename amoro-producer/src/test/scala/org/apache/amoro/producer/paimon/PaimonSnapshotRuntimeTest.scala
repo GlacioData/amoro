@@ -30,6 +30,33 @@ import org.apache.amoro.producer.spi.ProducerRuntimeValidationException
 class PaimonSnapshotRuntimeTest {
   private def conf: SparkConf = new SparkConf(false).set("spark.task.maxFailures", "1")
 
+  @Test def requiresTheActualJavaSerializerRegardlessOfConfiguredValue(): Unit = {
+    val javaConf = conf.set("spark.serializer", PaimonSnapshotRuntime.JavaSerializerClass)
+    PaimonSnapshotRuntime.validateSerializer(
+      new org.apache.spark.serializer.JavaSerializer(javaConf))
+    val error = assertThrows(
+      classOf[ProducerRuntimeValidationException],
+      () =>
+        PaimonSnapshotRuntime.validateSerializer(
+          new org.apache.spark.serializer.KryoSerializer(javaConf)))
+    assertTrue(error.getMessage.contains("Restart the application"))
+    assertTrue(error.getMessage.contains("KryoSerializer"))
+    assertThrows(
+      classOf[ProducerRuntimeValidationException],
+      () => PaimonSnapshotRuntime.validateSerializer(null))
+  }
+
+  @Test def onlyExecutorSnapshotExpirationOverridesTheSerializer(): Unit = {
+    val action = new PaimonExpireSnapshotsAction()
+    val config = PaimonExpireSnapshotsConfig(20, 10, 550, "")
+    assertTrue(action.sparkConfOverrides(config).isEmpty)
+    assertEquals(
+      Map("spark.serializer" -> PaimonSnapshotRuntime.JavaSerializerClass),
+      action.sparkConfOverrides(config.copy(executionMode = "executor")))
+    assertTrue(new PaimonCompactAction().sparkConfOverrides(
+      PaimonCompactConfig("full", "", "1.3", "", None)).isEmpty)
+  }
+
   @Test def requiresExactSparkAndSafeSchedulerSettings(): Unit = {
     assertThrows(
       classOf[ProducerRuntimeValidationException],
