@@ -29,7 +29,6 @@ import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.Date;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -158,7 +157,7 @@ public class ApiTokenController {
     String paramString = ParamSignatureCalculator.generateParamStringWithValueList(params);
 
     if (StringUtils.isBlank(paramString)) {
-      return ParamSignatureCalculator.SIMPLE_DATE_FORMAT.format(new Date());
+      return ParamSignatureCalculator.currentDateString();
     } else {
       return paramString;
     }
