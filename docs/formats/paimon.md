@@ -34,6 +34,41 @@ To operate on Paimon tables with SQL, use an external Spark or Flink client with
 
 For registering catalog operation steps, please refer to [Managing Catalogs](../managing-catalogs/).
 
+### 运行时表默认属性
+
+在 Amoro 的 Paimon Catalog 中，所有以 `table-default.` 开头的属性都会作为表默认属性，
+例如：
+
+```properties
+table-default.scan.manifest.parallelism=4
+table-default.write-buffer-size=32mb
+table-default.num-sorted-run.compaction-trigger=7
+table-default.self-optimizing.min-plan-interval=18000000
+```
+
+加载已有主键表和 Append 表时，Amoro 去掉 `table-default.` 前缀，逐项补充表自身尚未
+配置的属性，创建带有这些默认值的原生表内存副本，供当前表的刷新和优化规划使用。
+例如 `table-default.write-buffer-size` 会注入为原生表的 `write-buffer-size`，不再局限于
+Manifest 扫描并行度。表自身的配置始终优先于 Catalog 默认值；两者均未配置时沿用
+Paimon 原生默认值。表元数据中已有的属性也遵循此优先级，不会被 Catalog 默认值覆盖。
+
+默认属性名不能为空，空名称会在 Catalog 初始化时报错。所有默认属性值均原样传递，
+按 Paimon 或 Amoro 对该表参数的定义解析和使用，不为单个参数单独规范化或提前校验。
+加载表时，缺失属性通过 Paimon 原生动态参数和 schema 校验；不可变属性（例如
+`merge-engine`、`bucket-key`）不能通过运行时默认值修改。表中已有参数对应的默认值
+不会应用，也不会参与这次原生校验。注入不会把 Catalog 专用参数变为表参数。
+
+运行时注入不会写回 Paimon 表元数据，也不会修改 Catalog 缓存中的原始表。沿用现有
+Catalog 更新机制，修改或移除默认值后，后续表加载采用新配置；已创建的扫描、正在执行
+的规划和已下发任务保持原有配置。通过 Catalog 重新加载当前表的回调也应用该默认值。
+注入沿用本次加载的 schema，不因扫描快照或时间参数重新绑定历史 schema。
+历史健康分析重新绑定历史 schema 的扫描不在此运行时注入范围内。
+
+`scan.manifest.parallelism` 限制单次扫描内部的 Manifest 并行度，用于降低并行物化的
+内存峰值；它不会减少需要扫描的 Manifest 总量，也不是整个 AMS 的重扫描并发上限。
+不要仅凭线程池总线程数判断是否生效，应检查加载后的原生表
+`store().newScan().parallelism()`。
+
 {{< hint info >}}
 If you want to use S3 or OSS, please download the 
 [S3](https://repo.maven.apache.org/maven2/org/apache/paimon/paimon-s3/0.5.0-incubating/paimon-s3-0.5.0-incubating.jar), 
