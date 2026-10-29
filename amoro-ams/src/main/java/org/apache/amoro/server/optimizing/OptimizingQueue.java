@@ -1494,6 +1494,13 @@ public class OptimizingQueue extends PersistentBase {
         .collect(Collectors.toList());
   }
 
+  public long countTasks(Predicate<TaskRuntime<?>> predicate) {
+    return tableQueue.stream()
+        .flatMap(p -> p.getTaskMap().values().stream())
+        .filter(predicate)
+        .count();
+  }
+
   public void retryTask(TaskRuntime<?> taskRuntime) {
     findProcess(taskRuntime.getTaskId()).resetTask(taskRuntime);
   }
