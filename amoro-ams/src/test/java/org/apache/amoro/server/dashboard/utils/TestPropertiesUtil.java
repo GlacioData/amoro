@@ -48,6 +48,26 @@ public class TestPropertiesUtil {
   }
 
   @Test
+  public void testExtractTablePropertiesStripsExactlyThePrefix() {
+    Map<String, String> properties = Maps.newHashMap();
+    properties.put("table.x.y", "v1");
+    properties.put("table.", "v2");
+    properties.put("table.a*b+c", "v3");
+    properties.put("table.table.x", "v4");
+    properties.put("catalog.x", "v5");
+    // shares the "table" stem but must NOT pass the literal-prefix filter
+    properties.put("tables.x", "v6");
+
+    Map<String, String> extracted = PropertiesUtil.extractTableProperties(properties);
+
+    Assert.assertEquals(4, extracted.size());
+    Assert.assertEquals("v1", extracted.get("x.y"));
+    Assert.assertEquals("v2", extracted.get(""));
+    Assert.assertEquals("v3", extracted.get("a*b+c"));
+    Assert.assertEquals("v4", extracted.get("table.x"));
+  }
+
+  @Test
   public void testExtractCatalogMetaProperties() {
     Map<String, String> catalogMetaProperties =
         PropertiesUtil.extractCatalogMetaProperties(ALL_PROPERTIES);

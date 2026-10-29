@@ -48,7 +48,9 @@ public class PropertiesUtil {
         .forEach(
             entry ->
                 result.put(
-                    entry.getKey().replaceFirst(CatalogMetaProperties.TABLE_PROPERTIES_PREFIX, ""),
+                    entry
+                        .getKey()
+                        .substring(CatalogMetaProperties.TABLE_PROPERTIES_PREFIX.length()),
                     entry.getValue()));
     return result;
   }
