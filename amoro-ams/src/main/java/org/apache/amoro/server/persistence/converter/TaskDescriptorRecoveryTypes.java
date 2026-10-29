@@ -42,6 +42,7 @@ import org.apache.amoro.optimizing.TaskMetricsSummary;
 import org.apache.amoro.optimizing.TaskProperties;
 import org.apache.amoro.process.StagedTaskDescriptor;
 
+import java.lang.reflect.Type;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.Collections;
@@ -59,6 +60,10 @@ import java.util.Map;
 public final class TaskDescriptorRecoveryTypes {
 
   private static final Gson GSON = new Gson();
+  /** Shared type descriptor for {@code Map<String, String>} properties JSON. */
+  private static final Type STRING_STRING_MAP_TYPE =
+      TypeToken.getParameterized(Map.class, String.class, String.class).getType();
+
   private static final RecoveryTypes LEGACY_ICEBERG_TYPES =
       new RecoveryTypes(
           RewriteStageTask.class,
@@ -160,7 +165,7 @@ public final class TaskDescriptorRecoveryTypes {
     }
     Map<String, String> props;
     try {
-      props = GSON.fromJson(raw, new TypeToken<Map<String, String>>() {}.getType());
+      props = GSON.fromJson(raw, STRING_STRING_MAP_TYPE);
     } catch (RuntimeException e) {
       return null;
     }
