@@ -24,6 +24,8 @@ import org.apache.amoro.server.AmoroManagementConf;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
+import java.util.Locale;
+
 public class TestAmsUtil {
 
   @Test
@@ -72,5 +74,46 @@ public class TestAmsUtil {
     Assertions.assertEquals(
         "thrift://127.0.0.1:1261",
         AmsUtil.getAMSThriftAddress(conf, Constants.THRIFT_OPTIMIZING_SERVICE_NAME));
+  }
+
+  @Test
+  public void testByteToXB() {
+    Assertions.assertEquals("0.00B", AmsUtil.byteToXB(0));
+    Assertions.assertEquals("1.00B", AmsUtil.byteToXB(1));
+    Assertions.assertEquals("1023.00B", AmsUtil.byteToXB(1023));
+    Assertions.assertEquals("1.00KB", AmsUtil.byteToXB(1024));
+    Assertions.assertEquals("1.50KB", AmsUtil.byteToXB(1536));
+    Assertions.assertEquals("1.00MB", AmsUtil.byteToXB(1048576));
+    Assertions.assertEquals("8.00EB", AmsUtil.byteToXB(Long.MAX_VALUE));
+  }
+
+  @Test
+  public void testFormatString() {
+    Assertions.assertEquals("Iceberg Format", AmsUtil.formatString("ICEBERG_FORMAT"));
+    Assertions.assertEquals("Mixedformat", AmsUtil.formatString("mixedFormat"));
+    Assertions.assertEquals("Paimon X Y", AmsUtil.formatString("paimon-x_y"));
+    Assertions.assertEquals("    X", AmsUtil.formatString("0.9.x"));
+    Assertions.assertEquals("Iceberg", AmsUtil.formatString("iceberg"));
+  }
+
+  /**
+   * Guards the default-locale {@code String.toUpperCase()}/{@code String.toLowerCase()} semantics
+   * of {@link AmsUtil#formatString}: under the Turkish locale the leading {@code "i"} must map to
+   * {@code 'İ'} (dotted capital I), which locale-independent {@code Character#toUpperCase} would
+   * not produce.
+   */
+  @Test
+  public void testFormatStringTurkishLocale() {
+    Locale original = Locale.getDefault();
+    try {
+      Locale.setDefault(new Locale("tr", "TR"));
+      Assertions.assertEquals("Iceberg Format", AmsUtil.formatString("ICEBERG_FORMAT"));
+      Assertions.assertEquals("Mixedformat", AmsUtil.formatString("mixedFormat"));
+      Assertions.assertEquals("Paimon X Y", AmsUtil.formatString("paimon-x_y"));
+      Assertions.assertEquals("    X", AmsUtil.formatString("0.9.x"));
+      Assertions.assertEquals("İceberg", AmsUtil.formatString("iceberg"));
+    } finally {
+      Locale.setDefault(original);
+    }
   }
 }

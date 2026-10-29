@@ -34,6 +34,7 @@ import java.util.Enumeration;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 /**
@@ -44,6 +45,8 @@ public class AmsUtil {
 
   private static final String ZOOKEEPER_ADDRESS_FORMAT = "zookeeper://%s/%s";
   private static final String THRIFT_ADDRESS_FORMAT = "thrift://%s:%s";
+  private static final String[] SIZE_UNITS = {"B", "KB", "MB", "GB", "TB", "PB", "EB"};
+  private static final Pattern ASCII_LETTER = Pattern.compile("[a-zA-Z]+");
 
   public static Long longOrNull(String value) {
     if (value == null) {
@@ -55,14 +58,13 @@ public class AmsUtil {
 
   /** Convert size to a different unit, ensuring that the converted value is > 1 */
   public static String byteToXB(long size) {
-    String[] units = new String[] {"B", "KB", "MB", "GB", "TB", "PB", "EB"};
     float result = size, tmpResult = size;
     int unitIdx = 0;
-    int unitCnt = units.length;
+    int unitCnt = SIZE_UNITS.length;
     while (true) {
       result = result / 1024;
       if (result < 1 || unitIdx >= unitCnt - 1) {
-        return String.format("%2.2f%s", tmpResult, units[unitIdx]);
+        return String.format("%2.2f%s", tmpResult, SIZE_UNITS[unitIdx]);
       }
       tmpResult = result;
       unitIdx += 1;
@@ -154,8 +156,8 @@ public class AmsUtil {
     StringBuilder result = new StringBuilder();
     int flag = 0;
     for (int i = 0; i < beforeFormat.length(); i++) {
-      String s = String.valueOf(beforeFormat.toCharArray()[i]);
-      if (!s.matches("[a-zA-Z]+")) {
+      String s = String.valueOf(beforeFormat.charAt(i));
+      if (!ASCII_LETTER.matcher(s).matches()) {
         flag = 0;
         result.append(" ");
       } else {
