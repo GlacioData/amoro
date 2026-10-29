@@ -30,9 +30,10 @@ import org.apache.amoro.shade.guava32.com.google.common.collect.Lists;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.function.Function;
+import java.util.Objects;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
@@ -56,17 +57,25 @@ public class MetricsCollector extends Collector {
 
   @Override
   public List<MetricFamilySamples> collect() {
-    Map<MetricKey, Metric> registeredMetrics = metrics.getMetrics();
-
-    Map<MetricDefine, List<MetricKey>> metricDefineMap =
-        registeredMetrics.keySet().stream()
-            .collect(
-                Collectors.groupingBy(
-                    MetricKey::getDefine,
-                    Collectors.mapping(Function.identity(), Collectors.toList())));
-    return metricDefineMap.entrySet().stream()
-        .filter(entry -> isValidMetric(entry.getKey()))
-        .map(entry -> createFamilySample(entry.getKey(), entry.getValue(), registeredMetrics))
+    Map<MetricDefine, MetricFamilyBuilder> families = new HashMap<>();
+    metrics
+        .getMetrics()
+        .forEach(
+            (key, metric) -> {
+              MetricDefine define = key.getDefine();
+              MetricFamilyBuilder family = families.get(define);
+              // Null marks a rejected definition, so validation and filtering run once per scrape.
+              if (family == null && !families.containsKey(define)) {
+                family = isValidMetric(define) ? new MetricFamilyBuilder(define) : null;
+                families.put(define, family);
+              }
+              if (family != null) {
+                family.addSample(key, metric);
+              }
+            });
+    return families.values().stream()
+        .filter(Objects::nonNull)
+        .map(MetricFamilyBuilder::build)
         .collect(Collectors.toList());
   }
 
@@ -92,24 +101,29 @@ public class MetricsCollector extends Collector {
     return true;
   }
 
-  private MetricFamilySamples createFamilySample(
-      MetricDefine define, List<MetricKey> keys, Map<MetricKey, Metric> registeredMetrics) {
+  private static final class MetricFamilyBuilder {
+    private final MetricDefine define;
+    private final String name;
+    private final List<MetricFamilySamples.Sample> samples = Lists.newArrayList();
 
-    List<MetricFamilySamples.Sample> samples = Lists.newArrayList();
-    for (MetricKey key : keys) {
-      Metric metric = registeredMetrics.get(key);
-
-      MetricFamilySamples.Sample sample =
-          new MetricFamilySamples.Sample(
-              PREFIX + define.getName(), define.getTags(), key.valueOfTags(), covertValue(metric));
-      samples.add(sample);
+    private MetricFamilyBuilder(MetricDefine define) {
+      this.define = define;
+      this.name = PREFIX + define.getName();
     }
 
-    return new MetricFamilySamples(
-        PREFIX + define.getName(), covertType(define.getType()), define.getDescription(), samples);
+    private void addSample(MetricKey key, Metric metric) {
+      samples.add(
+          new MetricFamilySamples.Sample(
+              name, define.getTags(), key.valueOfTags(), covertValue(metric)));
+    }
+
+    private MetricFamilySamples build() {
+      return new MetricFamilySamples(
+          name, covertType(define.getType()), define.getDescription(), samples);
+    }
   }
 
-  private Type covertType(MetricType metricType) {
+  private static Type covertType(MetricType metricType) {
     switch (metricType) {
       case Counter:
         return Type.COUNTER;
@@ -120,7 +134,7 @@ public class MetricsCollector extends Collector {
     }
   }
 
-  private double covertValue(Metric metric) {
+  private static double covertValue(Metric metric) {
     if (metric instanceof Counter) {
       return ((Counter) metric).getCount();
     } else if (metric instanceof Gauge) {

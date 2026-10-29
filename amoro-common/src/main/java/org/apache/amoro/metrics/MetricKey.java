@@ -24,20 +24,23 @@ import org.apache.amoro.shade.guava32.com.google.common.collect.ImmutableMap;
 import org.apache.amoro.shade.guava32.com.google.common.collect.Lists;
 
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.stream.Collectors;
 
-/** MapKey define of registered metric */
+/** Immutable identity and fixed labels of a registered metric. */
 public class MetricKey {
 
   private final MetricDefine define;
   private final Map<String, String> valueOfTags;
+  private final List<String> orderedTagValues;
+  private final int hash;
 
   public MetricKey(MetricDefine define, Map<String, String> tagValues) {
     Preconditions.checkNotNull(define);
-    this.valueOfTags = tagValues == null ? ImmutableMap.of() : tagValues;
+    this.valueOfTags = snapshotTags(tagValues);
     if (define.getTags().size() != this.valueOfTags.size()) {
       throw new IllegalArgumentException(
           "Tag value is miss-match with metric define. MetricDefine{"
@@ -53,6 +56,21 @@ public class MetricKey {
                 Preconditions.checkArgument(
                     this.valueOfTags.containsKey(t), "The value of tag: %s is missed", t));
     this.define = define;
+    List<String> orderedValues = Lists.newArrayListWithCapacity(define.getTags().size());
+    define.getTags().forEach(tag -> orderedValues.add(valueOfTag(tag)));
+    this.orderedTagValues = Collections.unmodifiableList(orderedValues);
+    this.hash = Objects.hash(define, this.valueOfTags);
+  }
+
+  private static Map<String, String> snapshotTags(Map<String, String> tags) {
+    if (tags == null) {
+      return ImmutableMap.of();
+    }
+    if (tags instanceof ImmutableMap) {
+      return tags;
+    }
+    // Keep the existing representation of null values while isolating mutable caller maps.
+    return Collections.unmodifiableMap(new HashMap<>(tags));
   }
 
   public MetricDefine getDefine() {
@@ -64,9 +82,7 @@ public class MetricKey {
   }
 
   public List<String> valueOfTags() {
-    List<String> valueOfTags = Lists.newArrayList();
-    this.getDefine().getTags().forEach(t -> valueOfTags.add(valueOfTag(t)));
-    return Collections.unmodifiableList(valueOfTags);
+    return orderedTagValues;
   }
 
   @Override
@@ -84,7 +100,7 @@ public class MetricKey {
 
   @Override
   public int hashCode() {
-    return Objects.hash(this.define, this.valueOfTags);
+    return hash;
   }
 
   @Override
