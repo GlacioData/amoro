@@ -26,24 +26,32 @@ import org.apache.amoro.shade.guava32.com.google.common.collect.Lists;
 import java.util.List;
 import java.util.Objects;
 
-/** Define a metric */
+/** Immutable definition of a metric. */
 public class MetricDefine {
 
   private final String name;
   private final List<String> tags;
   private final MetricType type;
   private final String description;
+  private final String identity;
+  private final int hash;
 
   MetricDefine(String name, List<String> tags, MetricType type, String description) {
     Preconditions.checkArgument(name != null && !name.trim().isEmpty(), "Metric name is required");
     Preconditions.checkArgument(type != null, "Metric type is required");
     this.name = name;
-    if (tags == null) {
-      tags = ImmutableList.of();
-    }
-    this.tags = tags;
+    this.tags = tags == null ? ImmutableList.of() : ImmutableList.copyOf(tags);
     this.type = type;
     this.description = description;
+    // Equality ignores tag order and help text, but exported labels retain declaration order.
+    this.identity =
+        name
+            + ",type="
+            + type.name()
+            + "<"
+            + Joiner.on(",").join(this.tags.stream().sorted().iterator())
+            + ">";
+    this.hash = Objects.hash(identity);
   }
 
   /**
@@ -56,7 +64,7 @@ public class MetricDefine {
   }
 
   /**
-   * Supported tags
+   * Immutable tag names in declaration order.
    *
    * @return metric tags
    */
@@ -91,23 +99,17 @@ public class MetricDefine {
       return false;
     }
     MetricDefine that = (MetricDefine) o;
-    return this.toString().equals(that.toString());
+    return this.identity.equals(that.identity);
   }
 
   @Override
   public int hashCode() {
-    return Objects.hash(this.toString());
+    return hash;
   }
 
   @Override
   public String toString() {
-    StringBuilder builder = new StringBuilder();
-    builder.append(name);
-    builder.append(",type=").append(type.name());
-    builder.append("<");
-    Joiner.on(",").appendTo(builder, tags.stream().sorted().iterator());
-    builder.append(">");
-    return builder.toString();
+    return identity;
   }
 
   public static Builder defineCounter(String name) {
