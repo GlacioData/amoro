@@ -23,17 +23,34 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
+import java.io.OutputStream;
 
 public class SimpleSerializer<R> implements ResourceSerde<R> {
 
   @Override
   public byte[] serializeResource(R resource) {
-    try (ByteArrayOutputStream bos = new ByteArrayOutputStream()) {
-      try (ObjectOutputStream oos = new ObjectOutputStream(bos)) {
-        oos.writeObject(resource);
-        oos.flush();
-        return bos.toByteArray();
-      }
+    ByteArrayOutputStream bos = new ByteArrayOutputStream();
+    serializeResource(resource, bos);
+    return bos.toByteArray();
+  }
+
+  /**
+   * Serializes {@code resource} directly onto {@code out} without materializing an intermediate
+   * byte array. The stream is flushed but not closed; closing remains the caller's choice so it can
+   * chain compression around it.
+   */
+  public void serializeResource(R resource, OutputStream out) {
+    try (ObjectOutputStream oos =
+        new ObjectOutputStream(out) {
+          // ObjectOutputStream.close() would close the caller's stream; flush instead so the
+          // documented contract ("flushed but not closed") holds.
+          @Override
+          public void close() throws IOException {
+            flush();
+          }
+        }) {
+      oos.writeObject(resource);
+      oos.flush();
     } catch (IOException e) {
       throw new IllegalArgumentException("serialization error of " + resource, e);
     }
@@ -45,10 +62,9 @@ public class SimpleSerializer<R> implements ResourceSerde<R> {
     if (input == null) {
       return null;
     }
-    try (ByteArrayInputStream bis = new ByteArrayInputStream(input)) {
-      try (ObjectInputStream ois = new ObjectInputStream(bis)) {
-        return (R) ois.readObject();
-      }
+    try (ByteArrayInputStream bis = new ByteArrayInputStream(input);
+        ObjectInputStream ois = new ObjectInputStream(bis)) {
+      return (R) ois.readObject();
     } catch (IOException | ClassNotFoundException e) {
       throw new IllegalArgumentException("deserialization error ", e);
     }
