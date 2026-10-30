@@ -56,6 +56,7 @@ class TestTableRuntimeMapperStateQueries extends PersistentBase {
     ServerTableIdentifier table1 = createTable("db", "table1");
     ServerTableIdentifier table2 = createTable("db", "table2");
     ServerTableIdentifier table3 = createTable("db", "table3");
+    ServerTableIdentifier table4 = createTable("db", "unqueriedTable");
 
     saveState(table1.getId(), "key1", "value1");
     saveState(table1.getId(), "key2", "value2");
@@ -66,6 +67,9 @@ class TestTableRuntimeMapperStateQueries extends PersistentBase {
     doAs(
         TableRuntimeMapper.class,
         mapper -> mapper.setStateValue(table3.getId(), "key2", "updated-value2"));
+    // This row must be excluded. Without it, removing the scoped query's WHERE clause would
+    // leave the comparison green because every state-bearing table is in queriedIds.
+    saveState(table4.getId(), "key1", "must-not-be-returned");
 
     List<Long> queriedIds = Arrays.asList(table1.getId(), table2.getId(), table3.getId());
     List<TableRuntimeState> scoped =
@@ -73,8 +77,11 @@ class TestTableRuntimeMapperStateQueries extends PersistentBase {
 
     // The scoped query must return exactly the rows selectAllStates() holds for the same ids,
     // compared row by row (TableRuntimeState has no equals, so compare every field).
+    List<TableRuntimeState> allStates =
+        getAs(TableRuntimeMapper.class, TableRuntimeMapper::selectAllStates);
+    Assertions.assertEquals(5, allStates.size());
     Map<Long, TableRuntimeState> expected =
-        getAs(TableRuntimeMapper.class, TableRuntimeMapper::selectAllStates).stream()
+        allStates.stream()
             .filter(state -> queriedIds.contains(state.getTableId()))
             .collect(Collectors.toMap(TableRuntimeState::getStateId, state -> state));
 
