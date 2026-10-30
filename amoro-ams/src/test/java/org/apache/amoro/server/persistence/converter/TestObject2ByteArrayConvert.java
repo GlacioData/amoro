@@ -27,6 +27,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -55,6 +56,11 @@ class TestObject2ByteArrayConvert {
     metaData = mock(DatabaseMetaData.class);
     when(ps.getConnection()).thenReturn(connection);
     when(connection.getMetaData()).thenReturn(metaData);
+  }
+
+  @AfterEach
+  void clearDatabaseProductNameCache() throws Exception {
+    resetDatabaseProductNameCache();
   }
 
   /**
