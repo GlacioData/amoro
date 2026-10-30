@@ -1104,19 +1104,21 @@ public class OptimizingQueue extends PersistentBase {
         LOG.error("Failed to plan table {}", tableRuntime.getTableIdentifier(), throwable);
       }
       if (process != null && offerPlannedProcess(tableRuntime, process)) {
-        String skipIds =
-            skipTables.stream()
-                .map(ServerTableIdentifier::getId)
-                .sorted()
-                .map(String::valueOf)
-                .collect(Collectors.joining(","));
         LOG.info(
             "Completed planning on table {} with {} tasks with a total cost of {} ms, skipping {} tables.",
             tableRuntime.getTableIdentifier(),
             process.getTaskMap().size(),
             currentTime - startTime,
             skipTables.size());
-        LOG.debug("Skipped planning table IDs:{}", skipIds);
+        if (LOG.isDebugEnabled()) {
+          String skipIds =
+              skipTables.stream()
+                  .map(ServerTableIdentifier::getId)
+                  .sorted()
+                  .map(String::valueOf)
+                  .collect(Collectors.joining(","));
+          LOG.debug("Skipped planning table IDs:{}", skipIds);
+        }
       } else if (process != null) {
         LOG.info(
             "Skip offering planned process {} for table {} after final planning fence",
@@ -1492,6 +1494,13 @@ public class OptimizingQueue extends PersistentBase {
         .flatMap(p -> p.getTaskMap().values().stream())
         .filter(predicate)
         .collect(Collectors.toList());
+  }
+
+  public long countTasks(Predicate<TaskRuntime<?>> predicate) {
+    return tableQueue.stream()
+        .flatMap(p -> p.getTaskMap().values().stream())
+        .filter(predicate)
+        .count();
   }
 
   public void retryTask(TaskRuntime<?> taskRuntime) {
@@ -2308,9 +2317,8 @@ public class OptimizingQueue extends PersistentBase {
     }
 
     public int getActualQuota() {
-      return optimizingTasksMap
-          .getOrDefault(tableRuntime.getTableIdentifier(), new AtomicInteger(0))
-          .get();
+      AtomicInteger current = optimizingTasksMap.get(tableRuntime.getTableIdentifier());
+      return current == null ? 0 : current.get();
     }
 
     @Override

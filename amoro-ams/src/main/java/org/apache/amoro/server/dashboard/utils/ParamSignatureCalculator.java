@@ -26,6 +26,7 @@ import java.io.UnsupportedEncodingException;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
+import java.util.Date;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -33,7 +34,16 @@ import java.util.stream.Collectors;
 public class ParamSignatureCalculator {
   public static final Logger LOG = LoggerFactory.getLogger(ParamSignatureCalculator.class);
 
-  public static final SimpleDateFormat SIMPLE_DATE_FORMAT = new SimpleDateFormat("yyyyMMdd");
+  private static final ThreadLocal<SimpleDateFormat> YYYYMMDD_FORMAT =
+      ThreadLocal.withInitial(() -> new SimpleDateFormat("yyyyMMdd"));
+
+  /**
+   * Formats the current date as yyyyMMdd; the SimpleDateFormat is confined to this thread, making
+   * the shared-field race impossible.
+   */
+  public static String currentDateString() {
+    return YYYYMMDD_FORMAT.get().format(new Date());
+  }
 
   public static String getMD5(byte[] bytes) {
     char[] hexDigits = {

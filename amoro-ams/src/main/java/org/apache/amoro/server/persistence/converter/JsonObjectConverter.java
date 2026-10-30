@@ -34,6 +34,10 @@ public class JsonObjectConverter<T> extends BaseTypeHandler<T> {
 
   private static final ObjectMapper mapper = new ObjectMapper();
 
+  static {
+    mapper.disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
+  }
+
   private final Class<T> clazz;
 
   public JsonObjectConverter(Class<T> clazz) {
@@ -41,7 +45,6 @@ public class JsonObjectConverter<T> extends BaseTypeHandler<T> {
       throw new IllegalArgumentException("Type argument cannot be null");
     }
     this.clazz = clazz;
-    mapper.disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
   }
 
   @Override

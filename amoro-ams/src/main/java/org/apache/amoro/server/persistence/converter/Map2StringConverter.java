@@ -25,6 +25,7 @@ import org.apache.ibatis.type.MappedJdbcTypes;
 import org.apache.ibatis.type.MappedTypes;
 import org.apache.ibatis.type.TypeHandler;
 
+import java.lang.reflect.Type;
 import java.sql.CallableStatement;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -34,6 +35,10 @@ import java.util.Map;
 @MappedJdbcTypes(JdbcType.VARCHAR)
 @MappedTypes(Map.class)
 public class Map2StringConverter implements TypeHandler<Map<String, String>> {
+  /** Shared type descriptor for {@code Map<String, String>} JSON deserialization. */
+  private static final Type STRING_STRING_MAP_TYPE =
+      TypeToken.getParameterized(Map.class, String.class, String.class).getType();
+
   private final Gson gson = new Gson();
 
   @Override
@@ -54,7 +59,7 @@ public class Map2StringConverter implements TypeHandler<Map<String, String>> {
       return null;
     }
 
-    return gson.fromJson(res, new TypeToken<Map<String, String>>() {}.getType());
+    return gson.fromJson(res, STRING_STRING_MAP_TYPE);
   }
 
   @Override
@@ -64,7 +69,7 @@ public class Map2StringConverter implements TypeHandler<Map<String, String>> {
       return null;
     }
 
-    return gson.fromJson(res, new TypeToken<Map<String, String>>() {}.getType());
+    return gson.fromJson(res, STRING_STRING_MAP_TYPE);
   }
 
   @Override
@@ -74,6 +79,6 @@ public class Map2StringConverter implements TypeHandler<Map<String, String>> {
       return null;
     }
 
-    return gson.fromJson(res, new TypeToken<Map<String, String>>() {}.getType());
+    return gson.fromJson(res, STRING_STRING_MAP_TYPE);
   }
 }

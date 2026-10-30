@@ -439,20 +439,35 @@ public class DefaultTableService extends PersistentBase implements TableService 
               TableRuntimeMapper.class,
               mapper -> mapper.selectRuntimesByBucketIds(assignedBucketIds, false));
 
+      // Only the identifiers/states of the tables listed here are read below, so query them by
+      // table id instead of materializing every row cluster-wide. Empty id list must be
+      // short-circuited: the IN-list language driver renders invalid SQL for it (and with no
+      // runtimes both maps would never be accessed anyway).
+      List<Long> tableIds =
+          tableRuntimeMetaList.stream()
+              .map(TableRuntimeMeta::getTableId)
+              .collect(Collectors.toList());
+
       Map<Long, ServerTableIdentifier> identifierMap =
-          getAs(TableMetaMapper.class, TableMetaMapper::selectAllTableIdentifiers).stream()
-              .collect(Collectors.toMap(ServerTableIdentifier::getId, Function.identity()));
+          tableIds.isEmpty()
+              ? Collections.emptyMap()
+              : getAs(TableMetaMapper.class, mapper -> mapper.selectTableIdentifiers(tableIds))
+                  .stream()
+                  .collect(Collectors.toMap(ServerTableIdentifier::getId, Function.identity()));
 
       Map<Long, List<TableRuntimeState>> statesMap =
-          getAs(TableRuntimeMapper.class, TableRuntimeMapper::selectAllStates).stream()
-              .collect(
-                  Collectors.toMap(
-                      TableRuntimeState::getTableId,
-                      Lists::newArrayList,
-                      (a, b) -> {
-                        a.addAll(b);
-                        return a;
-                      }));
+          tableIds.isEmpty()
+              ? Collections.emptyMap()
+              : getAs(TableRuntimeMapper.class, mapper -> mapper.selectStatesByTableIds(tableIds))
+                  .stream()
+                  .collect(
+                      Collectors.toMap(
+                          TableRuntimeState::getTableId,
+                          Lists::newArrayList,
+                          (a, b) -> {
+                            a.addAll(b);
+                            return a;
+                          }));
 
       // Snapshot the current in-memory table IDs for the removal-detection loop below.
       // The "add" loop uses a live containsKey check so it does not rely on this snapshot.
@@ -647,6 +662,8 @@ public class DefaultTableService extends PersistentBase implements TableService 
     // It is permissible to have some erroneous states in the middle, as long as the final data is
     // consistent.
     // In master-slave mode, only clean up tables assigned to this node
+    // Exploration can overlap catalog creation, so refresh the catalog list before disposing
+    // runtimes that may have been added after the initial catalog snapshot.
     Set<String> catalogNames =
         catalogManager.listCatalogMetas().stream()
             .map(CatalogMeta::getCatalogName)

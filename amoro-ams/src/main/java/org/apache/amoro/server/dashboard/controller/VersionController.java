@@ -31,8 +31,15 @@ import java.util.Properties;
 public class VersionController {
   private static final Logger LOG = LoggerFactory.getLogger(VersionController.class);
 
+  /** git.properties is a build artifact and never changes within the process. */
+  private static final VersionInfo CACHED_VERSION_INFO = loadVersionInfo();
+
   /** Get project version information. */
   public void getVersionInfo(Context ctx) {
+    ctx.json(OkResponse.of(CACHED_VERSION_INFO));
+  }
+
+  private static VersionInfo loadVersionInfo() {
     Properties prop = new Properties();
     InputStream is =
         VersionController.class.getClassLoader().getResourceAsStream("amoro/git.properties");
@@ -53,6 +60,6 @@ public class VersionController {
     VersionInfo versionInfo = new VersionInfo();
     versionInfo.setVersion(String.format("%s(%s)", version, abbrev));
     versionInfo.setCommitTime(commitTime);
-    ctx.json(OkResponse.of(versionInfo));
+    return versionInfo;
   }
 }
