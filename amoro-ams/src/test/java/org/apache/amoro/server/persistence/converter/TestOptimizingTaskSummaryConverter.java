@@ -168,11 +168,11 @@ class TestOptimizingTaskSummaryConverter {
   }
 
   @Test
-  void reusesConverterInstancePerFactoryImpl() throws Exception {
+  void reusesConverterInstancePerSummaryType() throws Exception {
     // summaryConverter is private, so it is invoked reflectively to pin instance
     // reuse without widening the collaborator's visibility. This failed before the
     // converter cache (a fresh JsonObjectConverter was built per row) and must stay
-    // green now that converters are cached per factory impl.
+    // green now that converters are cached per resolved summary type.
     Method summaryConverter =
         OptimizingTaskSummaryConverter.class.getDeclaredMethod("summaryConverter", ResultSet.class);
     summaryConverter.setAccessible(true);
@@ -182,16 +182,56 @@ class TestOptimizingTaskSummaryConverter {
         summaryConverter.invoke(history, row(ICEBERG, factory)),
         summaryConverter.invoke(history, row(ICEBERG, factory)));
 
-    // Legacy rows without a factory impl (null key) must reuse a cached instance too.
+    // Legacy rows without a factory impl must reuse a cached instance too.
     assertSame(
         summaryConverter.invoke(history, row(ICEBERG, null)),
         summaryConverter.invoke(history, row(ICEBERG, null)));
 
-    // A different factory impl resolves to its own converter instance.
+    // A factory with a different summary type resolves to its own converter instance.
     assertNotSame(
         summaryConverter.invoke(history, row(ICEBERG, factory)),
         summaryConverter.invoke(
             history, row(ICEBERG, PaimonCompactionExecutorFactory.class.getName())));
+  }
+
+  @Test
+  void unknownFactoryNamesReuseTheLegacySummaryConverter() throws Exception {
+    Method summaryConverter =
+        OptimizingTaskSummaryConverter.class.getDeclaredMethod("summaryConverter", ResultSet.class);
+    summaryConverter.setAccessible(true);
+    Object legacyConverter = summaryConverter.invoke(history, row(ICEBERG, null));
+
+    for (int i = 0; i < 2_000; i++) {
+      assertSame(
+          legacyConverter,
+          summaryConverter.invoke(history, row(ICEBERG, "custom.RewriteFactory" + i)));
+    }
+  }
+
+  @Test
+  void registeredFactoriesWithTheSameSummaryTypeShareAConverter() throws Exception {
+    Method summaryConverter =
+        OptimizingTaskSummaryConverter.class.getDeclaredMethod("summaryConverter", ResultSet.class);
+    summaryConverter.setAccessible(true);
+    Object legacyConverter = summaryConverter.invoke(history, row(ICEBERG, null));
+    for (String factory :
+        new String[] {
+          "",
+          IcebergRewriteExecutorFactory.class.getName(),
+          "org.apache.amoro.optimizing.MixedIcebergRewriteExecutorFactory",
+          "org.apache.amoro.hive.optimizing.MixedHiveRewriteExecutorFactory"
+        }) {
+      assertSame(legacyConverter, summaryConverter.invoke(history, row(ICEBERG, factory)));
+    }
+
+    assertSame(
+        summaryConverter.invoke(
+            history, row(ICEBERG, PaimonCompactionExecutorFactory.class.getName())),
+        summaryConverter.invoke(
+            history,
+            row(
+                ICEBERG,
+                "org.apache.amoro.formats.paimon.optimizing.primary.PaimonPrimaryKeyCompactionExecutorFactory")));
   }
 
   @Test
