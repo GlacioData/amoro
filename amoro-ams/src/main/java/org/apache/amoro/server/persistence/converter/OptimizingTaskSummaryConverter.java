@@ -25,9 +25,18 @@ import java.sql.CallableStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.Collections;
+import java.util.concurrent.ConcurrentHashMap;
 
 /** Reads format-specific history summaries without applying execution recovery admission rules. */
 public class OptimizingTaskSummaryConverter extends JsonObjectConverter<MetricsSummary> {
+
+  /**
+   * Converters keyed by factory implementation name; the key set is bounded by the finite set of
+   * registered factory implementations (plus the legacy no-factory key).
+   */
+  private static final ConcurrentHashMap<String, JsonObjectConverter<? extends TaskMetricsSummary>>
+      SUMMARY_CONVERTERS = new ConcurrentHashMap<>();
+
   public OptimizingTaskSummaryConverter() {
     super(MetricsSummary.class);
   }
@@ -49,9 +58,13 @@ public class OptimizingTaskSummaryConverter extends JsonObjectConverter<MetricsS
 
   private JsonObjectConverter<? extends TaskMetricsSummary> summaryConverter(ResultSet rs)
       throws SQLException {
-    return new JsonObjectConverter<>(
-        TaskDescriptorRecoveryTypes.historySummaryClass(
-            TaskDescriptorRecoveryTypes.readFactoryImpl(rs)));
+    String factoryImpl = TaskDescriptorRecoveryTypes.readFactoryImpl(rs);
+    // Legacy rows carry no factory impl (null) while ConcurrentHashMap rejects null keys; both
+    // null and "" resolve to MetricsSummary, so the key is normalized to "".
+    String key = factoryImpl == null ? "" : factoryImpl;
+    return SUMMARY_CONVERTERS.computeIfAbsent(
+        key,
+        impl -> new JsonObjectConverter<>(TaskDescriptorRecoveryTypes.historySummaryClass(impl)));
   }
 
   static MetricsSummary adapt(TaskMetricsSummary summary) {

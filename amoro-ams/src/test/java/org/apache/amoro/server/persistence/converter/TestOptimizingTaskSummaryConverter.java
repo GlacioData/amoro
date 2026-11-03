@@ -19,20 +19,27 @@
 package org.apache.amoro.server.persistence.converter;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import org.apache.amoro.formats.paimon.optimizing.PaimonCompactionExecutorFactory;
+import org.apache.amoro.formats.paimon.optimizing.PaimonMetricsSummary;
+import org.apache.amoro.optimizing.IcebergRewriteExecutorFactory;
 import org.apache.amoro.optimizing.MetricsSummary;
 import org.apache.amoro.optimizing.TaskMetricsSummary;
 import org.apache.ibatis.executor.result.ResultMapException;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Method;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 class TestOptimizingTaskSummaryConverter {
@@ -110,6 +117,81 @@ class TestOptimizingTaskSummaryConverter {
       when(row.getString("properties")).thenReturn(properties);
       assertEquals(30, history.getResult(row, "metrics_summary").getRewriteDataRecordCnt());
     }
+  }
+
+  @Test
+  void goldenLegacyRowDeserializesToExpectedSummaryMap() throws Exception {
+    Map<String, String> expected = new LinkedHashMap<>();
+    expected.put(MetricsSummary.INPUT_DATA_FILES, "3");
+    expected.put(MetricsSummary.INPUT_DATA_SIZE, "300");
+    expected.put(MetricsSummary.INPUT_DATA_RECORDS, "30");
+    expected.put(MetricsSummary.INPUT_EQ_DELETE_FILES, "2");
+    expected.put(MetricsSummary.INPUT_EQ_DELETE_RECORDS, "4");
+    expected.put(MetricsSummary.OUTPUT_DATA_FILES, "1");
+    expected.put(MetricsSummary.OUTPUT_DATA_SIZE, "100");
+    expected.put(MetricsSummary.OUTPUT_DATA_RECORDS, "10");
+
+    assertEquals(
+        expected, history.getResult(row(ICEBERG, null), "metrics_summary").summaryAsMap(false));
+  }
+
+  @Test
+  void goldenPaimonRowWithUnknownFieldDeserializesToExpectedSummary() throws Exception {
+    // PaimonMetricsSummary has no @JsonIgnoreProperties, so tolerating "futureField"
+    // pins the shared ObjectMapper's disabled FAIL_ON_UNKNOWN_PROPERTIES feature.
+    String json =
+        "{\"compactedFileCount\":7,\"compactedFileSize\":700,\"compactedRecordCount\":70,"
+            + "\"producedFileCount\":2,\"producedFileSize\":200,\"producedRecordCount\":20,"
+            + "\"futureField\":{\"nested\":true}}";
+    PaimonMetricsSummary expected = new PaimonMetricsSummary();
+    expected.setCompactedFileCount(7);
+    expected.setCompactedFileSize(700);
+    expected.setCompactedRecordCount(70);
+    expected.setProducedFileCount(2);
+    expected.setProducedFileSize(200);
+    expected.setProducedRecordCount(20);
+
+    assertEquals(
+        expected,
+        new JsonObjectConverter<>(PaimonMetricsSummary.class)
+            .getNullableResult(row(json, null), "metrics_summary"));
+
+    MetricsSummary adapted =
+        history.getResult(
+            row(json, PaimonCompactionExecutorFactory.class.getName()), "metrics_summary");
+    assertEquals(7, adapted.getRewriteDataFileCnt());
+    assertEquals(700, adapted.getRewriteDataSize());
+    assertEquals(70, adapted.getRewriteDataRecordCnt());
+    assertEquals(2, adapted.getNewDataFileCnt());
+    assertEquals(200, adapted.getNewDataSize());
+    assertEquals(20, adapted.getNewDataRecordCnt());
+  }
+
+  @Test
+  void reusesConverterInstancePerFactoryImpl() throws Exception {
+    // summaryConverter is private, so it is invoked reflectively to pin instance
+    // reuse without widening the collaborator's visibility. This failed before the
+    // converter cache (a fresh JsonObjectConverter was built per row) and must stay
+    // green now that converters are cached per factory impl.
+    Method summaryConverter =
+        OptimizingTaskSummaryConverter.class.getDeclaredMethod("summaryConverter", ResultSet.class);
+    summaryConverter.setAccessible(true);
+
+    String factory = IcebergRewriteExecutorFactory.class.getName();
+    assertSame(
+        summaryConverter.invoke(history, row(ICEBERG, factory)),
+        summaryConverter.invoke(history, row(ICEBERG, factory)));
+
+    // Legacy rows without a factory impl (null key) must reuse a cached instance too.
+    assertSame(
+        summaryConverter.invoke(history, row(ICEBERG, null)),
+        summaryConverter.invoke(history, row(ICEBERG, null)));
+
+    // A different factory impl resolves to its own converter instance.
+    assertNotSame(
+        summaryConverter.invoke(history, row(ICEBERG, factory)),
+        summaryConverter.invoke(
+            history, row(ICEBERG, PaimonCompactionExecutorFactory.class.getName())));
   }
 
   @Test
