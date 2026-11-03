@@ -113,6 +113,32 @@ public interface TableMetaMapper {
   List<TableMetadata> selectTableMetasByDb(
       @Param("catalogName") String catalogName, @Param("database") String database);
 
+  @Select(
+      "SELECT table_identifier.table_id as table_id, table_identifier.catalog_name as catalog_name, "
+          + "table_identifier.db_name as db_name, table_identifier.table_name as table_name, table_identifier.format, "
+          + "primary_key, "
+          + "table_location, base_location, change_location, properties "
+          + "FROM table_metadata INNER JOIN table_identifier ON table_metadata.table_id=table_identifier.table_id "
+          + "WHERE "
+          + "table_identifier.catalog_name=#{catalogName} AND table_identifier.db_name=#{database}")
+  @Results({
+    @Result(property = "tableIdentifier.id", column = "table_id"),
+    @Result(property = "tableIdentifier.catalog", column = "catalog_name"),
+    @Result(property = "tableIdentifier.database", column = "db_name"),
+    @Result(property = "tableIdentifier.tableName", column = "table_name"),
+    @Result(
+        property = "tableIdentifier.format",
+        column = "format",
+        typeHandler = TableFormatConverter.class),
+    @Result(property = "primaryKey", column = "primary_key"),
+    @Result(property = "tableLocation", column = "table_location"),
+    @Result(property = "baseLocation", column = "base_location"),
+    @Result(property = "changeLocation", column = "change_location"),
+    @Result(property = "properties", column = "properties", typeHandler = Map2StringConverter.class)
+  })
+  List<TableMetadata> selectTableMetaSummariesByDb(
+      @Param("catalogName") String catalogName, @Param("database") String database);
+
   @Insert(
       "INSERT INTO table_metadata(table_id, table_name, db_name, catalog_name, primary_key,"
           + " table_location, base_location, change_location, meta_store_site, hdfs_site, core_site,"

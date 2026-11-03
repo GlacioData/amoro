@@ -34,13 +34,13 @@ import java.util.Locale;
 
 public class Object2ByteArrayConvert<T> implements TypeHandler<T> {
 
+  private static volatile String databaseProductName;
+
   @Override
   public void setParameter(PreparedStatement ps, int i, T parameter, JdbcType jdbcType)
       throws SQLException {
-    String dbName =
-        ps.getConnection().getMetaData().getDatabaseProductName().toLowerCase(Locale.ENGLISH);
     if (parameter == null) {
-      if (dbName.startsWith(AmoroManagementConf.DB_TYPE_POSTGRES)) {
+      if (databaseProductName(ps).startsWith(AmoroManagementConf.DB_TYPE_POSTGRES)) {
         ps.setNull(i, Types.BINARY);
       } else {
         ps.setNull(i, Types.BLOB);
@@ -49,6 +49,15 @@ public class Object2ByteArrayConvert<T> implements TypeHandler<T> {
     }
 
     ps.setBinaryStream(i, new ByteArrayInputStream(OptimizingPayloadCodec.encode(parameter)));
+  }
+
+  private String databaseProductName(PreparedStatement ps) throws SQLException {
+    String name = databaseProductName;
+    if (name == null) {
+      name = ps.getConnection().getMetaData().getDatabaseProductName().toLowerCase(Locale.ENGLISH);
+      databaseProductName = name;
+    }
+    return name;
   }
 
   @Override

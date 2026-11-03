@@ -28,8 +28,13 @@ import static org.mockito.Mockito.when;
 import io.javalin.core.validation.Validator;
 import io.javalin.http.Context;
 import org.apache.amoro.OptimizerProperties;
+import org.apache.amoro.api.OptimizerRegisterInfo;
 import org.apache.amoro.resource.ResourceGroup;
 import org.apache.amoro.server.dashboard.controller.OptimizerGroupController;
+import org.apache.amoro.server.dashboard.model.OptimizerInstanceInfo;
+import org.apache.amoro.server.dashboard.response.OkResponse;
+import org.apache.amoro.server.dashboard.response.PageResult;
+import org.apache.amoro.server.resource.OptimizerInstance;
 import org.apache.amoro.server.resource.OptimizerManager;
 import org.apache.amoro.server.table.TableManager;
 import org.apache.amoro.server.table.TableOptimizingQuery;
@@ -37,13 +42,16 @@ import org.apache.commons.lang3.tuple.Pair;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.ArgumentCaptor;
 
 import javax.ws.rs.BadRequestException;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.stream.Stream;
 
@@ -172,5 +180,136 @@ public class TestOptimizerGroupController {
     when(ctx.queryParams("actions[]")).thenReturn(Collections.emptyList());
     when(tableManager.queryTableOptimizingInfo(any(TableOptimizingQuery.class)))
         .thenReturn(Pair.of(Collections.emptyList(), 0));
+  }
+
+  private static final String OPTIMIZER_CONTAINER = "localContainer";
+  private static final long START_TIME_BASE = 1_700_000_000_000L;
+
+  /**
+   * Builds an optimizer whose every field is derived from {@code index}: startTime is {@code
+   * START_TIME_BASE + index * 7000}, so a bigger index means a later start time and must come first
+   * in the descending-start-time sort the endpoint applies.
+   */
+  private OptimizerInstance newOptimizerInstance(int index) {
+    OptimizerRegisterInfo registerInfo =
+        new OptimizerRegisterInfo()
+            .setResourceId("job-" + index)
+            .setGroupName("group1")
+            .setThreadCount(index + 1)
+            .setMemoryMb(1024 + index)
+            .setStartTime(START_TIME_BASE + index * 7_000L);
+    return new OptimizerInstance(registerInfo, OPTIMIZER_CONTAINER);
+  }
+
+  /** Instances ordered by ascending start time, so the endpoint's sort has to reverse them. */
+  private List<OptimizerInstance> newAscendingOptimizerInstances(int count) {
+    List<OptimizerInstance> instances = new ArrayList<>();
+    for (int i = 0; i < count; i++) {
+      instances.add(newOptimizerInstance(i));
+    }
+    return instances;
+  }
+
+  /**
+   * The DTO the endpoint must expose for the instance built with {@code index}; token and touchTime
+   * are generated inside {@link OptimizerInstance} and asserted as passthrough values.
+   */
+  private OptimizerInstanceInfo expectedInfo(OptimizerInstance instance, int index) {
+    return OptimizerInstanceInfo.builder()
+        .token(instance.getToken())
+        .startTime(START_TIME_BASE + index * 7_000L)
+        .touchTime(instance.getTouchTime())
+        .jobId("job-" + index)
+        .groupName("group1")
+        .coreNumber(index + 1)
+        .memory(1024 + index)
+        .jobStatus("RUNNING")
+        .container(OPTIMIZER_CONTAINER)
+        .build();
+  }
+
+  private List<OptimizerInstanceInfo> expectedInfos(
+      List<OptimizerInstance> instances, int... indexes) {
+    List<OptimizerInstanceInfo> expected = new ArrayList<>();
+    for (int index : indexes) {
+      expected.add(expectedInfo(instances.get(index), index));
+    }
+    return expected;
+  }
+
+  private void stubOptimizerListQuery(String group, String page, String pageSize) {
+    when(ctx.pathParam("optimizerGroup")).thenReturn(group);
+    when(ctx.queryParamAsClass("page", Integer.class))
+        .thenReturn(new Validator<>(page, Integer.class, "page"));
+    when(ctx.queryParamAsClass("pageSize", Integer.class))
+        .thenReturn(new Validator<>(pageSize, Integer.class, "pageSize"));
+  }
+
+  private PageResult<?> getOptimizersAndCapturePageResult() {
+    controller.getOptimizers(ctx);
+
+    ArgumentCaptor<OkResponse<PageResult<?>>> captor = ArgumentCaptor.forClass(OkResponse.class);
+    verify(ctx).json(captor.capture());
+    return captor.getValue().getResult();
+  }
+
+  @Test
+  void getOptimizersReturnsFirstPageSortedByStartTimeDescending() {
+    List<OptimizerInstance> ascending = newAscendingOptimizerInstances(25);
+    stubOptimizerListQuery("group1", "1", "20");
+    when(optimizerManager.listOptimizers("group1")).thenReturn(new ArrayList<>(ascending));
+
+    PageResult<?> result = getOptimizersAndCapturePageResult();
+
+    assertEquals(25, result.getTotal());
+    assertEquals(
+        expectedInfos(
+            ascending, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5),
+        result.getList());
+  }
+
+  @Test
+  void getOptimizersReturnsSecondPageWithRemainingInstancesAndFullTotal() {
+    List<OptimizerInstance> ascending = newAscendingOptimizerInstances(25);
+    stubOptimizerListQuery("all", "2", "20");
+    when(optimizerManager.listOptimizers()).thenReturn(new ArrayList<>(ascending));
+
+    PageResult<?> result = getOptimizersAndCapturePageResult();
+
+    assertEquals(25, result.getTotal());
+    assertEquals(expectedInfos(ascending, 4, 3, 2, 1, 0), result.getList());
+  }
+
+  @Test
+  void getOptimizersWithOffsetBeyondTotalReturnsEmptyListAndFullTotal() {
+    List<OptimizerInstance> ascending = newAscendingOptimizerInstances(25);
+    stubOptimizerListQuery("group1", "4", "20");
+    when(optimizerManager.listOptimizers("group1")).thenReturn(new ArrayList<>(ascending));
+
+    PageResult<?> result = getOptimizersAndCapturePageResult();
+
+    assertEquals(25, result.getTotal());
+    assertEquals(Collections.emptyList(), result.getList());
+  }
+
+  @ParameterizedTest
+  @CsvSource({"0,20", "1,-1", "1,0", "1,20", "2,20"})
+  void getOptimizersPreservesEmptyListResponse(String page, String pageSize) {
+    stubOptimizerListQuery("group1", page, pageSize);
+    when(optimizerManager.listOptimizers("group1")).thenReturn(new ArrayList<>());
+
+    PageResult<?> result = getOptimizersAndCapturePageResult();
+
+    assertEquals(0, result.getTotal());
+    assertEquals(Collections.emptyList(), result.getList());
+  }
+
+  @ParameterizedTest
+  @CsvSource({"0,20", "1,-1"})
+  void getOptimizersPreservesInvalidPaginationFailureForNonEmptyList(String page, String pageSize) {
+    stubOptimizerListQuery("group1", page, pageSize);
+    when(optimizerManager.listOptimizers("group1")).thenReturn(newAscendingOptimizerInstances(1));
+
+    assertThrows(IllegalArgumentException.class, () -> controller.getOptimizers(ctx));
   }
 }

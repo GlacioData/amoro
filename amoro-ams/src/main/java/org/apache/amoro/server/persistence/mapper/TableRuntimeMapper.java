@@ -21,8 +21,10 @@ package org.apache.amoro.server.persistence.mapper;
 import org.apache.amoro.server.persistence.BucketIdCount;
 import org.apache.amoro.server.persistence.TableRuntimeMeta;
 import org.apache.amoro.server.persistence.TableRuntimeState;
+import org.apache.amoro.server.persistence.extension.InListExtendedLanguageDriver;
 import org.apache.ibatis.annotations.Delete;
 import org.apache.ibatis.annotations.Insert;
+import org.apache.ibatis.annotations.Lang;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Result;
 import org.apache.ibatis.annotations.ResultMap;
@@ -227,6 +229,19 @@ public interface TableRuntimeMapper {
       "SELECT state_id, table_id, state_key, state_value, state_version FROM " + STATE_TABLE_NAME)
   @ResultMap("runtimeState")
   List<TableRuntimeState> selectAllStates();
+
+  /**
+   * Selects the state rows of the given tables only. The empty-list case is intentionally left
+   * invalid (the IN-list language driver renders {@code IN ()}); callers must short-circuit before
+   * querying when they hold no table ids.
+   */
+  @Select(
+      "SELECT state_id, table_id, state_key, state_value, state_version FROM "
+          + STATE_TABLE_NAME
+          + " WHERE table_id IN (#{tableIds::number[]})")
+  @Lang(InListExtendedLanguageDriver.class)
+  @ResultMap("runtimeState")
+  List<TableRuntimeState> selectStatesByTableIds(@Param("tableIds") List<Long> tableIds);
 
   @Insert(
       "INSERT INTO "

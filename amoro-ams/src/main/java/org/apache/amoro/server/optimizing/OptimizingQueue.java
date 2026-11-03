@@ -1496,6 +1496,13 @@ public class OptimizingQueue extends PersistentBase {
         .collect(Collectors.toList());
   }
 
+  public long countTasks(Predicate<TaskRuntime<?>> predicate) {
+    return tableQueue.stream()
+        .flatMap(p -> p.getTaskMap().values().stream())
+        .filter(predicate)
+        .count();
+  }
+
   public void retryTask(TaskRuntime<?> taskRuntime) {
     findProcess(taskRuntime.getTaskId()).resetTask(taskRuntime);
   }
@@ -2310,9 +2317,8 @@ public class OptimizingQueue extends PersistentBase {
     }
 
     public int getActualQuota() {
-      return optimizingTasksMap
-          .getOrDefault(tableRuntime.getTableIdentifier(), new AtomicInteger(0))
-          .get();
+      AtomicInteger current = optimizingTasksMap.get(tableRuntime.getTableIdentifier());
+      return current == null ? 0 : current.get();
     }
 
     @Override

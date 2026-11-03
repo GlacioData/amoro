@@ -187,26 +187,26 @@ public class OptimizerGroupController {
     } else {
       optimizers = optimizerManager.listOptimizers(optimizerGroup);
     }
-    List<OptimizerInstance> optimizerList = new ArrayList<>(optimizers);
-    optimizerList.sort(Comparator.comparingLong(OptimizerInstance::getStartTime).reversed());
-    List<OptimizerInstanceInfo> result =
-        optimizerList.stream()
-            .map(
-                e ->
-                    OptimizerInstanceInfo.builder()
-                        .token(e.getToken())
-                        .startTime(e.getStartTime())
-                        .touchTime(e.getTouchTime())
-                        .jobId(e.getResourceId())
-                        .groupName(e.getGroupName())
-                        .coreNumber(e.getThreadCount())
-                        .memory(e.getMemoryMb())
-                        .jobStatus("RUNNING")
-                        .container(e.getContainerName())
-                        .build())
-            .collect(Collectors.toList());
-
-    PageResult<OptimizerInstanceInfo> amsPageResult = PageResult.of(result, offset, pageSize);
+    // both listOptimizers implementations return freshly-built lists, safe to sort in place
+    optimizers.sort(Comparator.comparingLong(OptimizerInstance::getStartTime).reversed());
+    // slice the page before mapping so DTOs are only built for the returned page
+    PageResult<OptimizerInstanceInfo> amsPageResult =
+        PageResult.of(
+            optimizers,
+            offset,
+            pageSize,
+            e ->
+                OptimizerInstanceInfo.builder()
+                    .token(e.getToken())
+                    .startTime(e.getStartTime())
+                    .touchTime(e.getTouchTime())
+                    .jobId(e.getResourceId())
+                    .groupName(e.getGroupName())
+                    .coreNumber(e.getThreadCount())
+                    .memory(e.getMemoryMb())
+                    .jobStatus("RUNNING")
+                    .container(e.getContainerName())
+                    .build());
     ctx.json(OkResponse.of(amsPageResult));
   }
 

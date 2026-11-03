@@ -111,6 +111,7 @@ import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.Lock;
+import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
 @RunWith(Parameterized.class)
@@ -827,6 +828,47 @@ public class TestOptimizingQueue extends AMSTableTestBase {
     Assert.assertEquals(
         1, queue.collectTasks(t -> t.getStatus() == TaskRuntime.Status.SCHEDULED).size());
     queue.dispose();
+  }
+
+  @Test
+  public void testCountTasksConsistentWithCollectTasks() {
+    // the same predicates the pending/executing task gauges use
+    Predicate<TaskRuntime<?>> pendingTasks =
+        task ->
+            task.getStatus().equals(TaskRuntime.Status.PLANNED)
+                || task.getStatus().equals(TaskRuntime.Status.SCHEDULED);
+    Predicate<TaskRuntime<?>> executingTasks =
+        task -> task.getStatus().equals(TaskRuntime.Status.ACKED);
+
+    // an empty queue counts zero for both gauge predicates
+    OptimizingQueue emptyQueue = buildOptimizingGroupService();
+    Assert.assertEquals(0, emptyQueue.collectTasks(pendingTasks).size());
+    Assert.assertEquals(0, emptyQueue.countTasks(pendingTasks));
+    Assert.assertEquals(0, emptyQueue.countTasks(executingTasks));
+    emptyQueue.dispose();
+
+    // a queue with a known task status distribution: 1 SCHEDULED, then 1 ACKED
+    DefaultTableRuntime tableRuntime = initTableWithFiles();
+    OptimizingQueue queue = buildOptimizingGroupService(tableRuntime);
+
+    TaskRuntime<?> task = queue.pollTask(optimizerThread, MAX_POLLING_TIME);
+    Assert.assertNotNull(task);
+    Assert.assertEquals(TaskRuntime.Status.SCHEDULED, task.getStatus());
+    assertCountTasksMatchesCollectTasks(queue, pendingTasks, 1);
+    assertCountTasksMatchesCollectTasks(queue, executingTasks, 0);
+
+    queue.ackTask(task.getTaskId(), optimizerThread);
+    Assert.assertEquals(TaskRuntime.Status.ACKED, task.getStatus());
+    assertCountTasksMatchesCollectTasks(queue, pendingTasks, 0);
+    assertCountTasksMatchesCollectTasks(queue, executingTasks, 1);
+    queue.dispose();
+  }
+
+  private void assertCountTasksMatchesCollectTasks(
+      OptimizingQueue queue, Predicate<TaskRuntime<?>> predicate, int expected) {
+    Assert.assertEquals(expected, queue.collectTasks(predicate).size());
+    Assert.assertEquals(expected, queue.countTasks(predicate));
+    Assert.assertEquals(queue.collectTasks(predicate).size(), queue.countTasks(predicate));
   }
 
   @Test

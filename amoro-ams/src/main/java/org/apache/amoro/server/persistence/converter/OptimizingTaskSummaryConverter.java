@@ -25,9 +25,19 @@ import java.sql.CallableStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.Collections;
+import java.util.concurrent.ConcurrentHashMap;
 
 /** Reads format-specific history summaries without applying execution recovery admission rules. */
 public class OptimizingTaskSummaryConverter extends JsonObjectConverter<MetricsSummary> {
+
+  /**
+   * Converters keyed by resolved summary type so unknown historical factory names share the legacy
+   * converter instead of accumulating entries for arbitrary strings.
+   */
+  private static final ConcurrentHashMap<
+          Class<? extends TaskMetricsSummary>, JsonObjectConverter<? extends TaskMetricsSummary>>
+      SUMMARY_CONVERTERS = new ConcurrentHashMap<>();
+
   public OptimizingTaskSummaryConverter() {
     super(MetricsSummary.class);
   }
@@ -49,9 +59,10 @@ public class OptimizingTaskSummaryConverter extends JsonObjectConverter<MetricsS
 
   private JsonObjectConverter<? extends TaskMetricsSummary> summaryConverter(ResultSet rs)
       throws SQLException {
-    return new JsonObjectConverter<>(
+    Class<? extends TaskMetricsSummary> summaryClass =
         TaskDescriptorRecoveryTypes.historySummaryClass(
-            TaskDescriptorRecoveryTypes.readFactoryImpl(rs)));
+            TaskDescriptorRecoveryTypes.readFactoryImpl(rs));
+    return SUMMARY_CONVERTERS.computeIfAbsent(summaryClass, JsonObjectConverter::new);
   }
 
   static MetricsSummary adapt(TaskMetricsSummary summary) {
