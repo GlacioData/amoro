@@ -187,10 +187,13 @@ public class OptimizerGroupController {
     } else {
       optimizers = optimizerManager.listOptimizers(optimizerGroup);
     }
-    List<OptimizerInstance> optimizerList = new ArrayList<>(optimizers);
-    optimizerList.sort(Comparator.comparingLong(OptimizerInstance::getStartTime).reversed());
+    // both listOptimizers implementations return freshly-built lists, safe to sort in place
+    optimizers.sort(Comparator.comparingLong(OptimizerInstance::getStartTime).reversed());
+    // slice the page before mapping so DTOs are only built for the returned page
     List<OptimizerInstanceInfo> result =
-        optimizerList.stream()
+        optimizers.stream()
+            .skip(offset)
+            .limit(pageSize)
             .map(
                 e ->
                     OptimizerInstanceInfo.builder()
@@ -206,7 +209,7 @@ public class OptimizerGroupController {
                         .build())
             .collect(Collectors.toList());
 
-    PageResult<OptimizerInstanceInfo> amsPageResult = PageResult.of(result, offset, pageSize);
+    PageResult<OptimizerInstanceInfo> amsPageResult = PageResult.of(result, optimizers.size());
     ctx.json(OkResponse.of(amsPageResult));
   }
 
