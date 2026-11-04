@@ -210,7 +210,8 @@ public abstract class InternalCatalog extends ServerCatalog {
   }
 
   public List<TableMetadata> listTableMetadataInDatabase(String database) {
-    return getAs(TableMetaMapper.class, mapper -> mapper.selectTableMetasByDb(name(), database));
+    return getAs(
+        TableMetaMapper.class, mapper -> mapper.selectTableMetaSummariesByDb(name(), database));
   }
 
   private String getDatabaseDesc(String database) {
