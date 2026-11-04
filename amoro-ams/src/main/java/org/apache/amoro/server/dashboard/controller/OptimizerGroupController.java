@@ -190,26 +190,23 @@ public class OptimizerGroupController {
     // both listOptimizers implementations return freshly-built lists, safe to sort in place
     optimizers.sort(Comparator.comparingLong(OptimizerInstance::getStartTime).reversed());
     // slice the page before mapping so DTOs are only built for the returned page
-    List<OptimizerInstanceInfo> result =
-        optimizers.stream()
-            .skip(offset)
-            .limit(pageSize)
-            .map(
-                e ->
-                    OptimizerInstanceInfo.builder()
-                        .token(e.getToken())
-                        .startTime(e.getStartTime())
-                        .touchTime(e.getTouchTime())
-                        .jobId(e.getResourceId())
-                        .groupName(e.getGroupName())
-                        .coreNumber(e.getThreadCount())
-                        .memory(e.getMemoryMb())
-                        .jobStatus("RUNNING")
-                        .container(e.getContainerName())
-                        .build())
-            .collect(Collectors.toList());
-
-    PageResult<OptimizerInstanceInfo> amsPageResult = PageResult.of(result, optimizers.size());
+    PageResult<OptimizerInstanceInfo> amsPageResult =
+        PageResult.of(
+            optimizers,
+            offset,
+            pageSize,
+            e ->
+                OptimizerInstanceInfo.builder()
+                    .token(e.getToken())
+                    .startTime(e.getStartTime())
+                    .touchTime(e.getTouchTime())
+                    .jobId(e.getResourceId())
+                    .groupName(e.getGroupName())
+                    .coreNumber(e.getThreadCount())
+                    .memory(e.getMemoryMb())
+                    .jobStatus("RUNNING")
+                    .container(e.getContainerName())
+                    .build());
     ctx.json(OkResponse.of(amsPageResult));
   }
 

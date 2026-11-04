@@ -42,6 +42,7 @@ import org.apache.commons.lang3.tuple.Pair;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.ArgumentCaptor;
 
@@ -289,5 +290,26 @@ public class TestOptimizerGroupController {
 
     assertEquals(25, result.getTotal());
     assertEquals(Collections.emptyList(), result.getList());
+  }
+
+  @ParameterizedTest
+  @CsvSource({"0,20", "1,-1", "1,0", "1,20", "2,20"})
+  void getOptimizersPreservesEmptyListResponse(String page, String pageSize) {
+    stubOptimizerListQuery("group1", page, pageSize);
+    when(optimizerManager.listOptimizers("group1")).thenReturn(new ArrayList<>());
+
+    PageResult<?> result = getOptimizersAndCapturePageResult();
+
+    assertEquals(0, result.getTotal());
+    assertEquals(Collections.emptyList(), result.getList());
+  }
+
+  @ParameterizedTest
+  @CsvSource({"0,20", "1,-1"})
+  void getOptimizersPreservesInvalidPaginationFailureForNonEmptyList(String page, String pageSize) {
+    stubOptimizerListQuery("group1", page, pageSize);
+    when(optimizerManager.listOptimizers("group1")).thenReturn(newAscendingOptimizerInstances(1));
+
+    assertThrows(IllegalArgumentException.class, () -> controller.getOptimizers(ctx));
   }
 }
