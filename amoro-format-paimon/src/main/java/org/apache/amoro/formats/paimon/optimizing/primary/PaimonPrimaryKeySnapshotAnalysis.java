@@ -79,7 +79,8 @@ public final class PaimonPrimaryKeySnapshotAnalysis implements FormatTableAnalys
           .thenComparing(Comparator.comparingLong(BucketFacts::fileCount).reversed())
           .thenComparing(Comparator.comparingLong(BucketFacts::fileSize).reversed())
           .thenComparing(
-              (left, right) -> compareUnsigned(left.partitionBytes(), right.partitionBytes()))
+              (left, right) ->
+                  compareUnsigned(left.unit.getPartitionBytes(), right.unit.getPartitionBytes()))
           .thenComparingInt(BucketFacts::bucket);
 
   private static final Comparator<DataFileMeta> STABLE_FILE_ORDER =
@@ -561,7 +562,7 @@ public final class PaimonPrimaryKeySnapshotAnalysis implements FormatTableAnalys
       BucketFacts facts = sorted.get(index);
       builder
           .append("p=")
-          .append(Integer.toUnsignedString(Arrays.hashCode(facts.partitionBytes()), 16))
+          .append(Integer.toUnsignedString(Arrays.hashCode(facts.unit.getPartitionBytes()), 16))
           .append(",b=")
           .append(facts.bucket())
           .append(",r=")
@@ -643,36 +644,21 @@ public final class PaimonPrimaryKeySnapshotAnalysis implements FormatTableAnalys
   }
 
   static final class BucketFacts {
-    private final BinaryRow partition;
-    private final byte[] partitionBytes;
     private final int bucket;
     private final List<DataFileMeta> files;
     private final Levels levels;
     private final PaimonBucketCompactionUnit unit;
 
     private BucketFacts(
-        BinaryRow partition,
-        byte[] partitionBytes,
         int bucket,
         List<DataFileMeta> files,
         Levels levels,
         PaimonBucketCompactionUnit unit,
         boolean retainPlannerFacts) {
-      this.partition = partition.copy();
-      this.partitionBytes = Arrays.copyOf(partitionBytes, partitionBytes.length);
       this.bucket = bucket;
-      this.files =
-          Collections.unmodifiableList(retainPlannerFacts ? new ArrayList<>(files) : files);
+      this.files = Collections.unmodifiableList(files);
       this.levels = retainPlannerFacts ? levels : null;
       this.unit = unit;
-    }
-
-    BinaryRow partition() {
-      return partition.copy();
-    }
-
-    byte[] partitionBytes() {
-      return Arrays.copyOf(partitionBytes, partitionBytes.length);
     }
 
     int bucket() {
@@ -757,7 +743,7 @@ public final class PaimonPrimaryKeySnapshotAnalysis implements FormatTableAnalys
     private final BinaryRow partition;
     private final byte[] partitionBytes;
     private final int bucket;
-    private final List<DataFileMeta> files = new ArrayList<>();
+    private final ArrayList<DataFileMeta> files = new ArrayList<>(1);
     private long fileSize;
     private long recordCount;
     private long lastFileCreationTime;
@@ -785,8 +771,11 @@ public final class PaimonPrimaryKeySnapshotAnalysis implements FormatTableAnalys
               fileSize,
               recordCount,
               lastFileCreationTime);
-      return new BucketFacts(
-          partition, partitionBytes, bucket, files, levels, unit, retainPlannerFacts);
+      // All files have been collected and sorted. Share the frozen list with the analysis.
+      if (retainPlannerFacts) {
+        files.trimToSize();
+      }
+      return new BucketFacts(bucket, files, levels, unit, retainPlannerFacts);
     }
   }
 
