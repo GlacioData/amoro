@@ -113,6 +113,13 @@ public class TableController {
   private static final Logger LOG = LoggerFactory.getLogger(TableController.class);
   private static final long UPGRADE_INFO_EXPIRE_INTERVAL = 60 * 60 * 1000;
 
+  /**
+   * Hive-upgrade table properties are derived from static constants of {@link TableProperties} and
+   * {@link HiveTableProperties} and never change within the process; computed once on first
+   * request.
+   */
+  private static volatile Map<String, String> cachedUpgradeProperties;
+
   private final CatalogManager catalogManager;
   private final TableManager tableManager;
   private final ServerTableDescriptor tableDescriptor;
@@ -398,6 +405,21 @@ public class TableController {
    * @param ctx - context for handling the request and response
    */
   public void getUpgradeHiveTableProperties(Context ctx) throws IllegalAccessException {
+    Map<String, String> keyValues = cachedUpgradeProperties;
+    if (keyValues == null) {
+      synchronized (TableController.class) {
+        keyValues = cachedUpgradeProperties;
+        if (keyValues == null) {
+          keyValues = loadUpgradeHiveTableProperties();
+          cachedUpgradeProperties = keyValues;
+        }
+      }
+    }
+    ctx.json(OkResponse.of(keyValues));
+  }
+
+  private static Map<String, String> loadUpgradeHiveTableProperties()
+      throws IllegalAccessException {
     Map<String, String> keyValues = new TreeMap<>();
     Map<String, String> tableProperties =
         AmsUtil.getNotDeprecatedAndNotInternalStaticFields(TableProperties.class);
@@ -414,7 +436,7 @@ public class TableController {
         .filter(key -> !key.endsWith("_DEFAULT"))
         .forEach(
             key -> keyValues.put(hiveProperties.get(key), hiveProperties.get(key + "_DEFAULT")));
-    ctx.json(OkResponse.of(keyValues));
+    return keyValues;
   }
 
   /**
