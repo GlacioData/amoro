@@ -20,19 +20,157 @@ package org.apache.amoro.formats.paimon.optimizing.health;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import org.apache.amoro.formats.paimon.optimizing.health.PaimonAppendSnapshotAnalysis.PlannerFile;
 import org.apache.amoro.formats.paimon.optimizing.health.PaimonAppendSnapshotAnalysis.ScanTotals;
+import org.apache.amoro.table.health.TableHealthStructure;
+import org.apache.paimon.CoreOptions;
+import org.apache.paimon.Snapshot;
+import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.io.DataFileMeta;
 import org.apache.paimon.schema.TableSchema;
 import org.apache.paimon.table.AppendOnlyFileStoreTable;
 import org.apache.paimon.table.BucketMode;
 import org.apache.paimon.utils.SnapshotManager;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 
 public class TestPaimonAppendSnapshotAnalysis {
+
+  @ParameterizedTest
+  @EnumSource(
+      value = BucketMode.class,
+      names = {"BUCKET_UNAWARE", "HASH_FIXED"})
+  void derivedAnalysesShareIsolatedFileSnapshotAndPreserveOrder(BucketMode mode) {
+    PaimonHealthEvaluationContext context = context(mode);
+    BinaryRow partition = BinaryRow.singleColumn(7);
+    PlannerFile second = new PlannerFile(partition, mock(DataFileMeta.class), null, null);
+    PlannerFile first = new PlannerFile(partition, mock(DataFileMeta.class), null, null);
+    List<PlannerFile> input = new ArrayList<>(Arrays.asList(second, first));
+    PaimonAppendHealthEvaluator.Result health =
+        PaimonAppendHealthEvaluator.Result.invalid("fixture");
+    PaimonAppendSnapshotAnalysis original =
+        PaimonAppendSnapshotAnalysis.create(
+            context, health, health, new ScanTotals(), input, true, context.snapshot().get(), 1);
+    TableHealthStructure structure =
+        new TableHealthStructure(
+            "APPEND",
+            "COMPLETE",
+            1L,
+            1L,
+            "1",
+            "0",
+            "0",
+            Collections.emptyList(),
+            Collections.emptyList());
+
+    PaimonAppendSnapshotAnalysis truncated = original.withPlannerFilesTruncated(true);
+    PaimonAppendSnapshotAnalysis attached = truncated.withStructure(structure);
+    input.clear();
+    partition.setInt(0, 99);
+    attached.plannerFiles().get(0).partition().setInt(0, 100);
+
+    assertNotSame(input, original.plannerFiles());
+    assertEquals(Arrays.asList(second, first), attached.plannerFiles());
+    assertSame(original.plannerFiles(), truncated.plannerFiles());
+    assertSame(truncated.plannerFiles(), attached.plannerFiles());
+    assertEquals(7, attached.plannerFiles().get(0).partition().getInt(0));
+    assertFalse(original.plannerFilesTruncated());
+    assertTrue(attached.plannerFilesTruncated());
+    assertTrue(attached.plannerFactsAvailable());
+    assertNull(original.healthDetails().getStructure());
+    assertSame(structure, attached.healthDetails().getStructure());
+    assertEquals(original.healthDetails().getMetrics(), attached.healthDetails().getMetrics());
+    assertEquals(
+        original.healthDetails().getComponents(), attached.healthDetails().getComponents());
+    assertEquals(
+        original.healthDetails().getReasonCodes(), attached.healthDetails().getReasonCodes());
+    assertSame(original.pendingInput(), attached.pendingInput());
+    assertSame(original.key(), attached.key());
+    assertSame(original.snapshot(), attached.snapshot());
+    assertEquals(original.fullSnapshotFileCount(), attached.fullSnapshotFileCount());
+    assertEquals(original.fullSnapshotScanCount(), attached.fullSnapshotScanCount());
+    assertThrows(UnsupportedOperationException.class, () -> attached.plannerFiles().clear());
+
+    PaimonAppendSnapshotAnalysis historical = attached.withoutPlannerFacts();
+    assertTrue(historical.plannerFiles().isEmpty());
+    assertFalse(historical.plannerFactsAvailable());
+    assertFalse(historical.plannerFilesTruncated());
+    assertNull(historical.snapshot());
+    assertEquals(attached.healthDetails(), historical.healthDetails());
+  }
+
+  @ParameterizedTest
+  @org.junit.jupiter.params.provider.ValueSource(booleans = {true, false})
+  void derivedAnalysesPreserveCoverageAndHistoricalFactsCannotBeReused(boolean unfiltered) {
+    PaimonHealthEvaluationContext context = context(BucketMode.BUCKET_UNAWARE);
+    PaimonAppendHealthEvaluator.Result health =
+        PaimonAppendHealthEvaluator.Result.invalid("fixture");
+    PaimonAppendSnapshotAnalysis analysis =
+        PaimonAppendSnapshotAnalysis.createForScan(
+            context,
+            health,
+            health,
+            new ScanTotals(),
+            Collections.emptyList(),
+            true,
+            unfiltered,
+            context.snapshot().get(),
+            1);
+    PaimonAppendSnapshotAnalysis derived =
+        analysis.withStructure(null).withPlannerFilesTruncated(true);
+    assertEquals(unfiltered, analysis.canReusePlannerFiles(true));
+    assertEquals(unfiltered, derived.canReusePlannerFiles(false));
+    assertFalse(derived.canReusePlannerFiles(true));
+    assertFalse(derived.withoutPlannerFacts().canReusePlannerFiles(false));
+    assertFalse(derived.withoutPlannerFacts().canReusePlannerFiles(true));
+    PaimonAppendSnapshotAnalysis unknown =
+        PaimonAppendSnapshotAnalysis.create(
+            context,
+            health,
+            health,
+            new ScanTotals(),
+            Collections.emptyList(),
+            true,
+            context.snapshot().get(),
+            1);
+    assertFalse(unknown.canReusePlannerFiles(false));
+    assertFalse(unknown.withStructure(null).canReusePlannerFiles(true));
+  }
+
+  private static PaimonHealthEvaluationContext context(BucketMode mode) {
+    AppendOnlyFileStoreTable table = mock(AppendOnlyFileStoreTable.class);
+    TableSchema schema = mock(TableSchema.class);
+    SnapshotManager snapshots = mock(SnapshotManager.class);
+    Snapshot snapshot = mock(Snapshot.class);
+    Map<String, String> options = new HashMap<>();
+    options.put("bucket", mode == BucketMode.HASH_FIXED ? "1" : "-1");
+    when(table.bucketMode()).thenReturn(mode);
+    when(table.schema()).thenReturn(schema);
+    when(schema.id()).thenReturn(1L);
+    when(schema.options()).thenReturn(options);
+    when(table.coreOptions()).thenReturn(new CoreOptions(options));
+    when(table.snapshotManager()).thenReturn(snapshots);
+    when(snapshots.latestSnapshot()).thenReturn(snapshot);
+    when(snapshot.id()).thenReturn(1L);
+    when(snapshot.timeMillis()).thenReturn(1L);
+    return PaimonHealthEvaluationContext.capture(table, "catalog.db.append", null);
+  }
 
   @Test
   public void pendingCountsSaturateInsteadOfBecomingEmpty() {
