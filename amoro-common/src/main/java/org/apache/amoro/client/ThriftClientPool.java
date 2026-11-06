@@ -166,6 +166,14 @@ public class ThriftClientPool<
         poolConfig.getMaxMessageSize());
   }
 
+  private static boolean isOversizedResponseFrame(TTransportException e) {
+    // Thrift 0.25 uses MESSAGE_SIZE_LIMIT for the read budget of the current frame as well.
+    // Only the framed transport's length check establishes that the configured limit was hit.
+    return e.getType() == TTransportException.CORRUPTED_DATA
+        && e.getMessage() != null
+        && e.getMessage().startsWith("Frame size (");
+  }
+
   /**
    * Get a client's IFace from pool
    *
@@ -226,7 +234,18 @@ public class ThriftClientPool<
                 success = true;
                 return result;
               } catch (InvocationTargetException e) {
-                throw e.getTargetException();
+                Throwable target = e.getTargetException();
+                if (target instanceof TTransportException
+                    && isOversizedResponseFrame((TTransportException) target)) {
+                  throw new ThriftException(
+                      "Thrift response frame declares a size above the client limit"
+                          + " (maxMessageSize="
+                          + poolConfig.getMaxMessageSize()
+                          + " bytes). Increase the maxMessageSize URL parameter if this response"
+                          + " size is expected.",
+                      target);
+                }
+                throw target;
               } finally {
                 if (success) {
                   pool.returnObject(finalClient);
