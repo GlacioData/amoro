@@ -2317,9 +2317,8 @@ public class OptimizingQueue extends PersistentBase {
     }
 
     public int getActualQuota() {
-      return optimizingTasksMap
-          .getOrDefault(tableRuntime.getTableIdentifier(), new AtomicInteger(0))
-          .get();
+      AtomicInteger current = optimizingTasksMap.get(tableRuntime.getTableIdentifier());
+      return current == null ? 0 : current.get();
     }
 
     @Override
