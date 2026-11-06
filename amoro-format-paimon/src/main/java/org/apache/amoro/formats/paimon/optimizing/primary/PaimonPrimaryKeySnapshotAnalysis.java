@@ -79,8 +79,7 @@ public final class PaimonPrimaryKeySnapshotAnalysis implements FormatTableAnalys
           .thenComparing(Comparator.comparingLong(BucketFacts::fileCount).reversed())
           .thenComparing(Comparator.comparingLong(BucketFacts::fileSize).reversed())
           .thenComparing(
-              (left, right) ->
-                  compareUnsigned(left.unit.getPartitionBytes(), right.unit.getPartitionBytes()))
+              (left, right) -> compareUnsigned(left.partitionBytes, right.partitionBytes))
           .thenComparingInt(BucketFacts::bucket);
 
   private static final Comparator<DataFileMeta> STABLE_FILE_ORDER =
@@ -109,6 +108,17 @@ public final class PaimonPrimaryKeySnapshotAnalysis implements FormatTableAnalys
     this.bucketFacts = Collections.unmodifiableList(new ArrayList<>(bucketFacts));
     this.activePartitionCount = activePartitionCount;
     this.validForPlanning = validForPlanning;
+  }
+
+  private PaimonPrimaryKeySnapshotAnalysis(
+      PaimonPrimaryKeySnapshotAnalysis source, TableHealthDetails healthDetails) {
+    this.key = source.key;
+    this.pendingInput = source.pendingInput;
+    this.healthDetails = healthDetails;
+    // Only a derived analysis can reuse the already isolated, unmodifiable bucket list.
+    this.bucketFacts = source.bucketFacts;
+    this.activePartitionCount = source.activePartitionCount;
+    this.validForPlanning = source.validForPlanning;
   }
 
   /** Analyze the exact {@link Snapshot} already captured by the metadata-only context. */
@@ -562,7 +572,7 @@ public final class PaimonPrimaryKeySnapshotAnalysis implements FormatTableAnalys
       BucketFacts facts = sorted.get(index);
       builder
           .append("p=")
-          .append(Integer.toUnsignedString(Arrays.hashCode(facts.unit.getPartitionBytes()), 16))
+          .append(Integer.toUnsignedString(Arrays.hashCode(facts.partitionBytes), 16))
           .append(",b=")
           .append(facts.bucket())
           .append(",r=")
@@ -607,13 +617,7 @@ public final class PaimonPrimaryKeySnapshotAnalysis implements FormatTableAnalys
   }
 
   private PaimonPrimaryKeySnapshotAnalysis withStructure(TableHealthStructure structure) {
-    return new PaimonPrimaryKeySnapshotAnalysis(
-        key,
-        pendingInput,
-        healthDetails.withStructure(structure),
-        bucketFacts,
-        activePartitionCount,
-        validForPlanning);
+    return new PaimonPrimaryKeySnapshotAnalysis(this, healthDetails.withStructure(structure));
   }
 
   @Override
@@ -644,21 +648,28 @@ public final class PaimonPrimaryKeySnapshotAnalysis implements FormatTableAnalys
   }
 
   static final class BucketFacts {
+    private final byte[] partitionBytes;
     private final int bucket;
     private final List<DataFileMeta> files;
     private final Levels levels;
     private final PaimonBucketCompactionUnit unit;
 
     private BucketFacts(
+        byte[] partitionBytes,
         int bucket,
         List<DataFileMeta> files,
         Levels levels,
         PaimonBucketCompactionUnit unit,
         boolean retainPlannerFacts) {
+      this.partitionBytes = Arrays.copyOf(partitionBytes, partitionBytes.length);
       this.bucket = bucket;
       this.files = Collections.unmodifiableList(files);
       this.levels = retainPlannerFacts ? levels : null;
       this.unit = unit;
+    }
+
+    byte[] partitionBytes() {
+      return Arrays.copyOf(partitionBytes, partitionBytes.length);
     }
 
     int bucket() {
@@ -775,7 +786,7 @@ public final class PaimonPrimaryKeySnapshotAnalysis implements FormatTableAnalys
       if (retainPlannerFacts) {
         files.trimToSize();
       }
-      return new BucketFacts(bucket, files, levels, unit, retainPlannerFacts);
+      return new BucketFacts(partitionBytes, bucket, files, levels, unit, retainPlannerFacts);
     }
   }
 

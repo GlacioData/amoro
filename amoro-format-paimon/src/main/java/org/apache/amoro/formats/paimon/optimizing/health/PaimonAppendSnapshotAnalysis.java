@@ -73,6 +73,22 @@ public final class PaimonAppendSnapshotAnalysis implements FormatTableAnalysis {
     this.fullSnapshotScanCount = fullSnapshotScanCount;
   }
 
+  private PaimonAppendSnapshotAnalysis(
+      PaimonAppendSnapshotAnalysis source,
+      TableHealthDetails healthDetails,
+      boolean plannerFilesTruncated) {
+    this.key = source.key;
+    this.pendingInput = source.pendingInput;
+    this.healthDetails = healthDetails;
+    // The source already owns a defensive, unmodifiable snapshot of the file references.
+    this.plannerFiles = source.plannerFiles;
+    this.plannerFactsAvailable = source.plannerFactsAvailable;
+    this.plannerFilesTruncated = plannerFilesTruncated;
+    this.snapshot = source.snapshot;
+    this.fullSnapshotFileCount = source.fullSnapshotFileCount;
+    this.fullSnapshotScanCount = source.fullSnapshotScanCount;
+  }
+
   /** Historical diagnostics must not retain a snapshot or files for planner reuse. */
   public PaimonAppendSnapshotAnalysis withoutPlannerFacts() {
     return new PaimonAppendSnapshotAnalysis(
@@ -89,28 +105,11 @@ public final class PaimonAppendSnapshotAnalysis implements FormatTableAnalysis {
 
   public PaimonAppendSnapshotAnalysis withStructure(TableHealthStructure structure) {
     return new PaimonAppendSnapshotAnalysis(
-        key,
-        pendingInput,
-        healthDetails.withStructure(structure),
-        plannerFiles,
-        plannerFactsAvailable,
-        plannerFilesTruncated,
-        snapshot,
-        fullSnapshotFileCount,
-        fullSnapshotScanCount);
+        this, healthDetails.withStructure(structure), plannerFilesTruncated);
   }
 
   public PaimonAppendSnapshotAnalysis withPlannerFilesTruncated(boolean truncated) {
-    return new PaimonAppendSnapshotAnalysis(
-        key,
-        pendingInput,
-        healthDetails,
-        plannerFiles,
-        plannerFactsAvailable,
-        truncated,
-        snapshot,
-        fullSnapshotFileCount,
-        fullSnapshotScanCount);
+    return new PaimonAppendSnapshotAnalysis(this, healthDetails, truncated);
   }
 
   /** Create an analysis after the scanner has exhausted the fixed-snapshot iterator. */

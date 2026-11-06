@@ -22,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.anyInt;
@@ -407,6 +408,44 @@ class TestPaimonPrimaryKeyOptimizingEvaluator {
     assertEquals(
         fileNames(forwardAnalysis.bucketFacts().get(0)),
         fileNames(reverseAnalysis.bucketFacts().get(0)));
+  }
+
+  @Test
+  void bucketFactsKeepPartitionIsolationAndStableFileOrder(@TempDir Path warehouse)
+      throws Exception {
+    try (Catalog catalog = fsCatalog(warehouse)) {
+      BinaryRow partition = BinaryRow.singleColumn(7);
+      byte[] expectedPartition = SerializationUtils.serializeBinaryRow(partition);
+      List<ManifestEntry> entries = new ArrayList<>();
+      entries.add(entry(partition, 0, file("later", 100L, 10L, 0, 2, 2L)));
+      entries.add(entry(partition, 0, file("earlier", 100L, 10L, 0, 1, 1L)));
+      HealthFixture fixture =
+          healthFixture(
+              catalog,
+              "t_owned_bucket_facts",
+              primaryKeyOptions(),
+              entries,
+              false,
+              BucketMode.HASH_FIXED);
+      PaimonPrimaryKeySnapshotAnalysis analysis =
+          PaimonPrimaryKeySnapshotAnalysis.analyze(fixture.table, fixture.context);
+      PaimonPrimaryKeySnapshotAnalysis.BucketFacts facts = analysis.bucketFacts().get(0);
+
+      partition.setInt(0, 99);
+      entries.clear();
+
+      assertEquals(java.util.Arrays.asList("earlier", "later"), fileNames(facts));
+      assertEquals(2, facts.levels().numberOfSortedRuns());
+      assertArrayEquals(expectedPartition, facts.unit().getPartitionBytes());
+      assertArrayEquals(expectedPartition, facts.partitionBytes());
+      assertThrows(UnsupportedOperationException.class, () -> analysis.bucketFacts().clear());
+      assertThrows(UnsupportedOperationException.class, () -> facts.files().clear());
+
+      byte[] returnedPartition = facts.partitionBytes();
+      returnedPartition[0] ^= 1;
+      facts.unit().getPartitionBytes()[0] ^= 1;
+      assertArrayEquals(expectedPartition, facts.partitionBytes());
+    }
   }
 
   @Test
