@@ -65,6 +65,11 @@ import java.util.Set;
 
 public final class PaimonAppendFileScanner {
 
+  private enum ScanPurpose {
+    ANALYSIS,
+    PLANNING
+  }
+
   private static final Logger LOG = LoggerFactory.getLogger(PaimonAppendFileScanner.class);
   // Keep synchronous planning bounded: three selection rounds, each with at most one proof.
   private static final int MAX_FIXED_WINDOW_ROUNDS = 3;
@@ -137,15 +142,19 @@ public final class PaimonAppendFileScanner {
             Long.MAX_VALUE,
             System.currentTimeMillis());
     return new PaimonAppendFileScanner(table, healthContext, planContext, partitionFilter)
-        .scan(false, collectPlannerFacts)
+        .scanForAnalysis(collectPlannerFacts)
         .analysis();
   }
 
-  ScanResult scan() {
-    return scan(true, true);
+  ScanResult scanForAnalysis(boolean collectPlannerFacts) {
+    return scan(ScanPurpose.ANALYSIS, collectPlannerFacts);
   }
 
-  private ScanResult scan(boolean applyFullRewrite, boolean collectPlannerFacts) {
+  ScanResult scan() {
+    return scan(ScanPurpose.PLANNING, true);
+  }
+
+  private ScanResult scan(ScanPurpose purpose, boolean collectPlannerFacts) {
     if (healthContext.configurationError().isPresent()
         || !healthContext.coreOptions().isPresent()) {
       PaimonAppendSnapshotAnalysis analysis =
@@ -160,13 +169,14 @@ public final class PaimonAppendFileScanner {
       PaimonAppendHealthEvaluator.Result health =
           evaluator.evaluate(Collections.emptyList(), healthContext.activityInput(100));
       PaimonAppendSnapshotAnalysis analysis =
-          PaimonAppendSnapshotAnalysis.create(
+          PaimonAppendSnapshotAnalysis.createForScan(
                   healthContext,
                   health,
                   health,
                   new ScanTotals(),
                   Collections.emptyList(),
                   collectPlannerFacts && planningShapeSupported(),
+                  partitionFilter == null,
                   null,
                   0)
               .withStructure(new PaimonHealthStructureCollector(table, healthContext).finish(true));
@@ -177,8 +187,8 @@ public final class PaimonAppendFileScanner {
     try {
       DeletionMetadataLookup deletionMetadataLookup = deletionMetadataLookup(snapshot);
       ScanResult result =
-          scanCompleteSnapshot(snapshot, deletionMetadataLookup, collectPlannerFacts);
-      if (applyFullRewrite
+          scanCompleteSnapshot(snapshot, deletionMetadataLookup, collectPlannerFacts, purpose);
+      if (purpose == ScanPurpose.PLANNING
           && table.bucketMode() == BucketMode.BUCKET_UNAWARE
           && context.reachFullInterval()
           && context.fullRewriteAllFiles()
@@ -211,14 +221,18 @@ public final class PaimonAppendFileScanner {
   private ScanResult scanCompleteSnapshot(
       Snapshot snapshot,
       DeletionMetadataLookup deletionMetadataLookup,
-      boolean collectPlannerFacts) {
+      boolean collectPlannerFacts,
+      ScanPurpose purpose) {
     PaimonAppendHealthEvaluator evaluator = evaluator();
     Map<PaimonAppendUnitKey, UnitAccumulator> units = new LinkedHashMap<>();
     Map<PaimonAppendUnitKey, UnitAccumulator> structuralUnits = new LinkedHashMap<>();
     Set<BinaryRow> partitions = new HashSet<>();
     Map<PaimonAppendUnitKey, Map<String, Long>> bucketedCounts = new HashMap<>();
     Set<PaimonAppendUnitKey> failedDvUnits = new HashSet<>();
-    Map<BinaryRow, List<PaimonFileCandidate>> candidates = new LinkedHashMap<>();
+    // Refresh consumes only analysis; its planner facts are rebuilt into candidates at plan time.
+    boolean collectCandidates = purpose == ScanPurpose.PLANNING;
+    Map<BinaryRow, List<PaimonFileCandidate>> candidates =
+        collectCandidates ? new LinkedHashMap<>() : Collections.emptyMap();
     List<PlannerFile> plannerFiles = new ArrayList<>();
     ScanTotals totals = new ScanTotals();
     PaimonHealthStructureCollector collector =
@@ -278,7 +292,7 @@ public final class PaimonAppendFileScanner {
         continue;
       }
       candidateCount++;
-      if (!fixed) {
+      if (!fixed && collectCandidates) {
         candidates.computeIfAbsent(partition, ignored -> new ArrayList<>()).add(candidate);
       }
       plannerFiles.add(
@@ -310,17 +324,20 @@ public final class PaimonAppendFileScanner {
     boolean plannerFactsAvailable =
         collectPlannerFacts && supported && layoutValid && failedDvUnits.isEmpty();
     if (!plannerFactsAvailable) {
-      candidates.clear();
+      if (collectCandidates) {
+        candidates.clear();
+      }
       plannerFiles.clear();
     }
     PaimonAppendSnapshotAnalysis analysis =
-        PaimonAppendSnapshotAnalysis.create(
+        PaimonAppendSnapshotAnalysis.createForScan(
                 healthContext,
                 health,
                 structuralHealth,
                 totals,
                 plannerFiles,
                 plannerFactsAvailable,
+                partitionFilter == null,
                 snapshot,
                 1)
             .withPlannerFilesTruncated(plannerFactsAvailable && eligibleFileCount > candidateCount)

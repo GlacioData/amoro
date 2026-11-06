@@ -139,6 +139,18 @@ class TestPaimonFixedBucketFileScanner {
       assertEquals(1, analysis.fullSnapshotScanCount());
       assertEquals(table.latestSnapshot().get().id(), scan.snapshotId());
       assertTrue(scan.files().isEmpty(), "The legacy partition-only candidate map must stay empty");
+
+      PaimonAppendFileScanner.ScanResult refresh =
+          new PaimonAppendFileScanner(table, context(table, 100), null).scanForAnalysis(true);
+      assertTrue(refresh.files().isEmpty());
+      assertExactManifestFacts(nativeFiles, refresh.analysis().plannerFiles());
+      assertEquals(analysis.key(), refresh.analysis().key());
+      assertEquals(
+          analysis.healthDetails().withStructure(null),
+          refresh.analysis().healthDetails().withStructure(null));
+      assertStructureFactsEqual(
+          analysis.healthDetails().getStructure(),
+          refresh.analysis().healthDetails().getStructure());
     }
   }
 

@@ -48,6 +48,7 @@ public final class PaimonAppendSnapshotAnalysis implements FormatTableAnalysis {
   private final List<PlannerFile> plannerFiles;
   private final boolean plannerFactsAvailable;
   private final boolean plannerFilesTruncated;
+  private final boolean plannerFilesUnfiltered;
   @Nullable private final Snapshot snapshot;
   private final long fullSnapshotFileCount;
   private final int fullSnapshotScanCount;
@@ -62,12 +63,37 @@ public final class PaimonAppendSnapshotAnalysis implements FormatTableAnalysis {
       @Nullable Snapshot snapshot,
       long fullSnapshotFileCount,
       int fullSnapshotScanCount) {
+    this(
+        key,
+        pendingInput,
+        healthDetails,
+        plannerFiles,
+        plannerFactsAvailable,
+        plannerFilesTruncated,
+        false,
+        snapshot,
+        fullSnapshotFileCount,
+        fullSnapshotScanCount);
+  }
+
+  private PaimonAppendSnapshotAnalysis(
+      TableAnalysisKey key,
+      PaimonPendingInput pendingInput,
+      TableHealthDetails healthDetails,
+      List<PlannerFile> plannerFiles,
+      boolean plannerFactsAvailable,
+      boolean plannerFilesTruncated,
+      boolean plannerFilesUnfiltered,
+      @Nullable Snapshot snapshot,
+      long fullSnapshotFileCount,
+      int fullSnapshotScanCount) {
     this.key = Objects.requireNonNull(key, "Analysis key must not be null");
     this.pendingInput = Objects.requireNonNull(pendingInput, "Pending input must not be null");
     this.healthDetails = Objects.requireNonNull(healthDetails, "Health details must not be null");
     this.plannerFiles = Collections.unmodifiableList(new ArrayList<>(plannerFiles));
     this.plannerFactsAvailable = plannerFactsAvailable;
     this.plannerFilesTruncated = plannerFilesTruncated;
+    this.plannerFilesUnfiltered = plannerFilesUnfiltered;
     this.snapshot = snapshot;
     this.fullSnapshotFileCount = fullSnapshotFileCount;
     this.fullSnapshotScanCount = fullSnapshotScanCount;
@@ -83,6 +109,7 @@ public final class PaimonAppendSnapshotAnalysis implements FormatTableAnalysis {
     // The source already owns a defensive, unmodifiable snapshot of the file references.
     this.plannerFiles = source.plannerFiles;
     this.plannerFactsAvailable = source.plannerFactsAvailable;
+    this.plannerFilesUnfiltered = source.plannerFilesUnfiltered;
     this.plannerFilesTruncated = plannerFilesTruncated;
     this.snapshot = source.snapshot;
     this.fullSnapshotFileCount = source.fullSnapshotFileCount;
@@ -112,7 +139,7 @@ public final class PaimonAppendSnapshotAnalysis implements FormatTableAnalysis {
     return new PaimonAppendSnapshotAnalysis(this, healthDetails, truncated);
   }
 
-  /** Create an analysis after the scanner has exhausted the fixed-snapshot iterator. */
+  /** Create facts without a partition-coverage guarantee; cross-call reuse requires one. */
   public static PaimonAppendSnapshotAnalysis create(
       PaimonHealthEvaluationContext context,
       PaimonAppendHealthEvaluator.Result result,
@@ -120,6 +147,32 @@ public final class PaimonAppendSnapshotAnalysis implements FormatTableAnalysis {
       ScanTotals totals,
       List<PlannerFile> plannerFiles,
       boolean plannerFactsAvailable,
+      @Nullable Snapshot snapshot,
+      int fullSnapshotScanCount) {
+    return createForScan(
+        context,
+        result,
+        structuralResult,
+        totals,
+        plannerFiles,
+        plannerFactsAvailable,
+        false,
+        snapshot,
+        fullSnapshotScanCount);
+  }
+
+  /**
+   * Create an analysis after exhausting the fixed-snapshot iterator. The coverage flag describes
+   * candidate collection, not the health scan, which always covers the entire snapshot.
+   */
+  public static PaimonAppendSnapshotAnalysis createForScan(
+      PaimonHealthEvaluationContext context,
+      PaimonAppendHealthEvaluator.Result result,
+      PaimonAppendHealthEvaluator.Result structuralResult,
+      ScanTotals totals,
+      List<PlannerFile> plannerFiles,
+      boolean plannerFactsAvailable,
+      boolean plannerFilesUnfiltered,
       @Nullable Snapshot snapshot,
       int fullSnapshotScanCount) {
     Objects.requireNonNull(context, "Health context must not be null");
@@ -144,6 +197,7 @@ public final class PaimonAppendSnapshotAnalysis implements FormatTableAnalysis {
         plannerFiles,
         plannerFactsAvailable,
         false,
+        plannerFilesUnfiltered,
         snapshot,
         totals.totalFileCount,
         fullSnapshotScanCount);
@@ -324,6 +378,17 @@ public final class PaimonAppendSnapshotAnalysis implements FormatTableAnalysis {
 
   public boolean plannerFactsAvailable() {
     return plannerFactsAvailable;
+  }
+
+  /**
+   * Whether these facts cover a subsequent planner's partition selection. Filtered or unknown
+   * sources require a new scan; truncating before applying a new filter is not equivalent to
+   * filtering before the file-count limit. No mutable native predicate is retained here.
+   */
+  public boolean canReusePlannerFiles(boolean partitionFiltered) {
+    return plannerFactsAvailable
+        && plannerFilesUnfiltered
+        && (!partitionFiltered || !plannerFilesTruncated);
   }
 
   /** Candidate truncation is not a failed or partial health scan. */

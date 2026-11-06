@@ -115,6 +115,44 @@ public class TestPaimonAppendSnapshotAnalysis {
     assertEquals(attached.healthDetails(), historical.healthDetails());
   }
 
+  @ParameterizedTest
+  @org.junit.jupiter.params.provider.ValueSource(booleans = {true, false})
+  void derivedAnalysesPreserveCoverageAndHistoricalFactsCannotBeReused(boolean unfiltered) {
+    PaimonHealthEvaluationContext context = context(BucketMode.BUCKET_UNAWARE);
+    PaimonAppendHealthEvaluator.Result health =
+        PaimonAppendHealthEvaluator.Result.invalid("fixture");
+    PaimonAppendSnapshotAnalysis analysis =
+        PaimonAppendSnapshotAnalysis.createForScan(
+            context,
+            health,
+            health,
+            new ScanTotals(),
+            Collections.emptyList(),
+            true,
+            unfiltered,
+            context.snapshot().get(),
+            1);
+    PaimonAppendSnapshotAnalysis derived =
+        analysis.withStructure(null).withPlannerFilesTruncated(true);
+    assertEquals(unfiltered, analysis.canReusePlannerFiles(true));
+    assertEquals(unfiltered, derived.canReusePlannerFiles(false));
+    assertFalse(derived.canReusePlannerFiles(true));
+    assertFalse(derived.withoutPlannerFacts().canReusePlannerFiles(false));
+    assertFalse(derived.withoutPlannerFacts().canReusePlannerFiles(true));
+    PaimonAppendSnapshotAnalysis unknown =
+        PaimonAppendSnapshotAnalysis.create(
+            context,
+            health,
+            health,
+            new ScanTotals(),
+            Collections.emptyList(),
+            true,
+            context.snapshot().get(),
+            1);
+    assertFalse(unknown.canReusePlannerFiles(false));
+    assertFalse(unknown.withStructure(null).canReusePlannerFiles(true));
+  }
+
   private static PaimonHealthEvaluationContext context(BucketMode mode) {
     AppendOnlyFileStoreTable table = mock(AppendOnlyFileStoreTable.class);
     TableSchema schema = mock(TableSchema.class);

@@ -36,9 +36,11 @@ import org.apache.amoro.config.OptimizingConfig;
 import org.apache.amoro.formats.paimon.PaimonCatalogFactory;
 import org.apache.amoro.formats.paimon.optimizing.health.PaimonAppendHealthEvaluator;
 import org.apache.amoro.formats.paimon.optimizing.health.PaimonAppendSnapshotAnalysis;
+import org.apache.amoro.formats.paimon.optimizing.health.PaimonAppendSnapshotAnalysis.PlannerFile;
 import org.apache.amoro.formats.paimon.optimizing.health.PaimonAppendSnapshotAnalysis.ScanTotals;
 import org.apache.amoro.formats.paimon.optimizing.health.PaimonHealthEvaluationContext;
 import org.apache.amoro.optimizing.OptimizationContext;
+import org.apache.amoro.table.health.TableHealthStructure;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.append.AppendCompactTask;
@@ -74,8 +76,12 @@ import org.apache.paimon.types.DataTypes;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -87,6 +93,216 @@ import java.util.stream.Collectors;
 
 @DisplayName("PaimonAppendFileScanner")
 class TestPaimonAppendFileScanner {
+
+  @ParameterizedTest
+  @CsvSource({"0,false", "2,false", "10,false", "2,true", "10,true"})
+  void analysisSkipsUnusedMapWithoutChangingHealthOrPlannerCandidates(
+      int limit, boolean filtered, @TempDir Path warehouse) throws Exception {
+    try (Catalog catalog = fsCatalog(warehouse)) {
+      Map<String, String> options = new HashMap<>();
+      options.put("compaction.file-num-limit", Integer.toString(limit));
+      Table table = createAppendOnlyTable(catalog, "t_analysis_map", options, true);
+      for (int i = 0; i < 5; i++) {
+        writeRecords(
+            table,
+            Collections.singletonList(
+                GenericRow.of(
+                    i,
+                    BinaryString.fromString("row-" + i),
+                    BinaryString.fromString("dt=" + i % 2))));
+      }
+      AppendOnlyFileStoreTable append =
+          (AppendOnlyFileStoreTable) catalog.getTable(Identifier.create("db1", "t_analysis_map"));
+      PaimonHealthEvaluationContext health =
+          PaimonHealthEvaluationContext.capture(append, "db1.t_analysis_map", null);
+      PaimonPlanContext plan = context(append, limit);
+      PredicateBuilder builder = new PredicateBuilder(append.schema().logicalPartitionType());
+      Predicate filter =
+          filtered ? builder.equal(builder.indexOf("dt"), BinaryString.fromString("dt=1")) : null;
+      PaimonAppendFileScanner.ScanResult direct =
+          new PaimonAppendFileScanner(append, health, plan, filter).scan();
+      PaimonAppendFileScanner.ScanResult analysis =
+          new PaimonAppendFileScanner(append, health, plan, filter).scanForAnalysis(true);
+
+      assertTrue(
+          analysis.files().isEmpty(), "Refresh must not retain a planner-only candidate Map");
+      assertEquals(Math.min(limit, filtered ? 2 : 5), countFiles(direct.files()));
+      assertEquals(5, analysis.analysis().pendingInput().getDataFileCount());
+      assertEquals(5, analysis.analysis().fullSnapshotFileCount());
+      assertEquals((filtered ? 2 : 5) > limit, analysis.analysis().plannerFilesTruncated());
+      assertAnalysisFactsEqual(direct.analysis(), analysis.analysis());
+      Map<BinaryRow, List<PaimonFileCandidate>> handedOff =
+          new PaimonAppendFileScanner(append, health, plan, filter)
+              .candidatesFromAnalysis(analysis.analysis());
+      assertCandidateMapsEqual(direct.files(), handedOff);
+      assertEquals(taskFileGroups(plan, direct.files()), taskFileGroups(plan, handedOff));
+      if (limit == 10) {
+        assertFalse(taskFileGroups(plan, handedOff).isEmpty());
+      }
+
+      PaimonAppendFileScanner.ScanResult historical =
+          new PaimonAppendFileScanner(append, health, plan, filter).scanForAnalysis(false);
+      assertTrue(historical.files().isEmpty());
+      assertTrue(historical.analysis().plannerFiles().isEmpty());
+      assertFalse(historical.analysis().plannerFactsAvailable());
+      assertHealthFactsEqual(analysis.analysis(), historical.analysis());
+    }
+  }
+
+  private static void assertAnalysisFactsEqual(
+      PaimonAppendSnapshotAnalysis expected, PaimonAppendSnapshotAnalysis actual) {
+    assertHealthFactsEqual(expected, actual);
+    assertEquals(expected.key(), actual.key());
+    assertEquals(expected.snapshot(), actual.snapshot());
+    assertEquals(expected.fullSnapshotScanCount(), actual.fullSnapshotScanCount());
+    assertEquals(expected.plannerFactsAvailable(), actual.plannerFactsAvailable());
+    assertEquals(expected.plannerFilesTruncated(), actual.plannerFilesTruncated());
+    assertEquals(expected.plannerFiles().size(), actual.plannerFiles().size());
+    for (int i = 0; i < expected.plannerFiles().size(); i++) {
+      PlannerFile left = expected.plannerFiles().get(i);
+      PlannerFile right = actual.plannerFiles().get(i);
+      assertEquals(left.partition(), right.partition());
+      assertEquals(left.bucket(), right.bucket());
+      assertEquals(left.totalBuckets(), right.totalBuckets());
+      assertEquals(left.file(), right.file());
+      assertEquals(left.dvGroupKey(), right.dvGroupKey());
+      if (left.deletionFile() == null) {
+        assertEquals(null, right.deletionFile());
+      } else {
+        assertNotNull(right.deletionFile());
+        assertEquals(left.deletionFile().path(), right.deletionFile().path());
+        assertEquals(left.deletionFile().offset(), right.deletionFile().offset());
+        assertEquals(left.deletionFile().length(), right.deletionFile().length());
+        assertEquals(left.deletionFile().cardinality(), right.deletionFile().cardinality());
+      }
+    }
+  }
+
+  private static void assertHealthFactsEqual(
+      PaimonAppendSnapshotAnalysis expected, PaimonAppendSnapshotAnalysis actual) {
+    assertEquals(
+        expected.healthDetails().withStructure(null), actual.healthDetails().withStructure(null));
+    TableHealthStructure left = expected.healthDetails().getStructure();
+    TableHealthStructure right = actual.healthDetails().getStructure();
+    assertEquals(left.getTableShape(), right.getTableShape());
+    assertEquals(left.getAvailability(), right.getAvailability());
+    assertEquals(left.getSnapshotTimeMillis(), right.getSnapshotTimeMillis());
+    assertEquals(left.getTotalUnits(), right.getTotalUnits());
+    assertEquals(left.getAffectedUnits(), right.getAffectedUnits());
+    assertEquals(left.getSevereUnits(), right.getSevereUnits());
+    assertEquals(left.getBands(), right.getBands());
+    assertEquals(left.getProblems(), right.getProblems());
+  }
+
+  private static void assertCandidateMapsEqual(
+      Map<BinaryRow, List<PaimonFileCandidate>> expected,
+      Map<BinaryRow, List<PaimonFileCandidate>> actual) {
+    assertEquals(new ArrayList<>(expected.keySet()), new ArrayList<>(actual.keySet()));
+    for (BinaryRow partition : expected.keySet()) {
+      List<PaimonFileCandidate> left = expected.get(partition);
+      List<PaimonFileCandidate> right = actual.get(partition);
+      assertEquals(left.size(), right.size());
+      for (int i = 0; i < left.size(); i++) {
+        assertEquals(left.get(i).file(), right.get(i).file());
+        assertEquals(left.get(i).dvGroupKey(), right.get(i).dvGroupKey());
+        assertEquals(left.get(i).hasDeletionVector(), right.get(i).hasDeletionVector());
+        assertEquals(left.get(i).isSmallFile(), right.get(i).isSmallFile());
+        assertEquals(left.get(i).isUndersizedFile(), right.get(i).isUndersizedFile());
+        assertEquals(left.get(i).isHighDeleteRatio(), right.get(i).isHighDeleteRatio());
+      }
+    }
+  }
+
+  private static List<List<DataFileMeta>> taskFileGroups(
+      PaimonPlanContext context, Map<BinaryRow, List<PaimonFileCandidate>> files) {
+    List<List<DataFileMeta>> groups = new ArrayList<>();
+    PaimonPartitionEvaluator evaluator = new PaimonPartitionEvaluator(context);
+    PaimonAppendTaskPacker packer = new PaimonAppendTaskPacker(context);
+    files.forEach(
+        (partition, candidates) ->
+            packer
+                .pack(evaluator.evaluate(partition, candidates))
+                .forEach(task -> groups.add(task.compactBefore())));
+    return groups;
+  }
+
+  @ParameterizedTest
+  @ValueSource(booleans = {false, true})
+  void analysisPreservesDeletionGroupsAndFailureHealth(boolean failure, @TempDir Path warehouse)
+      throws Exception {
+    try (Catalog catalog = fsCatalog(warehouse)) {
+      Table table =
+          createAppendOnlyTable(
+              catalog,
+              "t_analysis_dv",
+              Collections.singletonMap("deletion-vectors.enabled", "true"),
+              false);
+      for (int round = 0; round < 2; round++) {
+        List<GenericRow> rows = new ArrayList<>();
+        for (int i = 0; i < 3; i++) {
+          rows.add(GenericRow.of(i, BinaryString.fromString("round-" + round + "-" + i)));
+        }
+        writeRecords(table, rows);
+      }
+      AppendOnlyFileStoreTable append =
+          (AppendOnlyFileStoreTable) catalog.getTable(Identifier.create("db1", "t_analysis_dv"));
+      PaimonHealthEvaluationContext health =
+          PaimonHealthEvaluationContext.capture(append, "db1.t_analysis_dv", null);
+      org.apache.paimon.Snapshot snapshot = health.snapshot().get();
+      List<ManifestEntry> files =
+          append.store().newScan().withSnapshot(snapshot).plan().files(FileKind.ADD);
+      assertEquals(2, files.size());
+      IndexFileHandler handler = mock(IndexFileHandler.class);
+      if (failure) {
+        when(handler.scan(snapshot, "DELETION_VECTORS"))
+            .thenThrow(new IllegalStateException("manifest unavailable"));
+      } else {
+        List<IndexManifestEntry> indexEntries = new ArrayList<>();
+        for (int i = 0; i < files.size(); i++) {
+          ManifestEntry file = files.get(i);
+          IndexManifestEntry entry =
+              unawareIndexEntry(file.partition(), file.file().fileName(), i * 20, 20, 1L, "shared");
+          indexEntries.add(entry);
+          when(handler.filePath(entry))
+              .thenReturn(new org.apache.paimon.fs.Path("file:/tmp/shared"));
+        }
+        when(handler.scan(snapshot, "DELETION_VECTORS")).thenReturn(indexEntries);
+      }
+      PaimonPlanContext plan = context(append, 100);
+      PaimonAppendFileScanner.ScanResult direct =
+          new PaimonAppendFileScanner(append, health, plan, null, handler).scan();
+      PaimonAppendFileScanner.ScanResult analysis =
+          new PaimonAppendFileScanner(append, health, plan, null, handler).scanForAnalysis(true);
+
+      assertTrue(analysis.files().isEmpty());
+      assertAnalysisFactsEqual(direct.analysis(), analysis.analysis());
+      assertEquals(2, analysis.analysis().pendingInput().getDataFileCount());
+      if (failure) {
+        assertFalse(analysis.analysis().plannerFactsAvailable());
+        assertTrue(analysis.analysis().plannerFiles().isEmpty());
+        assertEquals(-1, analysis.analysis().pendingInput().getHealthScore());
+        assertTrue(
+            analysis
+                .analysis()
+                .healthDetails()
+                .getReasonCodes()
+                .contains("DELETE_METADATA_READ_FAILED"));
+      } else {
+        assertEquals(2, analysis.analysis().plannerFiles().size());
+        assertEquals(
+            "2", analysis.analysis().healthDetails().getMetrics().get("deleteRecordCount"));
+        assertTrue(
+            analysis.analysis().plannerFiles().stream()
+                .allMatch(file -> "file:/tmp/shared".equals(file.dvGroupKey())));
+        Map<BinaryRow, List<PaimonFileCandidate>> handedOff =
+            new PaimonAppendFileScanner(append, health, plan, null, handler)
+                .candidatesFromAnalysis(analysis.analysis());
+        assertCandidateMapsEqual(direct.files(), handedOff);
+        assertEquals(taskFileGroups(plan, direct.files()), taskFileGroups(plan, handedOff));
+        assertFalse(taskFileGroups(plan, handedOff).isEmpty());
+      }
+    }
+  }
 
   @Test
   void legacyAppendDeleteCountIsZeroWithoutDeletionVectors() {

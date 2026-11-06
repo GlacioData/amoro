@@ -746,9 +746,10 @@ public class PaimonOptimizingPlanner implements TableOptimizingPlanner {
         partitionComputer.generatePartValues(partition));
   }
 
-  private static boolean matchesCurrentContext(
+  private boolean matchesCurrentContext(
       PaimonHealthEvaluationContext context, PaimonAppendSnapshotAnalysis analysis) {
-    if (!analysis.plannerFactsAvailable() || !context.key().equals(analysis.key())) {
+    if (!analysis.canReusePlannerFiles(partitionFilter != null)
+        || !context.key().equals(analysis.key())) {
       return false;
     }
     return context.snapshotId() < 0 || analysis.snapshot() != null;
