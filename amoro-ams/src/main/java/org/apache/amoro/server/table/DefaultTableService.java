@@ -23,7 +23,6 @@ import org.apache.amoro.ServerTableIdentifier;
 import org.apache.amoro.TableFormat;
 import org.apache.amoro.TableIDWithFormat;
 import org.apache.amoro.TableRuntime;
-import org.apache.amoro.api.CatalogMeta;
 import org.apache.amoro.client.AmsServerInfo;
 import org.apache.amoro.config.Configurations;
 import org.apache.amoro.config.TableConfiguration;
@@ -439,20 +438,35 @@ public class DefaultTableService extends PersistentBase implements TableService 
               TableRuntimeMapper.class,
               mapper -> mapper.selectRuntimesByBucketIds(assignedBucketIds, false));
 
+      // Only the identifiers/states of the tables listed here are read below, so query them by
+      // table id instead of materializing every row cluster-wide. Empty id list must be
+      // short-circuited: the IN-list language driver renders invalid SQL for it (and with no
+      // runtimes both maps would never be accessed anyway).
+      List<Long> tableIds =
+          tableRuntimeMetaList.stream()
+              .map(TableRuntimeMeta::getTableId)
+              .collect(Collectors.toList());
+
       Map<Long, ServerTableIdentifier> identifierMap =
-          getAs(TableMetaMapper.class, TableMetaMapper::selectAllTableIdentifiers).stream()
-              .collect(Collectors.toMap(ServerTableIdentifier::getId, Function.identity()));
+          tableIds.isEmpty()
+              ? Collections.emptyMap()
+              : getAs(TableMetaMapper.class, mapper -> mapper.selectTableIdentifiers(tableIds))
+                  .stream()
+                  .collect(Collectors.toMap(ServerTableIdentifier::getId, Function.identity()));
 
       Map<Long, List<TableRuntimeState>> statesMap =
-          getAs(TableRuntimeMapper.class, TableRuntimeMapper::selectAllStates).stream()
-              .collect(
-                  Collectors.toMap(
-                      TableRuntimeState::getTableId,
-                      Lists::newArrayList,
-                      (a, b) -> {
-                        a.addAll(b);
-                        return a;
-                      }));
+          tableIds.isEmpty()
+              ? Collections.emptyMap()
+              : getAs(TableRuntimeMapper.class, mapper -> mapper.selectStatesByTableIds(tableIds))
+                  .stream()
+                  .collect(
+                      Collectors.toMap(
+                          TableRuntimeState::getTableId,
+                          Lists::newArrayList,
+                          (a, b) -> {
+                            a.addAll(b);
+                            return a;
+                          }));
 
       // Snapshot the current in-memory table IDs for the removal-detection loop below.
       // The "add" loop uses a live containsKey check so it does not rely on this snapshot.
@@ -647,10 +661,10 @@ public class DefaultTableService extends PersistentBase implements TableService 
     // It is permissible to have some erroneous states in the middle, as long as the final data is
     // consistent.
     // In master-slave mode, only clean up tables assigned to this node
+    // The catalog list was already fetched once above (getServerCatalogs reads the same
+    // catalog-meta rows); derive the name set from it instead of scanning the table again.
     Set<String> catalogNames =
-        catalogManager.listCatalogMetas().stream()
-            .map(CatalogMeta::getCatalogName)
-            .collect(Collectors.toSet());
+        externalCatalogs.stream().map(ServerCatalog::name).collect(Collectors.toSet());
     for (TableRuntime tableRuntime : tableRuntimeMap.values()) {
       if (!catalogNames.contains(tableRuntime.getTableIdentifier().getCatalog())) {
         // In master-slave mode, only dispose tables assigned to this node
