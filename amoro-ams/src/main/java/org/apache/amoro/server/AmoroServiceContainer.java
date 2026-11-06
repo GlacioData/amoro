@@ -47,6 +47,8 @@ import org.apache.amoro.server.manager.EventsManager;
 import org.apache.amoro.server.manager.MetricManager;
 import org.apache.amoro.server.persistence.DataSourceFactory;
 import org.apache.amoro.server.persistence.HttpSessionHandlerFactory;
+import org.apache.amoro.server.persistence.PersistenceFailureReporter;
+import org.apache.amoro.server.persistence.PersistenceUnavailableDuringStartupException;
 import org.apache.amoro.server.persistence.SqlSessionFactoryProvider;
 import org.apache.amoro.server.process.ProcessService;
 import org.apache.amoro.server.process.ProcessService.ExecuteEngineManager;
@@ -145,24 +147,32 @@ public class AmoroServiceContainer {
                   }));
 
       service.startBaseServices();
+      service.runLeaderElectionLoop();
+    } catch (Throwable t) {
+      LOG.error("AMS encountered an unknown exception, will exit...", t);
+      System.exit(1);
+    }
+  }
 
-      while (true) {
+  void runLeaderElectionLoop() throws Exception {
+    while (true) {
+      // Keep cleanup failures suppressed when a fatal startup error exits the election loop.
+      try (AutoCloseable cleanup = this::stopLeaderServices) {
         try {
-          service.waitLeaderShip();
-          service.startLeaderServices();
-          service.waitFollowerShip();
+          waitLeaderShip();
+          startLeaderServices();
+          waitFollowerShip();
+        } catch (PersistenceUnavailableDuringStartupException e) {
+          // A failed initialization must not loop through every table or immediately retry
+          // leadership.
+          throw e;
         } catch (ConfigurationException e) {
           LOG.error("AMS will exit...", e);
           System.exit(1);
         } catch (Exception e) {
           LOG.error("AMS start error", e);
-        } finally {
-          service.stopLeaderServices();
         }
       }
-    } catch (Throwable t) {
-      LOG.error("AMS encountered an unknown exception, will exit...", t);
-      System.exit(1);
     }
   }
 
@@ -229,6 +239,20 @@ public class AmoroServiceContainer {
    * the Thrift servers.
    */
   private void startOptimizingService() throws Exception {
+    try (PersistenceFailureReporter.StartupScope scope =
+        PersistenceFailureReporter.startupScope()) {
+      try {
+        initializeOptimizingService();
+      } catch (Exception failure) {
+        PersistenceFailureReporter.record(PersistenceFailureReporter.Phase.STATEMENT, failure);
+        scope.check();
+        throw failure;
+      }
+      scope.check();
+    }
+  }
+
+  void initializeOptimizingService() throws Exception {
     // Load process factories and build action coordinators from default table runtime factory.
     TableProcessFactoryManager tableProcessFactoryManager = new TableProcessFactoryManager();
     tableProcessFactoryManager.initialize();
@@ -271,6 +295,7 @@ public class AmoroServiceContainer {
     addHandlerChain(InlineTableExecutors.getInstance().getBlockerExpiringExecutor());
     addHandlerChain(InlineTableExecutors.getInstance().getTableRefreshingExecutor());
     tableService.initialize();
+    PersistenceFailureReporter.throwIfStartupFailed();
     LOG.info("AMS table service have been initialized");
     tableManager.setTableService(tableService);
 
@@ -312,7 +337,14 @@ public class AmoroServiceContainer {
       haState = HAState.LEADER;
     } catch (Exception e) {
       haState = HAState.INITIALIZING;
-      stopLeaderServices();
+      try {
+        stopLeaderServices();
+      } catch (Throwable cleanupFailure) {
+        // Preserve the fatal startup type so the main loop cannot retry it as a generic error.
+        if (cleanupFailure != e) {
+          e.addSuppressed(cleanupFailure);
+        }
+      }
       throw e;
     }
   }

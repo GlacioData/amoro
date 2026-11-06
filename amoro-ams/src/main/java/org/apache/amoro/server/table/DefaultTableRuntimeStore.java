@@ -403,7 +403,7 @@ public class DefaultTableRuntimeStore extends PersistentBase implements TableRun
           } else {
             LOG.error("failed to commit operations", t);
           }
-          session.rollback();
+          rollbackAfterFailure(session, t);
           throw AmoroRuntimeException.wrap(t, PersistenceException::new);
         } finally {
           tableLock.unlock();

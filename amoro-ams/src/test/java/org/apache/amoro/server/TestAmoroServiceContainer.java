@@ -24,15 +24,22 @@ import static org.apache.amoro.server.AmoroServiceContainer.HAState.LEADER;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doCallRealMethod;
+import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
+import org.apache.amoro.server.persistence.PersistenceFailureReporter;
+import org.apache.amoro.server.persistence.PersistenceUnavailableDuringStartupException;
 import org.apache.iceberg.common.DynFields;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+
+import java.sql.SQLException;
 
 public class TestAmoroServiceContainer {
 
@@ -118,6 +125,81 @@ public class TestAmoroServiceContainer {
     assertSame(startupFailure, thrown);
     verify(amsAssignService).stop();
     assertEquals(FOLLOWER, serviceContainer.getHaState());
+  }
+
+  @Test
+  public void testMasterSlaveStartupSeesSwallowedCleanupFailure() throws Exception {
+    MASTER_SLAVE_MODE_FIELD.asStatic().set(true);
+    AmoroServiceContainer container = mockServiceContainer(INITIALIZING);
+    doAnswer(
+            invocation -> {
+              PersistenceFailureReporter.record(
+                  PersistenceFailureReporter.Phase.POOL_CLEANUP,
+                  new SQLException("lost during cleanup", "08006"));
+              return null;
+            })
+        .when(container)
+        .initializeOptimizingService();
+    assertThrows(PersistenceUnavailableDuringStartupException.class, container::startBaseServices);
+    assertEquals(INITIALIZING, container.getHaState());
+    PersistenceFailureReporter.throwIfStartupFailed();
+  }
+
+  @Test
+  public void testActiveStandbyStartupPropagatesFatalDatabaseFailure() throws Exception {
+    AmoroServiceContainer container = mockServiceContainer(FOLLOWER);
+    doCallRealMethod().when(container).startLeaderServices();
+    doThrow(new SQLException("lost during initialization", "08006"))
+        .when(container)
+        .initializeOptimizingService();
+    assertThrows(
+        PersistenceUnavailableDuringStartupException.class, container::startLeaderServices);
+    verify(container).stopLeaderServices();
+    PersistenceFailureReporter.throwIfStartupFailed();
+  }
+
+  @Test
+  public void testLeaderLoopPreservesFatalStartupFailureAcrossBothCleanupAttempts()
+      throws Exception {
+    AmoroServiceContainer container = mockServiceContainer(FOLLOWER);
+    doCallRealMethod().when(container).runLeaderElectionLoop();
+    doCallRealMethod().when(container).startLeaderServices();
+    SQLException databaseFailure = new SQLException("connection lost", "08006");
+    IllegalStateException startupCleanupFailure =
+        new IllegalStateException("startup cleanup failed");
+    IllegalStateException loopCleanupFailure = new IllegalStateException("loop cleanup failed");
+    doThrow(databaseFailure).when(container).initializeOptimizingService();
+    doThrow(startupCleanupFailure).doThrow(loopCleanupFailure).when(container).stopLeaderServices();
+
+    PersistenceUnavailableDuringStartupException thrown =
+        assertThrows(
+            PersistenceUnavailableDuringStartupException.class, container::runLeaderElectionLoop);
+    assertSame(databaseFailure, thrown.getCause());
+    assertEquals(2, thrown.getSuppressed().length);
+    assertSame(startupCleanupFailure, thrown.getSuppressed()[0]);
+    assertSame(loopCleanupFailure, thrown.getSuppressed()[1]);
+    verify(container).waitLeaderShip();
+    PersistenceFailureReporter.throwIfStartupFailed();
+  }
+
+  @Test
+  public void testLeaderLoopRetriesOrdinaryFailureAndPropagatesCleanupFailure() throws Exception {
+    AmoroServiceContainer container = mockServiceContainer(FOLLOWER);
+    doCallRealMethod().when(container).runLeaderElectionLoop();
+    doThrow(new IllegalStateException("election failed"))
+        .doNothing()
+        .when(container)
+        .waitLeaderShip();
+    IllegalStateException cleanupFailure = new IllegalStateException("loop cleanup failed");
+    doNothing().doThrow(cleanupFailure).when(container).stopLeaderServices();
+
+    assertSame(
+        cleanupFailure,
+        assertThrows(IllegalStateException.class, container::runLeaderElectionLoop));
+    verify(container, times(2)).waitLeaderShip();
+    verify(container).startLeaderServices();
+    verify(container).waitFollowerShip();
+    verify(container, times(2)).stopLeaderServices();
   }
 
   private AmoroServiceContainer mockServiceContainer(AmoroServiceContainer.HAState haState)

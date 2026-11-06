@@ -26,6 +26,8 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mockito;
 
 public class TestPersistentBase {
@@ -120,6 +122,72 @@ public class TestPersistentBase {
     Mockito.verify(session, never()).rollback();
     Mockito.verify(session, never()).commit();
     Assertions.assertEquals("result", result);
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"doAs", "updateAs", "transaction", "doAsExisted"})
+  void preservesPrimaryFailureWhenRollbackAndCloseFail(String operation) {
+    UndefinedException primary = new UndefinedException("original database failure");
+    RuntimeException rollbackFailure = new IllegalStateException("rollback failed");
+    RuntimeException closeFailure = new IllegalStateException("close failed");
+    Mockito.doThrow(rollbackFailure).when(session).rollback();
+    Mockito.doThrow(closeFailure).doNothing().when(session).close();
+    UndefinedException reported =
+        Assertions.assertThrows(
+            UndefinedException.class,
+            () -> {
+              switch (operation) {
+                case "doAs":
+                  testObject.doAs(
+                      TestMapper.class,
+                      ignored -> {
+                        throw primary;
+                      });
+                  break;
+                case "updateAs":
+                  testObject.updateAs(
+                      TestMapper.class,
+                      ignored -> {
+                        throw primary;
+                      });
+                  break;
+                case "transaction":
+                  testObject.doAsTransaction(
+                      () -> {
+                        throw primary;
+                      });
+                  break;
+                case "doAsExisted":
+                  testObject.doAsExisted(
+                      TestMapper.class,
+                      ignored -> {
+                        throw primary;
+                      },
+                      () -> primary);
+                  break;
+                default:
+                  throw new AssertionError(operation);
+              }
+            });
+    Assertions.assertSame(primary, reported);
+    Assertions.assertArrayEquals(
+        new Throwable[] {rollbackFailure, closeFailure}, reported.getSuppressed());
+  }
+
+  @Test
+  void doesNotSuppressAnExceptionOntoItself() {
+    UndefinedException primary = new UndefinedException("original database failure");
+    Mockito.doThrow(primary).when(session).rollback();
+    UndefinedException reported =
+        Assertions.assertThrows(
+            UndefinedException.class,
+            () ->
+                testObject.doAsTransaction(
+                    () -> {
+                      throw primary;
+                    }));
+    Assertions.assertSame(primary, reported);
+    Assertions.assertEquals(0, reported.getSuppressed().length);
   }
 
   // mock mapper interface

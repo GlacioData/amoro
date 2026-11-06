@@ -37,6 +37,7 @@ import org.apache.amoro.server.ha.HighAvailabilityContainer;
 import org.apache.amoro.server.manager.MetricManager;
 import org.apache.amoro.server.optimizing.OptimizingStatus;
 import org.apache.amoro.server.persistence.BucketIdCount;
+import org.apache.amoro.server.persistence.PersistenceFailureReporter;
 import org.apache.amoro.server.persistence.PersistentBase;
 import org.apache.amoro.server.persistence.TableRuntimeMeta;
 import org.apache.amoro.server.persistence.TableRuntimeState;
@@ -230,6 +231,8 @@ public class DefaultTableService extends PersistentBase implements TableService 
           LOG.info("Master-slave mode: No bucketIds assigned to this node yet");
         }
       } catch (Exception e) {
+        PersistenceFailureReporter.record(PersistenceFailureReporter.Phase.STATEMENT, e);
+        PersistenceFailureReporter.throwIfStartupFailed();
         LOG.error("Failed to load tables for assigned bucketIds in master-slave mode", e);
         tableRuntimeMetaList = new ArrayList<>();
       }
@@ -412,6 +415,8 @@ public class DefaultTableService extends PersistentBase implements TableService 
         assignedBucketIds = new ArrayList<>(newBucketIds);
       }
     } catch (Exception e) {
+      PersistenceFailureReporter.record(PersistenceFailureReporter.Phase.STATEMENT, e);
+      PersistenceFailureReporter.throwIfStartupFailed();
       LOG.error("Failed to update assigned bucketIds", e);
     }
   }

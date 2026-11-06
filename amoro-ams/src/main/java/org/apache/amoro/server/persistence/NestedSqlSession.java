@@ -96,10 +96,17 @@ public final class NestedSqlSession implements Closeable {
     if (nestCount > 0) {
       nestCount--;
     } else if (nestCount == 0 && sqlSession != null) {
-      sqlSession.close();
-      sqlSession = null;
-      sessions.remove();
-      nestCount = -1;
+      try {
+        sqlSession.close();
+      } catch (RuntimeException failure) {
+        PersistenceFailureReporter.record(PersistenceFailureReporter.Phase.CLOSE, failure);
+        throw failure;
+      } finally {
+        sqlSession = null;
+        sessions.remove();
+        nestCount = -1;
+        isRollingback = false;
+      }
     }
   }
 }

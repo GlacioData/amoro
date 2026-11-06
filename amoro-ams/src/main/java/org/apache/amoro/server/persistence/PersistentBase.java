@@ -54,7 +54,8 @@ public abstract class PersistentBase {
         session.commit();
         return number.longValue();
       } catch (Throwable t) {
-        session.rollback();
+        PersistenceFailureReporter.record(PersistenceFailureReporter.Phase.STATEMENT, t);
+        rollbackAfterFailure(session, t);
         throw AmoroRuntimeException.wrap(t, PersistenceException::new);
       }
     }
@@ -67,7 +68,8 @@ public abstract class PersistentBase {
         consumer.accept(mapper);
         session.commit();
       } catch (Throwable t) {
-        session.rollback();
+        PersistenceFailureReporter.record(PersistenceFailureReporter.Phase.STATEMENT, t);
+        rollbackAfterFailure(session, t);
         throw AmoroRuntimeException.wrap(t, PersistenceException::new);
       }
     }
@@ -80,6 +82,7 @@ public abstract class PersistentBase {
         consumer.accept(mapper);
         session.commit();
       } catch (Throwable t) {
+        PersistenceFailureReporter.record(PersistenceFailureReporter.Phase.STATEMENT, t);
         LOG.error("Ignore error in doAsIgnoreError", t);
       }
     }
@@ -91,8 +94,9 @@ public abstract class PersistentBase {
         Arrays.stream(operations).forEach(Runnable::run);
         session.commit();
       } catch (Throwable t) {
+        PersistenceFailureReporter.record(PersistenceFailureReporter.Phase.STATEMENT, t);
         LOG.error("failed to commit transaction", t);
-        session.rollback();
+        rollbackAfterFailure(session, t);
         throw AmoroRuntimeException.wrap(t, PersistenceException::new);
       }
     }
@@ -104,6 +108,7 @@ public abstract class PersistentBase {
         T mapper = getMapper(session, mapperClz);
         return func.apply(mapper);
       } catch (Throwable t) {
+        PersistenceFailureReporter.record(PersistenceFailureReporter.Phase.STATEMENT, t);
         throw AmoroRuntimeException.wrap(t, PersistenceException::new);
       }
     }
@@ -121,8 +126,20 @@ public abstract class PersistentBase {
         }
         session.commit();
       } catch (Throwable t) {
-        session.rollback();
+        PersistenceFailureReporter.record(PersistenceFailureReporter.Phase.STATEMENT, t);
+        rollbackAfterFailure(session, t);
         throw AmoroRuntimeException.wrap(t, PersistenceException::new);
+      }
+    }
+  }
+
+  protected static void rollbackAfterFailure(NestedSqlSession session, Throwable originalFailure) {
+    try {
+      session.rollback();
+    } catch (Throwable rollbackFailure) {
+      PersistenceFailureReporter.record(PersistenceFailureReporter.Phase.ROLLBACK, rollbackFailure);
+      if (rollbackFailure != originalFailure) {
+        originalFailure.addSuppressed(rollbackFailure);
       }
     }
   }

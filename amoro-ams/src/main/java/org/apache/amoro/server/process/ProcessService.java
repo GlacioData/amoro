@@ -32,6 +32,7 @@ import org.apache.amoro.process.TableProcess;
 import org.apache.amoro.process.TableProcessStore;
 import org.apache.amoro.server.manager.AbstractPluginManager;
 import org.apache.amoro.server.optimizing.OptimizingStatus;
+import org.apache.amoro.server.persistence.PersistenceFailureReporter;
 import org.apache.amoro.server.persistence.PersistentBase;
 import org.apache.amoro.server.persistence.mapper.TableProcessMapper;
 import org.apache.amoro.server.process.executor.TableProcessExecutor;
@@ -214,6 +215,7 @@ public class ProcessService extends PersistentBase {
    */
   @VisibleForTesting
   public void recoverProcesses(List<TableRuntime> tableRuntimes) {
+    PersistenceFailureReporter.throwIfStartupFailed();
     Map<Long, TableRuntime> tableIdToRuntimes =
         tableRuntimes.stream()
             .collect(Collectors.toMap(t -> t.getTableIdentifier().getId(), t -> t));
@@ -225,14 +227,17 @@ public class ProcessService extends PersistentBase {
         getAs(
             TableProcessMapper.class,
             mapper -> mapper.selectActiveProcesses(tableIdToRuntimes.keySet()));
+    PersistenceFailureReporter.throwIfStartupFailed();
     activeProcesses.forEach(
         processMeta -> {
+          PersistenceFailureReporter.throwIfStartupFailed();
           TableRuntime tableRuntime = tableIdToRuntimes.get(processMeta.getTableId());
           if (tableRuntime != null) {
             ActionCoordinatorScheduler scheduler =
                 findScheduler(processMeta.getProcessType(), tableRuntime.getFormat());
             if (scheduler != null) {
               recoverProcess(tableRuntime, scheduler, processMeta);
+              PersistenceFailureReporter.throwIfStartupFailed();
             } else {
               LOG.warn(
                   "No ActionCoordinatorScheduler found for process {} (type={}, format={}), "
@@ -289,9 +294,12 @@ public class ProcessService extends PersistentBase {
               processMeta.getRetryNumber());
       try {
         TableProcess process = scheduler.recover(tableRuntime, store);
+        PersistenceFailureReporter.throwIfStartupFailed();
         trackTableProcess(tableRuntime.getTableIdentifier(), store, process);
         executeOrTraceProcess(store, process);
       } catch (Throwable t) {
+        PersistenceFailureReporter.record(PersistenceFailureReporter.Phase.STATEMENT, t);
+        PersistenceFailureReporter.throwIfStartupFailed();
         LOG.error(
             "Failed to recover table process {} (action {}) for table {}, marking it FAILED "
                 + "and continuing recovery.",

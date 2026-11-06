@@ -44,7 +44,7 @@ final class FullSkipTestDatabase {
       String protocol = "mysql".equals(type) ? "mysql" : "postgresql";
       String url = "jdbc:" + protocol + "://127.0.0.1:" + port + "/jspt2717";
       if ("mysql".equals(type)) {
-        url += "?useSSL=false&allowPublicKeyRetrieval=true";
+        url += "?useSSL=false&connectTimeout=5000&socketTimeout=10000&allowPublicKeyRetrieval=true";
       }
       Configurations config = new Configurations();
       config.set(AmoroManagementConf.DB_TYPE, type);
