@@ -72,8 +72,9 @@ import org.apache.amoro.shade.thrift.org.apache.thrift.TMultiplexedProcessor;
 import org.apache.amoro.shade.thrift.org.apache.thrift.TProcessor;
 import org.apache.amoro.shade.thrift.org.apache.thrift.protocol.TBinaryProtocol;
 import org.apache.amoro.shade.thrift.org.apache.thrift.protocol.TProtocolFactory;
-import org.apache.amoro.shade.thrift.org.apache.thrift.server.THsHaServer;
 import org.apache.amoro.shade.thrift.org.apache.thrift.server.TServer;
+import org.apache.amoro.shade.thrift.org.apache.thrift.server.TServerEventHandler;
+import org.apache.amoro.shade.thrift.org.apache.thrift.server.TThreadedSelectorServer;
 import org.apache.amoro.shade.thrift.org.apache.thrift.transport.TNonblockingServerSocket;
 import org.apache.amoro.shade.thrift.org.apache.thrift.transport.TTransportException;
 import org.apache.amoro.shade.thrift.org.apache.thrift.transport.TTransportFactory;
@@ -525,7 +526,8 @@ public class AmoroServiceContainer {
                 workerThreads, getThriftThreadFactory(Constants.THRIFT_TABLE_SERVICE_NAME)),
             selectorThreads,
             queueSizePerSelector,
-            maxMessageSize);
+            maxMessageSize,
+            new ThriftConnectionEventHandler(Constants.THRIFT_TABLE_SERVICE_NAME));
 
     OptimizingService.Processor<OptimizingService.Iface> optimizingProcessor =
         new OptimizingService.Processor<>(
@@ -543,10 +545,11 @@ public class AmoroServiceContainer {
                 getThriftThreadFactory(Constants.THRIFT_OPTIMIZING_SERVICE_NAME)),
             selectorThreads,
             queueSizePerSelector,
-            maxMessageSize);
+            maxMessageSize,
+            new ThriftConnectionEventHandler(Constants.THRIFT_OPTIMIZING_SERVICE_NAME));
   }
 
-  private TServer createThriftServer(
+  static TServer createThriftServer(
       TProcessor processor,
       String processorName,
       String bindHost,
@@ -554,24 +557,65 @@ public class AmoroServiceContainer {
       ExecutorService executorService,
       int selectorThreads,
       int queueSizePerSelector,
-      long maxMessageSize)
+      long maxMessageSize,
+      TServerEventHandler eventHandler)
       throws TTransportException {
-    LOG.info("Initializing thrift server: {}", processorName);
-    LOG.info("Starting {} thrift server on port: {}", processorName, port);
+    if (selectorThreads < 1) {
+      throw new IllegalArgumentException(
+          "Thrift selector thread count (thrift-server.selector-thread-count) must be positive, "
+              + "got: "
+              + selectorThreads);
+    }
+    if (queueSizePerSelector < 1) {
+      throw new IllegalArgumentException(
+          "Thrift selector queue size (thrift-server.selector-queue-size) must be positive, "
+              + "got: "
+              + queueSizePerSelector);
+    }
     TNonblockingServerSocket serverTransport = getServerSocket(bindHost, port);
+    try {
+      return createThriftServer(
+          processor,
+          processorName,
+          serverTransport,
+          executorService,
+          selectorThreads,
+          queueSizePerSelector,
+          maxMessageSize,
+          eventHandler);
+    } catch (RuntimeException e) {
+      serverTransport.close();
+      throw e;
+    }
+  }
+
+  @VisibleForTesting
+  static TServer createThriftServer(
+      TProcessor processor,
+      String processorName,
+      TNonblockingServerSocket serverTransport,
+      ExecutorService executorService,
+      int selectorThreads,
+      int queueSizePerSelector,
+      long maxMessageSize,
+      TServerEventHandler eventHandler) {
+    LOG.info("Initializing thrift server: {}", processorName);
+    LOG.info("Starting {} thrift server on port: {}", processorName, serverTransport.getPort());
     final TProtocolFactory protocolFactory = new TBinaryProtocol.Factory();
     final TProtocolFactory inputProtoFactory =
         new TBinaryProtocol.Factory(true, true, maxMessageSize, maxMessageSize);
     TTransportFactory transportFactory = createThriftTransportFactory(maxMessageSize);
     TMultiplexedProcessor multiplexedProcessor = new TMultiplexedProcessor();
     multiplexedProcessor.registerProcessor(processorName, processor);
-    THsHaServer.Args args =
-        new THsHaServer.Args(serverTransport)
+    TThreadedSelectorServer.Args args =
+        new TThreadedSelectorServer.Args(serverTransport)
             .processor(multiplexedProcessor)
             .transportFactory(transportFactory)
             .protocolFactory(protocolFactory)
             .inputProtocolFactory(inputProtoFactory)
-            .executorService(executorService);
+            .executorService(executorService)
+            .selectorThreads(selectorThreads)
+            .acceptQueueSizePerThread(queueSizePerSelector);
     LOG.info(
         "The number of selector threads for the {} thrift server is: {}",
         processorName,
@@ -580,7 +624,9 @@ public class AmoroServiceContainer {
         "The size of per-selector queue for the {} thrift server is: {}",
         processorName,
         queueSizePerSelector);
-    return new THsHaServer(args);
+    TServer server = new TThreadedSelectorServer(args);
+    server.setServerEventHandler(eventHandler);
+    return server;
   }
 
   static TTransportFactory createThriftTransportFactory(long maxMessageSize) {
@@ -704,7 +750,7 @@ public class AmoroServiceContainer {
     }
   }
 
-  private TNonblockingServerSocket getServerSocket(String bindHost, int portNum)
+  static TNonblockingServerSocket getServerSocket(String bindHost, int portNum)
       throws TTransportException {
     InetSocketAddress serverAddress;
     serverAddress = new InetSocketAddress(bindHost, portNum);
