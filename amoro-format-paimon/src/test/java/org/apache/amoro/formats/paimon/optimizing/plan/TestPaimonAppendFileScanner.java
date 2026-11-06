@@ -21,6 +21,8 @@ package org.apache.amoro.formats.paimon.optimizing.plan;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -80,6 +82,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.lang.reflect.Field;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -131,6 +134,7 @@ class TestPaimonAppendFileScanner {
       assertEquals(5, analysis.analysis().fullSnapshotFileCount());
       assertEquals((filtered ? 2 : 5) > limit, analysis.analysis().plannerFilesTruncated());
       assertAnalysisFactsEqual(direct.analysis(), analysis.analysis());
+      assertAnalysisPartitionOwnership(direct.analysis(), analysis.analysis());
       Map<BinaryRow, List<PaimonFileCandidate>> handedOff =
           new PaimonAppendFileScanner(append, health, plan, filter)
               .candidatesFromAnalysis(analysis.analysis());
@@ -140,12 +144,41 @@ class TestPaimonAppendFileScanner {
         assertFalse(taskFileGroups(plan, handedOff).isEmpty());
       }
 
+      List<BinaryRow> beforeMutation =
+          direct.analysis().plannerFiles().stream()
+              .map(PlannerFile::partition)
+              .collect(Collectors.toList());
+      direct.files().values().stream()
+          .flatMap(List::stream)
+          .findFirst()
+          .ifPresent(candidate -> candidate.partition().clear());
+      assertEquals(
+          beforeMutation,
+          direct.analysis().plannerFiles().stream()
+              .map(PlannerFile::partition)
+              .collect(Collectors.toList()));
+
       PaimonAppendFileScanner.ScanResult historical =
           new PaimonAppendFileScanner(append, health, plan, filter).scanForAnalysis(false);
       assertTrue(historical.files().isEmpty());
       assertTrue(historical.analysis().plannerFiles().isEmpty());
       assertFalse(historical.analysis().plannerFactsAvailable());
       assertHealthFactsEqual(analysis.analysis(), historical.analysis());
+    }
+  }
+
+  private static void assertAnalysisPartitionOwnership(
+      PaimonAppendSnapshotAnalysis first, PaimonAppendSnapshotAnalysis second) throws Exception {
+    Field field = PlannerFile.class.getDeclaredField("partition");
+    field.setAccessible(true);
+    Map<BinaryRow, BinaryRow> partitions = new HashMap<>();
+    for (int i = 0; i < first.plannerFiles().size(); i++) {
+      BinaryRow owned = (BinaryRow) field.get(first.plannerFiles().get(i));
+      BinaryRow previous = partitions.putIfAbsent(owned, owned);
+      if (previous != null) {
+        assertSame(previous, owned, "One analysis must share equal partition storage");
+      }
+      assertNotSame(owned, field.get(second.plannerFiles().get(i)));
     }
   }
 

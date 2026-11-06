@@ -234,6 +234,7 @@ public final class PaimonAppendFileScanner {
     Map<BinaryRow, List<PaimonFileCandidate>> candidates =
         collectCandidates ? new LinkedHashMap<>() : Collections.emptyMap();
     List<PlannerFile> plannerFiles = new ArrayList<>();
+    PlannerFile.Factory plannerFileFactory = new PlannerFile.Factory();
     ScanTotals totals = new ScanTotals();
     PaimonHealthStructureCollector collector =
         new PaimonHealthStructureCollector(table, healthContext);
@@ -296,7 +297,7 @@ public final class PaimonAppendFileScanner {
         candidates.computeIfAbsent(partition, ignored -> new ArrayList<>()).add(candidate);
       }
       plannerFiles.add(
-          new PlannerFile(
+          plannerFileFactory.create(
               partition,
               entry.bucket(),
               entry.totalBuckets(),

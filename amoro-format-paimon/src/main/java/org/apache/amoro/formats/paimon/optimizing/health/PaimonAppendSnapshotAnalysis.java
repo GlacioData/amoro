@@ -34,8 +34,10 @@ import javax.annotation.Nullable;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.TreeSet;
 
@@ -483,6 +485,44 @@ public final class PaimonAppendSnapshotAnalysis implements FormatTableAnalysis {
     private final DataFileMeta file;
     @Nullable private final DeletionFile deletionFile;
     @Nullable private final String dvGroupKey;
+
+    /** One factory belongs to one scan; its partition index must not escape into the analysis. */
+    public static final class Factory {
+      private final Map<BinaryRow, PlannerFile> partitions = new HashMap<>();
+
+      public PlannerFile create(
+          BinaryRow partition,
+          int bucket,
+          int totalBuckets,
+          DataFileMeta file,
+          @Nullable DeletionFile deletionFile,
+          @Nullable String dvGroupKey) {
+        PlannerFile owner = partitions.get(partition);
+        if (owner != null) {
+          return new PlannerFile(owner, bucket, totalBuckets, file, deletionFile, dvGroupKey);
+        }
+        PlannerFile created =
+            new PlannerFile(partition, bucket, totalBuckets, file, deletionFile, dvGroupKey);
+        // Index only the private defensive copy; public accessors return independent rows.
+        partitions.put(created.partition, created);
+        return created;
+      }
+    }
+
+    private PlannerFile(
+        PlannerFile partitionOwner,
+        int bucket,
+        int totalBuckets,
+        DataFileMeta file,
+        @Nullable DeletionFile deletionFile,
+        @Nullable String dvGroupKey) {
+      this.partition = partitionOwner.partition;
+      this.bucket = bucket;
+      this.totalBuckets = totalBuckets;
+      this.file = Objects.requireNonNull(file, "Data file must not be null");
+      this.deletionFile = deletionFile;
+      this.dvGroupKey = dvGroupKey;
+    }
 
     public PlannerFile(
         BinaryRow partition,
