@@ -23,6 +23,7 @@ import org.apache.amoro.ServerTableIdentifier;
 import org.apache.amoro.TableFormat;
 import org.apache.amoro.TableIDWithFormat;
 import org.apache.amoro.TableRuntime;
+import org.apache.amoro.api.CatalogMeta;
 import org.apache.amoro.client.AmsServerInfo;
 import org.apache.amoro.config.Configurations;
 import org.apache.amoro.config.TableConfiguration;
@@ -661,10 +662,12 @@ public class DefaultTableService extends PersistentBase implements TableService 
     // It is permissible to have some erroneous states in the middle, as long as the final data is
     // consistent.
     // In master-slave mode, only clean up tables assigned to this node
-    // The catalog list was already fetched once above (getServerCatalogs reads the same
-    // catalog-meta rows); derive the name set from it instead of scanning the table again.
+    // Exploration can overlap catalog creation, so refresh the catalog list before disposing
+    // runtimes that may have been added after the initial catalog snapshot.
     Set<String> catalogNames =
-        externalCatalogs.stream().map(ServerCatalog::name).collect(Collectors.toSet());
+        catalogManager.listCatalogMetas().stream()
+            .map(CatalogMeta::getCatalogName)
+            .collect(Collectors.toSet());
     for (TableRuntime tableRuntime : tableRuntimeMap.values()) {
       if (!catalogNames.contains(tableRuntime.getTableIdentifier().getCatalog())) {
         // In master-slave mode, only dispose tables assigned to this node
