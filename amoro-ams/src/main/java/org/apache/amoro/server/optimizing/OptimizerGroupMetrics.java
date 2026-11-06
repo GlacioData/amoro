@@ -128,16 +128,16 @@ public class OptimizerGroupMetrics {
         OPTIMIZER_GROUP_PENDING_TASKS,
         (Gauge<Integer>)
             () ->
-                optimizingQueue
-                    .collectTasks(
+                (int)
+                    optimizingQueue.countTasks(
                         task ->
-                            task.getStatus().equals(PLANNED) || task.getStatus().equals(SCHEDULED))
-                    .size());
+                            task.getStatus().equals(PLANNED)
+                                || task.getStatus().equals(SCHEDULED)));
     registerMetric(
         registry,
         OPTIMIZER_GROUP_EXECUTING_TASKS,
         (Gauge<Integer>)
-            () -> optimizingQueue.collectTasks(task -> task.getStatus().equals(ACKED)).size());
+            () -> (int) optimizingQueue.countTasks(task -> task.getStatus().equals(ACKED)));
 
     registerMetric(
         registry,
