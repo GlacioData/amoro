@@ -266,7 +266,7 @@ public class FullCompactionCompletion extends PersistentBase {
         }
         session.commit();
       } catch (Throwable failure) {
-        session.rollback();
+        rollbackAfterFailure(session, failure);
         throw failure;
       }
     }

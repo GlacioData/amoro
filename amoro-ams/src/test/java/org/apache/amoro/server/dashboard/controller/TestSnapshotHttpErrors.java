@@ -74,7 +74,8 @@ class TestSnapshotHttpErrors {
                                       new SnapshotReadException(reason, "typed snapshot failure"));
                                 }))
             .when(descriptor)
-            .getSnapshotDetailResponse(any(), any(), any(), any(), any(), any(), anyBoolean());
+            .getSnapshotDetailResponse(
+                any(), any(), any(), any(), any(), any(), anyBoolean(), any(), any());
         HttpURLConnection connection = request(app.port(), "?pageSize=25");
         assertEquals(statuses[i], connection.getResponseCode());
         try (BufferedReader body =

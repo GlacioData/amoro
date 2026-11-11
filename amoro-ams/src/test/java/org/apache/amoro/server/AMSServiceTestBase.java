@@ -28,6 +28,7 @@ import org.apache.amoro.server.process.iceberg.IcebergProcessFactory;
 import org.apache.amoro.server.table.DefaultTableRuntime;
 import org.apache.amoro.server.table.DefaultTableRuntimeFactory;
 import org.apache.amoro.server.table.DefaultTableService;
+import org.apache.amoro.table.TableRuntimeFactory;
 import org.junit.AfterClass;
 import org.junit.Assert;
 import org.junit.BeforeClass;
@@ -50,7 +51,11 @@ public abstract class AMSServiceTestBase extends AMSManagerTestBase {
   }
 
   protected static void initTableService(Duration optimizerHeartbeatTimeout) {
-    DefaultTableRuntimeFactory runtimeFactory = new DefaultTableRuntimeFactory();
+    initTableService(optimizerHeartbeatTimeout, new DefaultTableRuntimeFactory());
+  }
+
+  protected static void initTableService(
+      Duration optimizerHeartbeatTimeout, TableRuntimeFactory runtimeFactory) {
     try {
       Configurations configurations = new Configurations();
       configurations.set(AmoroManagementConf.OPTIMIZER_HB_TIMEOUT, optimizerHeartbeatTimeout);

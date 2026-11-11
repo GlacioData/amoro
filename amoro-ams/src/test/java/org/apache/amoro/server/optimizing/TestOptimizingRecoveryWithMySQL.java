@@ -111,8 +111,11 @@ class TestOptimizingRecoveryWithMySQL {
 
   @Container
   private static final MySQLContainer<?> MYSQL =
-      new MySQLContainer<>("mysql:8.0")
+      new MySQLContainer<>(System.getProperty("amoro.test.mysql.image", "mysql:8.0"))
           .withDatabaseName("amoro")
+          .withUrlParam("useSSL", "false")
+          .withUrlParam("connectTimeout", "5000")
+          .withUrlParam("socketTimeout", "10000")
           .withUsername("amoro")
           .withPassword("amoro");
 

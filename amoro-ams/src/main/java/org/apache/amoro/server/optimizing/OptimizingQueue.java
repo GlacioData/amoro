@@ -50,6 +50,7 @@ import org.apache.amoro.server.optimizing.TaskRuntime.Status;
 import org.apache.amoro.server.persistence.NestedSqlSession;
 import org.apache.amoro.server.persistence.OptimizingPayloadException;
 import org.apache.amoro.server.persistence.OptimizingProcessState;
+import org.apache.amoro.server.persistence.PersistenceFailureReporter;
 import org.apache.amoro.server.persistence.PersistentBase;
 import org.apache.amoro.server.persistence.TaskFilesPersistence;
 import org.apache.amoro.server.persistence.converter.TaskDescriptorRecoveryTypes;
@@ -180,7 +181,18 @@ public class OptimizingQueue extends PersistentBase {
         new OptimizerGroupMetrics(
             optimizerGroup.getName(), MetricManager.getInstance().getGlobalRegistry(), this);
     this.metrics.register();
-    tableRuntimeList.forEach(tableRuntime -> recoverOwnedTable(tableRuntime, "STARTUP"));
+    try {
+      PersistenceFailureReporter.throwIfStartupFailed();
+      for (DefaultTableRuntime tableRuntime : tableRuntimeList) {
+        PersistenceFailureReporter.throwIfStartupFailed();
+        recoverOwnedTable(tableRuntime, "STARTUP");
+        // The last table can have a cleanup failure consumed by MyBatis or the pool.
+        PersistenceFailureReporter.throwIfStartupFailed();
+      }
+    } catch (RuntimeException | Error failure) {
+      dispose();
+      throw failure;
+    }
   }
 
   public void recoverOwnedTable(DefaultTableRuntime tableRuntime) {
@@ -214,6 +226,10 @@ public class OptimizingQueue extends PersistentBase {
       recoverOwnedTableInternal(tableRuntime, expectedProcessId, trigger);
       removePendingRecovery(tableRuntime);
     } catch (RuntimeException e) {
+      if ("STARTUP".equals(trigger)) {
+        PersistenceFailureReporter.record(PersistenceFailureReporter.Phase.STATEMENT, e);
+        PersistenceFailureReporter.throwIfStartupFailed();
+      }
       PendingRecovery registered = pendingRecoveries.get(tableId);
       if (registered == null || !registered.fullSkip) {
         handleRecoveryFailure(tableRuntime, expectedProcessId, trigger, e);

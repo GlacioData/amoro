@@ -24,6 +24,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -41,6 +43,7 @@ import org.apache.amoro.table.descriptor.OperationType;
 import org.apache.amoro.table.descriptor.ServerTableMeta;
 import org.apache.amoro.table.descriptor.SnapshotDetailPage;
 import org.apache.amoro.table.descriptor.SnapshotReadException;
+import org.apache.amoro.table.tag.TagScope;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -69,7 +72,8 @@ class TestSnapshotRequestGate {
     field.setAccessible(true);
     ((Map<TableFormat, FormatTableDescriptor>) field.get(server)).put(TableFormat.PAIMON, format);
     when(format.supportsBoundedSnapshotRead()).thenReturn(true);
-    when(format.getSnapshotDetailPage(table, "1", "main", 25, null))
+    when(format.getSnapshotDetailPage(
+            eq(table), eq("1"), eq("main"), isNull(), any(TagScope.class), eq(25), isNull()))
         .thenReturn(new SnapshotDetailPage(Collections.emptyList(), null));
   }
 
@@ -80,7 +84,8 @@ class TestSnapshotRequestGate {
     AtomicReference<Throwable> failure = new AtomicReference<>();
     when(format.getSnapshots(table, "main", OperationType.ALL, 25, 0, null))
         .thenReturn(org.apache.commons.lang3.tuple.Pair.of(Collections.emptyList(), 0L));
-    when(format.getSnapshotDetailPage(table, "1", "main", 25, null))
+    when(format.getSnapshotDetailPage(
+            eq(table), eq("1"), eq("main"), isNull(), any(TagScope.class), eq(25), isNull()))
         .thenAnswer(
             i -> {
               entered.countDown();
@@ -122,7 +127,9 @@ class TestSnapshotRequestGate {
           SnapshotReadException.Reason.BUSY,
           assertThrows(SnapshotReadException.class, () -> server.getTableConsumersInfos(id))
               .getReason());
-      verify(format).getSnapshotDetailPage(any(), anyString(), anyString(), anyInt(), any());
+      verify(format)
+          .getSnapshotDetailPage(
+              any(), anyString(), anyString(), isNull(), any(TagScope.class), anyInt(), any());
     } finally {
       cleanup.countDown();
       first.join(5000);
@@ -130,7 +137,8 @@ class TestSnapshotRequestGate {
     assertTrue(failure.get() instanceof SnapshotReadException);
     doReturn(new SnapshotDetailPage(Collections.emptyList(), null))
         .when(format)
-        .getSnapshotDetailPage(table, "1", "main", 25, null);
+        .getSnapshotDetailPage(
+            eq(table), eq("1"), eq("main"), isNull(), any(TagScope.class), eq(25), isNull());
     assertTrue(
         server.getSnapshotDetailResponse(id, "1", "main", null, 25, null, false)
             instanceof SnapshotDetailPage);

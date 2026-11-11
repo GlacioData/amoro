@@ -38,6 +38,7 @@ import org.apache.amoro.server.persistence.TableRuntimeMeta;
 import org.apache.amoro.server.persistence.mapper.TableMetaMapper;
 import org.apache.amoro.server.persistence.mapper.TableRuntimeMapper;
 import org.apache.amoro.table.TableProperties;
+import org.apache.amoro.table.TableRuntimeFactory;
 import org.apache.amoro.table.TableSummary;
 import org.apache.commons.lang3.tuple.Pair;
 import org.junit.Assert;
@@ -530,10 +531,19 @@ public class TestTableManagerQuery extends AMSTableTestBase {
       meta.setGroupName(configuration.getOptimizingConfig().getOptimizerGroup());
       meta.setTableSummary(new TableSummary());
       doAs(TableRuntimeMapper.class, mapper -> mapper.insertRuntime(meta));
+      DefaultTableRuntimeFactory factory = new DefaultTableRuntimeFactory();
+      factory.withTableLoader(ignored -> null);
+      TableRuntimeFactory.TableRuntimeCreator creator =
+          factory
+              .accept(identifier, properties)
+              .orElseThrow(
+                  () -> new IllegalArgumentException("Unsupported fixture format: " + format));
       DefaultTableRuntimeStore store =
           new DefaultTableRuntimeStore(
-              identifier, meta, DefaultTableRuntime.REQUIRED_STATES, Collections.emptyList());
-      return new DefaultTableRuntime(store, () -> null);
+              identifier, meta, creator.requiredStateKeys(), Collections.emptyList());
+      DefaultTableRuntime runtime = (DefaultTableRuntime) creator.create(store);
+      store.setTableRuntime(runtime);
+      return runtime;
     }
 
     public void updateRuntime(

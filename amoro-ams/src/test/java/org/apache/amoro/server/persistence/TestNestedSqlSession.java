@@ -19,10 +19,13 @@
 package org.apache.amoro.server.persistence;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -95,6 +98,24 @@ public class TestNestedSqlSession {
     assertEquals(-1, getNestCount(nestedSession));
     verify(sqlSession).close();
     assertNull(nestedSession.getSqlSession());
+  }
+
+  @Test
+  void closingFailureDoesNotPoisonNextSessionOnSameThread() {
+    nestedSession.close();
+    RuntimeException failure = new IllegalStateException("close failed");
+    NestedSqlSession failed = NestedSqlSession.openSession(() -> sqlSession);
+    doThrow(failure).doNothing().when(sqlSession).close();
+    try {
+      assertSame(failure, assertThrows(RuntimeException.class, failed::close));
+      assertFalse(NestedSqlSession.hasActiveSession());
+      try (NestedSqlSession fresh = NestedSqlSession.openSession(() -> mock(SqlSession.class))) {
+        assertNotSame(failed, fresh);
+      }
+    } finally {
+      // Also clean the unpatched implementation after the expected red assertion.
+      failed.close();
+    }
   }
 
   @Test

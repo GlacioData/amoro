@@ -645,7 +645,7 @@ public class DefaultTableProcessStore extends PersistentBase implements TablePro
           session.commit();
         } catch (Throwable t) {
           LOG.error("failed to commit operations", t);
-          session.rollback();
+          rollbackAfterFailure(session, t);
           throw AmoroRuntimeException.wrap(t, PersistenceException::new);
         } finally {
           tableProcessLock.unlock();

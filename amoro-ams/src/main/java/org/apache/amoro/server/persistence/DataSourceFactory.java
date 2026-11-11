@@ -20,7 +20,6 @@ package org.apache.amoro.server.persistence;
 
 import org.apache.amoro.config.Configurations;
 import org.apache.amoro.server.AmoroManagementConf;
-import org.apache.commons.dbcp2.BasicDataSource;
 import org.apache.commons.pool2.impl.BaseObjectPoolConfig;
 import org.apache.ibatis.jdbc.ScriptRunner;
 import org.slf4j.Logger;
@@ -49,7 +48,7 @@ public class DataSourceFactory {
   private static final String POSTGRES_INIT_SQL_SCRIPT = "postgres/ams-postgres-init.sql";
 
   public static DataSource createDataSource(Configurations config) {
-    BasicDataSource dataSource = new BasicDataSource();
+    AmsDataSource dataSource = new AmsDataSource();
     dataSource.setUrl(config.getString(AmoroManagementConf.DB_CONNECTION_URL));
     dataSource.setDriverClassName(config.getString(AmoroManagementConf.DB_DRIVER_CLASS_NAME));
     String dbType = config.getString(AmoroManagementConf.DB_TYPE);
@@ -58,7 +57,15 @@ public class DataSourceFactory {
       dataSource.setUsername(config.getString(AmoroManagementConf.DB_USER_NAME));
       dataSource.setPassword(config.getString(AmoroManagementConf.DB_PASSWORD));
     }
+    if (AmoroManagementConf.DB_TYPE_MYSQL.equals(dbType)) {
+      MySqlConnectionPolicy.validate(
+          dataSource.getUrl(), dataSource.getUsername(), dataSource.getPassword());
+    }
     dataSource.setDefaultAutoCommit(false);
+    dataSource.setAutoCommitOnReturn(false);
+    dataSource.setRollbackOnReturn(true);
+    dataSource.setValidationQueryTimeout(2);
+    dataSource.setFastFailValidation(true);
     dataSource.setMaxTotal(config.getInteger(AmoroManagementConf.DB_CONNECT_MAX_TOTAL));
     dataSource.setMaxIdle(config.getInteger(AmoroManagementConf.DB_CONNECT_MAX_IDLE));
     dataSource.setMinIdle(0);
@@ -67,7 +74,7 @@ public class DataSourceFactory {
     dataSource.setRemoveAbandonedOnBorrow(true);
     dataSource.setRemoveAbandonedTimeout(60);
     dataSource.setTimeBetweenEvictionRunsMillis(Duration.ofMillis(10 * 60 * 1000L).toMillis());
-    dataSource.setTestOnBorrow(BaseObjectPoolConfig.DEFAULT_TEST_ON_BORROW);
+    dataSource.setTestOnBorrow(true);
     dataSource.setTestWhileIdle(BaseObjectPoolConfig.DEFAULT_TEST_WHILE_IDLE);
     dataSource.setMinEvictableIdleTimeMillis(1000);
     dataSource.setNumTestsPerEvictionRun(BaseObjectPoolConfig.DEFAULT_NUM_TESTS_PER_EVICTION_RUN);

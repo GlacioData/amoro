@@ -18,15 +18,22 @@
 
 package org.apache.amoro.server.table;
 
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
 import org.apache.amoro.ServerTableIdentifier;
+import org.apache.amoro.TableFormat;
 import org.apache.amoro.formats.paimon.PaimonHadoopCatalogTestHelper;
 import org.apache.amoro.server.catalog.ExternalCatalog;
 import org.apache.amoro.server.catalog.TableCatalogTestBase;
 import org.junit.Assert;
 import org.junit.Before;
+import org.junit.BeforeClass;
 import org.junit.Test;
 
+import java.time.Duration;
 import java.util.List;
+import java.util.Optional;
 
 public class TestSyncUnsupportedTableFormat extends TableCatalogTestBase {
 
@@ -35,6 +42,14 @@ public class TestSyncUnsupportedTableFormat extends TableCatalogTestBase {
 
   public TestSyncUnsupportedTableFormat() {
     super(PaimonHadoopCatalogTestHelper.defaultHelper());
+  }
+
+  @BeforeClass
+  public static void initTableService() {
+    // Paimon is supported by the default factory. Explicitly model a metadata-only format here.
+    TableFormatSupports unsupported = mock(TableFormatSupports.class);
+    when(unsupported.runtimeSupport(TableFormat.PAIMON)).thenReturn(Optional.empty());
+    initTableService(Duration.ofSeconds(10), new DefaultTableRuntimeFactory(unsupported));
   }
 
   @Before

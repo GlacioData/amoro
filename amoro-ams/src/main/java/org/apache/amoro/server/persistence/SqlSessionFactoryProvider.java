@@ -44,7 +44,6 @@ import org.apache.ibatis.session.Configuration;
 import org.apache.ibatis.session.SqlSessionFactory;
 import org.apache.ibatis.session.SqlSessionFactoryBuilder;
 import org.apache.ibatis.transaction.TransactionFactory;
-import org.apache.ibatis.transaction.jdbc.JdbcTransactionFactory;
 
 import javax.sql.DataSource;
 
@@ -63,7 +62,13 @@ public class SqlSessionFactoryProvider {
   public void init(DataSource dataSource) throws SQLException {
     registerDialectAliases();
 
-    TransactionFactory transactionFactory = new JdbcTransactionFactory();
+    TransactionFactory transactionFactory = new ReportingJdbcTransactionFactory();
+    if (dataSource instanceof AmsDataSource
+        && ((AmsDataSource) dataSource).cleansTransactionsOnReturn()) {
+      Properties transactionProperties = new Properties();
+      transactionProperties.setProperty("skipSetAutoCommitOnClose", "true");
+      transactionFactory.setProperties(transactionProperties);
+    }
     Environment environment = new Environment("develop", transactionFactory, dataSource);
     Configuration configuration = new Configuration(environment);
     configuration.addMapper(TableMetaMapper.class);
