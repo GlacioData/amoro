@@ -63,6 +63,20 @@ Amoro has supported built-in metrics to measure status of table self-optimizing 
 | table_optimizing_since_last_optimization_mills       | Gauge   | catalog, database, table, group | Duration in milliseconds since last successful optimization                            |
 | table_optimizing_lag_duration_mills                  | Gauge   | catalog, database, table, group | Duration in milliseconds between last self-optimizing snapshot and refreshed snapshot  |
 
+## Self-optimizing table counts
+
+`ams_self_optimizing_tables` is a gauge grouped by `catalog`, `format`, and `enabled`. It counts tables whose runtimes are loaded on the local AMS instance, with `enabled="true"` for self-optimizing enabled and `enabled="false"` for self-optimizing disabled. The enabled state comes from the parsed runtime configuration, which is updated by the existing metadata refresh process.
+
+The metric uses the same registration and collection mechanism as other table metrics. Configuration changes and runtime loading or unloading are reflected in the next scrape. Tables without a loaded runtime or configuration are excluded. Registered label combinations return zero after all matching runtimes are unloaded. The metrics are unregistered when the local table service shuts down.
+
+Prometheus adds the `amoro_` prefix automatically. Reporter include and exclude filters use the internal name `ams_self_optimizing_tables`. To query the number of tables with self-optimizing enabled per instance:
+
+```promql
+sum by (instance) (amoro_ams_self_optimizing_tables{enabled="true"})
+```
+
+Use `enabled="false"` to query disabled counts, and group by `catalog` and `format` as needed. Each AMS instance reports its locally loaded runtimes, so counts may overlap or be temporarily absent during instance transitions. Dashboards should distinguish missing series from actual zero values.
+
 ## Optimizer Group metrics
 
 | Metric Name                             | Type   | Tags  | Description                                      |
