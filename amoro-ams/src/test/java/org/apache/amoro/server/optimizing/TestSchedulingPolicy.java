@@ -18,6 +18,7 @@
 
 package org.apache.amoro.server.optimizing;
 
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -40,6 +41,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.function.IntSupplier;
 
 public class TestSchedulingPolicy {
 
@@ -172,15 +174,15 @@ public class TestSchedulingPolicy {
 
     CountDownLatch sortingStarted = new CountDownLatch(1);
     CountDownLatch releaseSorting = new CountDownLatch(1);
-    when(blocking.calculateQuotaOccupy())
+    when(blocking.calculateQuotaOccupy(any(IntSupplier.class)))
         .thenAnswer(
             invocation -> {
               sortingStarted.countDown();
               Assert.assertTrue(releaseSorting.await(5, TimeUnit.SECONDS));
               return 0.1D;
             });
-    when(another.calculateQuotaOccupy()).thenReturn(0.2D);
-    when(added.calculateQuotaOccupy()).thenReturn(0.3D);
+    when(another.calculateQuotaOccupy(any(IntSupplier.class))).thenReturn(0.2D);
+    when(added.calculateQuotaOccupy(any(IntSupplier.class))).thenReturn(0.3D);
 
     policy.addTable(blocking);
     policy.addTable(another);
