@@ -86,6 +86,9 @@ public class DefaultTableService extends PersistentBase implements TableService 
   private final long externalCatalogRefreshingInterval;
 
   private final Map<Long, TableRuntime> tableRuntimeMap = new ConcurrentHashMap<>();
+  private final SelfOptimizingTableMetrics selfOptimizingTableMetrics =
+      new SelfOptimizingTableMetrics(
+          MetricManager.getInstance().getGlobalRegistry(), tableRuntimeMap::values);
 
   private final ScheduledExecutorService tableExplorerScheduler =
       Executors.newSingleThreadScheduledExecutor(
@@ -280,6 +283,7 @@ public class DefaultTableService extends PersistentBase implements TableService 
           t -> {
             t.registerMetric(MetricManager.getInstance().getGlobalRegistry());
             tableRuntimeMap.put(t.getTableIdentifier().getId(), t);
+            selfOptimizingTableMetrics.register(t);
             tableRuntimes.add(t);
           });
     }
@@ -363,6 +367,7 @@ public class DefaultTableService extends PersistentBase implements TableService 
   public void setRuntime(TableRuntime tableRuntime) {
     checkStarted();
     tableRuntimeMap.put(tableRuntime.getTableIdentifier().getId(), tableRuntime);
+    selfOptimizingTableMetrics.register(tableRuntime);
   }
 
   @Override
@@ -378,6 +383,7 @@ public class DefaultTableService extends PersistentBase implements TableService 
 
   @Override
   public void dispose() {
+    selfOptimizingTableMetrics.close();
     tableExplorerScheduler.shutdown();
     if (bucketTableSyncScheduler != null) {
       bucketTableSyncScheduler.shutdown();
@@ -506,6 +512,7 @@ public class DefaultTableService extends PersistentBase implements TableService 
           TableRuntime runtime = tableRuntime.get();
           runtime.registerMetric(MetricManager.getInstance().getGlobalRegistry());
           tableRuntimeMap.put(tableId, runtime);
+          selfOptimizingTableMetrics.register(runtime);
           if (headHandler != null) {
             AmoroTable<?> table = loadTable(identifier);
             if (table != null) {
@@ -1039,6 +1046,7 @@ public class DefaultTableService extends PersistentBase implements TableService 
 
     TableRuntime tableRuntime = tableRuntimeOpt.get();
     tableRuntimeMap.put(serverTableIdentifier.getId(), tableRuntime);
+    selfOptimizingTableMetrics.register(tableRuntime);
     tableRuntime.registerMetric(MetricManager.getInstance().getGlobalRegistry());
     if (headHandler != null) {
       headHandler.fireTableAdded(table, tableRuntime);

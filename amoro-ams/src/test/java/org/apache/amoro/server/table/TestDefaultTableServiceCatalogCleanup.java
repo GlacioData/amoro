@@ -29,14 +29,20 @@ import org.apache.amoro.TableFormat;
 import org.apache.amoro.TableRuntime;
 import org.apache.amoro.api.CatalogMeta;
 import org.apache.amoro.config.Configurations;
+import org.apache.amoro.config.OptimizingConfig;
+import org.apache.amoro.config.TableConfiguration;
+import org.apache.amoro.metrics.Gauge;
+import org.apache.amoro.metrics.MetricKey;
 import org.apache.amoro.server.catalog.CatalogManager;
 import org.apache.amoro.server.catalog.ServerCatalog;
+import org.apache.amoro.server.manager.MetricManager;
 import org.apache.amoro.table.TableRuntimeFactory;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Field;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -76,6 +82,7 @@ class TestDefaultTableServiceCatalogCleanup {
 
       Assertions.assertSame(runtime, service.getRuntime(identifier.getId()));
       Assertions.assertEquals(0, disposals.get(), "a newly created table was disposed");
+      Assertions.assertEquals(1L, enabledCount(identifier));
     } finally {
       service.dispose();
     }
@@ -97,6 +104,7 @@ class TestDefaultTableServiceCatalogCleanup {
 
       Assertions.assertNull(service.getRuntime(identifier.getId()));
       Assertions.assertEquals(1, disposals.get());
+      Assertions.assertEquals(0L, enabledCount(identifier));
     } finally {
       service.dispose();
     }
@@ -118,7 +126,26 @@ class TestDefaultTableServiceCatalogCleanup {
   private static TableRuntime runtimeFor(ServerTableIdentifier identifier) {
     TableRuntime runtime = mock(TableRuntime.class);
     when(runtime.getTableIdentifier()).thenReturn(identifier);
+    OptimizingConfig optimizing = new OptimizingConfig();
+    optimizing.setEnabled(true);
+    when(runtime.getTableConfiguration())
+        .thenReturn(new TableConfiguration().setOptimizingConfig(optimizing));
     return runtime;
+  }
+
+  private static long enabledCount(ServerTableIdentifier identifier) {
+    Map<String, String> tags = new HashMap<>();
+    tags.put("catalog", identifier.getCatalog());
+    tags.put("format", identifier.getFormat().name());
+    tags.put("enabled", "true");
+    Gauge<?> gauge =
+        (Gauge<?>)
+            MetricManager.getInstance()
+                .getGlobalRegistry()
+                .getMetrics()
+                .get(new MetricKey(SelfOptimizingTableMetrics.TABLES, tags));
+    Assertions.assertNotNull(gauge);
+    return ((Number) gauge.getValue()).longValue();
   }
 
   private static AtomicInteger recordDisposalsAndRemoveRuntime(DefaultTableService service)
