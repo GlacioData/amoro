@@ -62,6 +62,7 @@ import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.IntSupplier;
 import java.util.function.Supplier;
 
 /** Default table runtime implementation. */
@@ -799,9 +800,14 @@ public class DefaultTableRuntime extends AbstractTableRuntime implements Optimiz
   }
 
   public double calculateQuotaOccupy() {
+    return calculateQuotaOccupy(this::getThreadCount);
+  }
+
+  /** Calculates quota using a lazily supplied resource count for this scheduling round. */
+  public double calculateQuotaOccupy(IntSupplier threadCount) {
     double targetQuota = getOptimizingConfig().getTargetQuota();
     int targetQuotaLimit =
-        targetQuota > 1 ? (int) targetQuota : (int) Math.ceil(targetQuota * getThreadCount());
+        targetQuota > 1 ? (int) targetQuota : (int) Math.ceil(targetQuota * threadCount.getAsInt());
     return (double) getQuotaTime() / AmoroServiceConstants.QUOTA_LOOK_BACK_TIME / targetQuotaLimit;
   }
 

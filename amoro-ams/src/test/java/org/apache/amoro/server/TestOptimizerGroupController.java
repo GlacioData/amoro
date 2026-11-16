@@ -22,6 +22,8 @@ import static org.junit.Assert.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -32,6 +34,7 @@ import org.apache.amoro.api.OptimizerRegisterInfo;
 import org.apache.amoro.resource.ResourceGroup;
 import org.apache.amoro.server.dashboard.controller.OptimizerGroupController;
 import org.apache.amoro.server.dashboard.model.OptimizerInstanceInfo;
+import org.apache.amoro.server.dashboard.model.OptimizerResourceInfo;
 import org.apache.amoro.server.dashboard.response.OkResponse;
 import org.apache.amoro.server.dashboard.response.PageResult;
 import org.apache.amoro.server.resource.OptimizerInstance;
@@ -44,11 +47,13 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import javax.ws.rs.BadRequestException;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -311,5 +316,80 @@ public class TestOptimizerGroupController {
     when(optimizerManager.listOptimizers("group1")).thenReturn(newAscendingOptimizerInstances(1));
 
     assertThrows(IllegalArgumentException.class, () -> controller.getOptimizers(ctx));
+  }
+
+  @ParameterizedTest
+  @ValueSource(ints = {0, 1, 10, 100})
+  void resourceGroupListLoadsOptimizersOnceAndKeepsDetails(int count) {
+    List<ResourceGroup> groups = new ArrayList<>();
+    for (int i = 0; i < count; i++) {
+      ResourceGroup group = new ResourceGroup.Builder("group" + i, "local").build();
+      groups.add(group);
+      when(optimizerManager.getResourceGroup(group.getName())).thenReturn(group);
+    }
+    when(optimizerManager.listResourceGroups()).thenReturn(groups);
+    when(optimizerManager.listOptimizers()).thenReturn(newAscendingOptimizerInstances(2));
+    List<OptimizerResourceInfo> result = resourceGroupsResponse();
+    assertEquals(count, result.size());
+    verify(optimizerManager, times(count == 0 ? 0 : 1)).listOptimizers();
+    verify(optimizerManager, never()).listOptimizers(any(String.class));
+    for (int i = 0; i < count; i++) {
+      assertEquals(groups.get(i), result.get(i).getResourceGroup());
+      assertEquals(i == 1 ? 3 : 0, result.get(i).getOccupationCore());
+      assertEquals(i == 1 ? 2049L : 0L, result.get(i).getOccupationMemory());
+      verify(optimizerManager).getResourceGroup(groups.get(i).getName());
+    }
+  }
+
+  @Test
+  void resourceGroupsPreserveExactMatchingAndRefreshEachRequest() {
+    List<ResourceGroup> groups =
+        Arrays.asList(
+            new ResourceGroup.Builder("group1", "local").build(),
+            new ResourceGroup.Builder("GROUP1", "local").build(),
+            new ResourceGroup.Builder("group1 ", "local").build());
+    when(optimizerManager.listResourceGroups()).thenReturn(groups);
+    for (ResourceGroup group : groups) {
+      when(optimizerManager.getResourceGroup(group.getName())).thenReturn(group);
+    }
+    when(optimizerManager.listOptimizers())
+        .thenReturn(newAscendingOptimizerInstances(2))
+        .thenReturn(Collections.emptyList());
+    List<OptimizerResourceInfo> first = resourceGroupsResponse();
+    assertEquals(3, first.get(0).getOccupationCore());
+    assertEquals(0, first.get(1).getOccupationCore());
+    assertEquals(0, first.get(2).getOccupationCore());
+    ctx = mock(Context.class);
+    assertEquals(0, resourceGroupsResponse().get(0).getOccupationCore());
+    verify(optimizerManager, times(2)).listOptimizers();
+  }
+
+  @Test
+  void resourceGroupsDoNotHideDatabaseOrNullGroupFailures() {
+    when(optimizerManager.listResourceGroups())
+        .thenReturn(
+            Collections.singletonList(new ResourceGroup.Builder("group1", "local").build()));
+    when(optimizerManager.listOptimizers()).thenThrow(new IllegalStateException("database"));
+    assertThrows(IllegalStateException.class, () -> controller.getResourceGroup(ctx));
+    org.mockito.Mockito.reset(optimizerManager);
+    when(optimizerManager.listResourceGroups())
+        .thenReturn(
+            Collections.singletonList(new ResourceGroup.Builder("group1", "local").build()));
+    when(optimizerManager.listOptimizers())
+        .thenReturn(
+            Collections.singletonList(
+                new OptimizerInstance(new OptimizerRegisterInfo().setThreadCount(1), "local")));
+    assertThrows(NullPointerException.class, () -> controller.getResourceGroup(ctx));
+    verify(ctx, never()).json(any());
+    verify(optimizerManager, never()).getResourceGroup(any());
+  }
+
+  @SuppressWarnings("unchecked")
+  private List<OptimizerResourceInfo> resourceGroupsResponse() {
+    controller.getResourceGroup(ctx);
+    ArgumentCaptor<OkResponse<List<OptimizerResourceInfo>>> captor =
+        ArgumentCaptor.forClass(OkResponse.class);
+    verify(ctx).json(captor.capture());
+    return captor.getValue().getResult();
   }
 }

@@ -48,6 +48,7 @@ import javax.ws.rs.BadRequestException;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -268,12 +269,21 @@ public class OptimizerGroupController {
 
   /** get {@link List<OptimizerResourceInfo>} url = /optimize/resourceGroups */
   public void getResourceGroup(Context ctx) {
+    List<ResourceGroup> groups = optimizerManager.listResourceGroups();
+    Map<String, List<OptimizerInstance>> optimizersByGroup = new HashMap<>();
+    if (!groups.isEmpty()) {
+      for (OptimizerInstance optimizer : optimizerManager.listOptimizers()) {
+        // Match listOptimizers(group): a null instance group must still fail, not be ignored.
+        String groupName = java.util.Objects.requireNonNull(optimizer.getGroupName());
+        optimizersByGroup.computeIfAbsent(groupName, key -> new ArrayList<>()).add(optimizer);
+      }
+    }
     List<OptimizerResourceInfo> result =
-        optimizerManager.listResourceGroups().stream()
+        groups.stream()
             .map(
                 group -> {
                   List<OptimizerInstance> optimizers =
-                      optimizerManager.listOptimizers(group.getName());
+                      optimizersByGroup.getOrDefault(group.getName(), Collections.emptyList());
                   OptimizerResourceInfo optimizerResourceInfo = new OptimizerResourceInfo();
                   optimizerResourceInfo.setResourceGroup(
                       optimizerManager.getResourceGroup(group.getName()));

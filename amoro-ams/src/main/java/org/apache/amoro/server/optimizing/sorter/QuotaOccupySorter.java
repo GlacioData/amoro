@@ -37,12 +37,22 @@ public class QuotaOccupySorter implements SorterFactory {
   public Comparator<DefaultTableRuntime> createComparator() {
     return new Comparator<DefaultTableRuntime>() {
       final Map<DefaultTableRuntime, Double> tableWeightMap = Maps.newHashMap();
+      final OptimizerThreadCountSnapshot threadCounts = new OptimizerThreadCountSnapshot();
+
+      private double weight(DefaultTableRuntime runtime) {
+        // Preserve dynamic dispatch for extensions overriding the original quota method.
+        if (runtime.getClass() != DefaultTableRuntime.class) {
+          return runtime.calculateQuotaOccupy();
+        }
+        return runtime.calculateQuotaOccupy(
+            () -> threadCounts.getThreadCount(runtime.getGroupName()));
+      }
 
       @Override
       public int compare(DefaultTableRuntime one, DefaultTableRuntime another) {
         return Double.compare(
-            tableWeightMap.computeIfAbsent(one, DefaultTableRuntime::calculateQuotaOccupy),
-            tableWeightMap.computeIfAbsent(another, DefaultTableRuntime::calculateQuotaOccupy));
+            tableWeightMap.computeIfAbsent(one, this::weight),
+            tableWeightMap.computeIfAbsent(another, this::weight));
       }
     };
   }
