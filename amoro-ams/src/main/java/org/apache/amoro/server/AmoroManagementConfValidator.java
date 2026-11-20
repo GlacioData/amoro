@@ -20,6 +20,7 @@ package org.apache.amoro.server;
 
 import org.apache.amoro.config.ConfigOption;
 import org.apache.amoro.config.Configurations;
+import org.apache.amoro.server.dashboard.auth.CorsBeforeHandler;
 import org.apache.amoro.server.dashboard.utils.AmsUtil;
 
 import java.net.InetAddress;
@@ -77,6 +78,9 @@ public class AmoroManagementConfValidator {
     }
     validateThreadCount(configurations, AmoroManagementConf.REFRESH_TABLES_THREAD_COUNT);
     validateThreadCount(configurations, AmoroManagementConf.OPTIMIZING_COMMIT_THREAD_COUNT);
+
+    CorsBeforeHandler.validateAllowedOrigins(
+        configurations.get(AmoroManagementConf.HTTP_SERVER_CORS_ALLOWED_ORIGINS));
   }
 
   private static void validateThreadCount(

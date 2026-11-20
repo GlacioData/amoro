@@ -27,6 +27,7 @@ import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.util.Collections;
 import java.util.stream.Stream;
 
 public class TestAmoroManagementConfValidator {
@@ -125,6 +126,49 @@ public class TestAmoroManagementConfValidator {
           ConfigOptions.key("terminal.backend").stringType().noDefaultValue(), backend);
       AmoroManagementConfValidator.validateConfig(configurations);
     }
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "*",
+        "null",
+        "",
+        "https://*.example.com",
+        "ftp://dashboard.example.com",
+        "https://dashboard.example.com/path",
+        "https://dashboard.example.com?query",
+        "https://dashboard.example.com#fragment",
+        "https://user@dashboard.example.com",
+        "https://dashboard.example.com:65536",
+        "https://dashboard.example.com:"
+      })
+  public void testRejectInvalidCorsOrigin(String origin) {
+    Configurations configurations = new Configurations();
+    configurations.set(AmoroManagementConf.SERVER_EXPOSE_HOST, "127.0.0.1");
+    configurations.set(
+        AmoroManagementConf.HTTP_SERVER_CORS_ALLOWED_ORIGINS, Collections.singletonList(origin));
+
+    IllegalArgumentException exception =
+        Assert.assertThrows(
+            IllegalArgumentException.class,
+            () -> AmoroManagementConfValidator.validateConfig(configurations));
+    Assert.assertTrue(
+        exception
+            .getMessage()
+            .contains(AmoroManagementConf.HTTP_SERVER_CORS_ALLOWED_ORIGINS.key()));
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+      strings = {"https://dashboard.example.com", "http://localhost:8080", "https://[::1]:8443/"})
+  public void testAcceptValidCorsOrigin(String origin) {
+    Configurations configurations = new Configurations();
+    configurations.set(AmoroManagementConf.SERVER_EXPOSE_HOST, "127.0.0.1");
+    configurations.set(
+        AmoroManagementConf.HTTP_SERVER_CORS_ALLOWED_ORIGINS, Collections.singletonList(origin));
+
+    AmoroManagementConfValidator.validateConfig(configurations);
   }
 
   @Test

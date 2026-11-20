@@ -36,6 +36,10 @@ ams:
     session-timeout: 7d
     bind-port: 1630
     rest-auth-type: token
+    # Credentialed cross-origin access requires explicit HTTP(S) origins.
+    # cors:
+    #   allowed-origins:
+    #     - https://dashboard.example.com
     login-auth-provider: org.apache.amoro.server.authentication.DefaultPasswdAuthenticationProvider
     # To enable dashboard LDAP login, uncomment the following settings:
     # login-auth-provider: org.apache.amoro.server.authentication.LdapPasswdAuthenticationProvider

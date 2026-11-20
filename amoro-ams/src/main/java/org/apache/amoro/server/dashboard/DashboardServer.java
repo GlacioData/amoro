@@ -422,6 +422,13 @@ public class DashboardServer {
   }
 
   public void preHandleRequest(Context ctx) {
+    // Preflight OPTIONS requests carry no credentials and have no side effects; CORS handling is
+    // done by CorsBeforeHandler plus the options terminator route registered in
+    // AmoroServiceContainer. Bypassing auth here keeps preflight responses a 2xx contract that
+    // does not depend on the exception pipeline's default status behavior.
+    if ("OPTIONS".equalsIgnoreCase(ctx.method())) {
+      return;
+    }
     String uriPath = ctx.path();
     if (inWhiteList(uriPath)) {
       return;

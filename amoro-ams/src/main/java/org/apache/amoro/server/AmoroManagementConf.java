@@ -345,6 +345,24 @@ public class AmoroManagementConf {
           .defaultValue(Duration.ofDays(7))
           .withDescription("Timeout for http session.");
 
+  /**
+   * Origins allowed to make credentialed cross-origin requests to the dashboard APIs. Empty by
+   * default, which denies every cross-origin request (same-origin deployments need no CORS).
+   * Matching is exact (scheme + host + port, case-insensitive); wildcards are rejected by startup
+   * validation because reflecting arbitrary origins together with credentials allows any web page
+   * to act as a logged-in user.
+   */
+  public static final ConfigOption<List<String>> HTTP_SERVER_CORS_ALLOWED_ORIGINS =
+      ConfigOptions.key("http-server.cors.allowed-origins")
+          .stringType()
+          .asList()
+          .defaultValues()
+          .withDescription(
+              "Explicit HTTP or HTTPS origins allowed to access AMS APIs cross-origin with"
+                  + " credentials, e.g. https://dashboard.example.com. The default empty list"
+                  + " grants no cross-origin access. Invalid origins and wildcards are rejected at"
+                  + " startup.");
+
   public static final ConfigOption<String> HTTP_SERVER_AUTH_BASIC_PROVIDER =
       ConfigOptions.key("http-server.auth-basic-provider")
           .stringType()
