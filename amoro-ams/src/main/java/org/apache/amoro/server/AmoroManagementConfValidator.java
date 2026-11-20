@@ -77,6 +77,17 @@ public class AmoroManagementConfValidator {
     }
     validateThreadCount(configurations, AmoroManagementConf.REFRESH_TABLES_THREAD_COUNT);
     validateThreadCount(configurations, AmoroManagementConf.OPTIMIZING_COMMIT_THREAD_COUNT);
+
+    // CORS allowlist must contain explicit origins only. A wildcard entry would restore
+    // reflecting arbitrary origins with credentials, which is exactly what this feature removes.
+    java.util.List<String> corsOrigins =
+        configurations.get(AmoroManagementConf.HTTP_SERVER_CORS_ALLOWED_ORIGINS);
+    if (corsOrigins != null && corsOrigins.stream().anyMatch(origin -> "*".equals(origin.trim()))) {
+      throw new IllegalArgumentException(
+          "configuration "
+              + AmoroManagementConf.HTTP_SERVER_CORS_ALLOWED_ORIGINS.key()
+              + " must not contain the wildcard '*'; configure explicit origins instead");
+    }
   }
 
   private static void validateThreadCount(

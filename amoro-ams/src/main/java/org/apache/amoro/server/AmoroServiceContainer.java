@@ -40,6 +40,7 @@ import org.apache.amoro.server.catalog.CatalogManager;
 import org.apache.amoro.server.catalog.DefaultCatalogManager;
 import org.apache.amoro.server.dashboard.DashboardServer;
 import org.apache.amoro.server.dashboard.JavalinJsonMapper;
+import org.apache.amoro.server.dashboard.auth.CorsBeforeHandler;
 import org.apache.amoro.server.dashboard.utils.AmsUtil;
 import org.apache.amoro.server.ha.HighAvailabilityContainer;
 import org.apache.amoro.server.ha.HighAvailabilityContainerFactory;
@@ -465,7 +466,6 @@ public class AmoroServiceContainer {
               config.addStaticFiles("/META-INF/resources/webjars", Location.CLASSPATH);
               config.sessionHandler(
                   () -> HttpSessionHandlerFactory.createSessionHandler(dataSource, serviceConfig));
-              config.enableCorsForAllOrigins();
               config.jsonMapper(JavalinJsonMapper.createDefaultJsonMapper());
               config.showJavalinBanner = false;
               config.enableWebjars();
@@ -479,6 +479,17 @@ public class AmoroServiceContainer {
           }
         });
 
+    // Allowlist-based CORS replaces enableCorsForAllOrigins(): the built-in plugin reflects any
+    // Origin with Allow-Credentials and echoes arbitrary preflight headers (javalin 4.6.8
+    // io/javalin/http/util/CorsUtil.kt), letting any web page issue credentialed requests.
+    // Registered before the auth filter so CORS headers land even on error responses.
+    httpServer.before(
+        new CorsBeforeHandler(
+            serviceConfig.get(AmoroManagementConf.HTTP_SERVER_CORS_ALLOWED_ORIGINS)));
+    // Preflight terminator: browsers require a 2xx preflight response. Removing the CorsPlugin
+    // also removes Javalin's implicit OPTIONS-200 fallback (JavalinServlet checks
+    // config.isCorsEnabled()), so preflight success must come from this explicit route.
+    httpServer.options("/*", ctx -> ctx.status(HttpCode.NO_CONTENT));
     httpServer.before(dashboardServer::preHandleRequest);
     httpServer.exception(
         Exception.class,
