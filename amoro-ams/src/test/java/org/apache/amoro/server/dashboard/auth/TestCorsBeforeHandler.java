@@ -26,7 +26,6 @@ import static io.javalin.core.util.Header.ACCESS_CONTROL_MAX_AGE;
 import static io.javalin.core.util.Header.ORIGIN;
 import static io.javalin.core.util.Header.VARY;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -51,7 +50,7 @@ import java.util.Map;
  * Javalin 4.6.8's Context is an open class whose req/res are @JvmField final fields, so it cannot
  * be usefully stubbed with Mockito. Tests build a real Context over mocked servlet objects:
  * ctx.header(name) delegates to req.getHeader, ctx.header(name, value) to res.setHeader, and the
- * response-header read path goes through ctx.res.getHeader.
+ * Vary values are read and appended through the servlet response.
  */
 public class TestCorsBeforeHandler {
 
@@ -76,8 +75,20 @@ public class TestCorsBeforeHandler {
             })
         .when(res)
         .setHeader(anyString(), anyString());
-    when(res.getHeader(anyString()))
-        .thenAnswer(invocation -> responseHeaders.get(invocation.getArgument(0)));
+    doAnswer(
+            invocation -> {
+              responseHeaders.merge(
+                  invocation.getArgument(0), invocation.getArgument(1), (a, b) -> a + ", " + b);
+              return null;
+            })
+        .when(res)
+        .addHeader(anyString(), anyString());
+    when(res.getHeaders(VARY))
+        .thenAnswer(
+            invocation ->
+                responseHeaders.containsKey(VARY)
+                    ? Collections.singletonList(responseHeaders.get(VARY))
+                    : Collections.emptyList());
     when(req.getMethod()).thenReturn("GET");
     requestHeaders.put(ORIGIN, ALLOWED_ORIGIN);
   }
@@ -98,10 +109,10 @@ public class TestCorsBeforeHandler {
   }
 
   @Test
-  public void testDisallowedOriginGetsNoHeaders() {
+  public void testDisallowedOriginGetsVaryWithoutCorsPermission() {
     requestHeaders.put(ORIGIN, "https://evil.example.com");
     new CorsBeforeHandler(Collections.singletonList(ALLOWED_ORIGIN)).handle(ctx);
-    assertTrue(responseHeaders.isEmpty(), "allowlist miss must not emit any CORS header");
+    assertEquals(Collections.singletonMap(VARY, ORIGIN), responseHeaders);
   }
 
   @Test
@@ -151,10 +162,23 @@ public class TestCorsBeforeHandler {
   }
 
   @Test
-  public void testNoOriginHeaderIsNoOp() {
+  public void testExplicitDefaultPortMatchesBrowserOrigin() {
+    new CorsBeforeHandler(Collections.singletonList("https://dashboard.example.com:443"))
+        .handle(ctx);
+    assertEquals(ALLOWED_ORIGIN, responseHeaders.get(ACCESS_CONTROL_ALLOW_ORIGIN));
+  }
+
+  @Test
+  public void testNonDefaultPortIsNotImplicitlyAllowed() {
+    requestHeaders.put(ORIGIN, "https://dashboard.example.com:8443");
+    new CorsBeforeHandler(Collections.singletonList(ALLOWED_ORIGIN)).handle(ctx);
+    assertNull(responseHeaders.get(ACCESS_CONTROL_ALLOW_ORIGIN));
+  }
+
+  @Test
+  public void testNoOriginGetsVaryWithoutCorsPermission() {
     requestHeaders.remove(ORIGIN);
     new CorsBeforeHandler(Collections.singletonList(ALLOWED_ORIGIN)).handle(ctx);
-    assertFalse(responseHeaders.containsKey(ACCESS_CONTROL_ALLOW_ORIGIN));
-    assertTrue(responseHeaders.isEmpty());
+    assertEquals(Collections.singletonMap(VARY, ORIGIN), responseHeaders);
   }
 }

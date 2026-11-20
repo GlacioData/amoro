@@ -28,33 +28,18 @@ import static io.javalin.core.util.Header.VARY;
 
 import io.javalin.http.Context;
 import io.javalin.http.Handler;
+import org.apache.amoro.server.AmoroManagementConf;
 
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
-import java.util.stream.Collectors;
 
-/**
- * Allowlist-based CORS handler.
- *
- * <p>Replaces Javalin's {@code enableCorsForAllOrigins()}, which reflects any request Origin with
- * {@code Access-Control-Allow-Credentials: true} and echoes arbitrary requested headers on
- * preflight (verified from {@code io/javalin/http/util/CorsUtil.kt} in javalin-4.6.8-sources.jar) -
- * any web page could then issue credentialed requests with a victim's session.
- *
- * <p>Behavior contract: specs/003-credential-security-hardening/contracts/api-contracts.md (C1).
- *
- * <p>Sources:
- *
- * <ul>
- *   <li>MDN CORS guide - credentialed responses must name an explicit origin (no wildcard) and
- *       servers returning a single origin from an allowlist should send {@code Vary: Origin};
- *       preflight responses advertise the allowed methods/headers as explicit lists:
- *       https://developer.mozilla.org/en-US/docs/Web/HTTP/CORS
- * </ul>
- */
+/** Handles CORS for explicitly configured HTTP and HTTPS origins. */
 public class CorsBeforeHandler implements Handler {
 
   /** Fixed set: covers the dashboard frontend and API clients; never reflects request input. */
@@ -68,28 +53,48 @@ public class CorsBeforeHandler implements Handler {
   private final Set<String> allowedOrigins;
 
   public CorsBeforeHandler(List<String> configuredOrigins) {
-    this.allowedOrigins =
-        configuredOrigins == null
-            ? new LinkedHashSet<>()
-            : configuredOrigins.stream()
-                .map(CorsBeforeHandler::normalize)
-                .collect(Collectors.toCollection(LinkedHashSet::new));
+    this.allowedOrigins = parseAllowedOrigins(configuredOrigins);
+  }
+
+  public static void validateAllowedOrigins(List<String> configuredOrigins) {
+    parseAllowedOrigins(configuredOrigins);
+  }
+
+  private static Set<String> parseAllowedOrigins(List<String> configuredOrigins) {
+    if (configuredOrigins == null || configuredOrigins.isEmpty()) {
+      return Collections.emptySet();
+    }
+
+    Set<String> origins = new LinkedHashSet<>();
+    for (String configuredOrigin : configuredOrigins) {
+      String origin = normalizeOrigin(configuredOrigin);
+      if (origin == null) {
+        throw new IllegalArgumentException(
+            "configuration "
+                + AmoroManagementConf.HTTP_SERVER_CORS_ALLOWED_ORIGINS.key()
+                + " must contain only explicit HTTP or HTTPS origins (scheme, host and optional port)");
+      }
+      origins.add(origin);
+    }
+    return origins;
   }
 
   @Override
   public void handle(Context ctx) {
-    String requestOrigin = ctx.header(ORIGIN);
-    if (requestOrigin == null || allowedOrigins.isEmpty()) {
+    if (allowedOrigins.isEmpty()) {
       return;
     }
-    if (!allowedOrigins.contains(normalize(requestOrigin))) {
+
+    // A cached response without CORS headers must also vary by Origin.
+    appendVary(ctx);
+    String requestOrigin = ctx.header(ORIGIN);
+    if (!allowedOrigins.contains(normalizeOrigin(requestOrigin))) {
       return;
     }
     // Explicit origin, never the request value reflected from an allowlist miss; credentialed
     // responses must not use the wildcard (MDN: Requests with credentials).
     ctx.header(ACCESS_CONTROL_ALLOW_ORIGIN, requestOrigin);
     ctx.header(ACCESS_CONTROL_ALLOW_CREDENTIALS, "true");
-    appendVary(ctx);
     if ("OPTIONS".equalsIgnoreCase(ctx.method())) {
       // Fixed lists only - do not echo Access-Control-Request-Headers from the request.
       ctx.header(ACCESS_CONTROL_ALLOW_METHODS, ALLOWED_METHODS);
@@ -98,33 +103,47 @@ public class CorsBeforeHandler implements Handler {
     }
   }
 
-  private static String normalize(String origin) {
-    String trimmed = origin.trim();
-    if (trimmed.endsWith("/")) {
-      trimmed = trimmed.substring(0, trimmed.length() - 1);
+  private static String normalizeOrigin(String value) {
+    if (value == null) {
+      return null;
     }
-    // Scheme and host are case-insensitive URL components; port is numeric.
-    return trimmed.toLowerCase(Locale.ROOT);
+
+    URI origin;
+    try {
+      origin = new URI(value.trim());
+    } catch (URISyntaxException e) {
+      return null;
+    }
+
+    String scheme = origin.getScheme();
+    boolean https = "https".equalsIgnoreCase(scheme);
+    String host = origin.getHost();
+    int port = origin.getPort();
+    if ((!https && !"http".equalsIgnoreCase(scheme))
+        || host == null
+        || host.contains("%")
+        || origin.getRawAuthority().endsWith(":")
+        || port > 65535
+        || origin.getRawUserInfo() != null
+        || origin.getRawQuery() != null
+        || origin.getRawFragment() != null
+        || (!origin.getRawPath().isEmpty() && !"/".equals(origin.getRawPath()))) {
+      return null;
+    }
+
+    String normalized = scheme.toLowerCase(Locale.ROOT) + "://" + host.toLowerCase(Locale.ROOT);
+    int defaultPort = https ? 443 : 80;
+    return port == -1 || port == defaultPort ? normalized : normalized + ":" + port;
   }
 
-  /**
-   * Append {@code Origin} to the response Vary header instead of overwriting it. Note the
-   * single-argument {@code ctx.header(name)} reads request headers (Javalin 4.6.8 Context.kt
-   * delegates to {@code req.getHeader}), so an existing response value is read via {@code
-   * ctx.res.getHeader}.
-   */
   private static void appendVary(Context ctx) {
-    String existing = ctx.res.getHeader(VARY);
-    if (existing == null || existing.isEmpty()) {
-      ctx.header(VARY, ORIGIN);
-      return;
-    }
-    boolean alreadyListed =
-        Arrays.stream(existing.split(","))
-            .map(value -> value.trim().toLowerCase(Locale.ROOT))
-            .anyMatch(ORIGIN.toLowerCase(Locale.ROOT)::equals);
-    if (!alreadyListed) {
-      ctx.header(VARY, existing + ", " + ORIGIN);
+    boolean alreadyVariesByOrigin =
+        ctx.res.getHeaders(VARY).stream()
+            .flatMap(header -> Arrays.stream(header.split(",")))
+            .map(String::trim)
+            .anyMatch(value -> ORIGIN.equalsIgnoreCase(value) || "*".equals(value));
+    if (!alreadyVariesByOrigin) {
+      ctx.res.addHeader(VARY, ORIGIN);
     }
   }
 }

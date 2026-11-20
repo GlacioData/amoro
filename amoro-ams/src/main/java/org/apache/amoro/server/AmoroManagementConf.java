@@ -358,9 +358,10 @@ public class AmoroManagementConf {
           .asList()
           .defaultValues()
           .withDescription(
-              "Origins allowed to access AMS APIs cross-origin with credentials, e.g."
-                  + " https://dashboard.example.com. Empty by default: all cross-origin requests"
-                  + " are denied. Wildcard entries are rejected at startup.");
+              "Explicit HTTP or HTTPS origins allowed to access AMS APIs cross-origin with"
+                  + " credentials, e.g. https://dashboard.example.com. The default empty list"
+                  + " grants no cross-origin access. Invalid origins and wildcards are rejected at"
+                  + " startup.");
 
   public static final ConfigOption<String> HTTP_SERVER_AUTH_BASIC_PROVIDER =
       ConfigOptions.key("http-server.auth-basic-provider")
