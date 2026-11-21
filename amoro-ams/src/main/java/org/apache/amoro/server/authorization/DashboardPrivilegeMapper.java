@@ -46,7 +46,7 @@ public class DashboardPrivilegeMapper {
   }
 
   public Optional<AuthorizationRequest> resolve(Context ctx) {
-    String method = ctx.method().toUpperCase();
+    String method = ctx.method().name();
     String path = ctx.path();
     return mappingRules.stream()
         .filter(rule -> rule.matches(method, path))

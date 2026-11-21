@@ -25,11 +25,12 @@ import static io.javalin.apibuilder.ApiBuilder.post;
 import static io.javalin.apibuilder.ApiBuilder.put;
 
 import io.javalin.apibuilder.EndpointGroup;
+import io.javalin.config.StaticFilesConfig;
 import io.javalin.http.ContentType;
 import io.javalin.http.Context;
-import io.javalin.http.HttpCode;
-import io.javalin.http.staticfiles.Location;
-import io.javalin.http.staticfiles.StaticFileConfig;
+import io.javalin.http.HandlerType;
+import io.javalin.http.Header;
+import io.javalin.http.HttpStatus;
 import org.apache.amoro.authentication.PasswdAuthenticationProvider;
 import org.apache.amoro.authentication.TokenAuthenticationProvider;
 import org.apache.amoro.config.Configurations;
@@ -70,8 +71,8 @@ import java.io.InputStreamReader;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.security.Principal;
+import java.util.Collections;
 import java.util.Objects;
-import java.util.function.Consumer;
 
 public class DashboardServer {
 
@@ -179,23 +180,22 @@ public class DashboardServer {
     return indexHtml;
   }
 
-  public Consumer<StaticFileConfig> configStaticFiles() {
-    return staticFiles -> {
-      staticFiles.hostedPath = "/";
-      // change to host files on a sub path, like '/assets'
-      staticFiles.directory = "/static";
-      // the directory where your files are located
-      staticFiles.location = Location.CLASSPATH;
-      // Location.CLASSPATH (jar) or Location.EXTERNAL (file system)
-      staticFiles.precompress = false;
-      // if the files should be pre-compressed and cached in memory (optimization)
-      staticFiles.aliasCheck = null;
-      // you can configure this to enable symlinks (= ContextHandler.ApproveAliases())
-      // staticFiles.headers = Map.of(...);
-      // headers that will be set for the files
-      staticFiles.skipFileFunction = req -> false;
-      // you can use this to skip certain files in the dir, based on the HttpServletRequest
-    };
+  public static void configureStaticFiles(StaticFilesConfig files) {
+    addStaticDirectory(files, "/static", "max-age=0");
+    addStaticDirectory(files, "/META-INF/resources/webjars", "max-age=0");
+    // Javalin uses this directory (without a leading slash) to resolve /webjars/... URLs.
+    addStaticDirectory(files, "META-INF/resources/webjars", "max-age=31622400");
+  }
+
+  private static void addStaticDirectory(
+      StaticFilesConfig files, String directory, String cacheControl) {
+    files.add(
+        config -> {
+          config.directory = directory;
+          config.headers = Collections.singletonMap(Header.CACHE_CONTROL, cacheControl);
+          // Preserve the JavaScript media type served by Jetty 9.
+          config.mimeTypes.add(ContentType.JAVASCRIPT_LEGACY, "js");
+        });
   }
 
   public EndpointGroup endpoints() {
@@ -426,7 +426,7 @@ public class DashboardServer {
     // done by CorsBeforeHandler plus the options terminator route registered in
     // AmoroServiceContainer. Bypassing auth here keeps preflight responses a 2xx contract that
     // does not depend on the exception pipeline's default status behavior.
-    if ("OPTIONS".equalsIgnoreCase(ctx.method())) {
+    if (ctx.method() == HandlerType.OPTIONS) {
       return;
     }
     String uriPath = ctx.path();
@@ -487,21 +487,21 @@ public class DashboardServer {
   public void handleException(Exception e, Context ctx) {
     if (e instanceof ForbiddenException) {
       // request doesn't start with /ams is  page request. we return index.html
-      if (!ctx.req.getRequestURI().startsWith("/api/ams")) {
+      if (!ctx.req().getRequestURI().startsWith("/api/ams")) {
         ctx.html(getIndexFileContent());
       } else {
-        ctx.json(new ErrorResponse(HttpCode.FORBIDDEN, e.getMessage(), ""));
+        ctx.json(new ErrorResponse(HttpStatus.FORBIDDEN, e.getMessage(), ""));
       }
     } else if (e instanceof SignatureCheckException) {
-      ctx.json(new ErrorResponse(HttpCode.FORBIDDEN, "Signature check failed", ""));
+      ctx.json(new ErrorResponse(HttpStatus.FORBIDDEN, "Signature check failed", ""));
     } else {
-      ctx.json(new ErrorResponse(HttpCode.INTERNAL_SERVER_ERROR, e.getMessage(), ""));
+      ctx.json(new ErrorResponse(HttpStatus.INTERNAL_SERVER_ERROR, e.getMessage(), ""));
     }
     LOG.error("An error occurred while processing the url:{}", ctx.url(), e);
   }
 
   /** Preserve endpoint-local typed errors instead of overwriting their outcome in Javalin. */
-  public static void handleHttpError(Context ctx, HttpCode status, String message) {
+  public static void handleHttpError(Context ctx, HttpStatus status, String message) {
     if (!Boolean.TRUE.equals(ctx.attribute(ErrorResponse.HTTP_ERROR_HANDLED))) {
       ctx.json(new ErrorResponse(status, message, ""));
     }

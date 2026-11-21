@@ -29,8 +29,8 @@ import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-import io.javalin.core.validation.Validator;
 import io.javalin.http.Context;
+import io.javalin.validation.Validator;
 import org.apache.amoro.ServerTableIdentifier;
 import org.apache.amoro.TableFormat;
 import org.apache.amoro.api.OptimizerRegisterInfo;

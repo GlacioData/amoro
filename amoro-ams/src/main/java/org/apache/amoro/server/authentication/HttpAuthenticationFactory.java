@@ -20,9 +20,9 @@ package org.apache.amoro.server.authentication;
 
 import static org.apache.amoro.authentication.TokenCredential.CLIENT_IP_KEY;
 
-import io.javalin.core.security.BasicAuthCredentials;
-import io.javalin.core.util.Header;
 import io.javalin.http.Context;
+import io.javalin.http.Header;
+import io.javalin.security.BasicAuthCredentials;
 import org.apache.amoro.authentication.PasswdAuthenticationProvider;
 import org.apache.amoro.authentication.PasswordCredential;
 import org.apache.amoro.authentication.TokenAuthenticationProvider;

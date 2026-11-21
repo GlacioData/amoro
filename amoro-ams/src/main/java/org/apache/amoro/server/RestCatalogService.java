@@ -32,8 +32,8 @@ import com.fasterxml.jackson.databind.PropertyNamingStrategy;
 import io.javalin.apibuilder.EndpointGroup;
 import io.javalin.http.ContentType;
 import io.javalin.http.Context;
-import io.javalin.http.HttpCode;
-import io.javalin.plugin.json.JavalinJackson;
+import io.javalin.http.HttpStatus;
+import io.javalin.json.JavalinJackson;
 import org.apache.amoro.ServerTableIdentifier;
 import org.apache.amoro.TableFormat;
 import org.apache.amoro.config.Configurations;
@@ -151,7 +151,7 @@ public class RestCatalogService extends PersistentBase implements RestExtension 
 
   @Override
   public boolean needHandleException(Context ctx) {
-    return ctx.req.getRequestURI().startsWith(ICEBERG_REST_API_PREFIX);
+    return ctx.req().getRequestURI().startsWith(ICEBERG_REST_API_PREFIX);
   }
 
   @Override
@@ -163,7 +163,7 @@ public class RestCatalogService extends PersistentBase implements RestExtension 
             .withType(e.getClass().getSimpleName())
             .withMessage(e.getMessage())
             .build();
-    ctx.res.setStatus(code.code);
+    ctx.res().setStatus(code.code);
     jsonResponse(ctx, response);
     if (code.code >= 500) {
       LOG.warn("InternalServer Error", e);
@@ -171,8 +171,8 @@ public class RestCatalogService extends PersistentBase implements RestExtension 
       // those errors happened when the client-side passed arguments with problems.
       LOG.info(
           "Exception when handle request: {} {}, code: {} message: {}",
-          ctx.req.getMethod(),
-          ctx.req.getRequestURI().substring(ICEBERG_REST_API_PREFIX.length()),
+          ctx.req().getMethod(),
+          ctx.req().getRequestURI().substring(ICEBERG_REST_API_PREFIX.length()),
           code.code,
           e.getMessage());
     }
@@ -180,7 +180,7 @@ public class RestCatalogService extends PersistentBase implements RestExtension 
 
   /** GET PREFIX/v1/config?warehouse={warehouse} */
   public void getCatalogConfig(Context ctx) {
-    String warehouse = ctx.req.getParameter("warehouse");
+    String warehouse = ctx.req().getParameter("warehouse");
     Preconditions.checkNotNull(warehouse, "lack required params: warehouse");
     InternalCatalog catalog = getCatalog(warehouse);
     Map<String, String> properties = Maps.newHashMap();
@@ -209,7 +209,7 @@ public class RestCatalogService extends PersistentBase implements RestExtension 
     handleCatalog(
         ctx,
         catalog -> {
-          String ns = ctx.req.getParameter("parent");
+          String ns = ctx.req().getParameter("parent");
           List<Namespace> nsLists = Lists.newArrayList();
           List<String> databases = catalog.listDatabases();
           if (ns == null) {
@@ -350,7 +350,7 @@ public class RestCatalogService extends PersistentBase implements RestExtension 
         handler -> {
           boolean purge =
               Boolean.parseBoolean(
-                  Optional.ofNullable(ctx.req.getParameter("purgeRequested")).orElse("false"));
+                  Optional.ofNullable(ctx.req().getParameter("purgeRequested")).orElse("false"));
           org.apache.amoro.server.table.TableMetadata tableMetadata = handler.tableMetadata();
           tableManager.dropTableMetadata(
               tableMetadata.getTableIdentifier().getIdentifier().buildTableIdentifier(), purge);
@@ -394,7 +394,8 @@ public class RestCatalogService extends PersistentBase implements RestExtension 
   }
 
   private void jsonResponse(Context ctx, RESTResponse rsp) {
-    ctx.contentType(ContentType.APPLICATION_JSON).result(jsonMapper.toJsonString(rsp));
+    ctx.contentType(ContentType.APPLICATION_JSON)
+        .result(jsonMapper.toJsonString(rsp, rsp.getClass()));
   }
 
   private void handleCatalog(
@@ -407,7 +408,7 @@ public class RestCatalogService extends PersistentBase implements RestExtension 
     if (r != null) {
       jsonResponse(ctx, r);
     } else {
-      ctx.status(HttpCode.NO_CONTENT);
+      ctx.status(HttpStatus.NO_CONTENT);
     }
   }
 

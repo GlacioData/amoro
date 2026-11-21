@@ -22,8 +22,7 @@ import static org.apache.amoro.server.AmoroManagementConf.HA_USE_MASTER_SLAVE_MO
 
 import io.javalin.Javalin;
 import io.javalin.http.Context;
-import io.javalin.http.HttpCode;
-import io.javalin.http.staticfiles.Location;
+import io.javalin.http.HttpStatus;
 import org.apache.amoro.Constants;
 import org.apache.amoro.OptimizerProperties;
 import org.apache.amoro.api.AmoroTableMetastore;
@@ -462,13 +461,11 @@ public class AmoroServiceContainer {
     httpServer =
         Javalin.create(
             config -> {
-              config.addStaticFiles(dashboardServer.configStaticFiles());
-              config.addStaticFiles("/META-INF/resources/webjars", Location.CLASSPATH);
-              config.sessionHandler(
+              DashboardServer.configureStaticFiles(config.staticFiles);
+              config.jetty.sessionHandler(
                   () -> HttpSessionHandlerFactory.createSessionHandler(dataSource, serviceConfig));
               config.jsonMapper(JavalinJsonMapper.createDefaultJsonMapper());
               config.showJavalinBanner = false;
-              config.enableWebjars();
             });
 
     httpServer.routes(
@@ -479,17 +476,11 @@ public class AmoroServiceContainer {
           }
         });
 
-    // Allowlist-based CORS replaces enableCorsForAllOrigins(): the built-in plugin reflects any
-    // Origin with Allow-Credentials and echoes arbitrary preflight headers (javalin 4.6.8
-    // io/javalin/http/util/CorsUtil.kt), letting any web page issue credentialed requests.
-    // Registered before the auth filter so CORS headers land even on error responses.
+    // Apply CORS before authentication so error responses also get the allowlist headers.
     httpServer.before(
         new CorsBeforeHandler(
             serviceConfig.get(AmoroManagementConf.HTTP_SERVER_CORS_ALLOWED_ORIGINS)));
-    // Preflight terminator: browsers require a 2xx preflight response. Removing the CorsPlugin
-    // also removes Javalin's implicit OPTIONS-200 fallback (JavalinServlet checks
-    // config.isCorsEnabled()), so preflight success must come from this explicit route.
-    httpServer.options("/*", ctx -> ctx.status(HttpCode.NO_CONTENT));
+    httpServer.options("/*", ctx -> ctx.status(HttpStatus.NO_CONTENT));
     httpServer.before(dashboardServer::preHandleRequest);
     httpServer.exception(
         Exception.class,
@@ -503,20 +494,21 @@ public class AmoroServiceContainer {
         });
     // default response handle
     httpServer.error(
-        HttpCode.NOT_FOUND.getStatus(),
+        HttpStatus.NOT_FOUND.getCode(),
         ctx -> {
           Optional<RestExtension> extension = handleExceptionByExtension.apply(ctx);
           if (!extension.isPresent()) {
-            DashboardServer.handleHttpError(ctx, HttpCode.NOT_FOUND, "page not found!");
+            DashboardServer.handleHttpError(ctx, HttpStatus.NOT_FOUND, "page not found!");
           }
         });
 
     httpServer.error(
-        HttpCode.INTERNAL_SERVER_ERROR.getStatus(),
+        HttpStatus.INTERNAL_SERVER_ERROR.getCode(),
         ctx -> {
           Optional<RestExtension> extension = handleExceptionByExtension.apply(ctx);
           if (!extension.isPresent()) {
-            DashboardServer.handleHttpError(ctx, HttpCode.INTERNAL_SERVER_ERROR, "internal error!");
+            DashboardServer.handleHttpError(
+                ctx, HttpStatus.INTERNAL_SERVER_ERROR, "internal error!");
           }
         });
   }

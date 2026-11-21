@@ -27,8 +27,10 @@ import org.apache.commons.io.IOUtils;
 import org.junit.jupiter.api.Test;
 
 import java.io.InputStream;
+import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.util.Properties;
 
 class TestDashboardIndexContent {
   @Test
@@ -46,6 +48,37 @@ class TestDashboardIndexContent {
       assertEquals(expected, server.getIndexFileContent());
     } finally {
       app.stop();
+    }
+  }
+
+  @Test
+  void webjarScriptsKeepTheirMediaTypeAndCachePolicy() throws Exception {
+    Properties pom = new Properties();
+    try (InputStream input =
+        getClass().getResourceAsStream("/META-INF/maven/org.webjars/swagger-ui/pom.properties")) {
+      pom.load(input);
+    }
+    String script = "/swagger-ui/" + pom.getProperty("version") + "/swagger-initializer.js";
+    Javalin app =
+        Javalin.create(config -> DashboardServer.configureStaticFiles(config.staticFiles)).start(0);
+    try {
+      assertScriptHeaders(app.port(), script, "max-age=0");
+      assertScriptHeaders(app.port(), "/webjars" + script, "max-age=31622400");
+    } finally {
+      app.stop();
+    }
+  }
+
+  private static void assertScriptHeaders(int port, String path, String cacheControl)
+      throws Exception {
+    HttpURLConnection connection =
+        (HttpURLConnection) new URL("http://127.0.0.1:" + port + path).openConnection();
+    try {
+      assertEquals(200, connection.getResponseCode());
+      assertEquals("application/javascript", connection.getContentType());
+      assertEquals(cacheControl, connection.getHeaderField("Cache-Control"));
+    } finally {
+      connection.disconnect();
     }
   }
 }

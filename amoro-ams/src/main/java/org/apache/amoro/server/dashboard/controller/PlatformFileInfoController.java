@@ -19,6 +19,7 @@
 package org.apache.amoro.server.dashboard.controller;
 
 import io.javalin.http.Context;
+import io.javalin.http.UploadedFile;
 import org.apache.amoro.server.dashboard.PlatformFileManager;
 import org.apache.amoro.server.dashboard.response.ErrorResponse;
 import org.apache.amoro.server.dashboard.response.OkResponse;
@@ -45,9 +46,12 @@ public class PlatformFileInfoController {
 
   /** Upload file. */
   public void uploadFile(Context ctx) throws IOException {
-    InputStream bodyAsInputStream = ctx.uploadedFile("file").getContent();
-    String name = ctx.uploadedFile("file").getFilename();
-    byte[] bytes = IOUtils.toByteArray(bodyAsInputStream);
+    UploadedFile file = ctx.uploadedFile("file");
+    String name = file.filename();
+    byte[] bytes;
+    try (InputStream input = file.content()) {
+      bytes = IOUtils.toByteArray(input);
+    }
 
     // validate xml config
     if (name.toLowerCase().endsWith(".xml")) {

@@ -18,16 +18,17 @@
 
 package org.apache.amoro.server.dashboard.auth;
 
-import static io.javalin.core.util.Header.ACCESS_CONTROL_ALLOW_CREDENTIALS;
-import static io.javalin.core.util.Header.ACCESS_CONTROL_ALLOW_HEADERS;
-import static io.javalin.core.util.Header.ACCESS_CONTROL_ALLOW_METHODS;
-import static io.javalin.core.util.Header.ACCESS_CONTROL_ALLOW_ORIGIN;
-import static io.javalin.core.util.Header.ACCESS_CONTROL_MAX_AGE;
-import static io.javalin.core.util.Header.ORIGIN;
-import static io.javalin.core.util.Header.VARY;
+import static io.javalin.http.Header.ACCESS_CONTROL_ALLOW_CREDENTIALS;
+import static io.javalin.http.Header.ACCESS_CONTROL_ALLOW_HEADERS;
+import static io.javalin.http.Header.ACCESS_CONTROL_ALLOW_METHODS;
+import static io.javalin.http.Header.ACCESS_CONTROL_ALLOW_ORIGIN;
+import static io.javalin.http.Header.ACCESS_CONTROL_MAX_AGE;
+import static io.javalin.http.Header.ORIGIN;
+import static io.javalin.http.Header.VARY;
 
 import io.javalin.http.Context;
 import io.javalin.http.Handler;
+import io.javalin.http.HandlerType;
 import org.apache.amoro.server.AmoroManagementConf;
 
 import java.net.URI;
@@ -95,7 +96,7 @@ public class CorsBeforeHandler implements Handler {
     // responses must not use the wildcard (MDN: Requests with credentials).
     ctx.header(ACCESS_CONTROL_ALLOW_ORIGIN, requestOrigin);
     ctx.header(ACCESS_CONTROL_ALLOW_CREDENTIALS, "true");
-    if ("OPTIONS".equalsIgnoreCase(ctx.method())) {
+    if (ctx.method() == HandlerType.OPTIONS) {
       // Fixed lists only - do not echo Access-Control-Request-Headers from the request.
       ctx.header(ACCESS_CONTROL_ALLOW_METHODS, ALLOWED_METHODS);
       ctx.header(ACCESS_CONTROL_ALLOW_HEADERS, ALLOWED_HEADERS);
@@ -138,12 +139,12 @@ public class CorsBeforeHandler implements Handler {
 
   private static void appendVary(Context ctx) {
     boolean alreadyVariesByOrigin =
-        ctx.res.getHeaders(VARY).stream()
+        ctx.res().getHeaders(VARY).stream()
             .flatMap(header -> Arrays.stream(header.split(",")))
             .map(String::trim)
             .anyMatch(value -> ORIGIN.equalsIgnoreCase(value) || "*".equals(value));
     if (!alreadyVariesByOrigin) {
-      ctx.res.addHeader(VARY, ORIGIN);
+      ctx.res().addHeader(VARY, ORIGIN);
     }
   }
 }

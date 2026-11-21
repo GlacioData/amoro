@@ -99,9 +99,11 @@ class TestSnapshotHttpErrors {
     JavalinJsonMapper mapper = JavalinJsonMapper.createDefaultJsonMapper();
     assertTrue(
         mapper
-            .toJsonString(PageResult.of(Collections.emptyList(), 3_000_000_000L))
+            .toJsonString(PageResult.of(Collections.emptyList(), 3_000_000_000L), PageResult.class)
             .contains("3000000000"));
-    String page = mapper.toJsonString(new SnapshotDetailPage(Collections.emptyList(), null));
+    String page =
+        mapper.toJsonString(
+            new SnapshotDetailPage(Collections.emptyList(), null), SnapshotDetailPage.class);
     assertTrue(page.contains("nextCursor"));
     assertTrue(!page.contains("total"));
   }
