@@ -43,6 +43,7 @@ import org.apache.amoro.properties.CatalogMetaProperties;
 import org.apache.amoro.server.catalog.CatalogManager;
 import org.apache.amoro.server.catalog.InternalCatalog;
 import org.apache.amoro.server.catalog.ServerCatalog;
+import org.apache.amoro.server.dashboard.response.ErrorMessages;
 import org.apache.amoro.server.manager.EventsManager;
 import org.apache.amoro.server.persistence.PersistentBase;
 import org.apache.amoro.server.table.TableManager;
@@ -157,11 +158,16 @@ public class RestCatalogService extends PersistentBase implements RestExtension 
   @Override
   public void handleException(Exception e, Context ctx) {
     IcebergRestErrorCode code = IcebergRestErrorCode.exceptionToCode(e);
+    // The typed errors are raised for the client on purpose. Anything else may describe the
+    // server's inside and is reduced to a generic text that does not name the exception either.
+    boolean clientFacing =
+        (code != IcebergRestErrorCode.InternalServerError || ErrorMessages.isClientFacing(e))
+            && !ErrorMessages.carriesInternalDetail(e.getMessage());
     ErrorResponse response =
         ErrorResponse.builder()
             .responseCode(code.code)
-            .withType(e.getClass().getSimpleName())
-            .withMessage(e.getMessage())
+            .withType(clientFacing ? e.getClass().getSimpleName() : code.name())
+            .withMessage(clientFacing ? e.getMessage() : ErrorMessages.INTERNAL_ERROR)
             .build();
     ctx.res().setStatus(code.code);
     jsonResponse(ctx, response);

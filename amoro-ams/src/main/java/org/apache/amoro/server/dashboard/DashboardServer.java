@@ -56,6 +56,7 @@ import org.apache.amoro.server.dashboard.controller.PlatformFileInfoController;
 import org.apache.amoro.server.dashboard.controller.ProcessController;
 import org.apache.amoro.server.dashboard.controller.TableController;
 import org.apache.amoro.server.dashboard.controller.VersionController;
+import org.apache.amoro.server.dashboard.response.ErrorMessages;
 import org.apache.amoro.server.dashboard.response.ErrorResponse;
 import org.apache.amoro.server.resource.OptimizerManager;
 import org.apache.amoro.server.table.TableManager;
@@ -478,7 +479,8 @@ public class DashboardServer {
     } else if (e instanceof SignatureCheckException) {
       ctx.json(new ErrorResponse(HttpStatus.FORBIDDEN, "Signature check failed", ""));
     } else {
-      ctx.json(new ErrorResponse(HttpStatus.INTERNAL_SERVER_ERROR, e.getMessage(), ""));
+      // Validation messages help the client; anything else may describe the server's inside.
+      ctx.json(new ErrorResponse(HttpStatus.INTERNAL_SERVER_ERROR, ErrorMessages.of(e), ""));
     }
     LOG.error("An error occurred while processing the url:{}", ctx.url(), e);
   }
