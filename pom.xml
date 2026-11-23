@@ -160,6 +160,7 @@
         <derby-jdbc.version>10.14.2.0</derby-jdbc.version>
         <commons-dbcp2.version>2.9.0</commons-dbcp2.version>
         <netty.version>4.1.129.Final</netty.version>
+        <jetty.version>11.0.26</jetty.version>
         <javalin.version>5.6.5</javalin.version>
         <rocksdb.version>7.10.2</rocksdb.version>
         <kryo.version>4.0.3</kryo.version>
