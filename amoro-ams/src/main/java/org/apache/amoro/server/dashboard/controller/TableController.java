@@ -63,6 +63,7 @@ import org.apache.amoro.server.table.TableManager;
 import org.apache.amoro.server.table.TableService;
 import org.apache.amoro.shade.guava32.com.google.common.base.Function;
 import org.apache.amoro.shade.guava32.com.google.common.base.Preconditions;
+import org.apache.amoro.shade.guava32.com.google.common.collect.Sets;
 import org.apache.amoro.shade.guava32.com.google.common.util.concurrent.ThreadFactoryBuilder;
 import org.apache.amoro.shade.thrift.org.apache.thrift.TException;
 import org.apache.amoro.table.TableIdentifier;
@@ -105,6 +106,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 /** The controller that handles table requests. */
@@ -112,6 +114,34 @@ public class TableController {
   private static final int MAX_OPTIMIZING_HISTORY_PAGE_SIZE = 100;
   private static final Logger LOG = LoggerFactory.getLogger(TableController.class);
   private static final long UPGRADE_INFO_EXPIRE_INTERVAL = 60 * 60 * 1000;
+
+  /**
+   * Auth entries that carry no credential, so they can still be listed. Everything else in {@code
+   * authConfigs} (access keys, secret keys, keytabs) is left out of list responses.
+   */
+  private static final Set<String> LISTABLE_AUTH_CONFIG_KEYS =
+      Sets.newHashSet(
+          CatalogMetaProperties.AUTH_CONFIGS_KEY_TYPE,
+          CatalogMetaProperties.AUTH_CONFIGS_KEY_HADOOP_USERNAME,
+          CatalogMetaProperties.AUTH_CONFIGS_KEY_PRINCIPAL);
+
+  /**
+   * The only storage entry that is not a config file. {@code core-site.xml}, {@code hdfs-site.xml}
+   * and {@code hive-site.xml} are stored base64-encoded and regularly contain credentials.
+   */
+  private static final Set<String> LISTABLE_STORAGE_CONFIG_KEYS =
+      Sets.newHashSet(CatalogMetaProperties.STORAGE_CONFIGS_KEY_TYPE);
+
+  /**
+   * Catalog property names that hold a credential. Catalog properties are open-ended (custom
+   * catalog implementations, Iceberg FileIO options, Hadoop style options), so they are matched by
+   * name rather than by a fixed list.
+   */
+  private static final Pattern SENSITIVE_CATALOG_PROPERTY =
+      Pattern.compile(
+          "password|passwd|secret|token|credential|keytab|api[-_.]?key|access[-_.]?key"
+              + "|private[-_.]?key|account[-_.]?key|session[-_.]?key",
+          Pattern.CASE_INSENSITIVE);
 
   /**
    * Hive-upgrade table properties are derived from static constants of {@link TableProperties} and
@@ -791,7 +821,52 @@ public class TableController {
    */
   public void getCatalogs(Context ctx) {
     List<CatalogMeta> catalogs = catalogManager.listCatalogMetas();
-    ctx.json(OkResponse.of(catalogs));
+    ctx.json(
+        OkResponse.of(
+            catalogs == null
+                ? null
+                : catalogs.stream()
+                    .map(TableController::toCatalogListItem)
+                    .collect(Collectors.toList())));
+  }
+
+  /**
+   * Copy of a catalog metadata for list responses, with credentials removed. The stored metadata is
+   * left untouched because {@link CatalogManager} keeps sharing its instances.
+   */
+  private static CatalogMeta toCatalogListItem(CatalogMeta catalogMeta) {
+    CatalogMeta item = new CatalogMeta();
+    item.setCatalogName(catalogMeta.getCatalogName());
+    item.setCatalogType(catalogMeta.getCatalogType());
+    item.setAuthConfigs(retainKeys(catalogMeta.getAuthConfigs(), LISTABLE_AUTH_CONFIG_KEYS));
+    item.setStorageConfigs(
+        retainKeys(catalogMeta.getStorageConfigs(), LISTABLE_STORAGE_CONFIG_KEYS));
+    Map<String, String> properties = new HashMap<>();
+    if (catalogMeta.getCatalogProperties() != null) {
+      catalogMeta
+          .getCatalogProperties()
+          .forEach(
+              (key, value) -> {
+                if (key != null && !SENSITIVE_CATALOG_PROPERTY.matcher(key).find()) {
+                  properties.put(key, value);
+                }
+              });
+    }
+    item.setCatalogProperties(properties);
+    return item;
+  }
+
+  private static Map<String, String> retainKeys(Map<String, String> source, Set<String> keys) {
+    Map<String, String> retained = new HashMap<>();
+    if (source != null) {
+      for (String key : keys) {
+        String value = source.get(key);
+        if (value != null) {
+          retained.put(key, value);
+        }
+      }
+    }
+    return retained;
   }
 
   public void getTableTags(Context ctx) {
