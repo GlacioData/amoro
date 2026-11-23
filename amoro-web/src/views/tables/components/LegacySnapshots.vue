@@ -44,12 +44,12 @@ const columns = computed<IColumns[]>(() => [
 ])
 const breadcrumbColumns = computed(() => [
   { title: t('operation'), dataIndex: 'operation', width: 120, ellipsis: true },
-  { title: t('file'), dataIndex: 'file', ellipsis: true },
+  { title: t('file'), dataIndex: 'file', minWidth: 240, ellipsis: true },
   { title: t('partition'), dataIndex: 'partition', width: 120 },
   { title: t('fileType'), dataIndex: 'fileType', width: 120, ellipsis: true },
   { title: t('size'), dataIndex: 'size', width: 120 },
   { title: t('commitTime'), dataIndex: 'commitTime', width: 200, ellipsis: true },
-  { title: t('path'), dataIndex: 'path', ellipsis: true },
+  { title: t('path'), dataIndex: 'path', minWidth: 280, ellipsis: true },
 ])
 const dataSource = reactive<SnapshotItem[]>([])
 const breadcrumbDataSource = reactive<BreadcrumbSnapshotItem[]>([])
@@ -256,7 +256,7 @@ onMounted(() => {
         </template>
       </Selector>
       <SnapshotCharts v-if="showCharts" :loading="loading" :record-options="recordChartOption" :file-options="fileChartOption" />
-      <el-table v-loading="loading" scrollbar-always-on row-key="snapshotId" :data="dataSource">
+      <el-table v-loading="loading" class="dashboard-table" scrollbar-always-on row-key="snapshotId" :data="dataSource">
         <el-table-column type="expand">
           <template #default="{ row: record }">
             <dl class="snapshot-summary">
@@ -286,27 +286,8 @@ onMounted(() => {
         </el-breadcrumb-item>
         <el-breadcrumb-item>{{ `${$t('snapshotId')} ${snapshotId}` }}</el-breadcrumb-item>
       </el-breadcrumb>
-      <el-table v-loading="loading" scrollbar-always-on row-key="file" class="g-mt-8" :data="breadcrumbDataSource">
-        <el-table-column v-for="column in breadcrumbColumns" :key="column.dataIndex" v-bind="tableColumnProps(column, breadcrumbColumns)">
-          <template v-if="column.dataIndex === 'file' || column.dataIndex === 'path'" #default="{ row: record }">
-            <template v-if="column.dataIndex === 'path'">
-              <el-tooltip>
-                <template #content>
-                  {{ record.path }}
-                </template>
-                <span>{{ record.path }}</span>
-              </el-tooltip>
-            </template>
-            <template v-if="column.dataIndex === 'file'">
-              <el-tooltip>
-                <template #content>
-                  {{ record.file }}
-                </template>
-                <span>{{ record.file }}</span>
-              </el-tooltip>
-            </template>
-          </template>
-        </el-table-column>
+      <el-table v-loading="loading" scrollbar-always-on row-key="file" class="dashboard-table g-mt-8" :tooltip-options="{ popperClass: 'snapshot-file-tooltip' }" :data="breadcrumbDataSource">
+        <el-table-column v-for="column in breadcrumbColumns" :key="column.dataIndex" v-bind="tableColumnProps(column, breadcrumbColumns)" />
       </el-table>
       <DashboardPagination :pagination="breadcrumbPagination" @change="change" />
     </template>

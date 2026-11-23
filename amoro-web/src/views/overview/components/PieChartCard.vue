@@ -71,8 +71,9 @@ watch(() => props.data, renderChart)
 </template>
 
 <style scoped>
-.pie-chart-card {
-  height: 500px;
+.pie-chart-card :deep(.el-card__body) {
+  display: flex;
+  align-items: center;
 }
 
 .card-title {

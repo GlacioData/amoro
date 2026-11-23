@@ -63,6 +63,7 @@ import org.apache.amoro.server.table.TableManager;
 import org.apache.amoro.server.table.TableService;
 import org.apache.amoro.shade.guava32.com.google.common.base.Function;
 import org.apache.amoro.shade.guava32.com.google.common.base.Preconditions;
+import org.apache.amoro.shade.guava32.com.google.common.collect.ImmutableMap;
 import org.apache.amoro.shade.guava32.com.google.common.util.concurrent.ThreadFactoryBuilder;
 import org.apache.amoro.shade.thrift.org.apache.thrift.TException;
 import org.apache.amoro.table.TableIdentifier;
@@ -790,7 +791,14 @@ public class TableController {
    * @param ctx - context for handling the request and response
    */
   public void getCatalogs(Context ctx) {
-    List<CatalogMeta> catalogs = catalogManager.listCatalogMetas();
+    List<Map<String, String>> catalogs =
+        catalogManager.listCatalogMetas().stream()
+            .map(
+                catalog ->
+                    ImmutableMap.of(
+                        "catalogName", catalog.getCatalogName(),
+                        "catalogType", catalog.getCatalogType()))
+            .collect(Collectors.toList());
     ctx.json(OkResponse.of(catalogs));
   }
 

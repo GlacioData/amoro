@@ -34,8 +34,6 @@ tags:
     description: Login and logout operations
   - name: Files
     description: File operations
-  - name: Settings
-    description: System and container settings
   - name: Overview
     description: Overview operations
 paths:
@@ -57,7 +55,7 @@ paths:
                       result:
                         type: array
                         items:
-                          $ref: '#/components/schemas/CatalogMeta'
+                          $ref: '#/components/schemas/CatalogListItem'
     post:
       tags:
         - Catalogs
@@ -88,7 +86,7 @@ paths:
       tags:
         - Catalogs
       summary: Get detail of some catalog
-      description: Get detailed information of a specific catalog
+      description: Get detailed information for a catalog. The Kerberos principal is masked, and configuration files are represented by name.
       responses:
         '200':
           description: Successful response
@@ -107,7 +105,7 @@ paths:
       tags:
         - Catalogs
       summary: Update catalog
-      description: Update the details of a specific catalog
+      description: Update a catalog. Sending the masked Kerberos principal from the detail response retains the stored principal.
       requestBody:
         required: true
         content:
@@ -158,41 +156,6 @@ paths:
                     properties:
                       result:
                         type: boolean
-  /api/ams/v1/catalogs/{catalogName}/config/{type}/{key}:
-    get:
-      tags:
-        - Catalogs
-      summary: Get catalog config file content
-      description: Get the config file content uri("/api/ams/v1/catalogs/{catalogName}/config/{type}/{key}")
-      parameters:
-        - name: catalogName
-          in: path
-          required: true
-          schema:
-            type: string
-          description: The name of the catalog
-        - name: type
-          in: path
-          required: true
-          schema:
-            type: string
-          description: The type of the config (e.g., storage-config, auth-config)
-        - name: key
-          in: path
-          required: true
-          schema:
-            type: string
-          description: The key of the config
-      responses:
-        '200':
-          description: Successful response
-          content:
-            application/octet-stream:
-              schema:
-                type: string
-                format: binary
-        '404':
-          description: Catalog or config file not found
   /api/ams/v1/optimize/optimizers/{jobId}:
     parameters:
       - name: jobId
@@ -330,7 +293,7 @@ paths:
       tags:
         - Files
       summary: Upload file
-      description: Upload a file
+      description: Upload a file and return its ID for configuring a catalog.
       requestBody:
         required: true
         content:
@@ -348,65 +311,6 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Response'
-  /api/ams/v1/files/{fileId}:
-    parameters:
-      - name: fileId
-        in: path
-        required: true
-        schema:
-          type: string
-        description: The ID of the file
-    get:
-      tags:
-        - Files
-      summary: Download file
-      description: Download a file by ID
-      responses:
-        '200':
-          description: Successful response
-          content:
-            application/octet-stream:
-              schema:
-                type: string
-                format: binary
-  /api/ams/v1/settings/system:
-    get:
-      tags:
-        - Settings
-      summary: Get system settings
-      description: Get system settings
-      responses:
-        '200':
-          description: Successful response
-          content:
-            application/json:
-              schema:
-                allOf:
-                  - $ref: '#/components/schemas/Response'
-                  - type: object
-                    properties:
-                      result:
-                        $ref: '#/components/schemas/SystemSetting'
-  /api/ams/v1/settings/containers:
-    get:
-      tags:
-        - Settings
-      summary: Get container settings
-      description: Get container settings
-      responses:
-        '200':
-          description: Successful response
-          content:
-            application/json:
-              schema:
-                allOf:
-                  - $ref: '#/components/schemas/Response'
-                  - type: object
-                    properties:
-                      result:
-                        type: array
-                        items:
-                          $ref: '#/components/schemas/ContainerSetting'
   /api/ams/v1/overview/resource:
     get:
       tags:
@@ -912,28 +816,6 @@ components:
           type: integer
         occupationMemory:
           type: integer
-    SystemSetting:
-      type: object
-      properties:
-        systemName:
-          type: string
-        version:
-          type: string
-        properties:
-          type: object
-          additionalProperties:
-            type: string
-    ContainerSetting:
-      type: object
-      properties:
-        containerName:
-          type: string
-        containerType:
-          type: string
-        properties:
-          type: object
-          additionalProperties:
-            type: string
     ResourceUsageHistory:
       type: object
       properties:
@@ -961,22 +843,10 @@ components:
           type: object
           additionalProperties:
             type: string
-    CatalogMeta:
+    CatalogListItem:
       type: object
       properties:
         catalogName:
           type: string
         catalogType:
           type: string
-        catalogProperties:
-          type: object
-          additionalProperties:
-            type: string
-        authConfigs:
-          type: object
-          additionalProperties:
-            type: string
-        storageConfigs:
-          type: object
-          additionalProperties:
-            type: string

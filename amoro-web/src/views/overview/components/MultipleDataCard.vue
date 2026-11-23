@@ -20,36 +20,32 @@ limitations under the License.
 import { useI18n } from 'vue-i18n'
 import type { IKeyAndValue } from '@/types/common.type'
 
-const props = defineProps<{ title: string, data: IKeyAndValue[] }>()
+const props = defineProps<{ title: string, data: IKeyAndValue<string | number>[] }>()
 
 const { t } = useI18n()
 </script>
 
 <template>
-  <el-card class="multiple-data" :body-style="{ paddingTop: '0px' }">
+  <el-card>
     <template #header>
       <span class="card-title">{{ props.title }}</span>
     </template>
-    <el-row>
-      <el-col v-for="item in props.data" :key="item.key" :span="12">
-        <el-statistic
-          :title="t(item.key)"
-          :value="item.value"
-          :value-style="{ color: '#07A7F0', fontSize: '28px' }"
-          style="margin-right: 20px;"
-        />
-      </el-col>
-    </el-row>
+    <div class="resource-statistics">
+      <el-statistic
+        v-for="item in props.data"
+        :key="item.key"
+        :title="t(item.key)"
+        :value="typeof item.value === 'number' ? item.value : undefined"
+        :formatter="typeof item.value === 'string' ? () => item.value : undefined"
+      />
+    </div>
   </el-card>
 </template>
 
 <style scoped>
-.card-title {
-  font-size: 28px;
-}
-
-.multiple-data {
-  padding-top: 0px;
-  height: 150px;
+.resource-statistics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 100px), 1fr));
+  gap: 12px;
 }
 </style>

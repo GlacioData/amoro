@@ -53,17 +53,19 @@ async function loadModule(path, dependencies) {
 const permissions = await loadModule('../src/utils/permission.ts', { '@/store': storeModule })
 const { default: router } = await loadModule('../src/router/index.ts', { 'vue-router': routerModule })
 
-test('removed Terminal URLs resolve to the existing not-found page', () => {
+test('removed Terminal and Settings URLs resolve to the existing not-found page', () => {
   // https://router.vuejs.org/guide/essentials/dynamic-matching.html#catch-all-404-not-found-route
-  assert.equal(router.resolve('/terminal').name, 'Page404')
-  assert.equal(router.resolve('/terminal/').name, 'Page404')
-  assert.equal(router.hasRoute('Terminal'), false)
+  for (const [path, name] of [['/terminal', 'Terminal'], ['/settings', 'Settings']]) {
+    assert.equal(router.resolve(path).name, 'Page404')
+    assert.equal(router.resolve(`${path}/`).name, 'Page404')
+    assert.equal(router.hasRoute(name), false)
+  }
 })
 
 test('retained management routes preserve their route names', () => {
   for (const [path, name] of Object.entries({
     '/tables': 'Tables', '/catalogs': 'Catalogs', '/optimizing': 'Optimizing',
-    '/overview': 'Overview', '/settings': 'Settings', '/login': 'Login',
+    '/overview': 'Overview', '/login': 'Login',
   })) {
     assert.equal(router.resolve(path).name, name, path)
   }
@@ -76,7 +78,7 @@ test('default navigation preserves management privilege priorities', () => {
     [['VIEW_CATALOG', 'VIEW_OPTIMIZER', 'VIEW_SYSTEM', 'MANAGE_PLATFORM'], '/catalogs'],
     [['VIEW_OPTIMIZER', 'VIEW_SYSTEM', 'MANAGE_PLATFORM'], '/optimizing'],
     [['VIEW_SYSTEM', 'MANAGE_PLATFORM'], '/overview'],
-    [['MANAGE_PLATFORM'], '/settings'],
+    [['MANAGE_PLATFORM'], '/login'],
     [['MANAGE_TABLE'], '/login'],
   ]
   for (const [privileges, expected] of cases) {
@@ -89,5 +91,5 @@ test('legacy SQL privilege cannot restore a removed default route', () => {
   store.userInfo.privileges = ['EXECUTE_SQL']
   assert.equal(permissions.getDefaultRoute(), '/login')
   store.userInfo.privileges = ['EXECUTE_SQL', 'MANAGE_PLATFORM']
-  assert.equal(permissions.getDefaultRoute(), '/settings')
+  assert.equal(permissions.getDefaultRoute(), '/login')
 })

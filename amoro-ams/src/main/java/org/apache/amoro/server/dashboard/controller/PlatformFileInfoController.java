@@ -22,17 +22,14 @@ import io.javalin.http.Context;
 import org.apache.amoro.server.dashboard.PlatformFileManager;
 import org.apache.amoro.server.dashboard.response.ErrorResponse;
 import org.apache.amoro.server.dashboard.response.OkResponse;
-import org.apache.amoro.shade.guava32.com.google.common.base.Preconditions;
 import org.apache.commons.io.IOUtils;
-import org.apache.commons.lang.StringUtils;
 import org.apache.hadoop.conf.Configuration;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.Base64;
-import java.util.HashMap;
-import java.util.Map;
+import java.util.Collections;
 
 /** The controller that handles file requests. */
 public class PlatformFileInfoController {
@@ -62,17 +59,6 @@ public class PlatformFileInfoController {
     }
     String content = Base64.getEncoder().encodeToString(bytes);
     Integer fid = platformFileInfoService.addFile(name, content);
-    Map<String, String> result = new HashMap<>();
-    result.put("id", String.valueOf(fid));
-    result.put("url", "/api/ams/v1/files/" + fid);
-    ctx.json(OkResponse.of(result));
-  }
-
-  /** Download file. */
-  public void downloadFile(Context ctx) {
-    String fileId = ctx.pathParam("fileId");
-    Preconditions.checkArgument(StringUtils.isNumeric(fileId), "Invalid file id");
-    byte[] content = platformFileInfoService.getFileContentById(Integer.valueOf(fileId));
-    ctx.result(content);
+    ctx.json(OkResponse.of(Collections.singletonMap("id", String.valueOf(fid))));
   }
 }

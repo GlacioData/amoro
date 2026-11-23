@@ -80,9 +80,15 @@ mappings:
     resource-type: OPTIMIZER
     privilege: MANAGE_OPTIMIZER
 
-  - prefixes:
+  - paths:
       - /api/ams/v1/files
-      - /api/ams/v1/settings
+      - /api/ams/v1/files/
+    methods:
+      - POST
+    resource-type: PLATFORM
+    privilege: MANAGE_PLATFORM
+
+  - prefixes:
       - /api/ams/v1/api/token
     resource-type: PLATFORM
     privilege: MANAGE_PLATFORM

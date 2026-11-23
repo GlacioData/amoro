@@ -26,31 +26,7 @@ export default [
       "result": [
         {
           "catalogName": "test_catalog",
-          "catalogType": "hadoop",
-          "storageConfigs": {
-            "storage.type": "Hadoop",
-            "hive.site": "PGNvbmZpZ3VyYXRpb24+PC9jb25maWd1cmF0aW9uPg==",
-            "hadoop.hdfs.site": "PGNvbmZpZ3VyYXRpb24+PC9jb25maWd1cmF0aW9uPg==",
-            "hadoop.core.site": "PGNvbmZpZ3VyYXRpb24+PC9jb25maWd1cmF0aW9uPg=="
-          },
-          "authConfigs": {
-            "auth.type": "simple",
-            "auth.simple.hadoop_username": "root"
-          },
-          "catalogProperties": {
-            "table.self-optimizing.group": "local",
-            "warehouse": "/mnt/dfs/4/warehouse_public",
-            "type": "hadoop",
-            "table-formats": "ICEBERG"
-          },
-          "setCatalogName": true,
-          "setCatalogType": true,
-          "setStorageConfigs": true,
-          "setAuthConfigs": true,
-          "setCatalogProperties": true,
-          "storageConfigsSize": 4,
-          "authConfigsSize": 2,
-          "catalogPropertiesSize": 4
+          "catalogType": "hadoop"
         }
       ]
     }),
@@ -91,16 +67,13 @@ export default [
         "storageConfig": {
           "storage.type": "Hadoop",
           "hive.site": {
-            "fileName": "hive-site.xml",
-            "fileUrl": "/api/ams/v1/catalogs/test_catalog/config/storage-config/hive-site"
+            "fileName": "hive-site.xml"
           },
           "hadoop.core.site": {
-            "fileName": "core-site.xml",
-            "fileUrl": "/api/ams/v1/catalogs/test_catalog/config/storage-config/hadoop-core-site"
+            "fileName": "core-site.xml"
           },
           "hadoop.hdfs.site": {
-            "fileName": "hdfs-site.xml",
-            "fileUrl": "/api/ams/v1/catalogs/test_catalog/config/storage-config/hadoop-hdfs-site"
+            "fileName": "hdfs-site.xml"
           }
         },
         "authConfig": {

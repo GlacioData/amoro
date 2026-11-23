@@ -27,7 +27,6 @@ import { checkCatalogStatus, delCatalog, getCatalogsSetting, getCatalogsTypes, g
 import type { ICatalogItem, IIOptimizeGroupItem, ILableAndValue, IMap } from '@/types/common.type'
 import { usePlaceholder } from '@/hooks/usePlaceholder'
 import { getResourceGroupsListAPI } from '@/services/optimize.service'
-import { downloadWithHeader } from '@/utils/request'
 import { canManageCatalog } from '@/utils/permission'
 
 interface IStorageConfigItem {
@@ -35,7 +34,6 @@ interface IStorageConfigItem {
   value: string
   key: string
   fileName: string
-  fileUrl: string
   fileId: string
   fileList: UploadUserFile[]
   uploadLoading: boolean
@@ -313,7 +311,6 @@ async function getConfigInfo() {
           label: storageConfigMap[key as keyof typeof storageConfigMap],
           value: (storageConfig[key] as any)?.fileName,
           fileName: (storageConfig[key] as any)?.fileName,
-          fileUrl: (storageConfig[key] as any)?.fileUrl,
           fileId: '',
           fileList: [],
           uploadLoading: false,
@@ -329,7 +326,6 @@ async function getConfigInfo() {
           label: authConfigMap[key as keyof typeof authConfigMap],
           value: (authConfig[key] as any)?.fileName,
           fileName: (authConfig[key] as any)?.fileName,
-          fileUrl: (authConfig[key] as any)?.fileUrl,
           fileId: '',
           fileList: [],
           uploadLoading: false,
@@ -419,7 +415,6 @@ async function changeMetastore() {
       label: storageConfigMap['hive.site'],
       value: '',
       fileName: '',
-      fileUrl: '',
       fileId: '',
       fileList: [],
       uploadLoading: false,
@@ -544,14 +539,13 @@ async function deleteCatalogModal() {
 // https://github.com/element-plus/element-plus/blob/2.14.8/docs/en-US/component/upload.md
 function uploadSucceeded(response: unknown, file: UploadFile, config: IStorageConfigItem, storage = false) {
   config.uploadLoading = false
-  const result = response as { code?: number, message?: string, result?: { url?: string, id?: string } } | null
+  const result = response as { code?: number, message?: string, result?: { id?: string } } | null
   if (result?.code !== 200 || !result.result?.id) {
     message.error(result?.message || `${file.name} ${t('uploaded')} ${t('failed')}`)
     return
   }
   config.isSuccess = true
   config.fileName = storage ? storageConfigFileNameMap[config.key as keyof typeof storageConfigFileNameMap] : file.name
-  config.fileUrl = result.result.url ?? ''
   config.fileId = result.result.id
   message.success(`${file.name} ${t('uploaded')} ${t('success')}`)
 }
@@ -560,9 +554,6 @@ function uploadFailed(file: UploadFile, config: IStorageConfigItem) {
   config.uploadLoading = false
   config.isSuccess = false
   message.error(`${file.name} ${t('uploaded')} ${t('failed')}`)
-}
-function viewFileDetail(url: string, fileName: string) {
-  downloadWithHeader(url, fileName)
 }
 onMounted(() => {
   getCatalogTypeOps()
@@ -701,11 +692,7 @@ onMounted(() => {
                   }}
                 </el-button>
               </el-upload>
-              <span
-                v-if="config.isSuccess || config.fileName" class="config-value"
-                :class="{ 'view-active': !!config.fileUrl }" @click="viewFileDetail(config.fileUrl, config.fileName)"
-              >{{ config.fileName
-              }}</span>
+              <span v-if="config.isSuccess || config.fileName" class="config-value">{{ config.fileName }}</span>
             </el-form-item>
           </div>
           <el-form-item>
@@ -766,11 +753,9 @@ onMounted(() => {
                   }}
                 </el-button>
               </el-upload>
-              <span
-                v-if="config.isSuccess || config.fileName" class="config-value auth-filename"
-                :class="{ 'view-active': !!config.fileUrl }" :title="config.fileName"
-                @click="viewFileDetail(config.fileUrl, config.fileName)"
-              >{{ config.fileName }}</span>
+              <span v-if="config.isSuccess || config.fileName" class="config-value auth-filename" :title="config.fileName">
+                {{ config.fileName }}
+              </span>
             </el-form-item>
           </div>
           <el-form-item
@@ -870,11 +855,6 @@ onMounted(() => {
       font-size: 16px;
       font-weight: 600;
       color: #102048;
-    }
-
-    .view-active {
-      color: @primary-color;
-      cursor: pointer;
     }
 
     .config-value {

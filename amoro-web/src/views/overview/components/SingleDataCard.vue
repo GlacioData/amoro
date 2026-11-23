@@ -17,28 +17,17 @@ limitations under the License.
 / -->
 
 <script setup lang="ts">
-const props = defineProps<{ title: string, value: string }>()
+const props = defineProps<{ title: string, value: string | number }>()
 </script>
 
 <template>
-  <el-card class="single-data">
+  <el-card>
     <template #header>
       <span class="card-title">{{ props.title }}</span>
     </template>
     <el-statistic
-      :value="props.value"
-      :value-style="{ color: '#07A7F0', fontSize: '28px' }"
-      style="margin-right: 50px"
+      :value="typeof props.value === 'number' ? props.value : undefined"
+      :formatter="typeof props.value === 'string' ? () => props.value : undefined"
     />
   </el-card>
 </template>
-
-<style scoped>
-.card-title {
-  font-size: 28px;
-}
-
-.single-data {
-  height: 150px;
-}
-</style>

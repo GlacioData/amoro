@@ -19,14 +19,12 @@ limitations under the License.
 <script lang="ts" setup>
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { useRouter } from 'vue-router'
 import { tableColumnProps } from '@/utils/table'
 import type { ITopTableItem } from '@/types/common.type'
 import { getTop10TableList } from '@/services/overview.service'
 import { bytesToSize } from '@/utils'
 
 const { t } = useI18n()
-const router = useRouter()
 const orderBy = ref('healthScore')
 const loading = ref<boolean>(false)
 const dataSource = reactive<ITopTableItem[]>([])
@@ -35,48 +33,40 @@ const columns = computed(() => [
   {
     title: t('tableName'),
     dataIndex: 'tableName',
-    width: 300,
+    minWidth: 132,
     ellipsis: true,
   },
   {
     title: t('tableSize'),
     dataIndex: 'tableSize',
-    width: 100,
+    width: 92,
     ellipsis: true,
   },
   {
     title: t('fileCount'),
     dataIndex: 'fileCount',
-    width: 100,
+    width: 90,
     ellipsis: true,
   },
   {
     title: t('averageFileSize'),
     dataIndex: 'averageFileSize',
-    width: 140,
+    width: 132,
     ellipsis: true,
   },
   {
     title: t('healthScore'),
     dataIndex: 'healthScore',
-    width: 110,
+    width: 104,
     ellipsis: true,
   },
 ])
 
-function goTableDetail(record: ITopTableItem) {
-  try {
-    const table = (record.tableName || '').split('.')
-    router.push({
-      path: '/tables',
-      query: {
-        catalog: table[0],
-        db: table[1],
-        table: table[2],
-      },
-    })
-  }
-  catch (error) {
+function tableDetailLocation(record: ITopTableItem) {
+  const [catalog, db, table] = (record.tableName || '').split('.')
+  return {
+    path: '/tables',
+    query: { catalog, db, table },
   }
 }
 
@@ -121,28 +111,26 @@ onMounted(() => {
       </el-row>
     </template>
 
-    <div class="list-wrap">
-      <el-table v-loading="loading" class="dashboard-table" :data="dataSource" :max-height="390">
-        <el-table-column v-for="column in columns" :key="column.dataIndex" v-bind="tableColumnProps(column, columns)">
-          <template v-if="column.dataIndex === 'averageFileSize' || column.dataIndex === 'healthScore' || column.dataIndex === 'tableName' || column.dataIndex === 'tableSize'" #default="{ row: record }">
-            <template v-if="column.dataIndex === 'tableName'">
-              <span :title="record.tableName" class="primary-link" @click="goTableDetail(record)">
-                {{ record.tableName }}
-              </span>
-            </template>
-            <template v-if="column.dataIndex === 'tableSize'">
-              {{ bytesToSize(record.tableSize) }}
-            </template>
-            <template v-if="column.dataIndex === 'averageFileSize'">
-              {{ bytesToSize(record.averageFileSize) }}
-            </template>
-            <template v-if="column.dataIndex === 'healthScore'">
-              {{ record.healthScore == null || record.healthScore < 0 ? 'N/A' : record.healthScore }}
-            </template>
+    <el-table v-loading="loading" class="dashboard-table" :data="dataSource" scrollbar-always-on>
+      <el-table-column v-for="column in columns" :key="column.dataIndex" v-bind="tableColumnProps(column, columns)">
+        <template v-if="column.dataIndex === 'averageFileSize' || column.dataIndex === 'healthScore' || column.dataIndex === 'tableName' || column.dataIndex === 'tableSize'" #default="{ row: record }">
+          <template v-if="column.dataIndex === 'tableName'">
+            <router-link :to="tableDetailLocation(record)" class="primary-link">
+              {{ record.tableName }}
+            </router-link>
           </template>
-        </el-table-column>
-      </el-table>
-    </div>
+          <template v-if="column.dataIndex === 'tableSize'">
+            {{ bytesToSize(record.tableSize) }}
+          </template>
+          <template v-if="column.dataIndex === 'averageFileSize'">
+            {{ bytesToSize(record.averageFileSize) }}
+          </template>
+          <template v-if="column.dataIndex === 'healthScore'">
+            {{ record.healthScore == null || record.healthScore < 0 ? 'N/A' : record.healthScore }}
+          </template>
+        </template>
+      </el-table-column>
+    </el-table>
   </el-card>
 </template>
 
@@ -151,25 +139,7 @@ onMounted(() => {
   font-size: 18px;
 }
 
-.top-tables-card {
-  height: 500px;
-}
-
-.list-wrap {
-  .primary-link {
-    color: @primary-color;
-
-    &:hover {
-      cursor: pointer;
-    }
-
-    &.disabled {
-      color: #999;
-
-      &:hover {
-        cursor: not-allowed;
-      }
-    }
-  }
+.primary-link {
+  color: @primary-color;
 }
 </style>

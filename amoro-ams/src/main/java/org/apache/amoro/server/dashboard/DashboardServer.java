@@ -53,7 +53,6 @@ import org.apache.amoro.server.dashboard.controller.OptimizerGroupController;
 import org.apache.amoro.server.dashboard.controller.OverviewController;
 import org.apache.amoro.server.dashboard.controller.PlatformFileInfoController;
 import org.apache.amoro.server.dashboard.controller.ProcessController;
-import org.apache.amoro.server.dashboard.controller.SettingController;
 import org.apache.amoro.server.dashboard.controller.TableController;
 import org.apache.amoro.server.dashboard.controller.VersionController;
 import org.apache.amoro.server.dashboard.response.ErrorResponse;
@@ -89,7 +88,6 @@ public class DashboardServer {
   private final OptimizerGroupController optimizerGroupController;
   private final OptimizerController optimizerController;
   private final PlatformFileInfoController platformFileInfoController;
-  private final SettingController settingController;
   private final ProcessController processController;
   private final TableController tableController;
   private final VersionController versionController;
@@ -117,7 +115,6 @@ public class DashboardServer {
     this.optimizerGroupController = new OptimizerGroupController(tableManager, optimizerManager);
     this.optimizerController = new OptimizerController(optimizerManager);
     this.platformFileInfoController = new PlatformFileInfoController(platformFileManager);
-    this.settingController = new SettingController(serviceConfig, optimizerManager);
     ServerTableDescriptor tableDescriptor =
         new ServerTableDescriptor(catalogManager, tableManager, serviceConfig);
     this.processController = new ProcessController(tableManager);
@@ -340,7 +337,6 @@ public class DashboardServer {
             delete("/{catalogName}", catalogController::deleteCatalog);
             put("/{catalogName}", catalogController::updateCatalog);
             get("/{catalogName}/delete/check", catalogController::catalogDeleteCheck);
-            get("/{catalogName}/config/{type}/{key}", catalogController::getCatalogConfFileContent);
           });
 
       // optimizing api
@@ -376,20 +372,7 @@ public class DashboardServer {
           });
 
       // file apis
-      path(
-          "/files",
-          () -> {
-            post("", platformFileInfoController::uploadFile);
-            get("/{fileId}", platformFileInfoController::downloadFile);
-          });
-
-      // setting apis
-      path(
-          "/settings",
-          () -> {
-            get("/containers", settingController::getContainerSetting);
-            get("/system", settingController::getSystemSetting);
-          });
+      post("/files", platformFileInfoController::uploadFile);
 
       // health api
       get("/health/status", healthCheckController::healthCheck);

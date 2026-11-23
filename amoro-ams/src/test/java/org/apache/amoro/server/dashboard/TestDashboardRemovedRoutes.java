@@ -24,7 +24,9 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import io.javalin.Javalin;
+import org.apache.amoro.api.CatalogMeta;
 import org.apache.amoro.config.Configurations;
+import org.apache.amoro.properties.CatalogMetaProperties;
 import org.apache.amoro.server.AmoroManagementConf;
 import org.apache.amoro.server.AmoroServiceContainer;
 import org.apache.amoro.server.authorization.CasbinAuthorizationManager;
@@ -51,15 +53,20 @@ import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.Set;
 
-class TestDashboardTerminalRemoval {
+class TestDashboardRemovedRoutes {
   private static final String[][] REMOVED_ROUTES = {
-    {"GET", "/examples"},
-    {"GET", "/examples/CreateTable"},
-    {"POST", "/catalogs/fixture/execute"},
-    {"GET", "/fixture/logs"},
-    {"GET", "/fixture/result"},
-    {"PUT", "/fixture/stop"},
-    {"GET", "/latestInfos"}
+    {"GET", "/terminal/examples"},
+    {"GET", "/terminal/examples/CreateTable"},
+    {"POST", "/terminal/catalogs/fixture/execute"},
+    {"GET", "/terminal/fixture/logs"},
+    {"GET", "/terminal/fixture/result"},
+    {"PUT", "/terminal/fixture/stop"},
+    {"GET", "/terminal/latestInfos"},
+    {"GET", "/settings/system"},
+    {"GET", "/settings/containers"},
+    {"GET", "/catalogs/fixture/config/storage-config/hadoop-core-site"},
+    {"GET", "/catalogs/fixture/config/auth-config/auth-kerberos-keytab"},
+    {"GET", "/files/1"}
   };
 
   @ParameterizedTest
@@ -72,7 +79,7 @@ class TestDashboardTerminalRemoval {
         for (String[] route : REMOVED_ROUTES) {
           for (String suffix : new String[] {"", "/"}) {
             HttpURLConnection connection =
-                request(app, route[0], "/api/ams/v1/terminal" + route[1] + suffix, role);
+                request(app, route[0], "/api/ams/v1" + route[1] + suffix, role);
             try {
               int status = connection.getResponseCode();
               String body = body(connection);
@@ -94,8 +101,13 @@ class TestDashboardTerminalRemoval {
           assertEquals(200, catalog.getResponseCode());
           JsonNode response = JacksonUtil.parseObject(body(catalog), JsonNode.class);
           assertEquals(200, response.path("code").asInt());
-          assertTrue(response.path("result").isArray());
-          assertEquals(0, response.path("result").size());
+          JsonNode result = response.path("result");
+          assertTrue(result.isArray());
+          assertEquals(1, result.size());
+          JsonNode item = result.get(0);
+          assertEquals("fixture", item.path("catalogName").asText());
+          assertEquals("filesystem", item.path("catalogType").asText());
+          assertEquals(2, item.size());
         } finally {
           catalog.disconnect();
         }
@@ -116,7 +128,15 @@ class TestDashboardTerminalRemoval {
     Configurations conf = new Configurations();
     conf.set(AmoroManagementConf.AUTHORIZATION_ENABLED, authorization);
     CatalogManager catalogs = mock(CatalogManager.class);
-    when(catalogs.listCatalogMetas()).thenReturn(Collections.emptyList());
+    CatalogMeta catalog = new CatalogMeta();
+    catalog.setCatalogName("fixture");
+    catalog.setCatalogType("filesystem");
+    catalog.setAuthConfigs(
+        Collections.singletonMap(
+            CatalogMetaProperties.AUTH_CONFIGS_KEY_PRINCIPAL, "fixture@EXAMPLE.TEST"));
+    catalog.setStorageConfigs(
+        Collections.singletonMap(CatalogMetaProperties.STORAGE_CONFIGS_KEY_CORE_SITE, "AQI="));
+    when(catalogs.listCatalogMetas()).thenReturn(Collections.singletonList(catalog));
     DashboardServer server =
         new DashboardServer(
             conf,

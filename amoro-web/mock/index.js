@@ -21,7 +21,6 @@
  import database from './modules/database'
  import db from './modules/db'
  import overview from './modules/overview'
- import settings from './modules/settings'
  import optimize from './modules/optimize'
 
 export default [
@@ -30,6 +29,5 @@ export default [
   ...database,
   ...db,
   ...overview,
-  ...settings,
   ...optimize,
 ];

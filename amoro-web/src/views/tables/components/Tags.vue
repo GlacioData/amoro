@@ -28,6 +28,7 @@ import TagSnapshotSelect from './TagSnapshotSelect.vue'
 import { canDeleteTag, canUpdateTagRetention, resolvedTagRetention, sameRetentionSource, tagErrorMessages, validTagForm } from './tag-management-state'
 import { requestEpoch } from './snapshot-page-state'
 import { useMediaQuery } from '@/hooks/useMediaQuery'
+import { usePagination } from '@/hooks/usePagination'
 import DashboardPagination from '@/components/DashboardPagination.vue'
 import { tableColumnProps } from '@/utils/table'
 import { message } from '@/utils/ui-feedback'
@@ -52,7 +53,8 @@ const errors = reactive({ mutation: '', read: '' })
 const errorMessages = computed(() => tagErrorMessages(errors))
 const keyword = ref(String(route.query.tagKeyword || ''))
 const page = ref(Math.max(1, Number(route.query.tagPage) || 1))
-const pageSize = ref(20)
+const { pageSize: defaultPageSize, pageSizeOptions } = usePagination()
+const pageSize = ref(defaultPageSize)
 const total = ref(0)
 const typedSnapshotReferences = ref(false)
 const editing = ref(false)
@@ -303,7 +305,7 @@ onBeforeUnmount(() => requests.invalidate())
         total,
         showQuickJumper: true,
         showSizeChanger: true,
-        pageSizeOptions: [20, 50, 100],
+        pageSizeOptions,
         showTotal: value => $t('tagTotal', { total: value, pages: Math.ceil(value / pageSize) }),
       }"
       :disabled="busy || loading"
