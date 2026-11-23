@@ -17,21 +17,22 @@ limitations under the License.
 / -->
 
 <script lang="ts" setup>
-import { onMounted, reactive, ref, shallowReactive } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute } from 'vue-router'
-import useClipboard from 'vue-clipboard3'
-import { Modal as AModal, message } from 'ant-design-vue'
+import DashboardPagination from '@/components/DashboardPagination.vue'
+import { tableColumnProps } from '@/utils/table'
+import { copyText } from '@/utils/clipboard'
+import { message } from '@/utils/ui-feedback'
 import { usePagination } from '@/hooks/usePagination'
 import type { IColumns, OperationItem } from '@/types/common.type'
 import { getOperations } from '@/services/table.service'
 import { dateFormat } from '@/utils'
 
-const { toClipboard } = useClipboard()
 const { t } = useI18n()
-const columns: IColumns[] = shallowReactive([
+const columns = computed<IColumns[]>(() => [
   { title: t('time'), dataIndex: 'ts', width: '30%' },
-  { title: t('operation'), dataIndex: 'operation', scopedSlots: { customRender: 'operation' } },
+  { title: t('operation'), dataIndex: 'operation' },
 ])
 const visible = ref<boolean>(false)
 const activeCopyText = ref<string>('')
@@ -72,7 +73,7 @@ async function getOperationInfo() {
   }
 }
 
-function change({ current = 1, pageSize = 25 } = pagination) {
+function change({ current, pageSize }: { current: number, pageSize: number }) {
   pagination.current = current
   if (pageSize !== pagination.pageSize) {
     pagination.current = 1
@@ -92,7 +93,7 @@ function cancel() {
 
 async function onCopy() {
   try {
-    await toClipboard(activeCopyText.value)
+    await copyText(activeCopyText.value)
     message.success(t('copySuccess'))
     cancel()
   }
@@ -106,44 +107,40 @@ onMounted(() => {
 
 <template>
   <div class="table-operations">
-    <a-table
-      row-key="partiton"
-      :columns="columns"
-      :data-source="dataSource"
-      :pagination="pagination"
-      :loading="loading"
-      @change="change"
-    >
-      <template #bodyCell="{ column, record }">
-        <template v-if="column.dataIndex === 'operation'">
-          <span class="text-active g-max-line-3" @click="viewDetail(record)">
-            {{ record.operation }}
-          </span>
+    <el-table v-loading="loading" row-key="partiton" :data="dataSource">
+      <el-table-column v-for="column in columns" :key="column.dataIndex" v-bind="tableColumnProps(column, columns)">
+        <template v-if="column.dataIndex === 'operation'" #default="{ row: record }">
+          <template v-if="column.dataIndex === 'operation'">
+            <span class="text-active g-max-line-3" @click="viewDetail(record)">
+              {{ record.operation }}
+            </span>
+          </template>
         </template>
-      </template>
-    </a-table>
+      </el-table-column>
+    </el-table>
+    <DashboardPagination :pagination="pagination" @change="change" />
   </div>
-  <AModal
-    :open="visible"
+  <el-dialog
+    :model-value="visible"
     :width="560"
     :title="$t('operationDetails')"
     class="operation-wrap"
-    @cancel="cancel"
+    @update:model-value="(value: boolean) => { if (!value) cancel() }"
   >
     {{ activeCopyText }}
     <template #footer>
-      <a-button type="primary" @click="onCopy">
+      <el-button type="primary" @click="onCopy">
         {{ $t('copy') }}
-      </a-button>
+      </el-button>
     </template>
-  </AModal>
+  </el-dialog>
 </template>
 
 <style lang="less">
 .table-operations {
   padding: 12px 0;
 
-  .ant-table-tbody > tr > td {
+  .el-table__body > tr > td {
     white-space: pre;
   }
 
@@ -153,7 +150,7 @@ onMounted(() => {
   }
 }
 
-.operation-wrap .ant-modal-body {
+.operation-wrap .el-dialog__body {
   max-height: 360px;
   overflow-y: auto;
   white-space: pre;

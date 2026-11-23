@@ -18,6 +18,7 @@
 
 <script lang="ts" setup>
 import { computed, ref } from 'vue'
+import spriteUrl from '@/assets/icons/sprite.svg?no-inline'
 
 const props = defineProps<{ iconClass?: string, className?: string, isStroke?: boolean, disabled?: boolean }>()
 const emit = defineEmits<{
@@ -40,7 +41,7 @@ const stroke = computed(() => {
 })
 
 const iconName = computed(() => {
-  return `#icon-${props.iconClass}`
+  return `${spriteUrl}#icon-${props.iconClass}`
 })
 
 const svgClass = computed(() => {
@@ -72,7 +73,7 @@ function onMouseout() {
 
 <template>
   <svg :class="svgClass" aria-hidden="true" :stroke="stroke" @click="handleClick" @mouseover="onMouseover" @mouseout="onMouseout">
-    <use :xlink:href="iconName" />
+    <use :href="iconName" />
   </svg>
 </template>
 

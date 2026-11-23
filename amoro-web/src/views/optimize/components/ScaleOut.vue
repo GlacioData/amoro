@@ -18,7 +18,6 @@ limitations under the License.
 
 <script lang="ts" setup>
 import { onMounted, reactive, ref } from 'vue'
-import { Modal as AModal } from 'ant-design-vue'
 import { usePlaceholder } from '@/hooks/usePlaceholder'
 import type { IGroupItem } from '@/types/common.type'
 import { getOptimizerGroups, scaleoutResource } from '@/services/optimize.service'
@@ -58,7 +57,7 @@ async function getCompactQueues() {
 
 function handleOk() {
   formRef.value
-    .validateFields()
+    .validate()
     .then(async () => {
       confirmLoading.value = true
       await scaleoutResource({
@@ -85,26 +84,33 @@ onMounted(() => {
 </script>
 
 <template>
-  <AModal
-    :open="props.visible"
+  <el-dialog
+    :model-value="props.visible"
     :title="$t('scaleOut')"
-    :confirm-loading="confirmLoading"
-    :closable="false"
-    @ok="handleOk"
-    @cancel="handleCancel"
+    :show-close="false"
+    :width="520"
+    @update:model-value="(open: boolean) => { if (!open) handleCancel() }"
   >
-    <a-form ref="formRef" :model="formState" class="label-120">
-      <a-form-item name="resourceGroup" :label="$t('resourceGroup')" :rules="[{ required: true, message: `${placeholder.resourceGroupPh}` }]">
-        <a-select
-          v-model:value="formState.resourceGroup"
-          :show-search="true"
+    <el-form ref="formRef" :model="formState" class="label-120" label-position="left">
+      <el-form-item prop="resourceGroup" :label="$t('resourceGroup')" :rules="[{ required: true, message: `${placeholder.resourceGroupPh}` }]">
+        <el-select
+          v-model="formState.resourceGroup"
+          :filterable="true"
           :options="groupList"
           :placeholder="placeholder.resourceGroupPh"
         />
-      </a-form-item>
-      <a-form-item name="parallelism" :label="$t('parallelism')" :rules="[{ required: true, message: `${placeholder.parallelismPh}` }]">
-        <a-input v-model:value="formState.parallelism" type="number" :placeholder="placeholder.parallelismPh" />
-      </a-form-item>
-    </a-form>
-  </AModal>
+      </el-form-item>
+      <el-form-item prop="parallelism" :label="$t('parallelism')" :rules="[{ required: true, message: `${placeholder.parallelismPh}` }]">
+        <el-input v-model="formState.parallelism" type="number" :placeholder="placeholder.parallelismPh" />
+      </el-form-item>
+    </el-form>
+    <template #footer>
+      <el-button :disabled="confirmLoading" @click="handleCancel">
+        {{ $t('cancel') }}
+      </el-button>
+      <el-button type="primary" :loading="confirmLoading" @click="handleOk">
+        {{ $t('ok') }}
+      </el-button>
+    </template>
+  </el-dialog>
 </template>

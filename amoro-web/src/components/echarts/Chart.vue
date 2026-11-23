@@ -17,7 +17,7 @@
  / -->
 
 <script lang="ts">
-import { defineComponent, onBeforeUnmount, onMounted, ref, toRefs, watch } from 'vue'
+import { defineComponent, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import echarts from './index'
 
 export default defineComponent({
@@ -36,51 +36,46 @@ export default defineComponent({
     },
     options: {
       type: Object,
-      default: () => {},
+      default: () => ({}),
     },
   },
   setup(props) {
-    let echartsInst: any = null
-    const { options } = toRefs(props)
-    const echart = ref()
-
-    const echartsInit = () => {
-      // pass the 'v5' compatibility theme registered by echarts/theme/v5
-      echartsInst = echarts.init(echart.value, 'v5')
-      echartsInst.setOption({
-        ...options.value,
-      })
-    }
-    const echartsOptionsUpdate = () => {
-      echartsInst.setOption({
-        ...options.value,
-      })
-      echartsInst.resize()
-    }
-
-    const resize = () => {
-      if (echartsInst) {
-        echartsInst.resize()
-      }
-    }
+    const echart = ref<HTMLDivElement>()
+    let chart: ReturnType<typeof echarts.init> | undefined
+    let observer: ResizeObserver | undefined
 
     watch(
-      () => options.value,
+      () => props.options,
       (value) => {
-        value && echartsOptionsUpdate()
+        if (value)
+          chart?.setOption(value)
       },
       {
         deep: true,
       },
     )
 
-    onBeforeUnmount(() => {
-      window.removeEventListener('resize', resize)
+    onMounted(() => {
+      const container = echart.value
+      if (!container)
+        return
+      chart = echarts.init(container, 'v5')
+      chart.setOption(props.options ?? {})
+      // The table sidebar can change the chart area without resizing the viewport.
+      observer = new ResizeObserver(() => {
+        const { clientWidth, clientHeight } = container
+        if (chart && clientWidth > 0 && clientHeight > 0
+          && (clientWidth !== chart.getWidth() || clientHeight !== chart.getHeight())) {
+          chart.resize()
+        }
+      })
+      observer.observe(container)
     })
 
-    onMounted(() => {
-      window.addEventListener('resize', resize)
-      echartsInit()
+    onBeforeUnmount(() => {
+      observer?.disconnect()
+      chart?.dispose()
+      chart = undefined
     })
 
     return {
@@ -91,9 +86,9 @@ export default defineComponent({
 </script>
 
 <template>
-  <a-spin :spinning="loading" class="echarts-loading">
+  <div v-loading="loading" class="echarts-loading">
     <div ref="echart" :style="{ width, height }" class="timeline-echarts" />
-  </a-spin>
+  </div>
 </template>
 
 <style lang="less">

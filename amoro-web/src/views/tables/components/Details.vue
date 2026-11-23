@@ -17,13 +17,13 @@ limitations under the License.
 / -->
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, reactive, shallowReactive } from 'vue'
+import { QuestionFilled } from '@element-plus/icons-vue'
+import { computed, onBeforeUnmount, reactive } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter } from 'vue-router'
-import { QuestionCircleOutlined } from '@ant-design/icons-vue'
-import type { ColumnProps } from 'ant-design-vue/es/table'
 import { requestEpoch, snapshotTableKey } from './snapshot-page-state'
 import { fileStatisticsPresentation } from './file-statistics-view'
+import { tableColumnProps } from '@/utils/table'
 import type { DetailColumnItem, IBaseDetailInfo, IColumns, IMap, PartitionColumnItem, TableFileStatistics } from '@/types/common.type'
 import { getTableDetail } from '@/services/table.service'
 import { dateFormat } from '@/utils'
@@ -99,6 +99,8 @@ const state = reactive({
   baseMetrics: [] as IMap<string | number>[],
   schema: [] as DetailColumnItem[],
 })
+
+const initialDetailLoading = computed(() => state.detailLoading && state.baseDetailInfo.boundedSnapshotRead === null)
 
 const fileStatisticsView = computed(() => fileStatisticsPresentation(
   state.baseDetailInfo.tableFormat || state.baseDetailInfo.tableType,
@@ -217,84 +219,79 @@ async function getTableDetails() {
 
 defineExpose({ getTableDetails })
 
-const primaryColumns: ColumnProps[] = shallowReactive([
-  { title: t('field'), dataIndex: 'field', width: '30%' },
-  { title: t('type'), dataIndex: 'type', width: '20%' },
-  { title: t('required'), dataIndex: 'required', width: '20%', customRender: text => String(text?.value) },
-  { title: t('description'), dataIndex: 'comment', ellipsis: true },
+const primaryColumns = computed<IColumns[]>(() => [
+  { title: t('field'), dataIndex: 'field', minWidth: 64 },
+  { title: t('type'), dataIndex: 'type', minWidth: 72 },
+  { title: t('required'), dataIndex: 'required', minWidth: 80 },
+  { title: t('description'), dataIndex: 'comment', minWidth: 96, ellipsis: true },
 ])
-const partitionColumns: IColumns[] = shallowReactive([
-  { title: t('field'), dataIndex: 'field', width: '30%' },
-  { title: t('sourceField'), dataIndex: 'sourceField', width: '30%' },
-  { title: t('transform'), dataIndex: 'transform', ellipsis: true },
+const partitionColumns = computed<IColumns[]>(() => [
+  { title: t('field'), dataIndex: 'field', minWidth: 100 },
+  { title: t('sourceField'), dataIndex: 'sourceField', minWidth: 108 },
+  { title: t('transform'), dataIndex: 'transform', minWidth: 100, ellipsis: true },
 ])
-const metricsColumns: IColumns[] = shallowReactive([
-  { title: t('metric'), dataIndex: 'metric', width: '50%', ellipsis: true },
-  { title: t('value'), dataIndex: 'value', ellipsis: true },
+const metricsColumns = computed<IColumns[]>(() => [
+  { title: t('metric'), dataIndex: 'metric', minWidth: 124, ellipsis: true },
+  { title: t('value'), dataIndex: 'value', minWidth: 116, ellipsis: true },
 ])
-const propertiesColumns: IColumns[] = shallowReactive([
-  { title: t('key'), dataIndex: 'key', width: '50%', ellipsis: true },
-  { title: t('value'), dataIndex: 'value', ellipsis: true },
+const propertiesColumns = computed<IColumns[]>(() => [
+  { title: t('key'), dataIndex: 'key', minWidth: 120, ellipsis: true },
+  { title: t('value'), dataIndex: 'value', minWidth: 120, ellipsis: true },
 ])
 </script>
 
 <template>
-  <div class="table-detail g-flex">
-    <div class="left-content">
+  <div class="table-detail" :class="{ 'is-initial-loading': initialDetailLoading }">
+    <div v-if="!initialDetailLoading" class="left-content">
       <div v-if="state.pkList && state.pkList.length" class="table-attrs">
         <p class="attr-title">
           {{ $t('primaryKey') }}
         </p>
-        <a-table
-          row-key="field"
-          :columns="primaryColumns"
-          :data-source="state.pkList"
-          :pagination="false"
-        />
+        <el-table row-key="field" :data="state.pkList">
+          <el-table-column v-for="column in primaryColumns" :key="column.dataIndex" v-bind="tableColumnProps(column, primaryColumns)">
+            <template v-if="column.dataIndex === 'required'" #default="{ row }">
+              {{ String(row.required) }}
+            </template>
+          </el-table-column>
+        </el-table>
       </div>
       <div v-if="state.partitionColumnList && state.partitionColumnList.length" class="table-attrs">
         <p class="attr-title">
           {{ $t('partitionKey') }}
         </p>
-        <a-table
-          row-key="field"
-          :columns="partitionColumns"
-          :data-source="state.partitionColumnList"
-          :pagination="false"
-        />
+        <el-table row-key="field" :data="state.partitionColumnList">
+          <el-table-column v-for="column in partitionColumns" :key="column.dataIndex" v-bind="tableColumnProps(column, partitionColumns)" />
+        </el-table>
       </div>
       <div class="table-attrs">
         <p class="attr-title">
           {{ $t('schema') }}
         </p>
-        <a-table
-          row-key="field"
-          :columns="primaryColumns"
-          :data-source="state.schema"
-          :pagination="false"
-        />
+        <el-table row-key="field" :data="state.schema">
+          <el-table-column v-for="column in primaryColumns" :key="column.dataIndex" v-bind="tableColumnProps(column, primaryColumns)">
+            <template v-if="column.dataIndex === 'required'" #default="{ row }">
+              {{ String(row.required) }}
+            </template>
+          </el-table-column>
+        </el-table>
       </div>
     </div>
-    <div class="right-content">
+    <div v-if="!initialDetailLoading" class="right-content">
       <div v-if="state.changeMetrics && state.changeMetrics.length" class="table-attrs">
         <p class="attr-title">
           {{ $t('changeTableMetrics') }}
         </p>
-        <a-table
-          :columns="metricsColumns"
-          :data-source="state.changeMetrics"
-          :pagination="false"
-        />
+        <el-table :data="state.changeMetrics">
+          <el-table-column v-for="column in metricsColumns" :key="column.dataIndex" v-bind="tableColumnProps(column, metricsColumns)" />
+        </el-table>
       </div>
       <div class="table-attrs">
         <p class="attr-title">
           {{ $t('baseTableMetrics') }}
         </p>
-        <a-table
-          :columns="metricsColumns"
-          :data-source="state.baseMetrics"
-          :pagination="false"
-        />
+        <el-table :data="state.baseMetrics">
+          <el-table-column v-for="column in metricsColumns" :key="column.dataIndex" v-bind="tableColumnProps(column, metricsColumns)" />
+        </el-table>
         <div v-if="fileStatisticsView" class="file-statistics-note" role="status" aria-live="polite" data-testid="file-statistics">
           <div class="file-statistics-header">
             <span
@@ -304,8 +301,8 @@ const propertiesColumns: IColumns[] = shallowReactive([
                 'is-awaiting': state.fileStatistics?.status === 'STALE' || state.fileStatistics?.status === 'PENDING',
               }"
             >{{ $t(fileStatisticsView.statusKey) }}</span>
-            <a-tooltip :trigger="['hover', 'focus']">
-              <template #title>
+            <el-tooltip :trigger="['hover', 'focus']">
+              <template #content>
                 <p>{{ $t('fileStatisticsScope') }}</p>
                 <p v-if="fileStatisticsView.evaluatedAtMillis">
                   {{ $t('fileStatisticsAsOf', { time: dateFormat(fileStatisticsView.evaluatedAtMillis) }) }}
@@ -317,9 +314,9 @@ const propertiesColumns: IColumns[] = shallowReactive([
                 </p>
               </template>
               <button type="button" class="file-statistics-explanation" :aria-label="$t('fileStatisticsExplanation')">
-                <QuestionCircleOutlined />
+                <QuestionFilled class="amoro-icon" />
               </button>
-            </a-tooltip>
+            </el-tooltip>
           </div>
           <p v-for="notice in fileStatisticsNotices" :key="notice">
             {{ $t(notice) }}
@@ -336,14 +333,12 @@ const propertiesColumns: IColumns[] = shallowReactive([
         <p class="attr-title">
           {{ $t('properties') }}
         </p>
-        <a-table
-          :columns="propertiesColumns"
-          :data-source="state.properties"
-          :pagination="false"
-        />
+        <el-table :data="state.properties">
+          <el-table-column v-for="column in propertiesColumns" :key="column.dataIndex" v-bind="tableColumnProps(column, propertiesColumns)" />
+        </el-table>
       </div>
     </div>
-    <u-loading v-if="state.detailLoading" />
+    <u-loading v-if="state.detailLoading" :loading-text="$t('loading')" />
   </div>
 </template>
 
@@ -385,26 +380,32 @@ const propertiesColumns: IColumns[] = shallowReactive([
 }
 
 .table-detail {
+  position: relative;
   display: flex;
-  column-gap: 24px;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 16px 20px;
+  padding-block-start: 12px;
+
+  &.is-initial-loading {
+    min-height: 160px;
+  }
 
   .left-content,
   .right-content {
-    padding: 0 0 12px;
-    flex-shrink: 0;
+    display: flex;
     flex-direction: column;
+    gap: 16px;
+    min-width: 0;
+    max-width: 100%;
   }
 
   .left-content {
-    flex: 2;
+    flex: 2 1 380px;
   }
 
   .right-content {
-    flex: 1;
-  }
-
-  .table-attrs {
-    margin-top: 16px;
+    flex: 1 1 256px;
   }
 
   .attr-title {
@@ -412,7 +413,13 @@ const propertiesColumns: IColumns[] = shallowReactive([
     line-height: 24px;
     font-weight: bold;
     color: #102048;
-    padding-bottom: 12px;
+    margin-bottom: 8px;
+  }
+
+  :deep(.el-table .cell) {
+    padding-inline: 8px;
+    word-break: normal;
+    overflow-wrap: anywhere;
   }
 }
 </style>

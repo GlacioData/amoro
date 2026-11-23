@@ -17,11 +17,9 @@
   */
 
 /// <reference types="vite/client" />
-// v2.0.1 ships client.d.ts but its exports map does not expose the client subpath.
-// Load the upstream declaration directly while keeping bundler resolution strict.
-// Source: https://www.typescriptlang.org/docs/handbook/triple-slash-directives.html#-reference-path-
-/// <reference path="../node_modules/vite-plugin-svg-icons/client.d.ts" />
-
 // ECharts supplies this side-effect theme registration as JavaScript without declarations.
 // Source: https://echarts.apache.org/handbook/en/basics/release-note/v6-upgrade-guide/
 declare module 'echarts/theme/v5' {}
+
+// Element Plus ships this side-effect style entry without declarations.
+declare module 'element-plus/es/components/message-box/style/css' {}

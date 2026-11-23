@@ -19,18 +19,19 @@ limitations under the License.
 <script lang="ts" setup>
 import { computed, onMounted, reactive, ref, shallowReactive } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { useRouter } from 'vue-router'
-import { Modal } from 'ant-design-vue'
-import type { TableProps } from 'ant-design-vue'
+import type { TableInstance } from 'element-plus'
+import DashboardPagination from '@/components/DashboardPagination.vue'
+import { tableColumnProps } from '@/utils/table'
+import { confirmAction } from '@/utils/ui-feedback'
 import type { IIOptimizeGroupItem, ILableAndValue, IOptimizeResourceTableItem, IOptimizeTableItem } from '@/types/common.type'
 import { getOptimizerAction, getOptimizerTableList, getResourceGroupsListAPI, releaseResource } from '@/services/optimize.service'
+import { useMediaQuery } from '@/hooks/useMediaQuery'
 import { usePagination } from '@/hooks/usePagination'
 import { usePlaceholder } from '@/hooks/usePlaceholder'
 import { bytesToSize, formatMS2DisplayTime, formatMS2Time } from '@/utils'
-import { getTableMaxWidth } from '@/utils/table'
 
 const { t } = useI18n()
-const router = useRouter()
+const compact = useMediaQuery('(max-width: 760px)')
 
 const STATUS_CONFIG = shallowReactive({
   pending: { title: 'pending', color: '#ffcc00' },
@@ -49,44 +50,36 @@ const optimizerGroupList = ref<ILableAndValue[]>([])
 type ServerSortField = 'duration' | 'quota'
 type ServerSortOrder = 'asc' | 'desc'
 
+const tableRef = ref<TableInstance>()
 const sortBy = ref<ServerSortField>()
 const sortOrder = ref<ServerSortOrder>()
 
-function columnSortOrder(field: ServerSortField) {
-  if (sortBy.value !== field) {
-    return null
-  }
-  return sortOrder.value === 'asc' ? 'ascend' : 'descend'
-}
-
 const columns = computed(() => [
-  { dataIndex: 'tableName', title: t('table'), width: 300, scopedSlots: { customRender: 'tableName' } },
-  { dataIndex: 'groupName', title: t('optimizerGroup'), width: 180, ellipsis: true },
-  { dataIndex: 'healthScore', title: t('healthScore'), width: 140, ellipsis: true },
-  { dataIndex: 'optimizeStatus', title: t('optimizingStatus'), width: 150, ellipsis: true },
+  { dataIndex: 'tableName', title: t('table'), minWidth: compact.value ? 208 : 300 },
+  { dataIndex: 'groupName', title: t('optimizerGroup'), minWidth: 128, ellipsis: true },
+  { dataIndex: 'healthScore', title: t('healthScore'), minWidth: 108, align: 'right' as const, ellipsis: true },
+  { dataIndex: 'optimizeStatus', title: t('optimizingStatus'), minWidth: 140, ellipsis: true },
   {
     dataIndex: 'duration',
     key: 'duration',
     title: t('duration'),
-    width: 150,
+    minWidth: 104,
+    align: 'right' as const,
     ellipsis: true,
     sorter: true,
-    sortDirections: ['descend', 'ascend'],
-    sortOrder: columnSortOrder('duration'),
   },
-  { dataIndex: 'fileCount', title: t('fileCount'), width: 150, ellipsis: true },
-  { dataIndex: 'fileSizeDesc', title: t('fileSize'), width: 150, ellipsis: true },
+  { dataIndex: 'fileCount', title: t('fileCount'), minWidth: 88, align: 'right' as const, ellipsis: true },
+  { dataIndex: 'fileSizeDesc', title: t('fileSize'), minWidth: 88, align: 'right' as const, ellipsis: true },
   {
     dataIndex: 'quota',
     key: 'quota',
     title: t('quota'),
-    width: 150,
+    minWidth: 84,
+    align: 'right' as const,
     ellipsis: true,
     sorter: true,
-    sortDirections: ['descend', 'ascend'],
-    sortOrder: columnSortOrder('quota'),
   },
-  { dataIndex: 'quotaOccupation', title: t('occupation'), width: 120, ellipsis: true },
+  { dataIndex: 'quotaOccupation', title: t('occupation'), minWidth: 104, align: 'right' as const, ellipsis: true },
 ])
 
 const pagination = reactive(usePagination())
@@ -162,7 +155,7 @@ function releaseModal(record: any) {
   if (record.container === 'external') {
     return
   }
-  Modal.confirm({
+  confirmAction({
     title: t('releaseOptModalTitle'),
     onOk: () => {
       releaseJob(record)
@@ -182,43 +175,33 @@ async function releaseJob(record: IOptimizeResourceTableItem) {
     releaseLoading.value = false
   }
 }
-const changeTable: TableProps<IOptimizeTableItem>['onChange'] = (
-  { current = pagination.current, pageSize = pagination.pageSize },
-  _filters,
-  sorter,
-) => {
-  const activeSorter = Array.isArray(sorter) ? sorter[0] : sorter
-  const nextSortBy
-    = activeSorter?.columnKey === 'duration' || activeSorter?.columnKey === 'quota'
-      ? activeSorter.columnKey
-      : undefined
-  const nextSortOrder
-    = activeSorter?.order === 'ascend'
-      ? 'asc'
-      : activeSorter?.order === 'descend'
-        ? 'desc'
-        : undefined
-  const normalizedSortBy = nextSortOrder ? nextSortBy : undefined
-  const pageSizeChanged = pageSize !== pagination.pageSize
-  const sortChanged = normalizedSortBy !== sortBy.value || nextSortOrder !== sortOrder.value
-
-  sortBy.value = normalizedSortBy
-  sortOrder.value = nextSortOrder
+function changeTable({ current, pageSize }: { current: number, pageSize: number }) {
+  pagination.current = pageSize !== pagination.pageSize ? 1 : current
   pagination.pageSize = pageSize
-  pagination.current = pageSizeChanged || sortChanged ? 1 : current
   getTableList()
 }
 
-function goTableDetail(record: IOptimizeTableItem) {
+function changeSort({ prop, order }: { prop: string, order: 'ascending' | 'descending' | null }) {
+  const field = order && (prop === 'duration' || prop === 'quota') ? prop : undefined
+  const direction = field ? (order === 'ascending' ? 'asc' : 'desc') : undefined
+  if (field === sortBy.value && direction === sortOrder.value)
+    return
+  sortBy.value = field
+  sortOrder.value = direction
+  pagination.current = 1
+  getTableList()
+}
+
+function tableDetailLocation(record: IOptimizeTableItem) {
   const { catalog, database, tableName } = record.tableIdentifier
-  router.push({
+  return {
     path: '/tables',
     query: {
       catalog,
       db: database,
       table: tableName,
     },
-  })
+  }
 }
 
 function reset() {
@@ -231,6 +214,7 @@ function reset() {
   durationMinMinutes.value = undefined
   sortBy.value = undefined
   sortOrder.value = undefined
+  tableRef.value?.clearSort()
   refresh(true)
 }
 
@@ -244,30 +228,38 @@ onMounted(async () => {
 <template>
   <div class="list-wrap">
     <div class="filter-form" role="search" :aria-label="t('search')">
-      <a-select
-        v-model:value="optimizerGroup" allow-clear :placeholder="t('optimizerGroup')" :options="optimizerGroupList"
+      <el-select
+        v-model="optimizerGroup"
+        clearable
+        :placeholder="t('optimizerGroup')"
+        :options="optimizerGroupList"
         class="filter-control"
       />
 
-      <a-input
-        v-model:value="dbSearchInput"
+      <el-input
+        v-model="dbSearchInput"
         :placeholder="placeholder.filterDBPh"
         class="filter-control"
       />
 
-      <a-input
-        v-model:value="tableSearchInput"
+      <el-input
+        v-model="tableSearchInput"
         :placeholder="placeholder.filterTablePh"
         class="filter-control"
       />
 
-      <a-select
-        v-model:value="actions" allow-clear :placeholder="t('action')" :options="actionOptions" mode="multiple"
+      <el-select
+        v-model="actions"
+        clearable
+        :placeholder="t('action')"
+        :options="actionOptions"
+        multiple
         class="filter-control"
       />
 
-      <a-input-number
-        v-model:value="healthScoreMin"
+      <el-input-number
+        v-model="healthScoreMin"
+        controls-position="right"
         :min="0"
         :max="100"
         :precision="0"
@@ -276,8 +268,9 @@ onMounted(async () => {
         class="filter-control"
       />
 
-      <a-input-number
-        v-model:value="healthScoreMax"
+      <el-input-number
+        v-model="healthScoreMax"
+        controls-position="right"
         :min="0"
         :max="100"
         :precision="0"
@@ -286,8 +279,9 @@ onMounted(async () => {
         class="filter-control"
       />
 
-      <a-input-number
-        v-model:value="durationMinMinutes"
+      <el-input-number
+        v-model="durationMinMinutes"
+        controls-position="right"
         :min="0"
         :precision="0"
         :placeholder="t('durationMinMinutes')"
@@ -296,62 +290,54 @@ onMounted(async () => {
       />
 
       <div class="filter-actions">
-        <a-button type="primary" @click="refresh(true)">
+        <el-button type="primary" @click="refresh(true)">
           {{ t('search') }}
-        </a-button>
-        <a-button @click="reset">
+        </el-button>
+        <el-button @click="reset">
           {{ t('reset') }}
-        </a-button>
+        </el-button>
       </div>
     </div>
-    <a-table
-      :columns="columns"
-      :data-source="dataSource"
-      :pagination="pagination"
-      :loading="loading"
-      :scroll="{ x: getTableMaxWidth(columns) }"
-      class="ant-table-common"
-      @change="changeTable"
-    >
-      <template #bodyCell="{ column, record }">
-        <template v-if="column.dataIndex === 'tableName'">
-          <a-typography-text
-            style="display: block;"
-            :ellipsis="{
-              tooltip: record.tableName,
-            }"
-            class="primary-link"
-            :content="record.tableName"
-            @click="goTableDetail(record)"
-          />
-        </template>
-        <template v-if="column.dataIndex === 'duration'">
-          <span :title="record.durationDesc">
-            {{ formatMS2Time(record.duration || 0) }}
-          </span>
-        </template>
-        <template v-if="column.dataIndex === 'healthScore'">
-          {{ record.healthScore >= 0 ? record.healthScore : '-' }}
-        </template>
-        <template v-if="column.dataIndex === 'quotaOccupation'">
-          <span :title="record.quotaOccupationDesc">
-            {{ record.quotaOccupationDesc }}
-          </span>
-        </template>
-        <template v-if="column.dataIndex === 'optimizeStatus'">
-          <span
-            :style="{ 'background-color': (STATUS_CONFIG[record.optimizeStatus as keyof typeof STATUS_CONFIG] as any)?.color }"
-            class="status-icon"
-          />
-          <span>{{ record.optimizeStatus }}</span>
-        </template>
-        <template v-if="column.dataIndex === 'operation'">
-          <span class="primary-link" :class="{ disabled: record.container === 'external' }" @click="releaseModal(record)">
-            {{ t('release') }}
-          </span>
-        </template>
+    <el-table ref="tableRef" v-loading="loading" class="dashboard-table" scrollbar-always-on :data="dataSource" @sort-change="changeSort">
+      <template #empty>
+        <el-empty :image-size="48" />
       </template>
-    </a-table>
+      <el-table-column v-for="column in columns" :key="column.dataIndex" v-bind="tableColumnProps(column, columns)" :align="column.align">
+        <template v-if="column.dataIndex === 'duration' || column.dataIndex === 'healthScore' || column.dataIndex === 'operation' || column.dataIndex === 'optimizeStatus' || column.dataIndex === 'quotaOccupation' || column.dataIndex === 'tableName'" #default="{ row: record }">
+          <template v-if="column.dataIndex === 'tableName'">
+            <router-link :to="tableDetailLocation(record)" :title="record.tableName" class="table-name-link">
+              {{ record.tableName }}
+            </router-link>
+          </template>
+          <template v-if="column.dataIndex === 'duration'">
+            <span :title="record.durationDesc">
+              {{ formatMS2Time(record.duration || 0) }}
+            </span>
+          </template>
+          <template v-if="column.dataIndex === 'healthScore'">
+            {{ record.healthScore >= 0 ? record.healthScore : '-' }}
+          </template>
+          <template v-if="column.dataIndex === 'quotaOccupation'">
+            <span :title="record.quotaOccupationDesc">
+              {{ record.quotaOccupationDesc }}
+            </span>
+          </template>
+          <template v-if="column.dataIndex === 'optimizeStatus'">
+            <span
+              :style="{ 'background-color': (STATUS_CONFIG[record.optimizeStatus as keyof typeof STATUS_CONFIG] as any)?.color }"
+              class="status-icon"
+            />
+            <span>{{ record.optimizeStatus }}</span>
+          </template>
+          <template v-if="column.dataIndex === 'operation'">
+            <span class="primary-link" :class="{ disabled: record.container === 'external' }" @click="releaseModal(record)">
+              {{ t('release') }}
+            </span>
+          </template>
+        </template>
+      </el-table-column>
+    </el-table>
+    <DashboardPagination v-if="pagination.total > 0" :pagination="pagination" @change="changeTable" />
   </div>
   <u-loading v-if="releaseLoading" />
 </template>
@@ -361,7 +347,7 @@ onMounted(async () => {
 
   .filter-form {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
     align-items: start;
     gap: 8px;
     width: 100%;
@@ -373,13 +359,38 @@ onMounted(async () => {
     min-width: 0;
   }
 
+  :deep(.el-input-number .el-input__inner) {
+    text-align: left;
+  }
+
   .filter-actions {
     display: flex;
     gap: 8px;
 
-    .ant-btn {
+    .el-button {
       flex: 1;
       min-width: 0;
+    }
+
+    .el-button + .el-button {
+      margin-inline-start: 0;
+    }
+  }
+
+  :deep(.el-table .cell) {
+    padding-inline: 8px;
+  }
+
+  .table-name-link {
+    display: block;
+    overflow: hidden;
+    color: @primary-color;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+
+    &:hover,
+    &:focus-visible {
+      text-decoration: underline;
     }
   }
 

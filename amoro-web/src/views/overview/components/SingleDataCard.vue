@@ -21,15 +21,16 @@ const props = defineProps<{ title: string, value: string }>()
 </script>
 
 <template>
-  <a-card class="single-data">
-    <template #title>
+  <el-card class="single-data">
+    <template #header>
       <span class="card-title">{{ props.title }}</span>
     </template>
-    <a-statistic
-      :value="props.value" :value-style="{ color: '#07A7F0', fontSize: '28px' }"
+    <el-statistic
+      :value="props.value"
+      :value-style="{ color: '#07A7F0', fontSize: '28px' }"
       style="margin-right: 50px"
     />
-  </a-card>
+  </el-card>
 </template>
 
 <style scoped>

@@ -17,7 +17,6 @@ limitations under the License.
 / -->
 
 <script lang="ts" setup>
-import { Modal as AModal } from 'ant-design-vue'
 import { ref } from 'vue'
 
 const props = defineProps<{ msg: string }>()
@@ -28,18 +27,17 @@ const open = ref(true)
 </script>
 
 <template>
-  <AModal
-    v-model:open="open"
+  <el-dialog
+    v-model="open"
     :width="560"
     :title="$t('errorMessage')"
-    :footer="null"
     class="upgrade-error"
-    @cancel="emit('cancel')"
+    @update:model-value="(open: boolean) => { if (!open) emit('cancel') }"
   >
     <p class="msg">
       {{ props.msg }}
     </p>
-  </AModal>
+  </el-dialog>
 </template>
 
 <style lang="less" scoped>

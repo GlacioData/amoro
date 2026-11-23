@@ -23,7 +23,6 @@ import { RecycleScroller } from 'vue-virtual-scroller'
 // since v3 the CSS entry moved from dist/vue-virtual-scroller.css to index.css
 // Source: https://vue-virtual-scroller.netlify.app/guide/
 import 'vue-virtual-scroller/index.css'
-import { Empty as AEmpty } from 'ant-design-vue'
 import type { IMap } from '@/types/common.type'
 import { tableTypeIconMap } from '@/types/common.type'
 
@@ -64,7 +63,6 @@ export default defineComponent ({
     }
 
     return {
-      simpleImage: AEmpty.PRESENTED_IMAGE_SIMPLE,
       tableTypeIconMap,
       handleMouseEnter,
       handleClickTable,
@@ -90,7 +88,7 @@ export default defineComponent ({
       </p>
     </div>
   </RecycleScroller>
-  <a-empty v-if="!items.length && !loading" class="theme-dark" :image="simpleImage" />
+  <el-empty v-if="!items.length && !loading" class="theme-dark" :image-size="64" />
 </template>
 
 <style lang="less" scoped>

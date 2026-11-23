@@ -50,22 +50,28 @@ function select(value: unknown) {
 </script>
 
 <template>
-  <a-select
+  <el-select
     id="tag-create-snapshot"
-    :value="value || undefined" :options="options" :loading="picker.state.loading" :disabled="disabled"
-    :placeholder="$t('tagChooseSnapshot')" :aria-label="$t('snapshotId')" :not-found-content="picker.state.loading ? $t('loading') : $t('tagNoSnapshots')"
-    class="snapshot-select" @change="select"
+    :model-value="value || undefined"
+    :options="options"
+    :loading="picker.state.loading"
+    :disabled="disabled"
+    :placeholder="$t('tagChooseSnapshot')"
+    :aria-label="$t('snapshotId')"
+    :no-data-text="picker.state.loading ? $t('loading') : $t('tagNoSnapshots')"
+    class="snapshot-select"
+    @change="select"
   />
-  <a-button v-if="picker.state.hasMore && !picker.state.error" type="link" :loading="picker.state.loading" :disabled="disabled || picker.state.loading" class="snapshot-more" @click="picker.load">
+  <el-button v-if="picker.state.hasMore && !picker.state.error" link type="primary" :loading="picker.state.loading" :disabled="disabled || picker.state.loading" class="snapshot-more" @click="picker.load">
     {{ $t('tagSnapshotMore') }}
-  </a-button>
-  <a-alert v-if="picker.state.error" type="error" :message="$t('tagSnapshotReadFailed')" show-icon class="snapshot-error">
-    <template #action>
-      <a-button size="small" :disabled="disabled || picker.state.loading" @click="picker.load">
+  </el-button>
+  <el-alert v-if="picker.state.error" type="error" :title="$t('tagSnapshotReadFailed')" show-icon class="snapshot-error" :closable="false">
+    <template #default>
+      <el-button size="small" :disabled="disabled || picker.state.loading" @click="picker.load">
         {{ $t('tagSnapshotRetry') }}
-      </a-button>
+      </el-button>
     </template>
-  </a-alert>
+  </el-alert>
 </template>
 
 <style scoped>

@@ -21,8 +21,8 @@ import { onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 
-import { Empty as AEmpty, Modal } from 'ant-design-vue'
 import Detail from './Detail.vue'
+import { confirmAction } from '@/utils/ui-feedback'
 import { getCatalogList } from '@/services/table.service'
 import type { ICatalogItem } from '@/types/common.type'
 import { usePageScroll } from '@/hooks/usePageScroll'
@@ -41,7 +41,6 @@ const isEdit = ref<boolean>(false)
 const NEW_CATALOG = 'new catalog'
 const loading = ref<boolean>(false)
 const writable = ref<boolean>(canManageCatalog())
-const simpleImage = AEmpty.PRESENTED_IMAGE_SIMPLE
 
 async function getCatalogs() {
   try {
@@ -152,7 +151,7 @@ onMounted(async () => {
   initSelectCatalog()
 })
 function leaveConfirm(cb?: () => void) {
-  Modal.confirm({
+  confirmAction({
     title: t('leavePageModalTitle'),
     content: t('leavePageModalContent'),
     okText: t('leave'),
@@ -185,12 +184,12 @@ onBeforeRouteLeave((_to, _form, next) => {
             {{ item.catalogName }}
           </li>
         </ul>
-        <a-button v-if="writable" :disabled="curCatalog.catalogName === NEW_CATALOG" class="add-btn" @click="addCatalog">
+        <el-button v-if="writable" :disabled="curCatalog.catalogName === NEW_CATALOG" class="add-btn" @click="addCatalog">
           +
-        </a-button>
+        </el-button>
       </div>
       <div class="catalog-detail">
-        <AEmpty v-if="!catalogs.length && !loading" :image="simpleImage" class="detail-empty" />
+        <el-empty v-if="!catalogs.length && !loading" :image-size="64" class="detail-empty" />
         <Detail v-else :is-edit="isEdit" @update-edit="updateEdit" @update-catalogs="updateCatalogs" />
       </div>
     </div>
@@ -249,19 +248,31 @@ onBeforeRouteLeave((_to, _form, next) => {
   }
   .catalog-detail {
     display: flex;
+    min-width: 0;
     flex: 1;
     .detail-empty {
       width: 100%;
       display: flex;
       flex-direction: column;
       justify-content: center;
-      :deep(.ant-empty-image) {
+      :deep(.el-empty__image) {
         height: 100px;
         svg {
           width: 120px;
         }
       }
     }
+  }
+}
+
+@media (max-width: 760px) {
+  .catalogs-wrap {
+    display: block;
+    height: auto;
+    padding: 12px;
+    .catalog-list-left { width: 100%; height: auto; }
+    .catalog-list { max-height: 124px; }
+    .catalog-detail { margin-top: 12px; }
   }
 }
 </style>

@@ -16,15 +16,12 @@
   * limitations under the License.
   */
 
-import path from 'node:path'
-import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import { vitePluginFakeServer } from 'vite-plugin-fake-server'
-import { createSvgIconsPlugin } from 'vite-plugin-svg-icons'
 import ViteComponents from 'unplugin-vue-components/vite'
-import { AntDesignVueResolver } from 'unplugin-vue-components/resolvers'
+import { ElementPlusResolver } from 'unplugin-vue-components/resolvers'
 import vueDevTools from 'vite-plugin-vue-devtools'
 
 const css = {
@@ -67,9 +64,11 @@ export default defineConfig({
             { name: 'vue', test: /node_modules[\\/](?:@vue|vue|vue-i18n|vue-router|vue-virtual-scroller)[\\/]/ },
             { name: 'dayjs', test: /node_modules[\\/]dayjs[\\/]/ },
             { name: 'axios', test: /node_modules[\\/]axios[\\/]/ },
-            { name: 'antd', test: /node_modules[\\/](?:ant-design-vue|@ant-design)[\\/]/ },
             { name: 'pinia', test: /node_modules[\\/]pinia[\\/]/ },
             { name: 'echarts', test: /node_modules[\\/]echarts[\\/]/ },
+            // The resolver emits a side-effect import per Element Plus component.
+            // Group only those styles to avoid many small requests on the Dashboard.
+            { name: 'element-plus-styles', test: /node_modules[\\/]element-plus[\\/](?:theme-chalk[\\/]|es[\\/]components[\\/][^\\/]+[\\/]style[\\/])/ },
           ],
         },
       },
@@ -83,15 +82,9 @@ export default defineConfig({
       infixName: false,
       enableProd: true,
     }),
-    createSvgIconsPlugin({
-      iconDirs: [path.resolve(process.cwd(), 'src/assets/icons/svg')],
-    }),
     ViteComponents({
       resolvers: [
-        AntDesignVueResolver({
-          importStyle: false,
-          resolveIcons: true,
-        }),
+        ElementPlusResolver({ importStyle: 'css' }),
       ],
     }),
     vueDevTools(),

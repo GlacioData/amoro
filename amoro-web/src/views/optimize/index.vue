@@ -179,10 +179,10 @@ export default defineComponent({
     padding: 0 12px;
     border: 1px solid #e5e5e5;
   }
-  :deep(.ant-tabs-content-holder) {
+  :deep(.el-tabs__content) {
     padding: 0 24px;
   }
-  :deep(.ant-tabs-nav) {
+  :deep(.el-tabs__header) {
     padding: 0 12px;
   }
   .table-name {

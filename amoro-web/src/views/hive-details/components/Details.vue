@@ -17,20 +17,21 @@ limitations under the License.
 / -->
 
 <script setup lang="ts">
-import { shallowReactive } from 'vue'
+import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { tableColumnProps } from '@/utils/table'
 import type { DetailColumnItem, IColumns } from '@/types/common.type'
 
 const props = defineProps<{ schema: DetailColumnItem[], partitionColumnList: DetailColumnItem[] }>()
 
 const { t } = useI18n()
 
-const primaryColumns: IColumns[] = shallowReactive([
+const primaryColumns = computed<IColumns[]>(() => [
   { title: t('field'), dataIndex: 'field', width: '30%' },
   { title: t('type'), dataIndex: 'type', width: '30%' },
   { title: t('description'), dataIndex: 'comment', ellipsis: true },
 ])
-const partitionColumns: IColumns[] = shallowReactive([
+const partitionColumns = computed<IColumns[]>(() => [
   { title: t('field'), dataIndex: 'field', width: '30%' },
   { title: t('type'), dataIndex: 'type', width: '30%' },
   { title: t('description'), dataIndex: 'comment', ellipsis: true },
@@ -44,23 +45,17 @@ const partitionColumns: IColumns[] = shallowReactive([
         <p class="attr-title">
           {{ $t('partitionKey') }}
         </p>
-        <a-table
-          row-key="field"
-          :columns="partitionColumns"
-          :data-source="props.partitionColumnList"
-          :pagination="false"
-        />
+        <el-table row-key="field" :data="props.partitionColumnList">
+          <el-table-column v-for="column in partitionColumns" :key="column.dataIndex" v-bind="tableColumnProps(column, partitionColumns)" />
+        </el-table>
       </div>
       <div class="table-attrs">
         <p class="attr-title">
           {{ $t('schema') }}
         </p>
-        <a-table
-          row-key="field"
-          :columns="primaryColumns"
-          :data-source="props.schema"
-          :pagination="false"
-        />
+        <el-table row-key="field" :data="props.schema">
+          <el-table-column v-for="column in primaryColumns" :key="column.dataIndex" v-bind="tableColumnProps(column, primaryColumns)" />
+        </el-table>
       </div>
     </div>
   </div>

@@ -18,8 +18,8 @@ limitations under the License.
 
 <script lang="ts" setup>
 import { onMounted, reactive, ref } from 'vue'
-import { Modal as AModal, message } from 'ant-design-vue'
 import { useI18n } from 'vue-i18n'
+import { message } from '@/utils/ui-feedback'
 import { usePlaceholder } from '@/hooks/usePlaceholder'
 import type { IIOptimizeGroupItem } from '@/types/common.type'
 import {
@@ -72,7 +72,7 @@ function handleCancel() {
 const formRef = ref()
 const propertiesRef = ref()
 function handleOk() {
-  formRef.value.validateFields().then(async () => {
+  formRef.value.validate().then(async () => {
     try {
       const properties = await propertiesRef.value.getProperties()
       const params = {
@@ -108,39 +108,49 @@ onMounted(() => {
 </script>
 
 <template>
-  <AModal
-    :open="true"
+  <el-dialog
+    :model-value="true"
     :title="edit ? $t('editGroup') : $t('addGroup')"
-    :confirm-loading="confirmLoading"
-    :closable="false"
+    :show-close="false"
     class="group-modal"
-    @ok="handleOk"
-    @cancel="handleCancel"
+    :width="520"
+    @update:model-value="(open: boolean) => { if (!open) handleCancel() }"
   >
-    <a-form ref="formRef" :model="formState" class="label-120">
-      <a-form-item name="name" :label="$t('name')" :rules="[{ required: true, message: `${placeholder.groupNamePh}` }]">
-        <a-input v-model:value="formState.name" :placeholder="placeholder.groupNamePh" :disabled="edit" />
-      </a-form-item>
-      <a-form-item
-        name="container" :label="$t('container')"
+    <el-form ref="formRef" :model="formState" class="label-120" label-position="left">
+      <el-form-item prop="name" :label="$t('name')" :rules="[{ required: true, message: `${placeholder.groupNamePh}` }]">
+        <el-input v-model="formState.name" :placeholder="placeholder.groupNamePh" :disabled="edit" />
+      </el-form-item>
+      <el-form-item
+        prop="container"
+        :label="$t('container')"
         :rules="[{ required: true, message: `${placeholder.groupContainer}` }]"
       >
-        <a-select
-          v-model:value="formState.container" :show-search="true" :options="selectList.containerList"
+        <el-select
+          v-model="formState.container"
+          :filterable="true"
+          :options="selectList.containerList"
           :placeholder="placeholder.groupContainer"
         />
-      </a-form-item>
-      <a-form-item :label="$t('properties')" />
-      <a-form-item>
+      </el-form-item>
+      <el-form-item :label="$t('properties')" />
+      <el-form-item>
         <Properties ref="propertiesRef" :properties-obj="formState.properties" :is-edit="true" />
-      </a-form-item>
-    </a-form>
-  </AModal>
+      </el-form-item>
+    </el-form>
+    <template #footer>
+      <el-button :disabled="confirmLoading" @click="handleCancel">
+        {{ $t('cancel') }}
+      </el-button>
+      <el-button type="primary" :loading="confirmLoading" @click="handleOk">
+        {{ $t('ok') }}
+      </el-button>
+    </template>
+  </el-dialog>
 </template>
 
 <style lang="less">
 .group-modal {
-  .ant-modal-body {
+  .el-dialog__body {
     max-height: 600px;
     overflow: auto;
   }

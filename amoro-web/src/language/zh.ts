@@ -115,6 +115,8 @@ export default {
   latestOperations: '最近操作',
   catalogs: '目录',
   catalog: '目录',
+  expandNavigation: '展开导航',
+  collapseNavigation: '收起导航',
   tables: '表',
   optimizing: '优化',
   settings: '设置',

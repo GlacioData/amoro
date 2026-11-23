@@ -69,15 +69,17 @@ export default defineComponent({
   display: flex;
   width: 100%;
   height: 100%;
-  min-width: 1200px;
   .right-content {
     display: flex;
     flex: 1;
+    min-width: 0;
+    min-height: 0;
     flex-direction: column;
     transition: width 0.3s;
     overflow: hidden;
     .content {
-      height: calc(100vh - 48px);
+      flex: 1;
+      min-height: 0;
       overflow: hidden;
     }
   }

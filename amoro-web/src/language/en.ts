@@ -115,6 +115,8 @@ export default {
   latestOperations: 'Latest Operations',
   catalogs: 'Catalogs',
   catalog: 'Catalog',
+  expandNavigation: 'Expand navigation',
+  collapseNavigation: 'Collapse navigation',
   tables: 'Tables',
   optimizing: 'Optimizing',
   settings: 'Settings',

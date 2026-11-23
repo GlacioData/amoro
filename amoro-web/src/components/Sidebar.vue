@@ -17,11 +17,13 @@
  / -->
 
 <script lang="ts">
-import { computed, defineComponent, nextTick, reactive, toRefs, watchEffect } from 'vue'
+import { Expand, Fold } from '@element-plus/icons-vue'
+import { computed, defineComponent, nextTick, reactive, ref, toRefs, watchEffect } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import useStore from '@/store/index'
 import { getQueryString } from '@/utils'
+import { useMediaQuery } from '@/hooks/useMediaQuery'
 import {
   canManagePlatform,
   canViewCatalog,
@@ -39,6 +41,7 @@ interface MenuItem {
 
 export default defineComponent({
   name: 'Sidebar',
+  components: { Expand, Fold },
   setup() {
     const { t } = useI18n()
     const router = useRouter()
@@ -46,9 +49,11 @@ export default defineComponent({
     const store = useStore()
 
     const state = reactive({
-      collapsed: false,
       selectedKeys: [] as string[],
     })
+    const preferredCollapsed = ref(false)
+    const compact = useMediaQuery('(max-width: 1024px)')
+    const collapsed = computed(() => compact.value || preferredCollapsed.value)
     const hasToken = computed(() => {
       return !!(getQueryString('token') || '')
     })
@@ -124,7 +129,7 @@ export default defineComponent({
       setCurMenu()
     })
     const toggleCollapsed = () => {
-      state.collapsed = !state.collapsed
+      preferredCollapsed.value = !preferredCollapsed.value
       // The stretch animation is 300 ms and the trigger method needs to be delayed here
       setTimeout(() => {
         window.dispatchEvent(new Event('resize'))
@@ -197,6 +202,8 @@ export default defineComponent({
 
     return {
       ...toRefs(state),
+      collapsed,
+      compact,
       hasToken,
       canAccessSystem,
       canAccessCatalog,
@@ -219,23 +226,22 @@ export default defineComponent({
       <img src="../assets/images/logo1.svg" class="logo-img" alt="">
       <img v-show="!collapsed" src="../assets/images/arctic-dashboard1.svg" class="arctic-name" alt="">
     </div>
-    <a-menu
-      v-model:selected-keys="selectedKeys"
-      mode="inline"
-      theme="dark"
-      :inline-collapsed="collapsed"
+    <el-menu
+      :default-active="String(selectedKeys[0] ?? '')"
+      :collapse="collapsed"
+      :collapse-transition="false"
     >
-      <a-menu-item v-for="item in menuList" :key="item.key" :class="{ 'active-color': (store.isShowTablesMenu && item.key === 'tables'), 'table-item-tab': item.key === 'tables' }" @click="navClick(item)">
-        <template #icon>
-          <svg-icon :icon-class="item.icon" class="svg-icon" />
+      <el-menu-item v-for="item in menuList" :key="item.key" :index="item.key" :aria-label="item.title" :class="{ 'active-color': (store.isShowTablesMenu && item.key === 'tables'), 'table-item-tab': item.key === 'tables' }" @click="navClick(item)">
+        <svg-icon :icon-class="item.icon" class="svg-icon" />
+        <template #title>
+          <span class="menu-title">{{ item.title }}</span>
         </template>
-        <span>{{ item.title }}</span>
-      </a-menu-item>
-    </a-menu>
-    <a-button type="link" class="toggle-btn" @click="toggleCollapsed">
-      <MenuUnfoldOutlined v-if="collapsed" />
-      <MenuFoldOutlined v-else />
-    </a-button>
+      </el-menu-item>
+    </el-menu>
+    <el-button v-if="!compact" link type="primary" :aria-label="$t(collapsed ? 'expandNavigation' : 'collapseNavigation')" :aria-expanded="!collapsed" class="toggle-btn" @click="toggleCollapsed">
+      <Expand v-if="collapsed" class="amoro-icon" />
+      <Fold v-else class="amoro-icon" />
+    </el-button>
   </div>
 </template>
 
@@ -247,11 +253,20 @@ export default defineComponent({
     display: flex;
     flex-direction: column;
     flex-shrink: 0;
-    :deep(.ant-menu) {
+    :deep(.el-menu) {
       height: 100%;
       width: 200px;
-      &.ant-menu-inline-collapsed {
+      border-right: 0;
+      --el-menu-bg-color: #001529;
+      --el-menu-text-color: rgba(255, 255, 255, 0.75);
+      --el-menu-active-color: #fff;
+      --el-menu-hover-bg-color: @dark-bg-color;
+      --el-menu-item-height: 40px;
+      &.el-menu--collapse {
         width: 64px;
+        .el-menu-item {
+          width: 100%;
+        }
         .logo {
           padding-left: 14px;
         }
@@ -264,14 +279,16 @@ export default defineComponent({
         }
       }
     }
-    :deep(.ant-menu-item) {
+    :deep(.el-menu-item) {
+      width: calc(100% - 8px);
       margin: 0;
+      border-radius: 8px;
       padding-left: 22px !important;
-      .ant-menu-title-content {
+      .menu-title {
         width: 100%;
         margin-left: 12px;
       }
-      &.active {
+      &.is-active {
         background-color: @primary-color;
         color: #fff;
       }
@@ -303,6 +320,7 @@ export default defineComponent({
     }
     .toggle-btn {
       position: absolute;
+      z-index: 1;
       right: -68px;
       top: 8px;
       font-size: 18px;
@@ -311,6 +329,11 @@ export default defineComponent({
     .svg-icon {
       font-size: 16px;
     }
+  }
+  @media (max-width: 760px) {
+    .side-bar :deep(.el-menu.el-menu--collapse) { width: 52px; --el-menu-item-height: 44px; }
+    .side-bar .logo { padding-inline: 14px; }
+    .side-bar :deep(.el-menu--collapse .el-menu-item) { padding-left: 16px !important; }
   }
   .tables-menu-wrap {
     position: absolute;

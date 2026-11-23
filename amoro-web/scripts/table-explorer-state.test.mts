@@ -21,29 +21,14 @@ import assert from 'node:assert/strict'
 // eslint-disable-next-line test/no-import-node-test
 import test from 'node:test'
 import {
-  clearTableCache,
-  createTableCache,
+  createBranchLoader,
   createTableSearchPlan,
-  getCachedTables,
-  getExpandedDatabaseKeys,
-  getSelectedPathExpandedKeys,
   getStoredCatalogExpandedKeys,
-  getTableCacheGeneration,
-  loadTablesWithCache,
-  refreshExpandedDatabaseNodes,
+  mergeExpandedKeys,
+  reconcileTreeNodes,
 } from '../src/views/tables/components/table-explorer-state.ts'
 
-test('selected detail path expands only its catalog without expanding the database', () => {
-  const expandedKeys = getSelectedPathExpandedKeys(
-    ['catalog:another'],
-    'sl',
-  )
-
-  assert.deepEqual(expandedKeys, ['catalog:another', 'catalog:sl'])
-  assert.equal(expandedKeys.some(key => key.includes('/db:')), false)
-})
-
-test('restores catalog expansion only so mounting a detail page cannot load tables', () => {
+test('restores catalog expansion and leaves unrelated databases unloaded', () => {
   const expandedKeys = getStoredCatalogExpandedKeys([
     'catalog:sl',
     'catalog:sl/db:sl_oki_test',
@@ -53,69 +38,60 @@ test('restores catalog expansion only so mounting a detail page cannot load tabl
   assert.deepEqual(expandedKeys, ['catalog:sl'])
 })
 
-test('caches table lists, including empty lists, until explicitly cleared', async () => {
-  const cache = createTableCache<{ name: string, type: string }>()
-  let requestCount = 0
-  const fetchTables = async () => {
-    requestCount += 1
-    return []
+test('shares pending requests for the same branch and refresh revision', async () => {
+  const load = createBranchLoader<string[]>()
+  let requests = 0
+  const fetchChildren = async () => {
+    requests += 1
+    return ['orders']
   }
 
-  assert.deepEqual(await loadTablesWithCache(cache, 'sl', 'empty_db', fetchTables), [])
-  assert.deepEqual(await loadTablesWithCache(cache, 'sl', 'empty_db', fetchTables), [])
-  assert.equal(requestCount, 1)
-
-  clearTableCache(cache)
-  assert.deepEqual(await loadTablesWithCache(cache, 'sl', 'empty_db', fetchTables), [])
-  assert.equal(requestCount, 2)
-})
-
-test('marks an in-flight result stale when a global refresh clears the cache', async () => {
-  const cache = createTableCache<{ name: string, type: string }>()
-  let resolveRequest: ((tables: { name: string, type: string }[]) => void) | undefined
-  const generation = getTableCacheGeneration(cache)
-  const pending = loadTablesWithCache(cache, 'sl', 'sl_oki_test', () =>
-    new Promise((resolve) => {
-      resolveRequest = resolve
-    }))
-
-  clearTableCache(cache)
-  resolveRequest?.([{ name: 'stale_orders', type: 'PAIMON' }])
-  await pending
-
-  assert.notEqual(getTableCacheGeneration(cache), generation)
-  assert.equal(getCachedTables(cache, 'sl', 'sl_oki_test'), undefined)
-})
-
-test('deduplicates concurrent table loads for the same database', async () => {
-  const cache = createTableCache<{ name: string, type: string }>()
-  let requestCount = 0
-  const fetchTables = async () => {
-    requestCount += 1
-    await Promise.resolve()
-    return [{ name: 'orders', type: 'PAIMON' }]
-  }
-
-  const [first, second] = await Promise.all([
-    loadTablesWithCache(cache, 'sl', 'sl_oki_test', fetchTables),
-    loadTablesWithCache(cache, 'sl', 'sl_oki_test', fetchTables),
-  ])
-
-  assert.deepEqual(first, [{ name: 'orders', type: 'PAIMON' }])
+  const first = load('catalog:sl', 0, fetchChildren)
+  const second = load('catalog:sl', 0, fetchChildren)
   assert.strictEqual(first, second)
-  assert.equal(requestCount, 1)
+  assert.deepEqual(await second, ['orders'])
+  assert.equal(requests, 1)
 })
 
-test('global refresh targets only expanded database nodes', () => {
-  assert.deepEqual(
-    getExpandedDatabaseKeys([
-      'catalog:sl',
-      'catalog:sl/db:sl_oki_test',
-      'catalog:other',
-      'catalog:other/db:archived/table:events',
-    ]),
-    ['catalog:sl/db:sl_oki_test'],
-  )
+test('allows a new revision to supersede a request and keeps its promise registered', async () => {
+  const load = createBranchLoader<string>()
+  let finishOld!: (value: string) => void
+  let finishNew!: (value: string) => void
+  const old = load('db', 0, () => new Promise(resolve => finishOld = resolve))
+  const next = load('db', 1, () => new Promise(resolve => finishNew = resolve))
+  await Promise.resolve()
+  finishOld('old')
+  await old
+  assert.strictEqual(load('db', 1, async () => 'duplicate'), next)
+  finishNew('fresh')
+  assert.equal(await next, 'fresh')
+})
+
+test('allows a failed branch request to be retried', async () => {
+  const load = createBranchLoader<string>()
+  await assert.rejects(load('db', 0, async () => {
+    throw new Error('unavailable')
+  }))
+  assert.equal(await load('db', 0, async () => 'fresh'), 'fresh')
+})
+
+test('keeps existing nodes and children when refresh returns equivalent data', () => {
+  const orders = { key: 'orders', tableType: 'PAIMON', children: ['unchanged'] }
+  const nodes = [orders]
+  assert.strictEqual(reconcileTreeNodes(nodes, [{ key: 'orders', tableType: 'PAIMON' }]), nodes)
+  const added = { key: 'new', tableType: 'ICEBERG' }
+  const updated = reconcileTreeNodes(nodes, [added, { key: 'orders', tableType: 'PAIMON' }])
+  assert.strictEqual(updated[0], added)
+  assert.strictEqual(updated[1], orders)
+  const changed = { key: 'orders', tableType: 'ICEBERG' }
+  assert.strictEqual(reconcileTreeNodes(updated, [changed])[0], changed)
+})
+
+test('applies explicit search toggles without changing the defaults', () => {
+  const autoExpanded = ['catalog:sl', 'db:open']
+  const toggles = new Map([['db:open', false], ['db:closed', true]])
+  assert.deepEqual(mergeExpandedKeys(autoExpanded, toggles), ['catalog:sl', 'db:closed'])
+  assert.deepEqual(autoExpanded, ['catalog:sl', 'db:open'])
 })
 
 test('keeps a bare table search global while targeting the current database', () => {
@@ -147,49 +123,4 @@ test('targets an explicitly qualified table without global database fan-out', ()
     createTableSearchPlan('orders', { catalog: '', database: '' }),
     { filterKeyword: 'orders' },
   )
-})
-
-test('exposes a fully loaded database cache to search without another request', async () => {
-  const cache = createTableCache<{ name: string, type: string }>()
-  const tables = [{ name: 'orders', type: 'PAIMON' }]
-
-  await loadTablesWithCache(cache, 'sl', 'sl_oki_test', async () => tables)
-
-  assert.strictEqual(getCachedTables(cache, 'sl', 'sl_oki_test'), tables)
-  assert.equal(getCachedTables(cache, 'sl', 'missing'), undefined)
-})
-
-test('refresh keeps expanded nodes visible and waits for every reload to settle', async () => {
-  const nodes = [
-    { key: 'catalog:sl/db:orders', value: 'old-orders' },
-    { key: 'catalog:sl/db:users', value: 'old-users' },
-    { key: 'catalog:sl/db:archive', value: 'old-archive' },
-  ]
-  let resolveUsers: (() => void) | undefined
-  let refreshSettled = false
-
-  const refresh = refreshExpandedDatabaseNodes(
-    nodes,
-    ['catalog:sl/db:orders', 'catalog:sl/db:users'],
-    node => node.value = '',
-    (node) => {
-      if (node.key.endsWith('orders')) {
-        return Promise.reject(new Error('orders unavailable'))
-      }
-      return new Promise<void>((resolve) => {
-        resolveUsers = resolve
-      })
-    },
-  )
-  refresh.then(() => refreshSettled = true)
-
-  await Promise.resolve()
-  assert.equal(refreshSettled, false)
-  assert.equal(nodes[0].value, 'old-orders')
-  assert.equal(nodes[1].value, 'old-users')
-  assert.equal(nodes[2].value, '')
-
-  resolveUsers?.()
-  await refresh
-  assert.equal(refreshSettled, true)
 })

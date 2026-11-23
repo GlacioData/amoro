@@ -1,0 +1,121 @@
+//
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+
+:root {
+  --el-color-primary: #1890ff;
+  --el-border-radius-base: 3px;
+}
+
+.amoro-icon {
+  width: 1em;
+  height: 1em;
+  flex: none;
+  vertical-align: -0.125em;
+}
+
+#app .el-form-item {
+  margin-bottom: 14px;
+}
+
+.label-80 { --el-form-label-width: 80px; }
+.label-100 { --el-form-label-width: 100px; }
+.label-110 { --el-form-label-width: 110px; }
+.label-120 { --el-form-label-width: 120px; }
+.label-140 { --el-form-label-width: 140px; }
+
+.el-form:not(.el-form--label-top) .el-form-item__label {
+  width: var(--el-form-label-width, auto);
+  justify-content: flex-start;
+}
+
+#app .el-table {
+  --el-table-header-bg-color: #f7f7f7;
+  --el-table-header-text-color: rgba(0, 0, 0, 0.88);
+  --el-table-text-color: rgba(0, 0, 0, 0.88);
+  --el-table-border-color: #ededed;
+
+  .el-table__cell {
+    padding-block: 8px;
+  }
+
+  .el-table__header th.el-table__cell {
+    font-weight: 600;
+  }
+}
+#app .dashboard-table .el-table__body .el-table__cell {
+  padding-block: 12px;
+}
+
+#app .el-tabs--top:not(.el-tabs--card):not(.el-tabs--border-card) > .el-tabs__header {
+  .el-tabs__item {
+    height: 44px;
+    padding-inline: 12px;
+  }
+}
+
+.theme-dark {
+  --el-fill-color-blank: @dark-bg-primary-color;
+  --el-border-color: rgba(255, 255, 255, 0.12);
+  --el-text-color-regular: #fff;
+  --el-text-color-secondary: #9ea4aa;
+  --el-text-color-placeholder: #9ea4aa;
+}
+
+.el-dialog, .el-message-box {
+  max-width: calc(100% - 32px);
+}
+
+@media (max-width: 760px), (max-height: 700px) {
+  .el-dialog {
+    margin-top: 16px;
+    margin-bottom: 16px;
+    max-height: calc(100dvh - 32px);
+    display: flex;
+    flex-direction: column;
+
+    .el-dialog__header, .el-dialog__footer {
+      flex: none;
+    }
+
+    .el-dialog__body {
+      min-height: 0;
+      overflow: auto;
+      overflow-wrap: anywhere;
+    }
+  }
+}
+
+.table-snapshots {
+  .snapshot-chart-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr));
+    gap: 16px;
+  }
+
+  .snapshot-summary {
+    display: grid;
+    grid-template-columns: minmax(0, min(38%, 220px)) minmax(0, 1fr);
+    column-gap: 12px;
+    margin: 0;
+    padding: 4px 8px;
+    overflow-wrap: anywhere;
+
+    dt { text-align: right; }
+    dd { margin: 0; }
+  }
+}

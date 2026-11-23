@@ -16,11 +16,39 @@
   * limitations under the License.
   */
 
-/**
- * Calculate table max width
- */
-export function getTableMaxWidth(columns: Array<{ width: number }>) {
-  return columns.reduce((pre: number, cur: { width: number }) => {
-    return pre + cur.width
-  }, 0)
+interface DashboardColumn {
+  dataIndex: string
+  title: string
+  width?: number | string
+  minWidth?: number
+  ellipsis?: boolean
+  sorter?: boolean
+}
+
+const descendingFirst: ('descending' | 'ascending' | null)[] = ['descending', 'ascending', null]
+
+// Element Plus fits flexible columns by the declared minimum widths. Convert
+// percentage widths to relative weights; retain fixed numeric widths as pixels.
+// https://github.com/element-plus/element-plus/blob/2.14.8/docs/en-US/component/table.md
+export function tableColumnProps(column: DashboardColumn, columns: readonly DashboardColumn[]) {
+  let minWidth = column.minWidth
+  if (typeof column.width === 'string' && column.width.endsWith('%')) {
+    minWidth = Number.parseFloat(column.width) * 5
+  }
+  else if (minWidth === undefined && column.width === undefined) {
+    const percentages = columns.filter(item => typeof item.width === 'string' && item.width.endsWith('%'))
+    if (percentages.length) {
+      const remaining = 100 - percentages.reduce((sum, item) => sum + Number.parseFloat(String(item.width)), 0)
+      minWidth = Math.max(80, 5 * remaining / columns.filter(item => item.width === undefined).length)
+    }
+  }
+  return {
+    prop: column.dataIndex,
+    label: column.title,
+    width: typeof column.width === 'number' ? column.width : undefined,
+    minWidth,
+    showOverflowTooltip: column.ellipsis ?? false,
+    sortable: column.sorter ? 'custom' as const : false,
+    sortOrders: column.sorter ? descendingFirst : undefined,
+  }
 }

@@ -18,7 +18,6 @@ limitations under the License.
 
 <script lang="ts" setup>
 import { onMounted, reactive, ref } from 'vue'
-import { Modal as AModal } from 'ant-design-vue'
 import { usePlaceholder } from '@/hooks/usePlaceholder'
 import type { IIOptimizeGroupItem } from '@/types/common.type'
 import { scaleoutResource } from '@/services/optimize.service'
@@ -45,7 +44,7 @@ const formState: FormState = reactive({
 
 function handleOk() {
   formRef.value
-    .validateFields()
+    .validate()
     .then(async () => {
       confirmLoading.value = true
       await scaleoutResource({
@@ -71,29 +70,36 @@ onMounted(() => {
 </script>
 
 <template>
-  <AModal
-    :open="true"
+  <el-dialog
+    :model-value="true"
     :title="$t('scaleOut')"
-    :confirm-loading="confirmLoading"
-    :closable="false"
-    @ok="handleOk"
-    @cancel="handleCancel"
+    :show-close="false"
+    :width="520"
+    @update:model-value="(open: boolean) => { if (!open) handleCancel() }"
   >
-    <a-form ref="formRef" :model="formState" class="label-120">
-      <a-form-item name="resourceGroup" :label="$t('resourceGroup')">
+    <el-form ref="formRef" :model="formState" class="label-120" label-position="left">
+      <el-form-item prop="resourceGroup" :label="$t('resourceGroup')">
         {{ formState.resourceGroup }}
-      </a-form-item>
-      <a-form-item
-        name="parallelism"
+      </el-form-item>
+      <el-form-item
+        prop="parallelism"
         :label="$t('parallelism')"
         :rules="[{ required: true, message: `${placeholder.parallelismPh}` }]"
       >
-        <a-input
-          v-model:value="formState.parallelism"
+        <el-input
+          v-model="formState.parallelism"
           type="number"
           :placeholder="placeholder.parallelismPh"
         />
-      </a-form-item>
-    </a-form>
-  </AModal>
+      </el-form-item>
+    </el-form>
+    <template #footer>
+      <el-button :disabled="confirmLoading" @click="handleCancel">
+        {{ $t('cancel') }}
+      </el-button>
+      <el-button type="primary" :loading="confirmLoading" @click="handleOk">
+        {{ $t('ok') }}
+      </el-button>
+    </template>
+  </el-dialog>
 </template>

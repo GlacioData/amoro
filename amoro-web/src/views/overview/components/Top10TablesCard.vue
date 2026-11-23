@@ -20,6 +20,7 @@ limitations under the License.
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
+import { tableColumnProps } from '@/utils/table'
 import type { ITopTableItem } from '@/types/common.type'
 import { getTop10TableList } from '@/services/overview.service'
 import { bytesToSize } from '@/utils'
@@ -105,51 +106,44 @@ onMounted(() => {
 </script>
 
 <template>
-  <a-card class="top-tables-card">
-    <template #title>
-      <a-row justify="space-between">
+  <el-card class="top-tables-card">
+    <template #header>
+      <el-row justify="space-between">
         <span class="card-title" v-text="t('top10Tables')" />
 
         <div style="display: flex; justify-content: space-between; align-items: center;">
-          <a-select v-model:value="orderBy" style="width: 150px" @change="getTop10Tables">
-            <a-select-option value="tableSize">
-              {{ t('tableSize') }}
-            </a-select-option>
-            <a-select-option value="fileCount">
-              {{ t('fileCount') }}
-            </a-select-option>
-            <a-select-option value="healthScore">
-              {{ t('healthScore') }}
-            </a-select-option>
-          </a-select>
+          <el-select v-model="orderBy" style="width: 150px" @change="getTop10Tables">
+            <el-option :label="t('tableSize')" value="tableSize" />
+            <el-option :label="t('fileCount')" value="fileCount" />
+            <el-option :label="t('healthScore')" value="healthScore" />
+          </el-select>
         </div>
-      </a-row>
+      </el-row>
     </template>
 
     <div class="list-wrap">
-      <a-table
-        class="ant-table-common" :columns="columns" :data-source="dataSource" :scroll="{ x: '100%', y: 350 }" :loading="loading"
-        :pagination="false"
-      >
-        <template #bodyCell="{ column, record }">
-          <template v-if="column.dataIndex === 'tableName'">
-            <span :title="record.tableName" class="primary-link" @click="goTableDetail(record)">
-              {{ record.tableName }}
-            </span>
+      <el-table v-loading="loading" class="dashboard-table" :data="dataSource" :max-height="390">
+        <el-table-column v-for="column in columns" :key="column.dataIndex" v-bind="tableColumnProps(column, columns)">
+          <template v-if="column.dataIndex === 'averageFileSize' || column.dataIndex === 'healthScore' || column.dataIndex === 'tableName' || column.dataIndex === 'tableSize'" #default="{ row: record }">
+            <template v-if="column.dataIndex === 'tableName'">
+              <span :title="record.tableName" class="primary-link" @click="goTableDetail(record)">
+                {{ record.tableName }}
+              </span>
+            </template>
+            <template v-if="column.dataIndex === 'tableSize'">
+              {{ bytesToSize(record.tableSize) }}
+            </template>
+            <template v-if="column.dataIndex === 'averageFileSize'">
+              {{ bytesToSize(record.averageFileSize) }}
+            </template>
+            <template v-if="column.dataIndex === 'healthScore'">
+              {{ record.healthScore == null || record.healthScore < 0 ? 'N/A' : record.healthScore }}
+            </template>
           </template>
-          <template v-if="column.dataIndex === 'tableSize'">
-            {{ bytesToSize(record.tableSize) }}
-          </template>
-          <template v-if="column.dataIndex === 'averageFileSize'">
-            {{ bytesToSize(record.averageFileSize) }}
-          </template>
-          <template v-if="column.dataIndex === 'healthScore'">
-            {{ record.healthScore == null || record.healthScore < 0 ? 'N/A' : record.healthScore }}
-          </template>
-        </template>
-      </a-table>
+        </el-table-column>
+      </el-table>
     </div>
-  </a-card>
+  </el-card>
 </template>
 
 <style lang="less" scoped>

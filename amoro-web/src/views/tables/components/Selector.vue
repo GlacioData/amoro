@@ -17,6 +17,8 @@ limitations under the License.
 / -->
 
 <script lang="ts" setup>
+import type { PopoverProps } from 'element-plus'
+import { ArrowDown, Check } from '@element-plus/icons-vue'
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { sameSnapshotSelection } from './snapshot-page-state'
 import type { IBranchItem, IServiceBranchItem } from '@/types/common.type'
@@ -35,6 +37,14 @@ let alive = true
 onBeforeUnmount(() => {
   alive = false
 })
+
+const referencePopperOptions: PopoverProps['popperOptions'] = {
+  strategy: 'fixed',
+  modifiers: [
+    { name: 'flip', options: { rootBoundary: 'viewport', padding: 12 } },
+    { name: 'preventOverflow', options: { rootBoundary: 'viewport', padding: 12, altAxis: true, tether: false } },
+  ],
+}
 
 const selectedObj = ref<IBranchItem>({ value: '', type: branchTypeMap.BRANCH, label: '' })
 const branchSearchKey = ref<string>('')
@@ -56,10 +66,6 @@ const operationList = reactive([operationMap.ALL, operationMap.OPTIMIZING, opera
 
 function onClickInput(e: MouseEvent) {
   e.stopPropagation()
-}
-
-function getPopupContainer(triggerNode: any) {
-  return triggerNode.parentNode || document.body
 }
 
 function selectObject(obj: IBranchItem) {
@@ -103,12 +109,16 @@ async function getTagList() {
   tagList.value = (result.list || []).map(l => ({ value: l.name, label: l.name, type: branchTypeMap.TAG, targetId: l.target.id }))
 }
 async function reloadTags(page = 1) {
-  if (pending.value) return
+  if (pending.value)
+    return
   tagPage.value = page
   pending.value = true
   emit('loadingChange', true)
   try { await getTagList() }
-  catch { if (alive) loadError.value = true }
+  catch {
+    if (alive)
+      loadError.value = true
+  }
   finally { if (alive) { pending.value = false; emit('loadingChange', false) } }
 }
 async function getConsumerList() {
@@ -174,91 +184,90 @@ onMounted(() => {
 
 <template>
   <div class="branch-selector">
-    <a-dropdown v-model:open="menuOpen" :trigger="['click']" placement="bottomLeft" :get-popup-container="getPopupContainer">
-      <a-button class="branch-btn" :disabled="(!selectedObj.value && !props.bounded) || disabled">
-        <svg-icon class-name="branch-selector-icon" :icon-class="selectedObj.type" class="g-mr-8" />
-        <span class="branch-btn-label">{{ selectedObj.label || $t('branches') }}</span>
-        <down-outlined />
-      </a-button>
-      <template #overlay>
-        <div @click.stop>
-          <div class="branch-selector-search">
-            <a-input v-show="tabActiveKey === branchTypeMap.BRANCH" v-model:value="branchSearchKey" :placeholder="$t('filterBranchesOrTagsOrConsumers')" @click="onClickInput" />
-            <a-input v-show="tabActiveKey === branchTypeMap.TAG" v-model:value="tagSearchKey" :disabled="pending" @press-enter="reloadTags(1)" :placeholder="$t('filterBranchesOrTagsOrConsumers')" @click="onClickInput" />
-            <a-input
-              v-show="tabActiveKey === branchTypeMap.CONSUMER" v-model:value="consumerSearchKey" :placeholder="$t('filterBranchesOrTagsOrConsumers')"
-              @click="onClickInput"
-            />
-          </div>
-          <a-alert v-if="loadError" type="error" :message="$t('snapshotReadFailed')" />
-          <a-button v-if="loadError" :disabled="disabled" @click="loadTab(tabActiveKey)">
-            {{ $t('snapshotRetry') }}
-          </a-button>
-          <a-spin :spinning="pending">
-            <a-tabs v-model:active-key="tabActiveKey" type="card" @change="loadTab(String($event))">
-              <a-tab-pane :key="branchTypeMap.BRANCH" :tab="$t('branches')" :disabled="pending">
-                <template v-if="!!actualBranchList.length">
-                  <div v-for="(item, key) in actualBranchList" :key="key" class="branch-selector-item" @click="selectObject(item)">
-                    <div class="item-icon">
-                      <check-outlined v-if="sameSnapshotSelection(item, selectedObj)" />
-                    </div>
-                    <span class="item-label">{{ item.label }}</span>
-                  </div>
-                </template>
-                <span v-else class="empty-tips">{{ $t('nothingToShow') }}</span>
-              </a-tab-pane>
-              <a-tab-pane :key="branchTypeMap.TAG" :tab="$t('tags')" :disabled="pending">
-                <template v-if="!!actualTagList.length">
-                  <div v-for="(item, key) in actualTagList" :key="key" class="branch-selector-item" @click="selectObject(item)">
-                    <div class="item-icon">
-                      <check-outlined v-if="sameSnapshotSelection(item, selectedObj)" />
-                    </div>
-                    <span class="item-label">{{ item.label }}</span>
-                  </div>
-                </template>
-                <span v-else class="empty-tips">{{ $t('nothingToShow') }}</span>
-                <a-pagination :current="tagPage" :total="tagTotal" :page-size="20" :disabled="pending" size="small" show-quick-jumper :show-size-changer="false" @change="reloadTags" />
-              </a-tab-pane>
-              <a-tab-pane v-if="props.bounded || consumerList.length !== 0" :key="branchTypeMap.CONSUMER" :tab="$t('consumers')" :disabled="pending">
-                <template v-if="!!actualConsumerList.length">
-                  <div v-for="(item, key) in actualConsumerList" :key="key" class="branch-selector-item" role="button" :tabindex="item.amoroCurrentSnapshotsOfTable ? 0 : -1" :aria-disabled="!item.amoroCurrentSnapshotsOfTable" @click="selectConsumer(item)" @keydown.enter.prevent="selectConsumer(item)" @keydown.space.prevent="selectConsumer(item)">
-                    <div class="item-icon">
-                      <check-outlined v-if="sameSnapshotSelection(item, selectedObj)" />
-                    </div>
-                    <span class="item-label">{{ item.label }}</span>
-                    <span v-if="!item.amoroCurrentSnapshotsOfTable">{{ $t('consumerSnapshotUnavailable') }}</span>
-                  </div>
-                </template>
-                <span v-else class="empty-tips">{{ $t('nothingToShow') }}</span>
-              </a-tab-pane>
-            </a-tabs>
-          </a-spin>
-        </div>
+    <el-popover v-model:visible="menuOpen" trigger="click" placement="bottom-start" :popper-options="referencePopperOptions" width="min(360px, calc(100vw - 24px))" popper-class="branch-selector-popup" :disabled="disabled">
+      <template #reference>
+        <el-button class="branch-btn" :disabled="(!selectedObj.value && !props.bounded) || disabled">
+          <svg-icon class-name="branch-selector-icon" :icon-class="selectedObj.type" class="g-mr-8" />
+          <span class="branch-btn-label">{{ selectedObj.label || $t('branches') }}</span>
+          <ArrowDown class="amoro-icon" />
+        </el-button>
       </template>
-    </a-dropdown>
+      <div @click.stop>
+        <div class="branch-selector-search">
+          <el-input v-show="tabActiveKey === branchTypeMap.BRANCH" v-model="branchSearchKey" :placeholder="$t('filterBranchesOrTagsOrConsumers')" @click="onClickInput" />
+          <el-input v-show="tabActiveKey === branchTypeMap.TAG" v-model="tagSearchKey" :disabled="pending" :placeholder="$t('filterBranchesOrTagsOrConsumers')" @keydown.enter="reloadTags(1)" @click="onClickInput" />
+          <el-input
+            v-show="tabActiveKey === branchTypeMap.CONSUMER"
+            v-model="consumerSearchKey"
+            :placeholder="$t('filterBranchesOrTagsOrConsumers')"
+            @click="onClickInput"
+          />
+        </div>
+        <el-alert v-if="loadError" type="error" :title="$t('snapshotReadFailed')" :closable="false" />
+        <el-button v-if="loadError" :disabled="disabled" @click="loadTab(tabActiveKey)">
+          {{ $t('snapshotRetry') }}
+        </el-button>
+        <div v-loading="pending">
+          <el-tabs v-model="tabActiveKey" type="card" @tab-change="(name: string | number) => { const $event = String(name); loadTab(String($event)) }">
+            <el-tab-pane lazy :key="branchTypeMap.BRANCH" :name="branchTypeMap.BRANCH" :label="$t('branches')" :disabled="pending">
+              <template v-if="!!actualBranchList.length">
+                <button v-for="(item, key) in actualBranchList" :key="key" type="button" class="branch-selector-item" @click="selectObject(item)">
+                  <div class="item-icon">
+                    <Check v-if="sameSnapshotSelection(item, selectedObj)" class="amoro-icon" />
+                  </div>
+                  <span class="item-label">{{ item.label }}</span>
+                </button>
+              </template>
+              <span v-else class="empty-tips">{{ $t('nothingToShow') }}</span>
+            </el-tab-pane>
+            <el-tab-pane lazy :key="branchTypeMap.TAG" :name="branchTypeMap.TAG" :label="$t('tags')" :disabled="pending">
+              <template v-if="!!actualTagList.length">
+                <button v-for="(item, key) in actualTagList" :key="key" type="button" class="branch-selector-item" @click="selectObject(item)">
+                  <div class="item-icon">
+                    <Check v-if="sameSnapshotSelection(item, selectedObj)" class="amoro-icon" />
+                  </div>
+                  <span class="item-label">{{ item.label }}</span>
+                </button>
+              </template>
+              <span v-else class="empty-tips">{{ $t('nothingToShow') }}</span>
+              <el-pagination :current-page="tagPage" :total="tagTotal" :page-size="20" :disabled="pending" size="small" layout="prev, pager, next, jumper" @update:current-page="reloadTags" />
+            </el-tab-pane>
+            <el-tab-pane lazy v-if="props.bounded || consumerList.length !== 0" :key="branchTypeMap.CONSUMER" :name="branchTypeMap.CONSUMER" :label="$t('consumers')" :disabled="pending">
+              <template v-if="!!actualConsumerList.length">
+                <div v-for="(item, key) in actualConsumerList" :key="key" class="branch-selector-item" role="button" :tabindex="item.amoroCurrentSnapshotsOfTable ? 0 : -1" :aria-disabled="!item.amoroCurrentSnapshotsOfTable" @click="selectConsumer(item)" @keydown.enter.prevent="selectConsumer(item)" @keydown.space.prevent="selectConsumer(item)">
+                  <div class="item-icon">
+                    <Check v-if="sameSnapshotSelection(item, selectedObj)" class="amoro-icon" />
+                  </div>
+                  <span class="item-label">{{ item.label }}</span>
+                  <span v-if="!item.amoroCurrentSnapshotsOfTable">{{ $t('consumerSnapshotUnavailable') }}</span>
+                </div>
+              </template>
+              <span v-else class="empty-tips">{{ $t('nothingToShow') }}</span>
+            </el-tab-pane>
+          </el-tabs>
+        </div>
+      </div>
+    </el-popover>
     <div>
-      <svg-icon class-name="branch-selector-icon" icon-class="branch" class="g-mr-4 g-ml-16" />
+      <svg-icon class-name="branch-selector-icon" icon-class="branch" class="g-mr-4" />
       <span class="g-mr-4">{{ props.bounded && !loaded.branch ? '—' : branchList.length }}</span>
       <span>{{ $t('branches') }}</span>
     </div>
     <div>
-      <svg-icon class-name="branch-selector-icon" icon-class="tag" class="g-mr-4 g-ml-16" />
+      <svg-icon class-name="branch-selector-icon" icon-class="tag" class="g-mr-4" />
       <span class="g-mr-4">{{ props.bounded && !loaded.tag ? '—' : tagTotal }}</span>
       <span>{{ $t('tags') }}</span>
     </div>
-    <div class="g-ml-24">
+    <div class="operation-filter">
       {{ $t('operation') }}:
-      <a-select
-        v-model:value="operation"
-        class="g-ml-8"
-        style="width: 160px"
+      <el-select
+        v-model="operation"
+        class="operation-select"
         :disabled="disabled || selectedObj.type === branchTypeMap.CONSUMER || !selectedObj.value"
         @change="onChange"
       >
-        <a-select-option v-for="item in operationList" :key="item" :value="item">
-          {{ item }}
-        </a-select-option>
-      </a-select>
+        <el-option v-for="item in operationList" :key="item" :label="item" :value="item" />
+      </el-select>
     </div>
     <div class="selector-extra">
       <slot name="extra" />
@@ -270,6 +279,8 @@ onMounted(() => {
 .branch-selector {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 16px;
 
   .branch-btn {
     display: flex;
@@ -285,11 +296,26 @@ onMounted(() => {
     }
   }
 
-  .ant-dropdown {
+  .operation-filter {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    max-width: 100%;
+  }
+
+  .operation-select {
+    width: 160px;
+    min-width: 0;
+  }
+
+  .selector-extra { display: flex; align-items: center; }
+}
+
+.branch-selector-popup {
     background: #fff;
-    width: 300px;
     height: auto;
-    max-height: 480px;
+    max-height: min(480px, calc(100dvh - 32px));
+    overflow: auto;
     padding: 8px 0 16px 0;
     font-size: 12px;
     border-radius: 6px;
@@ -299,11 +325,11 @@ onMounted(() => {
       margin: 0 12px 8px 12px;
     }
 
-    .ant-tabs {
+    .el-tabs {
       margin: 0 12px;
 
-      .ant-tabs-tabpane {
-        height: 240px;
+      .el-tab-pane {
+        height: min(240px, 40dvh);
         overflow-y: auto;
       }
 
@@ -314,6 +340,9 @@ onMounted(() => {
         padding: 7px 16px;
         overflow: hidden;
         text-align: left;
+        border: 0;
+        background: transparent;
+        font: inherit;
         cursor: pointer;
 
         &:hover {
@@ -343,11 +372,4 @@ onMounted(() => {
     text-align: center;
     color: #102048;
   }
-
-  .selector-extra {
-    display: flex;
-    align-items: center;
-    padding-left: 18px;
-  }
-}
 </style>

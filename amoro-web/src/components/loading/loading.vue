@@ -17,8 +17,6 @@
  / -->
 
 <script setup lang="ts">
-import { onBeforeUnmount, ref } from 'vue'
-
 const props = defineProps({
   loadingText: {
     type: String,
@@ -29,46 +27,52 @@ const props = defineProps({
     default: false,
   },
 })
-const visible = ref<boolean>(true)
-
-onBeforeUnmount(() => {
-  visible.value = false
-})
 </script>
 
 <template>
-  <div v-show="visible" v-if="visible" class="u-loading" :class="{ fullscreen: props.fullscreen }">
-    <a-spin :tip="props.loadingText" />
+  <div class="u-loading" :class="{ fullscreen: props.fullscreen }" role="status">
+    <span class="u-loading-spinner" aria-hidden="true" />
+    <span>{{ props.loadingText }}</span>
   </div>
 </template>
 
 <style lang="less" scoped>
 .u-loading {
   position: absolute;
+  inset: 0;
   z-index: 999;
-  top: 0;
-  bottom: 0;
-  left: 0;
-  right: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  background: rgba(0, 0, 0, .2);
+  gap: 8px;
+  background: rgba(255, 255, 255, .88);
+  background: color-mix(in srgb, var(--el-fill-color-blank, #fff) 88%, transparent);
+  color: var(--el-text-color-regular);
+  font-size: 14px;
+  line-height: 20px;
+  text-align: center;
 
   &.fullscreen {
     position: fixed;
   }
 
-  &-img {
-    width: 30px;
-    height: 30px;
-  }
+  &-spinner {
+    box-sizing: border-box;
+    width: 24px;
+    height: 24px;
+    border: 2px solid var(--el-color-primary-light-8);
+    border-top-color: var(--el-color-primary);
+    border-radius: 50%;
+    animation: loading-spin .8s linear infinite;
 
-  &-text {
-    margin-top: 8px;
-    user-select: none;
-    color: #fff;
+    @media (prefers-reduced-motion: reduce) {
+      animation: none;
+    }
   }
+}
+
+@keyframes loading-spin {
+  to { transform: rotate(360deg); }
 }
 </style>

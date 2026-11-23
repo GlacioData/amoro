@@ -21,24 +21,28 @@ import type { ICatalogItem, IMap, SnapshotItem } from '@/types/common.type'
 import request from '@/utils/request'
 import { deletedTag, savedTag, updatedTag, tagMutation } from './tag-mutation'
 
-export function getCatalogList(): Promise<ICatalogItem[]> {
-  return request.get('api/ams/v1/catalogs')
+interface ListingOptions {
+  handleError?: boolean
+}
+
+export function getCatalogList(options?: ListingOptions): Promise<ICatalogItem[]> {
+  return request.get('api/ams/v1/catalogs', options)
 }
 export function getDatabaseList(params: {
   catalog: string
   keywords: string
-}): Promise<string[]> {
+}, options?: ListingOptions): Promise<string[]> {
   const { catalog, keywords } = params
-  return request.get(`api/ams/v1/catalogs/${catalog}/databases`, { params: { keywords } })
+  return request.get(`api/ams/v1/catalogs/${catalog}/databases`, { ...options, params: { keywords } })
 }
 
 export function getTableList(params: {
   catalog: string
   db: string
   keywords: string
-}) {
+}, options?: ListingOptions) {
   const { catalog, db, keywords } = params
-  return request.get(`api/ams/v1/catalogs/${catalog}/databases/${db}/tables`, { params: { keywords } })
+  return request.get(`api/ams/v1/catalogs/${catalog}/databases/${db}/tables`, { ...options, params: { keywords } })
 }
 
 // get tables detail

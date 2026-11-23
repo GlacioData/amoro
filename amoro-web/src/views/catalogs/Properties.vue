@@ -17,8 +17,10 @@ limitations under the License.
 / -->
 
 <script setup lang="ts">
-import { computed, reactive, ref, shallowReactive, watch } from 'vue'
+import { Close } from '@element-plus/icons-vue'
+import { computed, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { tableColumnProps } from '@/utils/table'
 import type { IMap } from '@/types/common.type'
 import { getUUid } from '@/utils/index'
 
@@ -30,7 +32,7 @@ interface Propertie {
 
 const props = defineProps<{ propertiesObj: IMap<string>, isEdit: boolean }>()
 const { t } = useI18n()
-const propertiesColumns = shallowReactive([
+const propertiesColumns = computed(() => [
   { dataIndex: 'key', title: t('key'), width: 284, ellipsis: true },
   { dataIndex: 'value', title: t('value'), ellipsis: true },
 ])
@@ -69,7 +71,7 @@ function removeRule(item: Propertie) {
   if (index !== -1) {
     propertiesForm.data.splice(index, 1)
   }
-  // propertiesFormRef.value.validateFields()
+  // propertiesFormRef.value.validate()
 }
 function addRule() {
   propertiesForm.data.push({
@@ -99,7 +101,7 @@ defineExpose({
   },
   getProperties() {
     return propertiesFormRef.value
-      .validateFields()
+      .validate()
       .then(() => {
         const propObj: IMap<string> = {}
         propertiesForm.data.forEach((e) => {
@@ -125,37 +127,38 @@ defineExpose({
           {{ $t('value') }}
         </div>
       </div>
-      <a-form ref="propertiesFormRef" layout="inline" :model="propertiesForm" class="g-mt-12">
+      <el-form ref="propertiesFormRef" inline :model="propertiesForm" class="g-mt-12" label-position="left">
         <div v-for="(item, index) in propertiesForm.data" :key="item.uuid" class="config-row">
           <!-- validator: validateUnique -->
-          <a-form-item :name="['data', index, 'key']" :rules="rules">
-            <a-input v-model:value="item.key" style="width: 100%" />
-          </a-form-item>
-          <a-form-item :name="['data', index, 'value']" :rules="rules">
-            <a-input v-model:value="item.value" style="width: 100%" />
-          </a-form-item>
-          <close-outlined class="icon-close" @click="removeRule(item)" />
+          <el-form-item :prop="['data', index, 'key']" :rules="rules">
+            <el-input v-model="item.key" style="width: 100%" />
+          </el-form-item>
+          <el-form-item :prop="['data', index, 'value']" :rules="rules">
+            <el-input v-model="item.value" style="width: 100%" />
+          </el-form-item>
+          <Close class="amoro-icon icon-close" @click="removeRule(item)" />
         </div>
-      </a-form>
-      <a-button class="config-btn" @click="addRule">
+      </el-form>
+      <el-button class="config-btn" @click="addRule">
         +
-      </a-button>
+      </el-button>
     </div>
-    <a-table
-      v-if="!isEdit" row-key="uuid" :columns="propertiesColumns" :data-source="propertiesForm.data"
-      :pagination="false"
-    />
+    <el-table v-if="!isEdit" row-key="uuid" :data="propertiesForm.data">
+      <el-table-column v-for="column in propertiesColumns" :key="column.dataIndex" v-bind="tableColumnProps(column, propertiesColumns)" />
+    </el-table>
   </div>
 </template>
 
 <style lang="less">
 .config-properties {
+  min-width: 0;
   width: 100%;
   display: flex;
   flex-direction: column;
   line-height: 32px;
 
   .config-header {
+    box-sizing: border-box;
     width: 100%;
     padding-right: 32px;
     background: #fafafa;
@@ -187,6 +190,7 @@ defineExpose({
   }
 
   .config-row {
+    box-sizing: border-box;
     gap: 10px;
     display: flex;
     position: relative;
@@ -195,8 +199,9 @@ defineExpose({
     align-items: center;
     margin-bottom: 10px;
 
-    .ant-form-item {
+    .el-form-item {
       flex: 1;
+      min-width: 0;
       margin: 0px !important;
     }
 

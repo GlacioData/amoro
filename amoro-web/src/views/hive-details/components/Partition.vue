@@ -17,15 +17,16 @@ limitations under the License.
 / -->
 
 <script lang="ts" setup>
-import { shallowReactive } from 'vue'
+import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { tableColumnProps } from '@/utils/table'
 import type { DetailColumnItem } from '@/types/common.type'
 
 const props = defineProps<{ partitionFields: DetailColumnItem[], loading: boolean }>()
 
 const { t } = useI18n()
 
-const partitionFieldsColumns = shallowReactive([
+const partitionFieldsColumns = computed(() => [
   { dataIndex: 'field', title: t('field'), ellipsis: true },
   { dataIndex: 'type', title: t('type'), ellipsis: true },
   { dataIndex: 'comment', title: t('description'), ellipsis: true },
@@ -34,12 +35,8 @@ const partitionFieldsColumns = shallowReactive([
 
 <template>
   <div class="partition-field-wrap">
-    <a-table
-      :loading="loading"
-      class="ant-table-common"
-      :columns="partitionFieldsColumns"
-      :data-source="props.partitionFields"
-      :pagination="false"
-    />
+    <el-table v-loading="loading" class="dashboard-table" :data="props.partitionFields">
+      <el-table-column v-for="column in partitionFieldsColumns" :key="column.dataIndex" v-bind="tableColumnProps(column, partitionFieldsColumns)" />
+    </el-table>
   </div>
 </template>

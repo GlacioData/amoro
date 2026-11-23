@@ -17,8 +17,8 @@ limitations under the License.
 / -->
 
 <script lang="ts" setup>
+import { ArrowLeft } from '@element-plus/icons-vue'
 import { reactive, ref } from 'vue'
-import type { SelectProps } from 'ant-design-vue'
 import type { TableBasicInfo } from '@/types/common.type'
 import { usePlaceholder } from '@/hooks/usePlaceholder'
 
@@ -26,7 +26,7 @@ const emit = defineEmits<{
   (e: 'goBack'): void
 }>()
 
-const catalogOptions = ref<SelectProps['options']>([
+const catalogOptions = ref<{ label: string, value: string }[]>([
   {
     value: 'catalog1',
     label: 'catalog1',
@@ -36,7 +36,7 @@ const catalogOptions = ref<SelectProps['options']>([
     label: 'catalog2',
   },
 ])
-const databaseOptions = ref<SelectProps['options']>([
+const databaseOptions = ref<{ label: string, value: string }[]>([
   {
     value: 'database1',
     label: 'database1',
@@ -63,7 +63,7 @@ function goBack() {
 <template>
   <div class="create-table">
     <div class="nav-bar">
-      <left-outlined @click="goBack" />
+      <ArrowLeft class="amoro-icon" @click="goBack" />
       <span class="title g-ml-8">{{ $t('createTable') }}</span>
     </div>
     <div class="content">
@@ -71,29 +71,29 @@ function goBack() {
         <p class="title">
           {{ $t('basicInformation') }}
         </p>
-        <a-form :model="formState" class="label-120">
-          <a-form-item name="catalog" :label="$t('catalog')" :rules="[{ required: true, message: `${placeholder.selectClPh}` }]">
-            <a-select
-              v-model:value="formState.catalog"
+        <el-form :model="formState" class="label-120" label-position="left">
+          <el-form-item prop="catalog" :label="$t('catalog')" :rules="[{ required: true, message: `${placeholder.selectClPh}` }]">
+            <el-select
+              v-model="formState.catalog"
               :options="catalogOptions"
-              show-search
+              filterable
               :placeholder="placeholder.selectClPh"
               @change="changeCatalog"
             />
-          </a-form-item>
-          <a-form-item name="database" :label="$t('database')" :rules="[{ required: true, message: `${placeholder.selectDBPh}` }]">
-            <a-select
-              v-model:value="formState.database"
+          </el-form-item>
+          <el-form-item prop="database" :label="$t('database')" :rules="[{ required: true, message: `${placeholder.selectDBPh}` }]">
+            <el-select
+              v-model="formState.database"
               :options="databaseOptions"
-              show-search
+              filterable
               :placeholder="placeholder.selectDBPh"
               @change="changeDatabase"
             />
-          </a-form-item>
-          <a-form-item name="tableName" :label="$t('table')" :rules="[{ required: true, message: `${placeholder.inputTNPh}` }]">
-            <a-input v-model:value="formState.tableName" :placeholder="placeholder.inputTNPh" />
-          </a-form-item>
-        </a-form>
+          </el-form-item>
+          <el-form-item prop="tableName" :label="$t('table')" :rules="[{ required: true, message: `${placeholder.inputTNPh}` }]">
+            <el-input v-model="formState.tableName" :placeholder="placeholder.inputTNPh" />
+          </el-form-item>
+        </el-form>
       </div>
     </div>
   </div>

@@ -47,7 +47,7 @@ export default defineComponent({
     })
     const handleOk = () => {
       formRef.value
-        .validateFields()
+        .validate()
         .then(() => {
           formRef.value.resetFields()
           emit('cancel')
@@ -74,18 +74,26 @@ export default defineComponent({
 </script>
 
 <template>
-  <a-modal v-model:open="$props.visible" :title="$t('createDatabase')" @ok="handleOk" @cancel="handleCancel">
-    <a-form ref="formRef" :model="formState" class="label-120">
-      <a-form-item name="catalog" :label="$t('catalog')" :rules="[{ required: true, message: `${placeholder.selectClPh}` }]">
-        <a-select
-          v-model:value="formState.catalog"
+  <el-dialog :model-value="visible" :title="$t('createDatabase')" :width="520" @update:model-value="(open: boolean) => { if (!open) handleCancel() }">
+    <el-form ref="formRef" :model="formState" class="label-120" label-position="left">
+      <el-form-item prop="catalog" :label="$t('catalog')" :rules="[{ required: true, message: `${placeholder.selectClPh}` }]">
+        <el-select
+          v-model="formState.catalog"
           :options="catalogOptions"
           :placeholder="placeholder.selectClPh"
         />
-      </a-form-item>
-      <a-form-item name="dbname" :label="$t('databaseName')" :rules="[{ required: true, message: `${placeholder.inputDBPh}` }]">
-        <a-input v-model:value="formState.dbname" :placeholder="placeholder.inputDBPh" />
-      </a-form-item>
-    </a-form>
-  </a-modal>
+      </el-form-item>
+      <el-form-item prop="dbname" :label="$t('databaseName')" :rules="[{ required: true, message: `${placeholder.inputDBPh}` }]">
+        <el-input v-model="formState.dbname" :placeholder="placeholder.inputDBPh" />
+      </el-form-item>
+    </el-form>
+    <template #footer>
+      <el-button @click="handleCancel">
+        {{ $t('cancel') }}
+      </el-button>
+      <el-button type="primary" @click="handleOk">
+        {{ $t('ok') }}
+      </el-button>
+    </template>
+  </el-dialog>
 </template>
