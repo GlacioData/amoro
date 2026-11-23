@@ -74,7 +74,7 @@ public class PaimonPrimaryKeyOptimizingEvaluator {
               Comparator.comparingLong(PaimonBucketCompactionUnit::getFileSizeInBytes).reversed())
           .thenComparing(
               (left, right) ->
-                  PaimonPrimaryKeySnapshotAnalysis.compareUnsigned(
+                  PaimonPrimaryKeySnapshotWork.compareUnsigned(
                       left.getPartitionBytes(), right.getPartitionBytes()))
           .thenComparingInt(PaimonBucketCompactionUnit::getBucket);
 
@@ -316,7 +316,8 @@ public class PaimonPrimaryKeyOptimizingEvaluator {
         lastFullOptimizingTime,
         partitionFilter,
         planTime,
-        fullRetryNotBefore);
+        fullRetryNotBefore,
+        true);
   }
 
   /** Decide HASH optimizing from reusable facts already scanned for the exact health key. */
@@ -331,6 +332,32 @@ public class PaimonPrimaryKeyOptimizingEvaluator {
       Predicate partitionFilter,
       long planTime,
       long fullRetryNotBefore) {
+    return evaluate(
+        table,
+        tableName,
+        healthContext,
+        analysis,
+        optimizingConfig,
+        lastMinorOptimizingTime,
+        lastFullOptimizingTime,
+        partitionFilter,
+        planTime,
+        fullRetryNotBefore,
+        false);
+  }
+
+  private static PaimonPrimaryKeyOptimizingEvaluation evaluate(
+      FileStoreTable table,
+      String tableName,
+      PaimonHealthEvaluationContext healthContext,
+      PaimonPrimaryKeySnapshotAnalysis analysis,
+      OptimizingConfig optimizingConfig,
+      long lastMinorOptimizingTime,
+      long lastFullOptimizingTime,
+      Predicate partitionFilter,
+      long planTime,
+      long fullRetryNotBefore,
+      boolean freshAnalysis) {
     if (!healthContext.key().equals(analysis.key())) {
       throw new IllegalArgumentException(
           "Paimon primary-key analysis key does not match the captured planning context");
@@ -370,11 +397,18 @@ public class PaimonPrimaryKeyOptimizingEvaluator {
       List<PaimonBucketCompactionUnit> normalCandidates = new ArrayList<>();
       List<PaimonBucketCompactionUnit> majorCandidates = new ArrayList<>();
       int stopTrigger = coreOptions.numSortedRunStopTrigger();
-      for (PaimonPrimaryKeySnapshotAnalysis.BucketFacts facts : analysis.bucketFacts()) {
+      PaimonPrimaryKeySnapshotAnalysis candidates = analysis;
+      if (!freshAnalysis
+          && !analysis.reusableCandidates(coreOptions, healthContext.offPeakRatioNow())) {
+        candidates = PaimonPrimaryKeySnapshotAnalysis.analyze(table, healthContext);
+      }
+      if (!candidates.validForPlanning() || candidates.candidateDecisionFailed()) {
+        return PaimonPrimaryKeyOptimizingEvaluation.healthOnly(targetSnapshotId, analysis);
+      }
+      for (PaimonPrimaryKeySnapshotAnalysis.BucketFacts facts : candidates.bucketFacts()) {
         PaimonBucketCompactionUnit unit = facts.unit();
         allUnits.add(unit);
-        if (hasNormalCompactionCandidate(
-            coreOptions, facts.levels(), healthContext.offPeakRatioNow())) {
+        if (facts.normalCandidate()) {
           normalCandidates.add(unit);
           if (unit.getSortedRunCount() > stopTrigger) {
             majorCandidates.add(unit);
@@ -463,7 +497,7 @@ public class PaimonPrimaryKeyOptimizingEvaluator {
     return snapshotFiles;
   }
 
-  private static boolean hasNormalCompactionCandidate(
+  static boolean hasNormalCompactionCandidate(
       CoreOptions options, Levels levels, int offPeakRatio) {
     CompactStrategy strategy = createCompactStrategy(options, offPeakRatio);
     for (int pick = 0; pick < 2; pick++) {

@@ -18,606 +18,150 @@
 
 package org.apache.amoro.formats.paimon.optimizing.primary;
 
-import static org.apache.paimon.deletionvectors.DeletionVectorsIndexFile.DELETION_VECTORS_INDEX;
-
-import org.apache.amoro.formats.paimon.optimizing.health.PaimonActivityHealth;
-import org.apache.amoro.formats.paimon.optimizing.health.PaimonDeletionVectorCounts;
+import org.apache.amoro.formats.paimon.optimizing.PaimonOptimizingEligibility;
 import org.apache.amoro.formats.paimon.optimizing.health.PaimonHealthEvaluationContext;
-import org.apache.amoro.formats.paimon.optimizing.health.PaimonHealthStructureCollector;
-import org.apache.amoro.formats.paimon.optimizing.health.PaimonPrimaryKeyHealthEvaluator;
-import org.apache.amoro.formats.paimon.optimizing.health.PaimonPrimaryKeyHealthEvaluator.EvaluationMode;
-import org.apache.amoro.formats.paimon.optimizing.health.PaimonPrimaryKeyHealthEvaluator.Result;
-import org.apache.amoro.formats.paimon.optimizing.health.PaimonPrimaryKeyHealthEvaluator.UnitAccumulator;
-import org.apache.amoro.formats.paimon.optimizing.health.PaimonPrimaryKeyHealthEvaluator.UnitStatistics;
 import org.apache.amoro.optimizing.FormatTableAnalysis;
 import org.apache.amoro.table.health.TableAnalysisKey;
-import org.apache.amoro.table.health.TableHealthComponent;
 import org.apache.amoro.table.health.TableHealthDetails;
-import org.apache.amoro.table.health.TableHealthStructure;
-import org.apache.paimon.KeyValueFileStore;
-import org.apache.paimon.Snapshot;
-import org.apache.paimon.data.BinaryRow;
-import org.apache.paimon.index.IndexFileHandler;
-import org.apache.paimon.index.IndexFileMeta;
-import org.apache.paimon.io.DataFileMeta;
-import org.apache.paimon.manifest.ManifestEntry;
+import org.apache.amoro.utils.DigestUtil;
+import org.apache.paimon.CoreOptions;
 import org.apache.paimon.mergetree.Levels;
+import org.apache.paimon.mergetree.compact.EarlyFullCompaction;
+import org.apache.paimon.mergetree.compact.ForceUpLevel0Compaction;
+import org.apache.paimon.mergetree.compact.OffPeakHours;
+import org.apache.paimon.mergetree.compact.UniversalCompaction;
 import org.apache.paimon.table.BucketMode;
 import org.apache.paimon.table.FileStoreTable;
-import org.apache.paimon.table.source.snapshot.SnapshotReader;
-import org.apache.paimon.utils.Pair;
-import org.apache.paimon.utils.SerializationUtils;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
-import javax.annotation.Nullable;
-
+import java.io.File;
+import java.net.URL;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
-import java.util.Comparator;
-import java.util.HashMap;
 import java.util.HashSet;
-import java.util.Iterator;
-import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
-import java.util.Objects;
-import java.util.Optional;
 import java.util.Set;
+import java.util.TreeMap;
+import java.util.jar.JarFile;
 
-/** One fixed-snapshot primary-key analysis shared by health evaluation and HASH planning. */
+/** Fixed-snapshot summary. No native file metadata or Levels may escape synchronous work. */
 public final class PaimonPrimaryKeySnapshotAnalysis implements FormatTableAnalysis {
-
-  private static final Logger LOG = LoggerFactory.getLogger(PaimonPrimaryKeySnapshotAnalysis.class);
-
-  private static final int MAX_WORST_BUCKETS = 20;
-
-  private static final Comparator<BucketFacts> WORST_BUCKET_ORDER =
-      Comparator.comparingLong(BucketFacts::sortedRunCount)
-          .reversed()
-          .thenComparing(Comparator.comparingLong(BucketFacts::fileCount).reversed())
-          .thenComparing(Comparator.comparingLong(BucketFacts::fileSize).reversed())
-          .thenComparing(
-              (left, right) -> compareUnsigned(left.partitionBytes, right.partitionBytes))
-          .thenComparingInt(BucketFacts::bucket);
-
-  private static final Comparator<DataFileMeta> STABLE_FILE_ORDER =
-      Comparator.comparingInt(DataFileMeta::level)
-          .thenComparingLong(DataFileMeta::minSequenceNumber)
-          .thenComparingLong(DataFileMeta::maxSequenceNumber)
-          .thenComparing(DataFileMeta::fileName);
-
+  private static final boolean VERIFIED_NATIVE = verifyNativeStrategies();
   private final TableAnalysisKey key;
   private final PaimonPrimaryKeyPendingInput pendingInput;
   private final TableHealthDetails healthDetails;
   private final List<BucketFacts> bucketFacts;
   private final int activePartitionCount;
   private final boolean validForPlanning;
+  private final boolean reusableCandidates;
+  private final boolean candidateDecisionFailed;
+  private final String candidateFingerprint;
 
   private PaimonPrimaryKeySnapshotAnalysis(
-      TableAnalysisKey key,
-      PaimonPrimaryKeyPendingInput pendingInput,
-      TableHealthDetails healthDetails,
-      List<BucketFacts> bucketFacts,
-      int activePartitionCount,
-      boolean validForPlanning) {
-    this.key = key;
-    this.pendingInput = pendingInput;
-    this.healthDetails = healthDetails;
-    this.bucketFacts = Collections.unmodifiableList(new ArrayList<>(bucketFacts));
-    this.activePartitionCount = activePartitionCount;
-    this.validForPlanning = validForPlanning;
+      PaimonPrimaryKeySnapshotWork work,
+      PaimonHealthEvaluationContext context,
+      boolean retainPlannerFacts) {
+    this.key = work.key();
+    this.pendingInput = work.pendingInput();
+    this.healthDetails = work.healthDetails();
+    this.activePartitionCount = work.activePartitionCount();
+    this.validForPlanning = retainPlannerFacts && work.validForPlanning();
+    List<BucketFacts> facts = new ArrayList<>();
+    boolean reusable = false;
+    boolean failed = false;
+    String fingerprint = null;
+    if (validForPlanning && context.bucketMode() != BucketMode.KEY_DYNAMIC) {
+      try {
+        CoreOptions options =
+            PaimonPrimaryKeyOptions.compactionStrategyOptions(context.coreOptions().get());
+        fingerprint = candidateFingerprint(options, context.offPeakRatioNow());
+        // Only managed, stateless strategies can share the native decision across calls.
+        // EarlyFull's interval and GENTLE's counter remain on the fresh native path.
+        reusable =
+            VERIFIED_NATIVE
+                && PaimonOptimizingEligibility.isEligible(context.coreOptions().get().toMap())
+                && options.optimizedCompactionInterval() == null
+                && (!options.needLookup()
+                    || options.lookupCompact() == CoreOptions.LookupCompactMode.RADICAL);
+        for (PaimonPrimaryKeySnapshotWork.BucketFacts bucket : work.bucketFacts()) {
+          if (bucket.candidate() < 0) {
+            failed = true;
+            reusable = false;
+          }
+          facts.add(
+              new BucketFacts(bucket.unit(), bucket.ownedPartitionBytes(), bucket.candidate() > 0));
+        }
+      } catch (RuntimeException failure) {
+        // Candidate failure must not replace an independently completed health result.
+        failed = true;
+        reusable = false;
+      }
+    }
+    // Keep every bucket, including non-candidates and buckets outside diagnostic top-20.
+    if (retainPlannerFacts && facts.size() != work.bucketFacts().size()) {
+      facts.clear();
+      for (PaimonPrimaryKeySnapshotWork.BucketFacts bucket : work.bucketFacts()) {
+        facts.add(new BucketFacts(bucket.unit(), bucket.ownedPartitionBytes(), false));
+      }
+    }
+    this.bucketFacts = Collections.unmodifiableList(facts);
+    this.reusableCandidates = reusable;
+    this.candidateDecisionFailed = failed;
+    this.candidateFingerprint = fingerprint;
   }
 
-  private PaimonPrimaryKeySnapshotAnalysis(
-      PaimonPrimaryKeySnapshotAnalysis source, TableHealthDetails healthDetails) {
-    this.key = source.key;
-    this.pendingInput = source.pendingInput;
-    this.healthDetails = healthDetails;
-    // Only a derived analysis can reuse the already isolated, unmodifiable bucket list.
-    this.bucketFacts = source.bucketFacts;
-    this.activePartitionCount = source.activePartitionCount;
-    this.validForPlanning = source.validForPlanning;
+  private static boolean verifyNativeStrategies() {
+    // Inspect the actual code sources, not split-package implementation version metadata.
+    // An unverified runtime still computes fresh native decisions but does not retain them for
+    // reuse.
+    Set<URL> verified = new HashSet<>();
+    for (Class<?> type :
+        new Class<?>[] {
+          CoreOptions.class,
+          Levels.class,
+          UniversalCompaction.class,
+          EarlyFullCompaction.class,
+          ForceUpLevel0Compaction.class,
+          OffPeakHours.class
+        }) {
+      try {
+        URL location = type.getProtectionDomain().getCodeSource().getLocation();
+        if (!verified.add(location)) {
+          continue;
+        }
+        if (!"file".equals(location.getProtocol())) {
+          return false;
+        }
+        try (JarFile jar = new JarFile(new File(location.toURI()))) {
+          if (jar.getManifest() == null
+              || !"1.4.2"
+                  .equals(
+                      jar.getManifest().getMainAttributes().getValue("Implementation-Version"))) {
+            return false;
+          }
+        }
+      } catch (Exception unavailableVersion) {
+        return false;
+      }
+    }
+    return true;
   }
 
-  /** Analyze the exact {@link Snapshot} already captured by the metadata-only context. */
   public static PaimonPrimaryKeySnapshotAnalysis analyze(
       FileStoreTable table, PaimonHealthEvaluationContext context) {
     return analyze(table, context, true);
   }
 
-  /** Keep native Levels validation, but do not retain a historical snapshot's planning graph. */
   public static PaimonPrimaryKeySnapshotAnalysis analyzeHealth(
       FileStoreTable table, PaimonHealthEvaluationContext context) {
-    PaimonPrimaryKeySnapshotAnalysis result = analyze(table, context, false);
-    return new PaimonPrimaryKeySnapshotAnalysis(
-        result.key,
-        result.pendingInput,
-        result.healthDetails,
-        Collections.emptyList(),
-        result.activePartitionCount,
-        false);
+    return analyze(table, context, false);
   }
 
   private static PaimonPrimaryKeySnapshotAnalysis analyze(
       FileStoreTable table, PaimonHealthEvaluationContext context, boolean retainPlannerFacts) {
-    Objects.requireNonNull(table, "Paimon table must not be null");
-    Objects.requireNonNull(context, "Paimon health context must not be null");
-
-    if (context.configurationError().isPresent() || !context.coreOptions().isPresent()) {
-      return invalid(context, PaimonPrimaryKeyHealthEvaluator.INVALID_SCORING_CONFIG);
+    try (PaimonPrimaryKeySnapshotWork work =
+        PaimonPrimaryKeySnapshotWork.analyze(table, context, retainPlannerFacts)) {
+      return new PaimonPrimaryKeySnapshotAnalysis(work, context, retainPlannerFacts);
     }
-    Object store = table.store();
-    if (!(store instanceof KeyValueFileStore)) {
-      return invalid(context, PaimonPrimaryKeyHealthEvaluator.SNAPSHOT_SCAN_FAILED);
-    }
-    BucketMode bucketMode = context.bucketMode();
-    if (bucketMode != BucketMode.HASH_FIXED
-        && bucketMode != BucketMode.HASH_DYNAMIC
-        && bucketMode != BucketMode.KEY_DYNAMIC) {
-      return invalid(context, PaimonPrimaryKeyHealthEvaluator.SNAPSHOT_SCAN_FAILED);
-    }
-
-    PaimonPrimaryKeyHealthEvaluator healthEvaluator =
-        new PaimonPrimaryKeyHealthEvaluator(
-            context.compactionTrigger(),
-            context.stopTrigger(),
-            context.numLevels(),
-            context.targetFileSize(),
-            context.compactionFileSize());
-    Optional<Snapshot> snapshot = context.snapshot();
-    if (!snapshot.isPresent()) {
-      Result result =
-          healthEvaluator.evaluate(
-              Collections.emptyList(), context.activityInput(0), evaluationMode(bucketMode));
-      return create(context, result, Collections.emptyList(), 0, true)
-          .withStructure(new PaimonHealthStructureCollector(table, context).finish(true));
-    }
-
-    try {
-      return scan(
-          table,
-          context,
-          snapshot.get(),
-          (KeyValueFileStore) store,
-          healthEvaluator,
-          evaluationMode(bucketMode),
-          retainPlannerFacts);
-    } catch (RuntimeException e) {
-      LOG.warn(
-          "Failed to scan Paimon primary-key table [{}] at snapshot [{}] for health evaluation.",
-          context.key().getTableId(),
-          snapshot.get().id(),
-          e);
-      return invalid(context, PaimonPrimaryKeyHealthEvaluator.SNAPSHOT_SCAN_FAILED);
-    }
-  }
-
-  private static PaimonPrimaryKeySnapshotAnalysis scan(
-      FileStoreTable table,
-      PaimonHealthEvaluationContext context,
-      Snapshot snapshot,
-      KeyValueFileStore store,
-      PaimonPrimaryKeyHealthEvaluator healthEvaluator,
-      EvaluationMode mode,
-      boolean retainPlannerFacts) {
-    // Paimon 1.4.2 PojoDataFileMeta#copyWithoutStats 仅裁剪 valueStats/valueStatsCols。
-    // 健康与候选评估保留 key/level/schema/行数；这些元数据不用于 Optimizer 提交。
-    // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/io/PojoDataFileMeta.java#L308-L330
-    SnapshotReader reader = table.newSnapshotReader().withSnapshot(snapshot);
-    reader.dropStats();
-    Map<BucketKey, MutableBucket> buckets = new LinkedHashMap<>();
-    Set<BinaryRow> partitions = new HashSet<>();
-    Iterator<ManifestEntry> entries = reader.readFileIterator();
-    while (entries.hasNext()) {
-      ManifestEntry entry = entries.next();
-      BinaryRow partition = entry.partition().copy();
-      partitions.add(partition);
-      BucketKey key = new BucketKey(partition, entry.bucket());
-      buckets
-          .computeIfAbsent(key, ignored -> new MutableBucket(partition, entry.bucket()))
-          .add(entry.file());
-    }
-
-    List<MutableBucket> orderedBuckets = new ArrayList<>(buckets.values());
-    orderedBuckets.sort(
-        (left, right) -> {
-          int partitionOrder = compareUnsigned(left.partitionBytes, right.partitionBytes);
-          return partitionOrder != 0 ? partitionOrder : Integer.compare(left.bucket, right.bucket);
-        });
-
-    PaimonHealthStructureCollector collector = new PaimonHealthStructureCollector(table, context);
-    List<BucketFacts> facts = new ArrayList<>(orderedBuckets.size());
-    for (MutableBucket bucket : orderedBuckets) {
-      if (retainPlannerFacts) {
-        bucket.files.sort(STABLE_FILE_ORDER);
-      }
-      for (DataFileMeta file : bucket.files) {
-        collector.addFile(
-            bucket.partition, bucket.bucket, file, file.deleteRowCount().orElse(null));
-      }
-      Levels levels = new Levels(store.newKeyComparator(), bucket.files, context.numLevels());
-      int sortedRunCount = Math.toIntExact(levels.numberOfSortedRuns());
-      facts.add(bucket.toFacts(levels, sortedRunCount, retainPlannerFacts));
-    }
-
-    try {
-      Result result =
-          evaluateHealth(
-              context,
-              snapshot,
-              store,
-              healthEvaluator,
-              mode,
-              orderedBuckets,
-              partitions,
-              facts,
-              collector);
-      return create(context, result, facts, partitions.size(), true)
-          .withStructure(collector.finish(result.healthScore() >= 0));
-    } catch (RuntimeException e) {
-      LOG.warn(
-          "Failed to evaluate Paimon primary-key table [{}] at snapshot [{}] after collecting [{}] bucket facts.",
-          context.key().getTableId(),
-          snapshot.id(),
-          facts.size(),
-          e);
-      return invalidHealth(context, "DELETE_METADATA_READ_FAILED", facts, partitions.size(), true)
-          .withStructure(collector.finish(false));
-    }
-  }
-
-  private static Result evaluateHealth(
-      PaimonHealthEvaluationContext context,
-      Snapshot snapshot,
-      KeyValueFileStore store,
-      PaimonPrimaryKeyHealthEvaluator healthEvaluator,
-      EvaluationMode mode,
-      List<MutableBucket> orderedBuckets,
-      Set<BinaryRow> partitions,
-      List<BucketFacts> facts,
-      PaimonHealthStructureCollector collector) {
-    Map<BucketKey, List<IndexFileMeta>> deletionVectorFiles = Collections.emptyMap();
-    IndexFileHandler indexFileHandler = null;
-    if (context.deletionVectorsEnabled()) {
-      indexFileHandler = store.newIndexFileHandler();
-      Map<Pair<BinaryRow, Integer>, List<IndexFileMeta>> scanned =
-          indexFileHandler.scan(snapshot, DELETION_VECTORS_INDEX, partitions);
-      deletionVectorFiles = new HashMap<>();
-      for (Map.Entry<Pair<BinaryRow, Integer>, List<IndexFileMeta>> entry : scanned.entrySet()) {
-        BinaryRow partition = entry.getKey().getLeft().copy();
-        deletionVectorFiles.put(
-            new BucketKey(partition, entry.getKey().getRight()), entry.getValue());
-      }
-    }
-
-    List<UnitStatistics> statistics = new ArrayList<>(orderedBuckets.size());
-    int index = 0;
-    for (MutableBucket bucket : orderedBuckets) {
-      UnitAccumulator accumulator = healthEvaluator.newUnitAccumulator();
-      Map<String, Long> deletionCounts =
-          context.deletionVectorsEnabled()
-              ? PaimonDeletionVectorCounts.read(
-                  indexFileHandler,
-                  bucket.partition,
-                  bucket.bucket,
-                  deletionVectorFiles.getOrDefault(
-                      new BucketKey(bucket.partition, bucket.bucket), Collections.emptyList()))
-              : Collections.emptyMap();
-      for (DataFileMeta file : bucket.files) {
-        Long tombstoneCount = file.deleteRowCount().orElse(null);
-        Long deletionVectorCount = deletionCounts.getOrDefault(file.fileName(), 0L);
-        accumulator.addFile(file.fileSize(), file.rowCount(), tombstoneCount, deletionVectorCount);
-        collector.observeDeletionVector(bucket.partition, bucket.bucket, deletionVectorCount);
-      }
-      statistics.add(accumulator.snapshot(Math.toIntExact(facts.get(index).sortedRunCount())));
-      index++;
-    }
-    return healthEvaluator.evaluate(statistics, context.activityInput(0), mode);
-  }
-
-  private static EvaluationMode evaluationMode(BucketMode bucketMode) {
-    return bucketMode == BucketMode.KEY_DYNAMIC ? EvaluationMode.KEY_DYNAMIC : EvaluationMode.HASH;
-  }
-
-  private static PaimonPrimaryKeySnapshotAnalysis create(
-      PaimonHealthEvaluationContext context,
-      Result result,
-      List<BucketFacts> bucketFacts,
-      int activePartitionCount,
-      boolean validForPlanning) {
-    StructuralSummary structural = StructuralSummary.from(context, bucketFacts);
-    PaimonPrimaryKeyPendingInput pendingInput =
-        result.healthScore() < 0 && !bucketFacts.isEmpty()
-            ? structuralPendingInput(bucketFacts, structural)
-            : result.toPendingInput();
-    TableHealthDetails details =
-        details(
-            context,
-            result.healthScore() < 0 ? null : result,
-            bucketFacts,
-            activePartitionCount,
-            result.reasonCodes(),
-            structural);
-    return new PaimonPrimaryKeySnapshotAnalysis(
-        context.key(), pendingInput, details, bucketFacts, activePartitionCount, validForPlanning);
-  }
-
-  private static PaimonPrimaryKeySnapshotAnalysis invalid(
-      PaimonHealthEvaluationContext context, String reasonCode) {
-    return invalidHealth(context, reasonCode, Collections.emptyList(), 0, false);
-  }
-
-  private static PaimonPrimaryKeySnapshotAnalysis invalidHealth(
-      PaimonHealthEvaluationContext context,
-      String reasonCode,
-      List<BucketFacts> bucketFacts,
-      int activePartitionCount,
-      boolean validForPlanning) {
-    StructuralSummary structural = StructuralSummary.from(context, bucketFacts);
-    PaimonPrimaryKeyPendingInput pendingInput =
-        bucketFacts.isEmpty()
-            ? new PaimonPrimaryKeyPendingInput()
-            : structuralPendingInput(bucketFacts, structural);
-    TableHealthDetails details =
-        details(
-            context,
-            null,
-            bucketFacts,
-            activePartitionCount,
-            Collections.singletonList(reasonCode),
-            structural);
-    return new PaimonPrimaryKeySnapshotAnalysis(
-        context.key(), pendingInput, details, bucketFacts, activePartitionCount, validForPlanning);
-  }
-
-  private static PaimonPrimaryKeyPendingInput structuralPendingInput(
-      List<BucketFacts> bucketFacts, StructuralSummary summary) {
-    return new PaimonPrimaryKeyPendingInput(
-        summary.pendingFileCount(),
-        summary.totalFileSize,
-        summary.totalRecordCount,
-        summary.pendingSmallFileCount(),
-        summary.smallFileSize,
-        summary.tombstoneRecordCount,
-        -1L,
-        bucketFacts.size(),
-        summary.maxSortedRunCount,
-        -1,
-        -1,
-        -1,
-        -1);
-  }
-
-  private static TableHealthDetails details(
-      PaimonHealthEvaluationContext context,
-      @Nullable Result result,
-      List<BucketFacts> bucketFacts,
-      int activePartitionCount,
-      List<String> reasonCodes,
-      StructuralSummary structural) {
-    int runScore = result == null ? structuralRunScore(context, bucketFacts) : result.runScore();
-    int deleteScore = result == null ? -1 : result.materializedDeleteScore();
-    List<TableHealthComponent> components =
-        Arrays.asList(
-            component("SORTED_RUN", runScore, "MIN"),
-            component("MATERIALIZED_DELETE", deleteScore, "MIN"),
-            component("FILE_SIZE_AUXILIARY", -1, "AUXILIARY"),
-            component("SNAPSHOT_ACTIVITY", -1, "CONTEXT"));
-    Map<String, String> metrics =
-        metrics(context, result, bucketFacts, activePartitionCount, structural);
-    TableAnalysisKey key = context.key();
-    return new TableHealthDetails(
-        context.formulaVersion(),
-        nullableId(key.getSnapshotId()),
-        null,
-        nullableId(key.getSchemaId()),
-        context.scoringConfigFingerprint(),
-        key.encoded(),
-        components,
-        metrics,
-        reasonCodes);
-  }
-
-  private static int structuralRunScore(
-      PaimonHealthEvaluationContext context, List<BucketFacts> facts) {
-    if (facts.isEmpty()) {
-      return -1;
-    }
-    PaimonPrimaryKeyHealthEvaluator evaluator =
-        new PaimonPrimaryKeyHealthEvaluator(
-            context.compactionTrigger(),
-            context.stopTrigger(),
-            context.numLevels(),
-            context.targetFileSize(),
-            context.compactionFileSize());
-    List<UnitStatistics> units = new ArrayList<>();
-    for (BucketFacts bucket : facts) {
-      UnitAccumulator accumulator = evaluator.newUnitAccumulator();
-      for (DataFileMeta file : bucket.files()) {
-        accumulator.addFile(file.fileSize(), file.rowCount(), 0L, 0L);
-      }
-      units.add(accumulator.snapshot(Math.toIntExact(bucket.sortedRunCount())));
-    }
-    return evaluator
-        .evaluate(units, context.activityInput(0), evaluationMode(context.bucketMode()))
-        .runScore();
-  }
-
-  private static TableHealthComponent component(String code, int score, String combination) {
-    return new TableHealthComponent(code, score, null, combination, Collections.emptyMap());
-  }
-
-  private static Map<String, String> metrics(
-      PaimonHealthEvaluationContext context,
-      @Nullable Result result,
-      List<BucketFacts> bucketFacts,
-      int activePartitionCount,
-      StructuralSummary structural) {
-    boolean effectiveOptionsAvailable =
-        !context.configurationError().isPresent() && context.coreOptions().isPresent();
-    LinkedHashMap<String, String> metrics = new LinkedHashMap<>();
-    metrics.put("bucketMode", context.bucketMode().name());
-    metrics.put("activePartitionCount", Integer.toString(activePartitionCount));
-    metrics.put("effectiveUnitCount", integer(bucketFacts.size()));
-    metrics.put("totalFileCount", number(structural.totalFileCount));
-    metrics.put("totalFileSize", number(structural.totalFileSize));
-    metrics.put(
-        "averageFileSize",
-        number(
-            structural.totalFileCount == 0
-                ? 0L
-                : structural.totalFileSize / structural.totalFileCount));
-    metrics.put(
-        "targetFileSize", effectiveOptionsAvailable ? number(context.targetFileSize()) : "N/A");
-    metrics.put(
-        "compactionFileSize",
-        effectiveOptionsAvailable ? number(context.compactionFileSize()) : "N/A");
-    metrics.put(
-        "compactionTrigger",
-        effectiveOptionsAvailable ? integer(context.compactionTrigger()) : "N/A");
-    metrics.put("stopTrigger", effectiveOptionsAvailable ? integer(context.stopTrigger()) : "N/A");
-    metrics.put("numLevels", effectiveOptionsAvailable ? integer(context.numLevels()) : "N/A");
-    metrics.put("smallFileCount", number(structural.smallFileCount));
-    metrics.put("smallFileSize", number(structural.smallFileSize));
-    metrics.put("totalRecordCount", number(structural.totalRecordCount));
-    boolean structuralFactsAvailable = result != null || !bucketFacts.isEmpty();
-    long tombstoneRecordCount =
-        result == null ? structural.tombstoneRecordCount : result.tombstoneRecordCount();
-    metrics.put(
-        "tombstoneRecordCount",
-        structuralFactsAvailable && structural.tombstoneComplete && tombstoneRecordCount >= 0
-            ? number(tombstoneRecordCount)
-            : "N/A");
-    metrics.put(
-        "deletionVectorRecordCount",
-        result == null ? "N/A" : number(result.deletionVectorRecordCount()));
-    metrics.put("maxSortedRunCount", integer(structural.maxSortedRunCount));
-    metrics.put("sortedRunDistribution", sortedRunDistribution(bucketFacts));
-    metrics.put("worstBuckets", worstBuckets(bucketFacts));
-    metrics.put("latestSnapshotTimeMillis", positiveOrNa(context.snapshotTimeMillis()));
-    TableAnalysisKey key = context.key();
-    metrics.put("baselineSnapshotId", nonNegativeOrNa(key.getSuccessfulOptimizationBaselineId()));
-    metrics.put(
-        "baselineSnapshotTimeMillis",
-        positiveOrNa(key.getSuccessfulOptimizationBaselineTimeMillis()));
-    metrics.put("timeThresholdMillis", "N/A");
-    if (result != null && result.activity() != null) {
-      PaimonActivityHealth.Result activity = result.activity();
-      metrics.put("newSnapshotCount", nonNegativeOrNa(activity.newSnapshotCount()));
-      metrics.put("snapshotTimeDistanceMillis", "N/A");
-      metrics.put(
-          "snapshotPressure",
-          activity.baselineAvailable() ? Double.toString(activity.snapshotPressure()) : "N/A");
-      metrics.put("timePressure", "N/A");
-      metrics.put("activityPressure", Double.toString(activity.activityPressure()));
-    } else {
-      metrics.put("newSnapshotCount", "N/A");
-      metrics.put("snapshotTimeDistanceMillis", "N/A");
-      metrics.put("snapshotPressure", "N/A");
-      metrics.put("timePressure", "N/A");
-      metrics.put("activityPressure", "N/A");
-    }
-    if (!structuralFactsAvailable) {
-      for (String name :
-          Arrays.asList(
-              "activePartitionCount",
-              "effectiveUnitCount",
-              "totalFileCount",
-              "totalFileSize",
-              "averageFileSize",
-              "smallFileCount",
-              "smallFileSize",
-              "totalRecordCount",
-              "maxSortedRunCount",
-              "sortedRunDistribution",
-              "worstBuckets")) {
-        metrics.put(name, "N/A");
-      }
-    }
-    return metrics;
-  }
-
-  private static String sortedRunDistribution(List<BucketFacts> bucketFacts) {
-    int[] counts = new int[5];
-    for (BucketFacts facts : bucketFacts) {
-      long runs = facts.sortedRunCount();
-      int index = runs <= 1 ? 0 : runs <= 4 ? 1 : runs <= 7 ? 2 : runs <= 10 ? 3 : 4;
-      counts[index]++;
-    }
-    return "0-1=" + counts[0] + ",2-4=" + counts[1] + ",5-7=" + counts[2] + ",8-10=" + counts[3]
-        + ",11+=" + counts[4];
-  }
-
-  private static String worstBuckets(List<BucketFacts> bucketFacts) {
-    java.util.PriorityQueue<BucketFacts> top =
-        new java.util.PriorityQueue<>(MAX_WORST_BUCKETS, WORST_BUCKET_ORDER.reversed());
-    for (BucketFacts facts : bucketFacts) {
-      if (top.size() < MAX_WORST_BUCKETS) {
-        top.add(facts);
-      } else if (WORST_BUCKET_ORDER.compare(facts, top.peek()) < 0) {
-        top.poll();
-        top.add(facts);
-      }
-    }
-    List<BucketFacts> sorted = new ArrayList<>(top);
-    sorted.sort(WORST_BUCKET_ORDER);
-    StringBuilder builder = new StringBuilder();
-    int maximum = Math.min(MAX_WORST_BUCKETS, sorted.size());
-    for (int index = 0; index < maximum; index++) {
-      if (index > 0) {
-        builder.append(';');
-      }
-      BucketFacts facts = sorted.get(index);
-      builder
-          .append("p=")
-          .append(Integer.toUnsignedString(Arrays.hashCode(facts.partitionBytes), 16))
-          .append(",b=")
-          .append(facts.bucket())
-          .append(",r=")
-          .append(facts.sortedRunCount())
-          .append(",f=")
-          .append(facts.fileCount())
-          .append(",s=")
-          .append(facts.fileSize());
-    }
-    return builder.toString();
-  }
-
-  private static Long nullableId(long id) {
-    return id < 0 ? null : id;
-  }
-
-  private static String number(long value) {
-    return Long.toString(value);
-  }
-
-  private static String integer(int value) {
-    return Integer.toString(value);
-  }
-
-  private static String nonNegativeOrNa(long value) {
-    return value < 0 ? "N/A" : number(value);
-  }
-
-  private static String positiveOrNa(long value) {
-    return value <= 0 ? "N/A" : number(value);
-  }
-
-  static int compareUnsigned(byte[] left, byte[] right) {
-    int sharedLength = Math.min(left.length, right.length);
-    for (int index = 0; index < sharedLength; index++) {
-      int difference = (left[index] & 0xff) - (right[index] & 0xff);
-      if (difference != 0) {
-        return difference;
-      }
-    }
-    return Integer.compare(left.length, right.length);
-  }
-
-  private PaimonPrimaryKeySnapshotAnalysis withStructure(TableHealthStructure structure) {
-    return new PaimonPrimaryKeySnapshotAnalysis(this, healthDetails.withStructure(structure));
   }
 
   @Override
@@ -647,45 +191,55 @@ public final class PaimonPrimaryKeySnapshotAnalysis implements FormatTableAnalys
     return validForPlanning;
   }
 
+  boolean reusableCandidates(CoreOptions options, int offPeakRatio) {
+    return reusableCandidates
+        && candidateFingerprint.equals(candidateFingerprint(options, offPeakRatio));
+  }
+
+  private static String candidateFingerprint(CoreOptions options, int offPeakRatio) {
+    // Health identity intentionally omits some native EarlyFull options. Keep the complete
+    // strategy configuration separate so equal health keys cannot reuse stale candidates.
+    StringBuilder encoded = new StringBuilder().append(offPeakRatio).append(':');
+    new TreeMap<>(options.toMap())
+        .forEach(
+            (key, value) -> {
+              encoded.append(key.length()).append(':').append(key);
+              String text = String.valueOf(value);
+              encoded.append(text.length()).append(':').append(text);
+            });
+    return DigestUtil.sha256Hex(encoded.toString());
+  }
+
+  boolean candidateDecisionFailed() {
+    return candidateDecisionFailed;
+  }
+
   static final class BucketFacts {
-    private final byte[] partitionBytes;
-    private final int bucket;
-    private final List<DataFileMeta> files;
-    private final Levels levels;
     private final PaimonBucketCompactionUnit unit;
+    private final byte[] partitionBytes;
+    private final boolean normalCandidate;
 
     private BucketFacts(
-        byte[] partitionBytes,
-        int bucket,
-        List<DataFileMeta> files,
-        Levels levels,
-        PaimonBucketCompactionUnit unit,
-        boolean retainPlannerFacts) {
-      this.partitionBytes = Arrays.copyOf(partitionBytes, partitionBytes.length);
-      this.bucket = bucket;
-      this.files = Collections.unmodifiableList(files);
-      this.levels = retainPlannerFacts ? levels : null;
+        PaimonBucketCompactionUnit unit, byte[] partitionBytes, boolean normalCandidate) {
       this.unit = unit;
+      this.partitionBytes = partitionBytes;
+      this.normalCandidate = normalCandidate;
     }
 
     byte[] partitionBytes() {
-      return Arrays.copyOf(partitionBytes, partitionBytes.length);
+      return partitionBytes.clone();
     }
 
     int bucket() {
-      return bucket;
-    }
-
-    List<DataFileMeta> files() {
-      return files;
-    }
-
-    Levels levels() {
-      return levels;
+      return unit.getBucket();
     }
 
     PaimonBucketCompactionUnit unit() {
       return unit;
+    }
+
+    boolean normalCandidate() {
+      return normalCandidate;
     }
 
     long sortedRunCount() {
@@ -698,122 +252,6 @@ public final class PaimonPrimaryKeySnapshotAnalysis implements FormatTableAnalys
 
     long fileSize() {
       return unit.getFileSizeInBytes();
-    }
-  }
-
-  private static final class StructuralSummary {
-    private long totalFileCount;
-    private long totalFileSize;
-    private long totalRecordCount;
-    private long smallFileCount;
-    private long smallFileSize;
-    private long tombstoneRecordCount;
-    private int maxSortedRunCount;
-    private boolean tombstoneComplete = true;
-
-    private static StructuralSummary from(
-        PaimonHealthEvaluationContext context, List<BucketFacts> bucketFacts) {
-      StructuralSummary summary = new StructuralSummary();
-      for (BucketFacts facts : bucketFacts) {
-        summary.maxSortedRunCount =
-            Math.max(summary.maxSortedRunCount, Math.toIntExact(facts.sortedRunCount()));
-        for (DataFileMeta file : facts.files()) {
-          summary.totalFileCount = Math.addExact(summary.totalFileCount, 1L);
-          summary.totalFileSize = Math.addExact(summary.totalFileSize, file.fileSize());
-          summary.totalRecordCount = Math.addExact(summary.totalRecordCount, file.rowCount());
-          if (file.fileSize() < context.compactionFileSize()) {
-            summary.smallFileCount = Math.addExact(summary.smallFileCount, 1L);
-            summary.smallFileSize = Math.addExact(summary.smallFileSize, file.fileSize());
-          }
-          Optional<Long> tombstoneCount = file.deleteRowCount();
-          if (tombstoneCount.isPresent()
-              && tombstoneCount.get() >= 0
-              && tombstoneCount.get() <= file.rowCount()
-              && summary.tombstoneComplete) {
-            summary.tombstoneRecordCount =
-                Math.addExact(summary.tombstoneRecordCount, tombstoneCount.get());
-          } else {
-            summary.tombstoneComplete = false;
-            summary.tombstoneRecordCount = -1L;
-          }
-        }
-      }
-      return summary;
-    }
-
-    private int pendingFileCount() {
-      return (int) Math.min(totalFileCount, Integer.MAX_VALUE);
-    }
-
-    private int pendingSmallFileCount() {
-      return (int) Math.min(smallFileCount, Integer.MAX_VALUE);
-    }
-  }
-
-  private static final class MutableBucket {
-    private final BinaryRow partition;
-    private final byte[] partitionBytes;
-    private final int bucket;
-    private final ArrayList<DataFileMeta> files = new ArrayList<>(1);
-    private long fileSize;
-    private long recordCount;
-    private long lastFileCreationTime;
-
-    private MutableBucket(BinaryRow partition, int bucket) {
-      this.partition = partition.copy();
-      this.partitionBytes = SerializationUtils.serializeBinaryRow(this.partition);
-      this.bucket = bucket;
-    }
-
-    private void add(DataFileMeta file) {
-      files.add(file);
-      fileSize = Math.addExact(fileSize, file.fileSize());
-      recordCount = Math.addExact(recordCount, file.rowCount());
-      lastFileCreationTime = Math.max(lastFileCreationTime, file.creationTimeEpochMillis());
-    }
-
-    private BucketFacts toFacts(Levels levels, int sortedRunCount, boolean retainPlannerFacts) {
-      PaimonBucketCompactionUnit unit =
-          new PaimonBucketCompactionUnit(
-              partitionBytes,
-              bucket,
-              files.size(),
-              sortedRunCount,
-              fileSize,
-              recordCount,
-              lastFileCreationTime);
-      // All files have been collected and sorted. Share the frozen list with the analysis.
-      if (retainPlannerFacts) {
-        files.trimToSize();
-      }
-      return new BucketFacts(partitionBytes, bucket, files, levels, unit, retainPlannerFacts);
-    }
-  }
-
-  private static final class BucketKey {
-    private final BinaryRow partition;
-    private final int bucket;
-
-    private BucketKey(BinaryRow partition, int bucket) {
-      this.partition = partition.copy();
-      this.bucket = bucket;
-    }
-
-    @Override
-    public boolean equals(Object other) {
-      if (this == other) {
-        return true;
-      }
-      if (!(other instanceof BucketKey)) {
-        return false;
-      }
-      BucketKey that = (BucketKey) other;
-      return bucket == that.bucket && partition.equals(that.partition);
-    }
-
-    @Override
-    public int hashCode() {
-      return Objects.hash(partition, bucket);
     }
   }
 }

@@ -225,15 +225,29 @@ class TestPaimonPrimaryKeyManifestMemory {
       assertEquals(
           expected.healthDetails().getStructure().getTotalUnits(),
           actual.healthDetails().getStructure().getTotalUnits());
-      assertEquals(
-          originals.size(),
-          actual.bucketFacts().stream().mapToInt(fact -> fact.files().size()).sum());
-      for (PaimonPrimaryKeySnapshotAnalysis.BucketFacts fact : actual.bucketFacts()) {
-        for (DataFileMeta file : fact.files()) {
-          assertEquals(originals.get(file.fileName()).copyWithoutStats(), file);
-          assertEquals(SimpleStats.EMPTY_STATS, file.valueStats());
-          assertTrue(file.valueStatsCols().isEmpty());
-        }
+      java.util.concurrent.atomic.AtomicInteger inspected =
+          new java.util.concurrent.atomic.AtomicInteger();
+      try (PaimonPrimaryKeySnapshotWork work =
+          PaimonPrimaryKeySnapshotWork.analyze(
+              raw,
+              context,
+              true,
+              new PaimonPrimaryKeySnapshotWork.BucketObserver() {
+                @Override
+                public void validated(
+                    int bucket,
+                    List<DataFileMeta> files,
+                    org.apache.paimon.mergetree.Levels levels) {
+                  for (DataFileMeta file : files) {
+                    assertEquals(originals.get(file.fileName()).copyWithoutStats(), file);
+                    assertEquals(SimpleStats.EMPTY_STATS, file.valueStats());
+                    assertTrue(file.valueStatsCols().isEmpty());
+                    inspected.incrementAndGet();
+                  }
+                }
+              })) {
+        assertEquals(originals.size(), inspected.get());
+        assertTrue(work.validForPlanning());
       }
     }
   }
