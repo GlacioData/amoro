@@ -54,6 +54,7 @@ import static org.apache.amoro.properties.CatalogMetaProperties.STORAGE_CONFIGS_
 import static org.apache.amoro.properties.CatalogMetaProperties.TABLE_FORMATS;
 
 import io.javalin.http.Context;
+import io.javalin.http.NotFoundResponse;
 import org.apache.amoro.TableFormat;
 import org.apache.amoro.api.CatalogMeta;
 import org.apache.amoro.properties.CatalogMetaProperties;
@@ -101,6 +102,23 @@ public class CatalogController {
   private static final String EMPTY_XML_BASE64 = "PGNvbmZpZ3VyYXRpb24+PC9jb25maWd1cmF0aW9uPg==";
   private static final Map<String, List<String>> CATALOG_REQUIRED_PROPERTIES;
   private static final Set<CatalogDescriptor> VALIDATE_CATALOGS;
+
+  /**
+   * Storage config files that the catalog page offers for download. Every other storage entry is
+   * server internal.
+   */
+  private static final Set<String> DOWNLOADABLE_STORAGE_CONFIG_KEYS =
+      Sets.newHashSet(
+          STORAGE_CONFIGS_KEY_CORE_SITE,
+          STORAGE_CONFIGS_KEY_HDFS_SITE,
+          STORAGE_CONFIGS_KEY_HIVE_SITE);
+
+  /**
+   * Auth config files that may be downloaded. The keytab is deliberately absent: it is the server's
+   * own Kerberos credential. Access keys and secret keys are not files and are not listed either.
+   */
+  private static final Set<String> DOWNLOADABLE_AUTH_CONFIG_KEYS =
+      Sets.newHashSet(AUTH_CONFIGS_KEY_KRB5);
 
   static {
     CATALOG_REQUIRED_PROPERTIES = Maps.newHashMap();
@@ -736,15 +754,29 @@ public class CatalogController {
 
     CatalogMeta catalogMeta = catalogService.getCatalogMeta(catalogName);
     if (CONFIG_TYPE_STORAGE.equalsIgnoreCase(confType)) {
-      Map<String, String> storageConfig = catalogMeta.getStorageConfigs();
       String key = configKey.replaceAll("-", "\\.");
+      checkDownloadableConfigKey(DOWNLOADABLE_STORAGE_CONFIG_KEYS, key);
+      Map<String, String> storageConfig = catalogMeta.getStorageConfigs();
       ctx.result(Base64.getDecoder().decode(storageConfig.get(key)));
     } else if (CONFIG_TYPE_AUTH.equalsIgnoreCase(confType)) {
-      Map<String, String> storageConfig = catalogMeta.getAuthConfigs();
       String key = configKey.replaceAll("-", "\\.");
+      checkDownloadableConfigKey(DOWNLOADABLE_AUTH_CONFIG_KEYS, key);
+      Map<String, String> storageConfig = catalogMeta.getAuthConfigs();
       ctx.result(Base64.getDecoder().decode(storageConfig.get(key)));
     } else {
       throw new RuntimeException("Invalid request for " + confType);
+    }
+  }
+
+  /**
+   * Only explicitly downloadable config files are served; anything else in the config maps is
+   * reported as absent so that no other stored entry can be read through this endpoint.
+   */
+  private static void checkDownloadableConfigKey(Set<String> downloadableKeys, String key) {
+    if (!downloadableKeys.contains(key)) {
+      // Javalin answers a NotFoundResponse with status 404 and the message as body.
+      // https://javadoc.io/static/io.javalin/javalin/4.6.8/io/javalin/http/NotFoundResponse.html
+      throw new NotFoundResponse("Catalog or config file not found");
     }
   }
 
