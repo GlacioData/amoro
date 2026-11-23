@@ -17,9 +17,12 @@ limitations under the License.
 / -->
 
 <script lang="ts" setup>
+import { QuestionFilled } from '@element-plus/icons-vue'
 import { computed, onMounted, reactive, ref, shallowReactive } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute } from 'vue-router'
+import DashboardPagination from '@/components/DashboardPagination.vue'
+import { tableColumnProps } from '@/utils/table'
 import { usePagination } from '@/hooks/usePagination'
 import type { IColumns, ILableAndValue } from '@/types/common.type'
 import { getTableProcesses } from '@/services/table.service'
@@ -142,77 +145,88 @@ onMounted(() => {
 
 <template>
   <div class="table-process">
-    <a-space class="filter-form">
-      <a-input
-        v-model:value="processTypeFilter" allow-clear :placeholder="t('processType')"
-        style="min-width: 150px;" @change="handleFilterChange"
+    <el-space wrap class="filter-form">
+      <el-input
+        v-model="processTypeFilter"
+        clearable
+        :placeholder="t('processType')"
+        style="min-width: 150px;"
+        @change="handleFilterChange"
       />
-      <a-select
-        v-model:value="statusType" allow-clear :placeholder="t('status')" :options="statusTypeList"
-        style="min-width: 150px;" @change="handleFilterChange"
+      <el-select
+        v-model="statusType"
+        clearable
+        :placeholder="t('status')"
+        :options="statusTypeList"
+        style="min-width: 150px;"
+        @change="handleFilterChange"
       />
-    </a-space>
-    <a-table
-      row-key="processId" :columns="columns" :data-source="dataSource" :pagination="pagination"
-      :loading="loading" @change="change"
-    >
-      <template #bodyCell="{ record, column }">
-        <template v-if="column.dataIndex === 'status'">
-          <div class="g-flex-ac">
-            <span
-              :style="{ 'background-color': (STATUS_CONFIG[record.status as keyof typeof STATUS_CONFIG] || {} as any).color }"
-              class="status-icon"
-            />
-            <span>{{ record.status }}</span>
-            <a-tooltip
-              v-if="record.status === 'FAILED' && record.failMessage" placement="topRight" class="g-ml-4"
-              overlay-class-name="table-failed-tip"
-            >
-              <template #title>
-                <div class="tip-title">
-                  {{ record.failMessage }}
+    </el-space>
+    <el-table v-loading="loading" row-key="processId" :data="dataSource">
+      <el-table-column type="expand">
+        <template #default="{ row: record }">
+          <div class="expanded-content">
+            <template v-if="record.processParameters && Object.keys(record.processParameters).length">
+              <h4 class="expanded-section-title">
+                {{ t('processParameters') }}
+              </h4>
+              <div class="kv-list">
+                <div v-for="(value, key) in record.processParameters" :key="key" class="kv-row">
+                  <span class="kv-key">{{ key }}</span>
+                  <span class="kv-value">{{ value }}</span>
                 </div>
-              </template>
-              <question-circle-outlined />
-            </a-tooltip>
+              </div>
+            </template>
+            <template v-if="record.summary && Object.keys(record.summary).length">
+              <h4 class="expanded-section-title">
+                {{ t('summary') }}
+              </h4>
+              <div class="kv-list">
+                <div v-for="(value, key) in record.summary" :key="key" class="kv-row">
+                  <span class="kv-key">{{ key }}</span>
+                  <span class="kv-value">
+                    <a
+                      v-if="key === 'trackUri' && isHttpTrackUri(value)" :href="value"
+                      target="_blank" rel="noopener noreferrer"
+                    >{{ value }}</a>
+                    <template v-else>
+                      {{ value }}
+                    </template>
+                  </span>
+                </div>
+              </div>
+            </template>
           </div>
         </template>
-      </template>
-      <template #expandedRowRender="{ record }">
-        <div class="expanded-content">
-          <template v-if="record.processParameters && Object.keys(record.processParameters).length">
-            <h4 class="expanded-section-title">
-              {{ t('processParameters') }}
-            </h4>
-            <div class="kv-list">
-              <div v-for="(value, key) in record.processParameters" :key="key" class="kv-row">
-                <span class="kv-key">{{ key }}</span>
-                <span class="kv-value">{{ value }}</span>
-              </div>
+      </el-table-column>
+      <el-table-column v-for="column in columns" :key="column.dataIndex" v-bind="tableColumnProps(column, columns)">
+        <template v-if="column.dataIndex === 'status'" #default="{ row: record }">
+          <template v-if="column.dataIndex === 'status'">
+            <div class="g-flex-ac">
+              <span
+                :style="{ 'background-color': (STATUS_CONFIG[record.status as keyof typeof STATUS_CONFIG] || {} as any).color }"
+                class="status-icon"
+              />
+              <span>{{ record.status }}</span>
+              <el-tooltip
+                v-if="record.status === 'FAILED' && record.failMessage"
+                placement="topRight"
+                class="g-ml-4"
+                popper-class="table-failed-tip"
+              >
+                <template #content>
+                  <div class="tip-title">
+                    {{ record.failMessage }}
+                  </div>
+                </template>
+                <QuestionFilled class="amoro-icon" />
+              </el-tooltip>
             </div>
           </template>
-          <template v-if="record.summary && Object.keys(record.summary).length">
-            <h4 class="expanded-section-title">
-              {{ t('summary') }}
-            </h4>
-            <div class="kv-list">
-              <div v-for="(value, key) in record.summary" :key="key" class="kv-row">
-                <span class="kv-key">{{ key }}</span>
-                <span class="kv-value">
-                  <a
-                    v-if="key === 'trackUri' && isHttpTrackUri(value)" :href="value"
-                    target="_blank" rel="noopener noreferrer"
-                  >{{ value }}</a>
-                  <template v-else>
-                    {{ value }}
-                  </template>
-                </span>
-              </div>
-            </div>
-          </template>
-        </div>
-      </template>
-    </a-table>
+        </template>
+      </el-table-column>
+    </el-table>
+    <DashboardPagination :pagination="pagination" @change="change" />
   </div>
 </template>
 
@@ -220,19 +234,19 @@ onMounted(() => {
 .table-process {
   padding: 18px 0;
 
-  :deep(.ant-table-thead > tr > th:not(:last-child):not(.ant-table-selection-column):not(.ant-table-row-expand-icon-cell):not([colspan])::before) {
+  :deep(.el-table__header > tr > th:not(:last-child):not(.el-table-column--selection):not(.el-table__expand-column):not([colspan])::before) {
     height: 100% !important;
   }
 
-  :deep(.ant-table-thead > tr:not(:last-child) > th[colspan]) {
+  :deep(.el-table__header > tr:not(:last-child) > th[colspan]) {
     border-bottom: 1px solid #e8e8f0;
   }
 
-  :deep(.ant-table-thead > tr > th) {
+  :deep(.el-table__header > tr > th) {
     padding: 4px 16px !important;
   }
 
-  :deep(.ant-table-row-expand-icon) {
+  :deep(.el-table__expand-icon) {
     border-radius: 0 !important;
   }
 }
@@ -301,7 +315,7 @@ onMounted(() => {
 }
 
 .table-failed-tip {
-  .ant-tooltip-content {
+  .el-popper {
     width: 800px;
   }
 

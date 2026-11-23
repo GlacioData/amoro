@@ -140,47 +140,55 @@ export default defineComponent({
 </script>
 
 <template>
-  <div class="page-scroll" ref="pageScrollRef">
+  <div ref="pageScrollRef" class="page-scroll">
     <div class="border-wrap">
       <div class="resource-wrap">
         <div class="content">
-          <a-tabs
-            v-model:active-key="activeTab"
-            destroy-inactive-tab-pane
-            @change="onChangeTab"
+          <el-tabs
+            v-model="activeTab"
+            @tab-change="(name: string | number) => { const $event = String(name); onChangeTab($event) }"
           >
-            <a-tab-pane
+            <el-tab-pane
               key="tables"
-              :tab="t('tables')"
+              name="tables"
+              :label="t('tables')"
               :class="[activeTab === 'tables' ? 'active' : '']"
             >
-              <TableList />
-            </a-tab-pane>
-            <a-tab-pane
+              <template v-if="activeTab === 'tables'">
+                <TableList />
+              </template>
+            </el-tab-pane>
+            <el-tab-pane
               key="optimizers"
-              :tab="t('optimizers')"
+              name="optimizers"
+              :label="t('optimizers')"
               :class="[activeTab === 'optimizers' ? 'active' : '']"
             >
-              <a-button v-if="writable" type="primary" class="g-mb-16" @click="createOptimizer(null)">
-                {{ t("createOptimizer") }}
-              </a-button>
-              <List type="optimizers" />
-            </a-tab-pane>
-            <a-tab-pane
+              <template v-if="activeTab === 'optimizers'">
+                <el-button v-if="writable" type="primary" class="g-mb-16" @click="createOptimizer(null)">
+                  {{ t("createOptimizer") }}
+                </el-button>
+                <List type="optimizers" />
+              </template>
+            </el-tab-pane>
+            <el-tab-pane
               key="optimizerGroups"
-              :tab="t('optimizerGroups')"
+              name="optimizerGroups"
+              :label="t('optimizerGroups')"
               :class="[activeTab === 'optimizerGroups' ? 'active' : '']"
             >
-              <a-button v-if="writable" type="primary" class="g-mb-16" @click="editGroup(null)">
-                {{ t("addGroup") }}
-              </a-button>
-              <List
-                :key="groupKeyCount"
-                type="optimizerGroups"
-                @edit-group="editGroup"
-              />
-            </a-tab-pane>
-          </a-tabs>
+              <template v-if="activeTab === 'optimizerGroups'">
+                <el-button v-if="writable" type="primary" class="g-mb-16" @click="editGroup(null)">
+                  {{ t("addGroup") }}
+                </el-button>
+                <List
+                  :key="groupKeyCount"
+                  type="optimizerGroups"
+                  @edit-group="editGroup"
+                />
+              </template>
+            </el-tab-pane>
+          </el-tabs>
         </div>
       </div>
       <GroupModal

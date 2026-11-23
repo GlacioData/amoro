@@ -17,19 +17,21 @@ limitations under the License.
 / -->
 
 <script lang="ts" setup>
+import { CaretBottom, CaretRight } from '@element-plus/icons-vue'
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import axios from 'axios'
-import { CaretDownOutlined, CaretRightOutlined } from '@ant-design/icons-vue'
 import Selector from './Selector.vue'
 import { cursorPages, requestEpoch, snapshotRowKey } from './snapshot-page-state'
 import { snapshotChartData } from './snapshot-chart-data'
+import SnapshotCharts from './SnapshotCharts.vue'
+import DashboardPagination from '@/components/DashboardPagination.vue'
+import { tableColumnProps } from '@/utils/table'
 import { usePagination } from '@/hooks/usePagination'
 import { getSnapshotDetailPage, getSnapshots } from '@/services/table.service'
 import type { BreadcrumbSnapshotItem, SnapshotItem, SnapshotItemSummary } from '@/types/common.type'
 import { dateFormat } from '@/utils'
-import Chart from '@/components/echarts/Chart.vue'
 import { generateLineChartOption } from '@/utils/chart'
 
 const { t } = useI18n()
@@ -61,11 +63,11 @@ let pageRenderId = 0
 let retry: () => void = () => {}
 
 const columns = computed(() => [
-  { title: t('snapshotId'), dataIndex: 'snapshotId', ellipsis: true },
-  { title: t('operation'), dataIndex: 'operation' },
-  { title: t('records'), dataIndex: 'records' },
-  { title: t('fileCount'), dataIndex: 'fileCount' },
-  { title: t('commitTime'), dataIndex: 'commitTime' },
+  { title: t('snapshotId'), dataIndex: 'snapshotId', minWidth: 112, ellipsis: true },
+  { title: t('operation'), dataIndex: 'operation', minWidth: 112 },
+  { title: t('records'), dataIndex: 'records', minWidth: 96 },
+  { title: t('fileCount'), dataIndex: 'fileCount', minWidth: 112 },
+  { title: t('commitTime'), dataIndex: 'commitTime', minWidth: 164 },
 ])
 const detailColumns = computed(() => [
   { title: t('operation'), dataIndex: 'operation', width: 120, ellipsis: true },
@@ -255,13 +257,13 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="table-snapshots">
-    <a-alert v-if="error" type="error" :message="error" show-icon class="g-mb-8">
-      <template #action>
-        <a-button :disabled="loading || selectorLoading" @click="retry">
+    <el-alert v-if="error" type="error" :title="error" show-icon class="g-mb-8" :closable="false">
+      <template #default>
+        <el-button :disabled="loading || selectorLoading" @click="retry">
           {{ $t('snapshotRetry') }}
-        </a-button>
+        </el-button>
       </template>
-    </a-alert>
+    </el-alert>
     <div v-if="selectedSnapshot === null">
       <Selector
         v-bind="source" bounded :disabled="loading"
@@ -272,75 +274,69 @@ onBeforeUnmount(() => {
           <button type="button" class="snapshots-charts-header" :aria-expanded="showCharts" @click="showCharts = !showCharts">
             <span class="snapshots-charts-title">{{ $t('charts') }}</span>
             <span class="snapshots-charts-icon">
-              <CaretRightOutlined v-if="!showCharts" />
-              <CaretDownOutlined v-else />
+              <CaretRight v-if="!showCharts" class="amoro-icon" />
+              <CaretBottom v-else class="amoro-icon" />
             </span>
           </button>
         </template>
       </Selector>
-      <a-row v-if="showCharts" :gutter="32">
-        <a-col :span="12">
-          <Chart height="300px" :loading="loading" :options="recordChart" />
-        </a-col>
-        <a-col :span="12">
-          <Chart height="300px" :loading="loading" :options="fileChart" />
-        </a-col>
-      </a-row>
-      <a-table
-        row-key="snapshotId" :columns="columns" :data-source="rows"
-        :pagination="consumerSelected ? false : pagination" :loading="loading"
-        @change="loadList($event.current)"
-      >
-        <template #bodyCell="{ column, record }">
-          <a-button v-if="column.dataIndex === 'snapshotId'" type="link" :disabled="loading || selectorLoading" @click="openSnapshot(record.snapshotId)">
-            {{ record.snapshotId }}
-          </a-button>
-          <template v-else-if="column.dataIndex === 'fileCount'">
-            {{ record.fileCount ?? '—' }}
+      <SnapshotCharts v-if="showCharts" :loading="loading" :record-options="recordChart" :file-options="fileChart" />
+      <el-table v-loading="loading" scrollbar-always-on :class="{ 'snapshot-table-ready': !loading }" row-key="snapshotId" :data="rows">
+        <el-table-column type="expand">
+          <template #default="{ row: record }">
+            <dl class="snapshot-summary">
+              <template v-for="(value, key) in record.summary" :key="key">
+                <dt>{{ key }} :</dt>
+                <dd>{{ value ?? '—' }}</dd>
+              </template>
+            </dl>
           </template>
-          <template v-else-if="column.dataIndex === 'operation'">
-            {{ record.operation }}{{ record.producer === 'OPTIMIZE' ? '(optimizing)' : '' }}
+        </el-table-column>
+        <el-table-column v-for="column in columns" :key="column.dataIndex" v-bind="tableColumnProps(column, columns)">
+          <template v-if="column.dataIndex === 'commitTime' || column.dataIndex === 'fileCount' || column.dataIndex === 'operation' || column.dataIndex === 'snapshotId'" #default="{ row: record }">
+            <el-button v-if="column.dataIndex === 'snapshotId'" link type="primary" :disabled="loading || selectorLoading" @click="openSnapshot(record.snapshotId)">
+              {{ record.snapshotId }}
+            </el-button>
+            <template v-else-if="column.dataIndex === 'fileCount'">
+              {{ record.fileCount ?? '—' }}
+            </template>
+            <template v-else-if="column.dataIndex === 'operation'">
+              {{ record.operation }}{{ record.producer === 'OPTIMIZE' ? '(optimizing)' : '' }}
+            </template>
+            <template v-else-if="column.dataIndex === 'commitTime'">
+              {{ record.commitTime ? dateFormat(record.commitTime) : '—' }}
+            </template>
           </template>
-          <template v-else-if="column.dataIndex === 'commitTime'">
-            {{ record.commitTime ? dateFormat(record.commitTime) : '—' }}
-          </template>
-        </template>
-        <template #expandedRowRender="{ record }">
-          <a-row v-for="(value, key) in record.summary" :key="key" type="flex" :gutter="16">
-            <a-col flex="220px" style="text-align: right;">
-              {{ key }} :
-            </a-col>
-            <a-col flex="auto">
-              {{ value ?? '—' }}
-            </a-col>
-          </a-row>
-        </template>
-      </a-table>
+        </el-table-column>
+      </el-table>
+      <DashboardPagination v-if="!consumerSelected" :pagination="pagination" @change="({ current }) => loadList(current)" />
     </div>
     <div v-if="selectedSnapshot !== null">
-      <a-breadcrumb separator=">">
-        <a-breadcrumb-item><a @click="returnToList">{{ $t(fixedTag ? 'tags' : 'all') }}</a></a-breadcrumb-item>
-        <a-breadcrumb-item>{{ $t('snapshotId') }} {{ selectedSnapshot }}</a-breadcrumb-item>
-      </a-breadcrumb>
-      <a-table row-key="rowKey" :columns="detailColumns" :data-source="detailRows" :pagination="false" :loading="loading" class="g-mt-8">
-        <template #bodyCell="{ column, record }">
-          <template v-if="column.dataIndex === 'commitTime'">
-            {{ record.commitTime ? dateFormat(record.commitTime) : '—' }}
+      <el-breadcrumb separator=">">
+        <el-breadcrumb-item><a @click="returnToList">{{ $t(fixedTag ? 'tags' : 'all') }}</a></el-breadcrumb-item>
+        <el-breadcrumb-item>{{ $t('snapshotId') }} {{ selectedSnapshot }}</el-breadcrumb-item>
+      </el-breadcrumb>
+      <el-table v-loading="loading" scrollbar-always-on :class="{ 'snapshot-table-ready': !loading }" row-key="rowKey" class="g-mt-8" :data="detailRows">
+        <el-table-column v-for="column in detailColumns" :key="column.dataIndex" v-bind="tableColumnProps(column, detailColumns)">
+          <template v-if="column.dataIndex === 'commitTime' || column.dataIndex === 'file' || column.dataIndex === 'path'" #default="{ row: record }">
+            <template v-if="column.dataIndex === 'commitTime'">
+              {{ record.commitTime ? dateFormat(record.commitTime) : '—' }}
+            </template>
+            <el-tooltip v-else-if="column.dataIndex === 'file' || column.dataIndex === 'path'" :content="record[column.dataIndex]">
+              {{ record[column.dataIndex] }}
+            </el-tooltip>
           </template>
-          <a-tooltip v-else-if="column.dataIndex === 'file' || column.dataIndex === 'path'" :title="record[column.dataIndex]">
-            {{ record[column.dataIndex] }}
-          </a-tooltip>
-        </template>
-      </a-table>
-      <a-space class="snapshot-detail-pagination">
-        <a-button :disabled="loading || cursors.index === 0" @click="loadDetail(cursors.index - 1, cursors.starts[cursors.index - 1])">
+        </el-table-column>
+      </el-table>
+      <el-space class="snapshot-detail-pagination">
+        <el-button :disabled="loading || cursors.index === 0" @click="loadDetail(cursors.index - 1, cursors.starts[cursors.index - 1])">
           {{ $t('snapshotPrevious') }}
-        </a-button>
+        </el-button>
         <span>{{ cursors.index + 1 }}</span>
-        <a-button :disabled="loading || cursors.next === null" @click="loadDetail(cursors.index + 1, cursors.next)">
+        <el-button :disabled="loading || cursors.next === null" @click="loadDetail(cursors.index + 1, cursors.next)">
           {{ $t('snapshotNext') }}
-        </a-button>
-      </a-space>
+        </el-button>
+      </el-space>
     </div>
   </div>
 </template>
@@ -350,16 +346,27 @@ onBeforeUnmount(() => {
 .table-snapshots {
   padding: 18px 0;
 
-  :deep(.ant-btn-link) {
+  :deep(.el-button.is-link) {
     padding: 0;
   }
 
-  :deep(.ant-table-row-expand-icon) {
+  :deep(.el-table__expand-icon) {
     border-radius: 0 !important;
   }
 
-  .ant-table-wrapper {
+  :deep(td.el-table__expanded-cell) {
+    background-color: #f7f7f7;
+  }
+
+  .el-table {
     margin-top: 18px;
+  }
+
+  // Release the controls when the data is ready, even while Element Plus unmounts its loading mask.
+  .snapshot-table-ready :deep(.el-loading-mask) {
+    visibility: hidden;
+    pointer-events: none;
+    transition: none;
   }
 
   .snapshots-charts-header {

@@ -17,9 +17,10 @@ limitations under the License.
 / -->
 
 <script lang="ts" setup>
-import { reactive, ref, watch } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
+import { tableColumnProps } from '@/utils/table'
 import type { IColumns, IContainerSetting, IKeyAndValue } from '@/types/common.type'
 import { getContainersSetting, getSystemSetting } from '@/services/setting.services'
 import { usePageScroll } from '@/hooks/usePageScroll'
@@ -32,14 +33,14 @@ const loading = ref<boolean>(false)
 const systemSettingArray = reactive<IKeyAndValue[]>([])
 const containerSetting = reactive<IContainerSetting[]>([])
 
-const basicColumns: IColumns[] = reactive([
+const basicColumns = computed<IColumns[]>(() => [
   { title: t('key'), dataIndex: 'key', width: 340, ellipsis: true },
   { title: t('value'), dataIndex: 'value' },
 ])
 const activeKey = ref<string[]>([])
 const tabMap = {
-  system: { title: t('systemSetting'), key: 'system' },
-  container: { title: t('containerSetting'), key: 'container' },
+  system: { title: 'systemSetting', key: 'system' },
+  container: { title: 'containerSetting', key: 'container' },
 }
 const activeKeyTab = ref<string>(tabMap.system.key)
 watch(
@@ -121,22 +122,18 @@ function getSettingInfo() {
 <template>
   <div :ref="el => { pageScrollRef = el as HTMLElement | null }" class="page-scroll">
     <div class="setting-wrap">
-      <a-tabs v-model:active-key="activeKeyTab" @change="onChangeTab">
-        <a-tab-pane :key="tabMap.system.key" :tab="tabMap.system.title">
+      <el-tabs v-model="activeKeyTab" @tab-change="(name: string | number) => { const $event = String(name); onChangeTab($event) }">
+        <el-tab-pane lazy :key="tabMap.system.key" :name="tabMap.system.key" :label="t(tabMap.system.title)">
           <div class="system-setting">
-            <a-table
-              v-if="systemSettingArray.length"
-              row-key="key"
-              :columns="basicColumns"
-              :data-source="systemSettingArray"
-              :pagination="false"
-            />
+            <el-table v-if="systemSettingArray.length" row-key="key" :data="systemSettingArray">
+              <el-table-column v-for="column in basicColumns" :key="column.dataIndex" v-bind="tableColumnProps(column, basicColumns)" />
+            </el-table>
           </div>
-        </a-tab-pane>
-        <a-tab-pane :key="tabMap.container.key" :tab="tabMap.container.title">
+        </el-tab-pane>
+        <el-tab-pane lazy :key="tabMap.container.key" :name="tabMap.container.key" :label="t(tabMap.container.title)">
           <div class="container-setting">
-            <a-collapse v-model:active-key="activeKey">
-              <a-collapse-panel v-for="container in containerSetting" :key="container.name" :header="container.name">
+            <el-collapse v-model="activeKey">
+              <el-collapse-item v-for="container in containerSetting" :key="container.name" :name="container.name" :title="container.name">
                 <ul class="content">
                   <li class="item">
                     <h3 class="left">
@@ -154,30 +151,24 @@ function getSettingInfo() {
                 <h3 class="g-mb-12 g-mt-12">
                   {{ $t('properties') }}
                 </h3>
-                <a-table
-                  row-key="key"
-                  :columns="basicColumns"
-                  :data-source="container.propertiesArray"
-                  :pagination="false"
-                />
+                <el-table row-key="key" :data="container.propertiesArray">
+                  <el-table-column v-for="column in basicColumns" :key="column.dataIndex" v-bind="tableColumnProps(column, basicColumns)" />
+                </el-table>
                 <h3 class="g-mb-12 g-mt-12">
                   {{ $t('optimizerGroups') }}
                 </h3>
-                <a-collapse>
-                  <a-collapse-panel v-for="innerGroup in container.optimizeGroup" :key="innerGroup.name" :header="innerGroup.name">
-                    <a-table
-                      row-key="name"
-                      :columns="basicColumns"
-                      :data-source="innerGroup.innerPropertiesArray"
-                      :pagination="false"
-                    />
-                  </a-collapse-panel>
-                </a-collapse>
-              </a-collapse-panel>
-            </a-collapse>
+                <el-collapse>
+                  <el-collapse-item v-for="innerGroup in container.optimizeGroup" :key="innerGroup.name" :name="innerGroup.name" :title="innerGroup.name">
+                    <el-table row-key="name" :data="innerGroup.innerPropertiesArray">
+                      <el-table-column v-for="column in basicColumns" :key="column.dataIndex" v-bind="tableColumnProps(column, basicColumns)" />
+                    </el-table>
+                  </el-collapse-item>
+                </el-collapse>
+              </el-collapse-item>
+            </el-collapse>
           </div>
-        </a-tab-pane>
-      </a-tabs>
+        </el-tab-pane>
+      </el-tabs>
     </div>
   </div>
   <u-loading v-if="loading" />
@@ -201,17 +192,17 @@ function getSettingInfo() {
     font-size: 14px;
   }
   .container-setting {
-    :deep(.ant-collapse) {
-      > .ant-collapse-item > .ant-collapse-header {
+    :deep(.el-collapse) {
+      > .el-collapse-item > .el-collapse-item__header {
         font-weight: 500;
-        .ant-collapse-arrow {
+        .el-collapse-item__arrow {
           vertical-align: 1px;
         }
       }
-      .ant-collapse-content > .ant-collapse-content-box {
+      .el-collapse-item__wrap > .el-collapse-item__content {
         padding: 6px 16px 32px;
       }
-      .ant-collapse-item:last-child .ant-collapse-content > .ant-collapse-content-box {
+      .el-collapse-item:last-child .el-collapse-item__wrap > .el-collapse-item__content {
         padding-bottom: 16px;
       }
     }

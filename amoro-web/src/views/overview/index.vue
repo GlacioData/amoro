@@ -58,26 +58,26 @@ onMounted(() => {
 <template>
   <div :ref="el => { pageScrollRef = el as HTMLElement | null }" class="page-scroll">
     <div :style="{ background: '#F8F7F8', padding: '24px', minHeight: '900px' }" class="overview-content">
-      <a-row :gutter="[16, 8]">
-        <a-col v-for="(card, index) in singleData" :key="index" :span="6">
+      <el-row :gutter="16" class="overview-grid">
+        <el-col v-for="(card, index) in singleData" :key="index" :span="6" :xs="12">
           <SingleDataCard :title="t(card.key)" :value="card.value" />
-        </a-col>
-        <a-col :span="6">
+        </el-col>
+        <el-col :span="6" :xs="12">
           <MultipleDataCard :title="t('resource')" :data="multipleData" />
-        </a-col>
-        <a-col :span="12">
+        </el-col>
+        <el-col :span="12" :xs="24">
           <ResourceUsageCard />
-        </a-col>
-        <a-col :span="12">
+        </el-col>
+        <el-col :span="12" :xs="24">
           <DataSizeCard />
-        </a-col>
-        <a-col :span="12">
+        </el-col>
+        <el-col :span="12" :xs="24">
           <PieChartCard :title="t('optimizingStatus')" :data="optimizingStatusData" />
-        </a-col>
-        <a-col :span="12">
+        </el-col>
+        <el-col :span="12" :xs="24">
           <Top10TablesCard />
-        </a-col>
-      </a-row>
+        </el-col>
+      </el-row>
     </div>
   </div>
 </template>
@@ -86,5 +86,37 @@ onMounted(() => {
 .page-scroll {
   height: 100%;
   overflow-y: auto;
+}
+
+.overview-grid {
+  row-gap: 8px;
+
+  :deep(.el-card) {
+    --el-card-padding: 24px;
+    --el-card-border-color: #ededed;
+    border-radius: 8px;
+    box-shadow: none;
+  }
+
+  :deep(.el-card__header) {
+    min-height: 56px;
+    padding: 12px 24px;
+    display: flex;
+    align-items: center;
+    font-weight: 600;
+    color: rgba(0, 0, 0, 0.88);
+  }
+
+  @media (max-width: 760px) {
+    :deep(.el-card) { --el-card-padding: 12px; }
+    :deep(.el-card__header) { padding: 8px 12px; }
+    :deep(.card-title) { font-size: 18px; }
+    :deep(.el-card__header > .el-row) { gap: 8px; }
+  }
+
+  :deep(.el-card__header > .el-row) {
+    width: 100%;
+    align-items: center;
+  }
 }
 </style>

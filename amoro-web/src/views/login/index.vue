@@ -17,8 +17,8 @@ limitations under the License.
 / -->
 
 <script lang="ts">
-import { message } from 'ant-design-vue'
 import { defineComponent, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { message } from '@/utils/ui-feedback'
 import loginService from '@/services/login.service'
 import { usePlaceholder } from '@/hooks/usePlaceholder'
 import useStore from '@/store'

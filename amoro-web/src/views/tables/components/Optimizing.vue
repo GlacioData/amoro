@@ -17,10 +17,14 @@ limitations under the License.
 / -->
 
 <script lang="ts" setup>
+import { QuestionFilled } from '@element-plus/icons-vue'
 import { computed, onMounted, reactive, ref, shallowReactive } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute } from 'vue-router'
-import { Modal, message } from 'ant-design-vue'
+import DashboardPagination from '@/components/DashboardPagination.vue'
+import { copyText } from '@/utils/clipboard'
+import { tableColumnProps } from '@/utils/table'
+import { confirmAction, message } from '@/utils/ui-feedback'
 import { usePagination } from '@/hooks/usePagination'
 import type { BreadcrumbOptimizingItem, IColumns, ILableAndValue } from '@/types/common.type'
 import { cancelOptimizingProcess, getOptimizingProcessError, getOptimizingProcesses, getOptimizingTaskError, getTableOptimizingTypes, getTasksByOptimizingProcessId } from '@/services/table.service'
@@ -160,7 +164,7 @@ async function refreshOptimizingProcesses() {
 }
 
 async function cancel() {
-  Modal.confirm({
+  confirmAction({
     title: t('cancelOptimizingProcessOptModalTitle'),
     onOk: async () => {
       try {
@@ -338,37 +342,11 @@ function closeError() {
 
 async function copyError() {
   try {
-    try {
-      if (!navigator.clipboard) {
-        throw new Error('Clipboard API is unavailable')
-      }
-      await navigator.clipboard.writeText(errorModal.content)
-    }
-    catch (error) {
-      copyErrorWithTextarea(errorModal.content)
-    }
+    await copyText(errorModal.content)
     message.success(t('copySuccess'))
   }
   catch (error) {
     message.error(t('copyFailed'))
-  }
-}
-
-function copyErrorWithTextarea(content: string) {
-  const textarea = document.createElement('textarea')
-  textarea.value = content
-  textarea.readOnly = true
-  textarea.style.position = 'fixed'
-  textarea.style.opacity = '0'
-  document.body.appendChild(textarea)
-  try {
-    textarea.select()
-    if (!document.execCommand('copy')) {
-      throw new Error('Copy command failed')
-    }
-  }
-  finally {
-    document.body.removeChild(textarea)
   }
 }
 
@@ -382,172 +360,195 @@ onMounted(() => {
 <template>
   <div class="table-optimizing">
     <template v-if="!hasBreadcrumb">
-      <a-space class="filter-form">
-        <a-select
-          v-model:value="actionType" allow-clear :placeholder="t('type')" :options="actionTypeList"
-          style="min-width: 150px;" @change="handleFilterChange"
+      <el-space wrap class="filter-form">
+        <el-select
+          v-model="actionType"
+          clearable
+          :placeholder="t('type')"
+          :options="actionTypeList"
+          style="min-width: 150px;"
+          @change="handleFilterChange"
         />
-        <a-select
-          v-model:value="statusType" allow-clear :placeholder="t('status')" :options="statusTypeList"
-          style="min-width: 150px;" @change="handleFilterChange"
+        <el-select
+          v-model="statusType"
+          clearable
+          :placeholder="t('status')"
+          :options="statusTypeList"
+          style="min-width: 150px;"
+          @change="handleFilterChange"
         />
-      </a-space>
-      <a-table
-        row-key="processId" :columns="columns" :data-source="dataSource" :pagination="pagination"
-        :loading="loading" @change="change"
-      >
-        <template #headerCell="{ column }">
-          <template v-if="column.dataIndex === 'tasks'">
-            <div class="">
-              {{ column.title }}
-            </div>
-            <div class="">
-              {{ t('successSlashTotal') }}
-            </div>
+      </el-space>
+      <el-table v-loading="loading" row-key="processId" :data="dataSource">
+        <el-table-column type="expand">
+          <template #default="{ row: record }">
+            <el-row v-for="(value, key) in record.summary" :key="key" :gutter="16">
+              <el-col :style="{ flex: '0 0 420px' }" style="text-align: right;">
+                {{ key }} :
+              </el-col>
+              <el-col :style="{ flex: '1 1 auto' }">
+                {{ value }}
+              </el-col>
+            </el-row>
           </template>
-          <template v-if="column.dataIndex === 'inputFiles'">
-            <div class="">
-              {{ column.title }}
-            </div>
-            <div class="">
-              {{ t('sizeSlashCount') }}
-            </div>
+        </el-table-column>
+        <el-table-column v-for="column in columns" :key="column.dataIndex" v-bind="tableColumnProps(column, columns)">
+          <template v-if="column.dataIndex === 'inputFiles' || column.dataIndex === 'outputFiles' || column.dataIndex === 'tasks'" #header>
+            <template v-if="column.dataIndex === 'tasks'">
+              <div class="">
+                {{ column.title }}
+              </div>
+              <div class="">
+                {{ t('successSlashTotal') }}
+              </div>
+            </template>
+            <template v-if="column.dataIndex === 'inputFiles'">
+              <div class="">
+                {{ column.title }}
+              </div>
+              <div class="">
+                {{ t('sizeSlashCount') }}
+              </div>
+            </template>
+            <template v-if="column.dataIndex === 'outputFiles'">
+              <div class="">
+                {{ column.title }}
+              </div>
+              <div class="">
+                {{ t('sizeSlashCount') }}
+              </div>
+            </template>
           </template>
-          <template v-if="column.dataIndex === 'outputFiles'">
-            <div class="">
-              {{ column.title }}
-            </div>
-            <div class="">
-              {{ t('sizeSlashCount') }}
-            </div>
+          <template v-if="column.dataIndex === 'processId' || column.dataIndex === 'status'" #default="{ row: record }">
+            <template v-if="column.dataIndex === 'processId'">
+              <el-button link type="primary" @click="toggleBreadcrumb(record.processId, record.status)">
+                {{ record.processId }}
+              </el-button>
+            </template>
+            <template v-if="column.dataIndex === 'status'">
+              <div class="g-flex-ac">
+                <span
+                  :style="{ 'background-color': (STATUS_CONFIG[record.status as keyof typeof STATUS_CONFIG] || {} as any).color }"
+                  class="status-icon"
+                />
+                <span>{{ record.status }}</span>
+                <el-button
+                  v-if="record.status === 'FAILED' || record.status === 'CLOSED'"
+                  link
+                  class="error-detail-button g-ml-4"
+                  :aria-label="t('viewError')"
+                  :title="t('viewError')"
+                  @click.stop="showProcessError(record)"
+                >
+                  <QuestionFilled class="amoro-icon" />
+                </el-button>
+              </div>
+            </template>
           </template>
-        </template>
-        <template #bodyCell="{ record, column }">
-          <template v-if="column.dataIndex === 'processId'">
-            <a-button type="link" @click="toggleBreadcrumb(record.processId, record.status)">
-              {{ record.processId }}
-            </a-button>
-          </template>
-          <template v-if="column.dataIndex === 'status'">
-            <div class="g-flex-ac">
-              <span
-                :style="{ 'background-color': (STATUS_CONFIG[record.status as keyof typeof STATUS_CONFIG] || {} as any).color }"
-                class="status-icon"
-              />
-              <span>{{ record.status }}</span>
-              <a-button
-                v-if="record.status === 'FAILED' || record.status === 'CLOSED'" type="link" class="error-detail-button g-ml-4"
-                :aria-label="t('viewError')" :title="t('viewError')" @click.stop="showProcessError(record)"
-              >
-                <question-circle-outlined />
-              </a-button>
-            </div>
-          </template>
-        </template>
-        <template #expandedRowRender="{ record }">
-          <a-row v-for="(value, key) in record.summary" :key="key" type="flex" :gutter="16">
-            <a-col flex="420px" style="text-align: right;">
-              {{ key }} :
-            </a-col>
-            <a-col flex="auto">
-              {{ value }}
-            </a-col>
-          </a-row>
-        </template>
-      </a-table>
+        </el-table-column>
+      </el-table>
+      <DashboardPagination :pagination="pagination" @change="change" />
     </template>
     <template v-else>
-      <a-row>
-        <a-col :span="18">
-          <a-breadcrumb separator=">">
-            <a-breadcrumb-item class="text-active" @click="toggleBreadcrumb">
+      <el-row>
+        <el-col :span="18">
+          <el-breadcrumb separator=">">
+            <el-breadcrumb-item class="text-active" @click="toggleBreadcrumb">
               {{ t('all') }}
-            </a-breadcrumb-item>
-            <a-breadcrumb-item>{{ `${$t('processId')} ${processId}` }}</a-breadcrumb-item>
-          </a-breadcrumb>
-        </a-col>
-        <a-col :span="6">
-          <a-button
+            </el-breadcrumb-item>
+            <el-breadcrumb-item>{{ `${$t('processId')} ${processId}` }}</el-breadcrumb-item>
+          </el-breadcrumb>
+        </el-col>
+        <el-col :span="6">
+          <el-button
             v-if="writable"
-            v-model:disabled="cancelDisabled" type="primary" class="g-mb-16" style="float: right"
+            :disabled="cancelDisabled"
+            type="primary"
+            class="g-mb-16"
+            style="float: right"
             @click="cancel"
           >
             {{ t("cancelProcess") }}
-          </a-button>
-        </a-col>
-      </a-row>
-      <a-table
-        row-key="taskId" :columns="breadcrumbColumns" :data-source="breadcrumbDataSource"
-        :pagination="breadcrumbPagination" :loading="loading" class="g-mt-8" @change="change"
-      >
-        <template #headerCell="{ column }">
-          <template v-if="column.dataIndex === 'inputFilesDesc'">
-            <div class="">
-              {{ column.title }}
-            </div>
-            <div class="">
-              {{ t('sizeSlashCount') }}
-            </div>
+          </el-button>
+        </el-col>
+      </el-row>
+      <el-table v-loading="loading" row-key="taskId" class="g-mt-8" :data="breadcrumbDataSource">
+        <el-table-column type="expand">
+          <template #default="{ row: record }">
+            <el-row v-for="(value, key) in record.summary" :key="key" :gutter="16">
+              <el-col :style="{ flex: '0 0 420px' }" style="text-align: right;">
+                {{ key }} :
+              </el-col>
+              <el-col :style="{ flex: '1 1 auto' }">
+                {{ value }}
+              </el-col>
+            </el-row>
           </template>
-          <template v-if="column.dataIndex === 'outputFilesDesc'">
-            <div class="">
-              {{ column.title }}
-            </div>
-            <div class="">
-              {{ t('sizeSlashCount') }}
-            </div>
+        </el-table-column>
+        <el-table-column v-for="column in breadcrumbColumns" :key="column.dataIndex" v-bind="tableColumnProps(column, breadcrumbColumns)">
+          <template v-if="column.dataIndex === 'inputFilesDesc' || column.dataIndex === 'outputFilesDesc'" #header>
+            <template v-if="column.dataIndex === 'inputFilesDesc'">
+              <div class="">
+                {{ column.title }}
+              </div>
+              <div class="">
+                {{ t('sizeSlashCount') }}
+              </div>
+            </template>
+            <template v-if="column.dataIndex === 'outputFilesDesc'">
+              <div class="">
+                {{ column.title }}
+              </div>
+              <div class="">
+                {{ t('sizeSlashCount') }}
+              </div>
+            </template>
           </template>
-        </template>
-        <template #bodyCell="{ column, record }">
-          <template v-if="column.dataIndex === 'partitionData'">
-            <a-tooltip>
-              <template #title>
-                {{ formatPartition(record.partitionData) }}
-              </template>
-              <span>{{ formatPartition(record.partitionData) }}</span>
-            </a-tooltip>
+          <template v-if="column.dataIndex === 'partitionData' || column.dataIndex === 'status'" #default="{ row: record }">
+            <template v-if="column.dataIndex === 'partitionData'">
+              <el-tooltip>
+                <template #content>
+                  {{ formatPartition(record.partitionData) }}
+                </template>
+                <span>{{ formatPartition(record.partitionData) }}</span>
+              </el-tooltip>
+            </template>
+            <template v-if="column.dataIndex === 'status'">
+              <div class="g-flex-ac">
+                <span
+                  :style="{ 'background-color': (TASK_STATUS_CONFIG[record.status as keyof typeof TASK_STATUS_CONFIG] || {} as any).color }"
+                  class="status-icon"
+                />
+                <span>{{ record.status }}</span>
+                <el-button
+                  v-if="record.status === 'FAILED'"
+                  link
+                  class="error-detail-button g-ml-4"
+                  :aria-label="t('viewError')"
+                  :title="t('viewError')"
+                  @click.stop="showTaskError(record)"
+                >
+                  <QuestionFilled class="amoro-icon" />
+                </el-button>
+              </div>
+            </template>
           </template>
-          <template v-if="column.dataIndex === 'status'">
-            <div class="g-flex-ac">
-              <span
-                :style="{ 'background-color': (TASK_STATUS_CONFIG[record.status as keyof typeof TASK_STATUS_CONFIG] || {} as any).color }"
-                class="status-icon"
-              />
-              <span>{{ record.status }}</span>
-              <a-button
-                v-if="record.status === 'FAILED'" type="link" class="error-detail-button g-ml-4"
-                :aria-label="t('viewError')" :title="t('viewError')" @click.stop="showTaskError(record)"
-              >
-                <question-circle-outlined />
-              </a-button>
-            </div>
-          </template>
-        </template>
-        <template #expandedRowRender="{ record }">
-          <a-row v-for="(value, key) in record.summary" :key="key" type="flex" :gutter="16">
-            <a-col flex="420px" style="text-align: right;">
-              {{ key }} :
-            </a-col>
-            <a-col flex="auto">
-              {{ value }}
-            </a-col>
-          </a-row>
-        </template>
-      </a-table>
+        </el-table-column>
+      </el-table>
+      <DashboardPagination :pagination="breadcrumbPagination" @change="change" />
     </template>
-    <a-modal v-model:open="errorModal.open" :title="errorModal.title" :width="960" @cancel="closeError">
-      <a-spin :spinning="errorModal.loading">
+    <el-dialog v-model="errorModal.open" :title="errorModal.title" :width="960" @update:model-value="(open: boolean) => { if (!open) closeError() }">
+      <div v-loading="errorModal.loading">
         <pre class="error-stack">{{ errorModal.content }}</pre>
-      </a-spin>
+      </div>
       <template #footer>
-        <a-button :disabled="!errorModal.canCopy" @click="copyError">
+        <el-button :disabled="!errorModal.canCopy" @click="copyError">
           {{ t('copy') }}
-        </a-button>
-        <a-button type="primary" @click="closeError">
+        </el-button>
+        <el-button type="primary" @click="closeError">
           {{ t('close') }}
-        </a-button>
+        </el-button>
       </template>
-    </a-modal>
+    </el-dialog>
   </div>
 </template>
 
@@ -555,23 +556,23 @@ onMounted(() => {
 .table-optimizing {
   padding: 18px 0;
 
-  :deep(.ant-table-thead > tr > th:not(:last-child):not(.ant-table-selection-column):not(.ant-table-row-expand-icon-cell):not([colspan])::before) {
+  :deep(.el-table__header > tr > th:not(:last-child):not(.el-table-column--selection):not(.el-table__expand-column):not([colspan])::before) {
     height: 100% !important;
   }
 
-  :deep(.ant-table-thead > tr:not(:last-child) > th[colspan]) {
+  :deep(.el-table__header > tr:not(:last-child) > th[colspan]) {
     border-bottom: 1px solid #e8e8f0;
   }
 
-  :deep(.ant-table-thead > tr > th) {
+  :deep(.el-table__header > tr > th) {
     padding: 4px 16px !important;
   }
 
-  :deep(.ant-table-thead > tr > th) {
+  :deep(.el-table__header > tr > th) {
     padding: 4px 16px !important;
   }
 
-  :deep(.ant-table-row-expand-icon) {
+  :deep(.el-table__expand-icon) {
     border-radius: 0 !important;
   }
 }
@@ -617,7 +618,7 @@ onMounted(() => {
     cursor: pointer;
   }
 
-  .ant-btn-link {
+  .el-button.is-link {
     padding: 0;
   }
 }

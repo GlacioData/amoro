@@ -19,7 +19,9 @@ limitations under the License.
 <script lang="ts" setup>
 import { computed, onMounted, reactive, ref, shallowReactive } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { Modal, message } from 'ant-design-vue'
+import DashboardPagination from '@/components/DashboardPagination.vue'
+import { tableColumnProps } from '@/utils/table'
+import { confirmAction, message, warnAction } from '@/utils/ui-feedback'
 import type { IIOptimizeGroupItem, IOptimizeResourceTableItem } from '@/types/common.type'
 import { getOptimizerResourceList, getResourceGroupsListAPI, groupDeleteAPI, groupDeleteCheckAPI, releaseResource } from '@/services/optimize.service'
 import { usePagination } from '@/hooks/usePagination'
@@ -49,13 +51,13 @@ const STATUS_CONFIG = shallowReactive({
 const loading = ref<boolean>(false)
 const releaseLoading = ref<boolean>(false)
 const writable = canManageOptimizer()
-const tableColumns = shallowReactive([
+const tableColumns = computed(() => [
   { dataIndex: 'name', title: t('name'), ellipsis: true },
   { dataIndex: 'container', title: t('container'), width: '23%', ellipsis: true },
   { dataIndex: 'resourceOccupation', title: t('resourceOccupation'), width: '23%', ellipsis: true },
-  { dataIndex: 'operationGroup', title: t('operation'), key: 'operationGroup', ellipsis: true, width: 230, scopedSlots: { customRender: 'operationGroup' } },
+  { dataIndex: 'operationGroup', title: t('operation'), key: 'operationGroup', ellipsis: true, width: 230 },
 ])
-const optimizerColumns = shallowReactive([
+const optimizerColumns = computed(() => [
   { dataIndex: 'jobId', title: t('optimizerId'), width: '15%', ellipsis: true },
   { dataIndex: 'token', title: t('token'), width: '10%', ellipsis: true },
   { dataIndex: 'groupName', title: t('optimizerGroup'), ellipsis: true },
@@ -64,14 +66,14 @@ const optimizerColumns = shallowReactive([
   { dataIndex: 'resourceAllocation', title: t('resourceAllocation'), width: '10%', ellipsis: true },
   { dataIndex: 'startTime', title: t('startTime'), width: 172, ellipsis: true },
   { dataIndex: 'touchTime', title: t('touchTime'), width: 172, ellipsis: true },
-  { dataIndex: 'operation', title: t('operation'), key: 'operation', ellipsis: true, width: 160, scopedSlots: { customRender: 'operationGroup' } },
+  { dataIndex: 'operation', title: t('operation'), key: 'operation', ellipsis: true, width: 160 },
 ])
 const pagination = reactive(usePagination())
 const optimizersList = reactive<IOptimizeResourceTableItem[]>([])
 const groupList = reactive<IIOptimizeGroupItem[]>([])
 
 const columns = computed(() => {
-  return props.type === 'optimizers' ? optimizerColumns : tableColumns
+  return props.type === 'optimizers' ? optimizerColumns.value : tableColumns.value
 })
 
 const dataSource = computed(() => {
@@ -94,7 +96,7 @@ function releaseModal(record: any) {
   if (record.container === 'external') {
     return
   }
-  Modal.confirm({
+  confirmAction({
     title: t('releaseOptModalTitle'),
     onOk: () => {
       releaseJob(record)
@@ -169,7 +171,7 @@ function editGroup(record: IIOptimizeGroupItem) {
 async function removeGroup(record: IIOptimizeGroupItem) {
   const res = await groupDeleteCheckAPI({ name: record.name })
   if (res) {
-    Modal.confirm({
+    confirmAction({
       title: t('deleteGroupModalTitle'),
       onOk: async () => {
         await groupDeleteAPI({ name: record.name })
@@ -179,7 +181,7 @@ async function removeGroup(record: IIOptimizeGroupItem) {
     })
     return
   }
-  Modal.warning({
+  warnAction({
     title: t('cannotDeleteGroupModalTitle'),
     content: t('cannotDeleteGroupModalContent'),
   })
@@ -199,46 +201,44 @@ onMounted(() => {
 
 <template>
   <div class="list-wrap">
-    <a-table
-      class="ant-table-common"
-      :columns="columns"
-      :data-source="dataSource"
-      :pagination="pagination"
-      :loading="loading" @change="changeTable"
-    >
-      <template #bodyCell="{ column, record }">
-        <template v-if="column.dataIndex === 'durationDisplay'">
-          <span :title="record.durationDesc">
-            {{ record.durationDisplay }}
-          </span>
-        </template>
-        <template v-if="column.dataIndex === 'optimizeStatus'">
-          <span
-            :style="{ 'background-color': (STATUS_CONFIG[record.optimizeStatus as keyof typeof STATUS_CONFIG] as any)?.color }"
-            class="status-icon"
-          />
-          <span>{{ record.optimizeStatus }}</span>
-        </template>
-        <template v-if="column.dataIndex === 'operation'">
-          <span v-if="writable"
-            class="primary-link" :class="{ disabled: record.container === 'external' }"
-            @click="releaseModal(record)"
-          >
-            {{ t('release') }}
-          </span>
-        </template>
-        <template v-if="column.dataIndex === 'operationGroup'">
-          <template v-if="writable">
-          <span class="primary-link g-mr-12" @click="editGroup(record)">
-            {{ t('edit') }}
-          </span>
-          <span class="primary-link" @click="removeGroup(record)">
-            {{ t('remove') }}
-          </span>
+    <el-table v-loading="loading" class="dashboard-table" :data="dataSource">
+      <el-table-column v-for="column in columns" :key="column.dataIndex" v-bind="tableColumnProps(column, columns)">
+        <template v-if="column.dataIndex === 'durationDisplay' || column.dataIndex === 'operation' || column.dataIndex === 'operationGroup' || column.dataIndex === 'optimizeStatus'" #default="{ row: record }">
+          <template v-if="column.dataIndex === 'durationDisplay'">
+            <span :title="record.durationDesc">
+              {{ record.durationDisplay }}
+            </span>
+          </template>
+          <template v-if="column.dataIndex === 'optimizeStatus'">
+            <span
+              :style="{ 'background-color': (STATUS_CONFIG[record.optimizeStatus as keyof typeof STATUS_CONFIG] as any)?.color }"
+              class="status-icon"
+            />
+            <span>{{ record.optimizeStatus }}</span>
+          </template>
+          <template v-if="column.dataIndex === 'operation'">
+            <span
+              v-if="writable"
+              class="primary-link" :class="{ disabled: record.container === 'external' }"
+              @click="releaseModal(record)"
+            >
+              {{ t('release') }}
+            </span>
+          </template>
+          <template v-if="column.dataIndex === 'operationGroup'">
+            <template v-if="writable">
+              <span class="primary-link g-mr-12" @click="editGroup(record)">
+                {{ t('edit') }}
+              </span>
+              <span class="primary-link" @click="removeGroup(record)">
+                {{ t('remove') }}
+              </span>
+            </template>
           </template>
         </template>
-      </template>
-    </a-table>
+      </el-table-column>
+    </el-table>
+    <DashboardPagination :pagination="pagination" @change="changeTable" />
   </div>
   <u-loading v-if="releaseLoading" />
 </template>

@@ -17,8 +17,7 @@ limitations under the License.
 / -->
 
 <script setup lang="ts">
-import { QuestionCircleOutlined } from '@ant-design/icons-vue'
-import { Modal as AModal, Progress as AProgress, Tooltip as ATooltip } from 'ant-design-vue'
+import { QuestionFilled } from '@element-plus/icons-vue'
 import { computed, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import PaimonHealthStructure from './PaimonHealthStructure.vue'
@@ -310,30 +309,31 @@ function showHealthScoreDetail() {
     {{ displayScore }}
   </button>
 
-  <AModal
-    v-model:open="modalVisible"
-    :footer="null"
+  <el-dialog
+    v-model="modalVisible"
     class="health-score-modal"
     :title="t('healthScoreDetails')"
     width="min(800px, calc(100vw - 32px))"
-    centered
+    align-center
   >
     <div class="health-score-modal-content">
       <section class="health-score-section" :aria-label="cardTitle">
-        <div class="health-score-row">
-          <strong class="module-info">{{ cardTitle }}</strong>
-          <span class="module-score">{{ scoreWithMax(baseInfo.healthScore, 100) }}</span>
+        <div class="score-overview">
+          <div class="health-score-row">
+            <strong class="module-info">{{ cardTitle }}</strong>
+            <span class="module-score">{{ scoreWithMax(baseInfo.healthScore, 100) }}</span>
+          </div>
+          <el-progress
+            v-if="baseInfo.healthScore >= 0"
+            :percentage="scorePercent(baseInfo.healthScore, 100)"
+            :show-text="false"
+            :color="scoreColor"
+            :stroke-width="8"
+          />
+          <p v-if="isPaimon && isPaimonV3 && baseInfo.healthScore >= 0" class="score-grade" :style="{ color: scoreColor }">
+            {{ scoreGrade }}
+          </p>
         </div>
-        <AProgress
-          v-if="baseInfo.healthScore >= 0"
-          :percent="scorePercent(baseInfo.healthScore, 100)"
-          :show-info="false"
-          :stroke-color="scoreColor"
-          :stroke-width="8"
-        />
-        <p v-if="isPaimon && isPaimonV3 && baseInfo.healthScore >= 0" :style="{ color: scoreColor }">
-          {{ scoreGrade }}
-        </p>
         <div v-if="isPaimon" class="evaluation-status" role="status">
           <strong>{{ t(`healthStatus_${details?.evaluation?.status || (!details ? 'PENDING' : baseInfo.healthScore < 0 ? (details.structure ? 'PARTIAL' : 'FAILED') : 'LEGACY')}`) }}</strong>
           <p v-if="details?.evaluation?.stale">
@@ -358,7 +358,7 @@ function showHealthScoreDetail() {
         <p v-if="isIcebergCompatible" class="formula-row">
           {{ `${t('healthScore')} = ${t('smallFileScore')} + ${t('equalityDeleteScore')} + ${t('positionalDeleteScore')}` }}
         </p>
-        <dl v-if="details" class="summary-metadata">
+        <dl v-if="details && (!isPaimon || details.snapshotId != null || details.changeSnapshotId != null)" class="summary-metadata">
           <div v-if="!isPaimon">
             <dt>{{ t('healthFormulaVersion') }}</dt>
             <dd>{{ details.formulaVersion }}</dd>
@@ -397,21 +397,21 @@ function showHealthScoreDetail() {
           <div class="submodule-row">
             <div class="component-heading">
               <strong class="module-info">{{ componentLabel(component.code) }}</strong>
-              <ATooltip v-if="isPaimon" :title="componentDescription(component.code)" :trigger="['hover', 'focus']" overlay-class-name="health-score-tooltip">
+              <el-tooltip v-if="isPaimon" :content="componentDescription(component.code)" :trigger="['hover', 'focus']" popper-class="health-score-tooltip">
                 <button type="button" class="health-help" :aria-label="t('healthMetricHelp', { metric: componentLabel(component.code) })">
-                  <QuestionCircleOutlined />
+                  <QuestionFilled class="amoro-icon" />
                 </button>
-              </ATooltip>
+              </el-tooltip>
             </div>
             <span class="module-score">
               {{ isPaimon && component.code === 'FILE_SIZE_AUXILIARY' ? t('healthNotScored') : scoreWithMax(component.score, component.maxScore) }}
             </span>
           </div>
-          <AProgress
+          <el-progress
             v-if="component.score >= 0 && !(isPaimon && component.code === 'FILE_SIZE_AUXILIARY')"
-            :percent="scorePercent(component.score, component.maxScore)"
-            :show-info="false"
-            stroke-color="#1890ff"
+            :percentage="scorePercent(component.score, component.maxScore)"
+            :show-text="false"
+            color="#1890ff"
             :stroke-width="8"
           />
           <p v-if="!isPaimon" class="score-description">
@@ -429,11 +429,11 @@ function showHealthScoreDetail() {
             <div v-for="([code, value]) in componentMetrics(component)" :key="code">
               <dt>
                 {{ metricLabel(code) }}
-                <ATooltip v-if="isPaimon && metricDescription(code)" :title="metricDescription(code)" :trigger="['hover', 'focus']" overlay-class-name="health-score-tooltip">
+                <el-tooltip v-if="isPaimon && metricDescription(code)" :content="metricDescription(code)" :trigger="['hover', 'focus']" popper-class="health-score-tooltip">
                   <button type="button" class="health-help" :aria-label="t('healthMetricHelp', { metric: metricLabel(code) })">
-                    <QuestionCircleOutlined />
+                    <QuestionFilled class="amoro-icon" />
                   </button>
-                </ATooltip>
+                </el-tooltip>
               </dt>
               <dd>{{ metricValue(code, value) }}</dd>
             </div>
@@ -445,7 +445,7 @@ function showHealthScoreDetail() {
 
       <PaimonHealthComparison v-if="isPaimon" :comparison="baseInfo.healthComparison" />
 
-      <component :is="isPaimon ? 'details' : 'section'" v-if="healthMetrics.length" class="details-section">
+      <component :is="isPaimon ? 'details' : 'section'" v-if="healthMetrics.length" class="details-section health-metrics-section">
         <component :is="isPaimon ? 'summary' : 'h3'">
           {{ t('healthMetrics') }}
         </component>
@@ -453,11 +453,11 @@ function showHealthScoreDetail() {
           <div v-for="([code, value]) in healthMetrics" :key="code">
             <dt>
               {{ metricLabel(code) }}
-              <ATooltip v-if="isPaimon && metricDescription(code)" :title="metricDescription(code)" :trigger="['hover', 'focus']" overlay-class-name="health-score-tooltip">
+              <el-tooltip v-if="isPaimon && metricDescription(code)" :content="metricDescription(code)" :trigger="['hover', 'focus']" popper-class="health-score-tooltip">
                 <button type="button" class="health-help" :aria-label="t('healthMetricHelp', { metric: metricLabel(code) })">
-                  <QuestionCircleOutlined />
+                  <QuestionFilled class="amoro-icon" />
                 </button>
-              </ATooltip>
+              </el-tooltip>
             </dt>
             <dd>{{ metricValue(code, value) }}</dd>
           </div>
@@ -472,11 +472,10 @@ function showHealthScoreDetail() {
         {{ t('healthDetailsUnavailable') }}
       </p>
     </div>
-  </AModal>
+  </el-dialog>
 </template>
 
 <style lang="less">
-.evaluation-status { margin: 12px 0; padding: 12px; background: #fafbfc; border-left: 3px solid #91caff; }
 .health-score-tooltip {
   max-width: min(360px, calc(100vw - 32px));
 }
@@ -507,27 +506,86 @@ function showHealthScoreDetail() {
   }
 }
 
-.health-score-modal {
-  .ant-modal-body {
-    max-height: calc(100vh - 160px);
-    overflow-x: hidden;
-    overflow-y: auto;
+.health-score-modal.el-dialog {
+  --health-dialog-gutter: 24px;
+
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100dvh - 32px);
+  padding: 0;
+  white-space: normal;
+
+  .el-dialog__header {
+    flex: none;
+    margin: 0;
+    padding: 16px var(--health-dialog-gutter);
+    padding-inline-end: 48px;
+    border-bottom: 1px solid #e8eaef;
+  }
+
+  .el-dialog__title {
+    color: #102048;
+    font-weight: 600;
+  }
+
+  .el-dialog__body {
+    flex: 1 1 auto;
+    min-height: 0;
+    padding: 16px var(--health-dialog-gutter) 20px;
+    overflow: auto;
+    overscroll-behavior: contain;
   }
 
   .health-score-modal-content {
-    box-sizing: border-box;
-    width: 100%;
-    min-width: 0;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
     color: #102048;
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+
+    > * + * {
+      padding-block-start: 12px;
+      border-block-start: 1px solid #e8eaef;
+    }
   }
 
   .health-score-section,
-  .details-section {
+  .score-overview,
+  .submodule-item {
+    display: grid;
     min-width: 0;
-    margin-bottom: 16px;
+    gap: 8px;
   }
 
-  .ant-progress-line {
+  .health-score-section {
+    gap: 12px;
+  }
+
+  .score-overview {
+    gap: 4px;
+  }
+
+  .score-grade {
+    font-size: 13px;
+    font-weight: 600;
+  }
+
+  .evaluation-status {
+    display: grid;
+    gap: 2px;
+    padding: 12px;
+    border-inline-start: 3px solid #91caff;
+    border-radius: 4px;
+    background: #f5f7fa;
+    font-size: 13px;
+
+    strong {
+      font-weight: 600;
+    }
+  }
+
+  .el-progress {
     margin-inline-end: 0;
   }
 
@@ -536,8 +594,7 @@ function showHealthScoreDetail() {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 16px;
-    margin-bottom: 4px;
+    gap: 12px;
   }
 
   .module-info,
@@ -548,11 +605,18 @@ function showHealthScoreDetail() {
 
   .module-info {
     min-width: 0;
-    overflow-wrap: anywhere;
+    font-weight: 600;
   }
 
   .module-score {
     flex: none;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .health-score-row .module-score {
+    font-size: 24px;
+    line-height: 1.2;
   }
 
   .component-heading {
@@ -585,17 +649,14 @@ function showHealthScoreDetail() {
   .score-description,
   .component-rule,
   .empty-details {
-    margin: 6px 0;
+    margin: 0;
     color: #4f5d75;
-    font-size: 12px;
-    line-height: 1.5;
-    overflow-wrap: anywhere;
+    font-size: 13px;
   }
 
   .formula-row {
-    margin: 8px 0;
+    margin: 0;
     padding: 6px 8px;
-    overflow-wrap: anywhere;
     border-radius: 4px;
     background-color: #f5f7fa;
     color: #102048;
@@ -604,19 +665,31 @@ function showHealthScoreDetail() {
     text-align: center;
   }
 
-  h3 {
-    margin: 0 0 8px;
-    color: #102048;
+  .details-section > h3,
+  .details-section > summary {
     font-size: 14px;
-    line-height: 20px;
+    font-weight: 600;
+  }
+
+  .details-section > h3 {
+    margin-block-end: 8px;
+  }
+
+  .details-section > summary {
+    padding-block: 4px;
+    cursor: pointer;
+
+    &:focus-visible {
+      outline: 2px solid #1890ff;
+      outline-offset: 2px;
+    }
   }
 
   .submodule-item {
-    padding: 10px 0;
-    border-top: 1px solid #e8e8e8;
+    padding-block: 8px;
 
-    &:last-child {
-      padding-bottom: 0;
+    & + .submodule-item {
+      border-top: 1px solid #e8eaef;
     }
   }
 
@@ -628,13 +701,15 @@ function showHealthScoreDetail() {
 
   .summary-metadata,
   .metric-list {
-    margin: 8px 0 0;
+    margin: 0;
 
     > div {
       display: grid;
-      grid-template-columns: minmax(128px, 1fr) minmax(0, 2fr);
-      gap: 12px;
-      padding: 4px 0;
+      grid-template-columns: minmax(0, 1fr) fit-content(45%);
+      align-items: baseline;
+      min-width: 0;
+      gap: 8px;
+      padding-block: 6px;
     }
 
     dt {
@@ -646,8 +721,24 @@ function showHealthScoreDetail() {
       margin: 0;
       overflow-wrap: anywhere;
       color: #102048;
-      text-align: right;
+      text-align: end;
+      font-variant-numeric: tabular-nums;
     }
+  }
+
+  .summary-metadata > div {
+    padding-block: 2px;
+  }
+
+  .metric-list > div {
+    border-block-end: 1px solid #eef0f2;
+  }
+
+  .health-metrics-section > .metric-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr));
+    column-gap: 24px;
+    margin-block-start: 4px;
   }
 
   .reason-list {
@@ -660,15 +751,10 @@ function showHealthScoreDetail() {
   }
 
   @media (max-width: 480px) {
-    .summary-metadata > div,
-    .metric-list > div {
-      grid-template-columns: 1fr;
-      gap: 2px;
-    }
+    --health-dialog-gutter: 16px;
 
-    .summary-metadata dd,
-    .metric-list dd {
-      text-align: left;
+    .health-score-row .module-score {
+      font-size: 20px;
     }
   }
 }

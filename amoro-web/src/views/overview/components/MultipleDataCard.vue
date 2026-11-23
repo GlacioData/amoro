@@ -26,19 +26,21 @@ const { t } = useI18n()
 </script>
 
 <template>
-  <a-card class="multiple-data" :body-style="{ paddingTop: '0px' }">
-    <template #title>
+  <el-card class="multiple-data" :body-style="{ paddingTop: '0px' }">
+    <template #header>
       <span class="card-title">{{ props.title }}</span>
     </template>
-    <a-row>
-      <a-col v-for="item in props.data" :key="item.key" :span="12">
-        <a-statistic
-          :title="t(item.key)" :value="item.value"
-          :value-style="{ color: '#07A7F0', fontSize: '28px' }" style="margin-right: 20px;"
+    <el-row>
+      <el-col v-for="item in props.data" :key="item.key" :span="12">
+        <el-statistic
+          :title="t(item.key)"
+          :value="item.value"
+          :value-style="{ color: '#07A7F0', fontSize: '28px' }"
+          style="margin-right: 20px;"
         />
-      </a-col>
-    </a-row>
-  </a-card>
+      </el-col>
+    </el-row>
+  </el-card>
 </template>
 
 <style scoped>

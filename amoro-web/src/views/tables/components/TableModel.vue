@@ -18,8 +18,7 @@ under the License.
 -->
 
 <script setup lang="ts">
-import { QuestionCircleOutlined } from '@ant-design/icons-vue'
-import { Tooltip as ATooltip } from 'ant-design-vue'
+import { QuestionFilled } from '@element-plus/icons-vue'
 import { useI18n } from 'vue-i18n'
 import type { ITableModel } from '@/types/common.type'
 import { tableModelDescription } from '@/utils/tableModel'
@@ -32,12 +31,12 @@ const { t } = useI18n()
 <template>
   <p class="table-model">
     {{ t('tableModel') }}: <span class="text-color">{{ model?.code || '—' }}</span>
-    <!-- Tooltip trigger must receive focus/mouse events: https://antdv.com/components/tooltip -->
-    <ATooltip :title="t(tableModelDescription(format, model))" :trigger="['hover', 'focus']">
+    <!-- Tooltip trigger must receive focus/mouse events: https://element-plus.org/en-US/component/tooltip.html -->
+    <el-tooltip :content="t(tableModelDescription(format, model))" :trigger="['hover', 'focus']">
       <button type="button" class="model-help" :aria-label="t('tableModelHelp')">
-        <QuestionCircleOutlined />
+        <QuestionFilled class="amoro-icon" />
       </button>
-    </ATooltip>
+    </el-tooltip>
   </p>
 </template>
 

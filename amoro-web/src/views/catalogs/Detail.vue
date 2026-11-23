@@ -20,15 +20,9 @@ limitations under the License.
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter } from 'vue-router'
-import type {
-  UploadChangeParam,
-  UploadFile,
-} from 'ant-design-vue'
-import {
-  Modal,
-  message,
-} from 'ant-design-vue'
+import type { UploadFile, UploadUserFile } from 'element-plus'
 import Properties from './Properties.vue'
+import { confirmAction, message, warnAction } from '@/utils/ui-feedback'
 import { checkCatalogStatus, delCatalog, getCatalogsSetting, getCatalogsTypes, getMetastoreStorageTypes, getMetastoreTableFormats, saveCatalogsSetting } from '@/services/setting.services'
 import type { ICatalogItem, IIOptimizeGroupItem, ILableAndValue, IMap } from '@/types/common.type'
 import { usePlaceholder } from '@/hooks/usePlaceholder'
@@ -43,7 +37,7 @@ interface IStorageConfigItem {
   fileName: string
   fileUrl: string
   fileId: string
-  fileList: string[]
+  fileList: UploadUserFile[]
   uploadLoading: boolean
   isSuccess: boolean
 }
@@ -94,9 +88,9 @@ const uploadUrl = computed(() => {
 })
 const uploadHeaders = computed(() => {
   return {
-    'X-Request-Source': 'Web'
-  };
-});
+    'X-Request-Source': 'Web',
+  }
+})
 const isNewCatalog = computed(() => {
   const catalog = (route.query?.catalogname || '').toString()
   return decodeURIComponent(catalog) === 'new catalog'
@@ -187,6 +181,7 @@ const defaultPropertiesMap = {
   PAIMON: ['warehouse'],
 }
 
+let configRequest = 0
 watch(() => route.query, (value) => {
   value && initData()
 }, {
@@ -205,7 +200,7 @@ async function getOptimizerGroupList() {
   const list = (res || []).map((item: IIOptimizeGroupItem) => ({ lable: item.resourceGroup.name, value: item.resourceGroup.name }))
 
   if (list.length === 0) {
-    Modal.confirm({
+    confirmAction({
       title: t('noResourceGroupsTitle'),
       content: t('noResourceGroupsContent'),
       okText: t('goToButtonText'),
@@ -224,7 +219,7 @@ async function getOptimizerGroupList() {
   }
 }
 async function getCatalogTypeOps() {
-  const res = await getCatalogsTypes();
+  const res = await getCatalogsTypes()
   catalogTypeOps.length = 0
   ;(res || []).forEach((ele: any) => {
     catalogTypeOps.push({
@@ -260,6 +255,7 @@ async function loadMetastoreCapabilities(loadTableFormats: boolean) {
   }
 }
 async function getConfigInfo() {
+  const request = ++configRequest
   try {
     loading.value = true
     const { catalogname, type } = route.query
@@ -285,7 +281,7 @@ async function getConfigInfo() {
     }
     else {
       const res = await getCatalogsSetting(catalogname as string)
-      if (!res)
+      if (!res || request !== configRequest)
         return
 
       const { name, type, tableFormatList, storageConfig, authConfig, properties, tableProperties, optimizerGroup } = res
@@ -303,6 +299,8 @@ async function getConfigInfo() {
       await loadMetastoreCapabilities(false)
     }
 
+    if (request !== configRequest)
+      return
     const { storageConfig, authConfig } = formState
     Object.keys(storageConfig).forEach((key) => {
       const configArr = ['hadoop.core.site', 'hadoop.hdfs.site']
@@ -344,11 +342,10 @@ async function getConfigInfo() {
   catch (error) {
   }
   finally {
-    loading.value = false
+    if (request === configRequest)
+      loading.value = false
   }
 }
-
-
 
 async function changeProperties() {
   const properties = await propertiesRef.value.getPropertiesWithoputValidation()
@@ -373,7 +370,6 @@ async function changeProperties() {
   }
   formState.properties = properties
 }
-
 
 const authTypeOptions = computed(() => {
   const type = formState.storageConfig['storage.type']
@@ -407,7 +403,7 @@ watch(
         formState.authConfig[simpleUsernameKey] = 'local'
       }
     }
-  }
+  },
 )
 
 async function changeMetastore() {
@@ -440,7 +436,6 @@ async function changeMetastore() {
   await changeProperties()
 }
 
-
 function handleEdit() {
   emit('updateEdit', true)
 }
@@ -450,10 +445,9 @@ async function handleRemove() {
     deleteCatalogModal()
     return
   }
-  Modal.confirm({
+  warnAction({
     title: t('cannotDeleteModalTitle'),
     content: t('cannotDeleteModalContent'),
-    wrapClassName: 'not-delete-modal',
   })
 }
 async function validatorName(_: any, value: string) {
@@ -484,7 +478,7 @@ function getFileIdParams() {
 }
 function handleSave() {
   formRef.value
-    .validateFields()
+    .validate()
     .then(async () => {
       const { catalog, tableFormatList, storageConfig, authConfig } = formState
       const properties = await propertiesRef.value.getProperties()
@@ -529,13 +523,15 @@ function handleCancel() {
   getConfigInfo()
 }
 async function deleteCatalogModal() {
-  Modal.confirm({
+  confirmAction({
     title: t('deleteCatalogModalTitle'),
     onOk: async () => {
       try {
         await delCatalog(formState.catalog.name || '')
-        message.success(`${t('remove')} ${t('success')}`, 1, () => {
-          router.replace({ path: '/catalogs', query: {} }).then(() => router.go(0))
+        message.success({
+          message: `${t('remove')} ${t('success')}`,
+          duration: 1000,
+          onClose: () => { void router.replace({ path: '/catalogs', query: {} }).then(() => router.go(0)) },
         })
       }
       catch (error) {
@@ -544,35 +540,26 @@ async function deleteCatalogModal() {
     },
   })
 }
-function uploadFile(info: UploadChangeParam, config: { uploadLoading: boolean, isSuccess: boolean, fileName: any, key: string | number, fileUrl: any, fileId: any }, type?: string) {
-  try {
-    if (info.file.status === 'uploading') {
-      config.uploadLoading = true
-    }
-    else {
-      config.uploadLoading = false
-    }
-    if (info.file.status === 'done') {
-      const { code } = info.file.response
-      if (code !== 200) {
-        const { message } = info.file.response
-        throw new Error(message)
-      }
-      const { url, id } = info.file.response.result
-      config.isSuccess = true
-      config.fileName = type === 'STORAGE' ? storageConfigFileNameMap[config.key as keyof typeof storageConfigFileNameMap] : info.file.name
-      config.fileUrl = url
-      config.fileId = id
-      message.success(`${info.file.name} ${t('uploaded')} ${t('success')}`)
-    }
-    else if (info.file.status === 'error') {
-      config.isSuccess = false
-      message.error(`${info.file.name} ${t('uploaded')} ${t('failed')}`)
-    }
+// Element Plus reports HTTP success separately from AMS's business status.
+// https://github.com/element-plus/element-plus/blob/2.14.8/docs/en-US/component/upload.md
+function uploadSucceeded(response: unknown, file: UploadFile, config: IStorageConfigItem, storage = false) {
+  config.uploadLoading = false
+  const result = response as { code?: number, message?: string, result?: { url?: string, id?: string } } | null
+  if (result?.code !== 200 || !result.result?.id) {
+    message.error(result?.message || `${file.name} ${t('uploaded')} ${t('failed')}`)
+    return
   }
-  catch (error) {
-    message.error((error as Error).message)
-  }
+  config.isSuccess = true
+  config.fileName = storage ? storageConfigFileNameMap[config.key as keyof typeof storageConfigFileNameMap] : file.name
+  config.fileUrl = result.result.url ?? ''
+  config.fileId = result.result.id
+  message.success(`${file.name} ${t('uploaded')} ${t('success')}`)
+}
+
+function uploadFailed(file: UploadFile, config: IStorageConfigItem) {
+  config.uploadLoading = false
+  config.isSuccess = false
+  message.error(`${file.name} ${t('uploaded')} ${t('failed')}`)
 }
 function viewFileDetail(url: string, fileName: string) {
   downloadWithHeader(url, fileName)
@@ -587,212 +574,257 @@ onMounted(() => {
   <div class="detail-wrap">
     <div class="detail-content-wrap">
       <div class="content-wrap">
-        <a-form ref="formRef" :model="formState" class="catalog-form">
-          <a-form-item>
+        <el-form ref="formRef" :model="formState" class="catalog-form" label-position="left">
+          <el-form-item>
             <p class="header">
               {{ $t('basic') }}
             </p>
-          </a-form-item>
-          <a-form-item
-            :label="$t('name')" :name="['catalog', 'name']"
+          </el-form-item>
+          <el-form-item
+            :label="$t('name')"
+            :prop="['catalog', 'name']"
             :rules="[{ required: isEdit && isNewCatalog, validator: validatorName }]"
           >
-            <a-input v-if="isEdit && isNewCatalog" v-model:value="formState.catalog.name" />
+            <el-input v-if="isEdit && isNewCatalog" v-model="formState.catalog.name" />
             <span v-else class="config-value">{{ formState.catalog.name }}</span>
-          </a-form-item>
-          <a-form-item
+          </el-form-item>
+          <el-form-item
             :label="$t('metastore')"
-            :name="['catalog', 'type']" :rules="[{ required: isEdit && isNewCatalog }]"
+            :prop="['catalog', 'type']"
+            :rules="[{ required: isEdit && isNewCatalog }]"
           >
-             <a-select
-               v-if="isEdit && isNewCatalog" v-model:value="formState.catalog.type" :options="catalogTypeOps"
-               :placeholder="placeholder.selectPh" @change="changeMetastore"
-             />
-             <span v-else>{{ metastoreType }}</span>
-           </a-form-item>
-           <a-form-item
-            :label="$t('tableFormat')" :name="['tableFormatList']"
-           >
-            <a-checkbox-group
+            <el-select
+              v-if="isEdit && isNewCatalog"
+              v-model="formState.catalog.type"
+              :options="catalogTypeOps"
+              :placeholder="placeholder.selectPh"
+              @change="changeMetastore"
+            />
+            <span v-else>{{ metastoreType }}</span>
+          </el-form-item>
+          <el-form-item
+            :label="$t('tableFormat')"
+            :prop="['tableFormatList']"
+          >
+            <el-checkbox-group
               v-if="isEdit"
-              v-model:value="formState.tableFormatList"
+              v-model="formState.tableFormatList"
             >
-              <a-checkbox
+              <el-checkbox
                 v-for="item in tableFormatOptions"
                 :key="item"
                 :value="item"
               >
                 {{ tableFormatText[item] || item }}
-              </a-checkbox>
-            </a-checkbox-group>
+              </el-checkbox>
+            </el-checkbox-group>
             <span v-else class="config-value">
               {{ formState.tableFormatList.map((item) => tableFormatText[item] || item).join(', ') }}
             </span>
-           </a-form-item>
-          <a-form-item
-            :label="$t('optimizerGroup')" :name="['catalog', 'optimizerGroup']"
+          </el-form-item>
+          <el-form-item
+            :label="$t('optimizerGroup')"
+            :prop="['catalog', 'optimizerGroup']"
             :rules="[{ required: isEdit }]"
           >
-            <a-select
-              v-if="isEdit" v-model:value="formState.catalog.optimizerGroup" :options="optimizerGroupList"
+            <el-select
+              v-if="isEdit"
+              v-model="formState.catalog.optimizerGroup"
+              :options="optimizerGroupList"
               :placeholder="placeholder.selectPh"
             />
             <span v-else>{{ formState.catalog.optimizerGroup }}</span>
-          </a-form-item>
-          <a-form-item>
+          </el-form-item>
+          <el-form-item>
             <p class="header">
               {{ $t('storageConfigName') }}
             </p>
-          </a-form-item>
-          <a-form-item :label="$t('type')" :name="['storageConfig', 'storage.type']" :rules="[{ required: isEdit }]">
-            <a-select
-              v-if="isEdit" v-model:value="formState.storageConfig['storage.type']"
-              :placeholder="placeholder.selectPh" :options="storageTypeOptions"
+          </el-form-item>
+          <el-form-item :label="$t('type')" :prop="['storageConfig', 'storage.type']" :rules="[{ required: isEdit }]">
+            <el-select
+              v-if="isEdit"
+              v-model="formState.storageConfig['storage.type']"
+              :placeholder="placeholder.selectPh"
+              :options="storageTypeOptions"
             />
             <span v-else class="config-value">{{ formState.storageConfig['storage.type'] }}</span>
-          </a-form-item>
-          <a-form-item
-            v-if="formState.storageConfig['storage.type'] === 'S3'" :label="$t('endpoint')"
-            :name="['storageConfig', 'storage.s3.endpoint']" :rules="[{ required: false }]"
+          </el-form-item>
+          <el-form-item
+            v-if="formState.storageConfig['storage.type'] === 'S3'"
+            :label="$t('endpoint')"
+            :prop="['storageConfig', 'storage.s3.endpoint']"
+            :rules="[{ required: false }]"
           >
-            <a-input v-if="isEdit" v-model:value="formState.storageConfig['storage.s3.endpoint']" />
+            <el-input v-if="isEdit" v-model="formState.storageConfig['storage.s3.endpoint']" />
             <span v-else class="config-value">{{ formState.storageConfig['storage.s3.endpoint'] }}</span>
-          </a-form-item>
-          <a-form-item
-            v-if="formState.storageConfig['storage.type'] === 'S3'" :label="$t('region')"
-            :name="['storageConfig', 'storage.s3.region']" :rules="[{ required: false }]"
+          </el-form-item>
+          <el-form-item
+            v-if="formState.storageConfig['storage.type'] === 'S3'"
+            :label="$t('region')"
+            :prop="['storageConfig', 'storage.s3.region']"
+            :rules="[{ required: false }]"
           >
-            <a-input v-if="isEdit" v-model:value="formState.storageConfig['storage.s3.region']" />
+            <el-input v-if="isEdit" v-model="formState.storageConfig['storage.s3.region']" />
             <span v-else class="config-value">{{ formState.storageConfig['storage.s3.region'] }}</span>
-          </a-form-item>
-          <a-form-item
-              v-if="formState.storageConfig['storage.type'] === 'OSS'" :label="$t('endpoint')"
-              :name="['storageConfig', 'storage.oss.endpoint']" :rules="[{ required: false }]"
+          </el-form-item>
+          <el-form-item
+            v-if="formState.storageConfig['storage.type'] === 'OSS'"
+            :label="$t('endpoint')"
+            :prop="['storageConfig', 'storage.oss.endpoint']"
+            :rules="[{ required: false }]"
           >
-            <a-input v-if="isEdit" v-model:value="formState.storageConfig['storage.oss.endpoint']" />
+            <el-input v-if="isEdit" v-model="formState.storageConfig['storage.oss.endpoint']" />
             <span v-else class="config-value">{{ formState.storageConfig['storage.oss.endpoint'] }}</span>
-          </a-form-item>
+          </el-form-item>
           <div v-if="formState.storageConfig['storage.type'] === 'Hadoop'">
-            <a-form-item
-              v-for="config in formState.storageConfigArray" :key="config.label" :label="config.label"
+            <el-form-item
+              v-for="config in formState.storageConfigArray"
+              :key="config.label"
+              :label="config.label"
               class="g-flex-ac"
             >
-              <a-upload
-                v-if="isEdit" v-model:file-list="config.fileList" name="file" accept=".xml"
-                :show-upload-list="false" :action="uploadUrl" :disabled="config.uploadLoading"
+              <el-upload
+                v-if="isEdit"
+                v-model:file-list="config.fileList"
+                name="file"
+                accept=".xml"
+                :show-upload-list="false"
+                :action="uploadUrl"
+                :disabled="config.uploadLoading"
                 :headers="uploadHeaders"
-                @change="(args: UploadChangeParam<UploadFile<any>>) => uploadFile(args, config, 'STORAGE')"
+                :before-upload="() => { config.uploadLoading = true; return true }"
+                :on-success="(response: unknown, file: UploadFile) => uploadSucceeded(response, file, config, true)"
+                :on-error="(_: Error, file: UploadFile) => uploadFailed(file, config)"
               >
-                <a-button type="primary" ghost :loading="config.uploadLoading" class="g-mr-12">
+                <el-button type="primary" plain :loading="config.uploadLoading" class="g-mr-12">
                   {{ $t('upload')
                   }}
-                </a-button>
-              </a-upload>
+                </el-button>
+              </el-upload>
               <span
                 v-if="config.isSuccess || config.fileName" class="config-value"
                 :class="{ 'view-active': !!config.fileUrl }" @click="viewFileDetail(config.fileUrl, config.fileName)"
               >{{ config.fileName
               }}</span>
-            </a-form-item>
+            </el-form-item>
           </div>
-          <a-form-item>
+          <el-form-item>
             <p class="header">
               {{ $t('authenticationConfig') }}
             </p>
-          </a-form-item>
-          <a-form-item :label="$t('type')" :name="['authConfig', 'auth.type']" :rules="[{ required: isEdit && !isAuthDisabled }]">
-            <a-select
-              v-if="isEdit" v-model:value="formState.authConfig['auth.type']"
-              :placeholder="placeholder.selectPh" :options="authTypeOptions" :disabled="isAuthDisabled"
+          </el-form-item>
+          <el-form-item :label="$t('type')" :prop="['authConfig', 'auth.type']" :rules="[{ required: isEdit && !isAuthDisabled }]">
+            <el-select
+              v-if="isEdit"
+              v-model="formState.authConfig['auth.type']"
+              :placeholder="placeholder.selectPh"
+              :options="authTypeOptions"
+              :disabled="isAuthDisabled"
             />
             <span v-else class="config-value">{{ formState.authConfig['auth.type'] }}</span>
-          </a-form-item>
-          <a-form-item
-            v-if="formState.authConfig['auth.type'] === 'SIMPLE'" :label="$t('hadoopUsername')"
-            :name="['authConfig', 'auth.simple.hadoop_username']" :rules="[{ required: isEdit && !isAuthDisabled }]"
+          </el-form-item>
+          <el-form-item
+            v-if="formState.authConfig['auth.type'] === 'SIMPLE'"
+            :label="$t('hadoopUsername')"
+            :prop="['authConfig', 'auth.simple.hadoop_username']"
+            :rules="[{ required: isEdit && !isAuthDisabled }]"
           >
-            <a-input v-if="isEdit" v-model:value="formState.authConfig['auth.simple.hadoop_username']" :disabled="isAuthDisabled" />
+            <el-input v-if="isEdit" v-model="formState.authConfig['auth.simple.hadoop_username']" :disabled="isAuthDisabled" />
             <span v-else class="config-value">{{ formState.authConfig['auth.simple.hadoop_username'] }}</span>
-          </a-form-item>
-          <a-form-item
-            v-if="formState.authConfig['auth.type'] === 'KERBEROS'" :label="$t('kerberosPrincipal')"
-            :name="['authConfig', 'auth.kerberos.principal']" :rules="[{ required: isEdit && !isAuthDisabled }]"
+          </el-form-item>
+          <el-form-item
+            v-if="formState.authConfig['auth.type'] === 'KERBEROS'"
+            :label="$t('kerberosPrincipal')"
+            :prop="['authConfig', 'auth.kerberos.principal']"
+            :rules="[{ required: isEdit && !isAuthDisabled }]"
           >
-            <a-input v-if="isEdit" v-model:value="formState.authConfig['auth.kerberos.principal']" :disabled="isAuthDisabled" />
+            <el-input v-if="isEdit" v-model="formState.authConfig['auth.kerberos.principal']" :disabled="isAuthDisabled" />
             <span v-else class="config-value">{{ formState.authConfig['auth.kerberos.principal'] }}</span>
-          </a-form-item>
+          </el-form-item>
           <div v-if="formState.authConfig['auth.type'] === 'KERBEROS'">
-            <a-form-item
-              v-for="config in formState.authConfigArray" :key="config.label" :label="config.label"
+            <el-form-item
+              v-for="config in formState.authConfigArray"
+              :key="config.label"
+              :label="config.label"
               class="g-flex-ac"
             >
-              <a-upload
-                v-if="isEdit" v-model:file-list="config.fileList" name="file"
-                :accept="config.key === 'auth.kerberos.keytab' ? '.keytab' : '.conf'" :show-upload-list="false"
-                :action="uploadUrl" :disabled="config.uploadLoading"
+              <el-upload
+                v-if="isEdit"
+                v-model:file-list="config.fileList"
+                name="file"
+                :accept="config.key === 'auth.kerberos.keytab' ? '.keytab' : '.conf'"
+                :show-upload-list="false"
+                :action="uploadUrl"
+                :disabled="config.uploadLoading"
                 :headers="uploadHeaders"
-                @change="(args: UploadChangeParam<UploadFile<any>>) => uploadFile(args, config)"
+                :before-upload="() => { config.uploadLoading = true; return true }"
+                :on-success="(response: unknown, file: UploadFile) => uploadSucceeded(response, file, config)"
+                :on-error="(_: Error, file: UploadFile) => uploadFailed(file, config)"
               >
-                <a-button type="primary" ghost :loading="config.uploadLoading" class="g-mr-12">
+                <el-button type="primary" plain :loading="config.uploadLoading" class="g-mr-12">
                   {{ $t('upload')
                   }}
-                </a-button>
-              </a-upload>
+                </el-button>
+              </el-upload>
               <span
                 v-if="config.isSuccess || config.fileName" class="config-value auth-filename"
                 :class="{ 'view-active': !!config.fileUrl }" :title="config.fileName"
                 @click="viewFileDetail(config.fileUrl, config.fileName)"
               >{{ config.fileName }}</span>
-            </a-form-item>
+            </el-form-item>
           </div>
-          <a-form-item
-            v-if="formState.authConfig['auth.type'] === 'AK/SK'" :label="$t('accessKey')"
-            :name="['authConfig', 'auth.ak_sk.access_key']" :rules="[{ required: isEdit && !isAuthDisabled }]"
+          <el-form-item
+            v-if="formState.authConfig['auth.type'] === 'AK/SK'"
+            :label="$t('accessKey')"
+            :prop="['authConfig', 'auth.ak_sk.access_key']"
+            :rules="[{ required: isEdit && !isAuthDisabled }]"
           >
-            <a-input v-if="isEdit" v-model:value="formState.authConfig['auth.ak_sk.access_key']" :disabled="isAuthDisabled" />
+            <el-input v-if="isEdit" v-model="formState.authConfig['auth.ak_sk.access_key']" :disabled="isAuthDisabled" />
             <span v-else class="config-value">{{ formState.authConfig['auth.ak_sk.access_key'] }}</span>
-          </a-form-item>
-          <a-form-item
-            v-if="formState.authConfig['auth.type'] === 'AK/SK'" :label="$t('secretKey')"
-            :name="['authConfig', 'auth.ak_sk.secret_key']" :rules="[{ required: isEdit && !isAuthDisabled }]"
+          </el-form-item>
+          <el-form-item
+            v-if="formState.authConfig['auth.type'] === 'AK/SK'"
+            :label="$t('secretKey')"
+            :prop="['authConfig', 'auth.ak_sk.secret_key']"
+            :rules="[{ required: isEdit && !isAuthDisabled }]"
           >
-            <a-input v-if="isEdit" v-model:value="formState.authConfig['auth.ak_sk.secret_key']" :disabled="isAuthDisabled" />
+            <el-input v-if="isEdit" v-model="formState.authConfig['auth.ak_sk.secret_key']" :disabled="isAuthDisabled" />
             <span v-else class="config-value">{{ formState.authConfig['auth.ak_sk.secret_key'] }}</span>
-          </a-form-item>
-          <a-form-item>
+          </el-form-item>
+          <el-form-item>
             <p class="header">
               {{ $t('properties') }}
             </p>
-          </a-form-item>
-          <a-form-item>
+          </el-form-item>
+          <el-form-item>
             <Properties ref="propertiesRef" :properties-obj="formState.properties" :is-edit="isEdit" />
-          </a-form-item>
-          <a-form-item>
+          </el-form-item>
+          <el-form-item>
             <p class="header">
               {{ $t('tableProperties') }}
             </p>
-          </a-form-item>
-          <a-form-item>
+          </el-form-item>
+          <el-form-item>
             <Properties ref="tablePropertiesRef" :properties-obj="formState.tableProperties" :is-edit="isEdit" />
-          </a-form-item>
-        </a-form>
+          </el-form-item>
+        </el-form>
       </div>
     </div>
     <div v-if="isEdit && writable" class="footer-btn">
-      <a-button type="primary" class="save-btn g-mr-12" @click="handleSave">
+      <el-button type="primary" class="save-btn g-mr-12" @click="handleSave">
         {{ $t('save') }}
-      </a-button>
-      <a-button @click="handleCancel">
+      </el-button>
+      <el-button @click="handleCancel">
         {{ $t('cancel') }}
-      </a-button>
+      </el-button>
     </div>
     <div v-if="!isEdit && writable" class="footer-btn">
-      <a-button type="primary" class="edit-btn g-mr-12" @click="handleEdit">
+      <el-button type="primary" class="edit-btn g-mr-12" @click="handleEdit">
         {{ $t('edit') }}
-      </a-button>
-      <a-button class="remove-btn" @click="handleRemove">
+      </el-button>
+      <el-button class="remove-btn" @click="handleRemove">
         {{ $t('remove') }}
-      </a-button>
+      </el-button>
     </div>
     <u-loading v-if="loading" />
   </div>
@@ -820,11 +852,11 @@ onMounted(() => {
     overflow: auto;
     flex-direction: column;
 
-    .ant-form-item {
+    .el-form-item {
       margin-bottom: 8px;
     }
 
-    :deep(.ant-form-item-label) {
+    :deep(.el-form-item__label) {
       >label {
         word-break: break-all;
         white-space: pre-wrap;
@@ -880,12 +912,36 @@ onMounted(() => {
     }
   }
 }
+
+@media (max-width: 1200px) {
+  .detail-wrap {
+    min-width: 0;
+    padding-right: 16px;
+    .detail-content-wrap { padding-right: 0; }
+    .content-wrap :deep(.el-form-item__label) { width: min(200px, 35%); }
+  }
+}
+
+@media (max-width: 760px) {
+  .detail-wrap {
+    height: auto;
+    border-left: 1px solid #e8e8f0;
+    padding: 12px;
+    .detail-content-wrap { height: auto; overflow: visible; }
+    .content-wrap {
+      overflow: visible;
+      :deep(.el-form-item) { display: block; }
+      :deep(.el-form-item__label) {
+        width: auto;
+        min-height: 20px;
+        height: auto;
+        line-height: 20px;
+      }
+    }
+    .footer-btn { height: auto; }
+  }
+}
 </style>
 
 <style lang="less">
-.not-delete-modal {
-  .ant-modal-confirm-btns .ant-btn:first-child {
-    display: none;
-  }
-}
 </style>

@@ -17,19 +17,20 @@ limitations under the License.
 / -->
 
 <script lang="ts" setup>
-import { shallowReactive } from 'vue'
+import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { tableColumnProps } from '@/utils/table'
 import type { DetailColumnItem } from '@/types/common.type'
 
 const props = defineProps<{ fields: DetailColumnItem[], loading: boolean }>()
 
 const { t } = useI18n()
 
-const fieldsColumns = shallowReactive([
+const fieldsColumns = computed(() => [
   { dataIndex: 'field', title: t('field'), ellipsis: true },
   { dataIndex: 'type', title: t('type'), ellipsis: true },
   { dataIndex: 'comment', title: t('description'), ellipsis: true },
-  { dataIndex: 'primaryKey', title: t('primaryKey'), scopedSlots: { customRender: 'primaryKey' } },
+  { dataIndex: 'primaryKey', title: t('primaryKey') },
 ])
 
 defineExpose({
@@ -42,18 +43,14 @@ defineExpose({
 
 <template>
   <div class="field-wrap">
-    <a-table
-      :loading="loading"
-      class="ant-table-common"
-      :columns="fieldsColumns"
-      :data-source="props.fields"
-      :pagination="false"
-    >
-      <template #bodyCell="{ column, record }">
-        <template v-if="column.dataIndex === 'primaryKey'">
-          <a-checkbox v-model:checked="record.checked" />
+    <el-table v-loading="loading" class="dashboard-table" :data="props.fields">
+      <el-table-column v-for="column in fieldsColumns" :key="column.dataIndex" v-bind="tableColumnProps(column, fieldsColumns)">
+        <template v-if="column.dataIndex === 'primaryKey'" #default="{ row: record }">
+          <template v-if="column.dataIndex === 'primaryKey'">
+            <el-checkbox v-model="record.checked" />
+          </template>
         </template>
-      </template>
-    </a-table>
+      </el-table-column>
+    </el-table>
   </div>
 </template>

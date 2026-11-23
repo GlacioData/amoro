@@ -17,25 +17,33 @@
  / -->
 
 <script lang="ts" setup>
-import zhCN from 'ant-design-vue/es/locale/zh_CN'
-import enUS from 'ant-design-vue/es/locale/en_US'
+import elementEn from 'element-plus/es/locale/lang/en'
+import elementZh from 'element-plus/es/locale/lang/zh-cn'
 import dayjs from 'dayjs'
 import { watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import 'dayjs/locale/zh-cn'
 
+const dashboardEn = {
+  ...elementEn,
+  el: {
+    ...elementEn.el,
+    table: { ...elementEn.el.table, emptyText: 'No data' },
+  },
+}
+
 const { locale } = useI18n()
 dayjs.locale('en')
 
 watch(locale, (val) => {
-  dayjs.locale(val)
+  dayjs.locale(val === 'en' ? 'en' : 'zh-cn')
 })
 </script>
 
 <template>
-  <a-config-provider :locale="locale === 'en' ? enUS : zhCN">
+  <el-config-provider :locale="locale === 'en' ? dashboardEn : elementZh">
     <router-view />
-  </a-config-provider>
+  </el-config-provider>
 </template>
 
 <style>

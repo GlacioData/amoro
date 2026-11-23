@@ -16,10 +16,56 @@
  * limitations under the License.
  */
 
-export interface TableCache<T> {
-  values: Record<string, T[]>
-  pending: Map<string, Promise<T[]>>
-  generation: number
+export function createBranchLoader<T>() {
+  const pending = new Map<string, { revision: number, result: Promise<T> }>()
+
+  return (key: string, revision: number, load: () => Promise<T>) => {
+    const active = pending.get(key)
+    if (active?.revision === revision) {
+      return active.result
+    }
+
+    const result = Promise.resolve().then(load).finally(() => {
+      if (pending.get(key)?.result === result) {
+        pending.delete(key)
+      }
+    })
+    pending.set(key, { revision, result })
+    return result
+  }
+}
+
+export function reconcileTreeNodes<T extends { key: string, tableType?: string }>(
+  previous: T[] | undefined,
+  incoming: T[],
+): T[] {
+  if (!previous) {
+    return incoming
+  }
+  if (previous.length === incoming.length && incoming.every((node, index) =>
+    node.key === previous[index].key && node.tableType === previous[index].tableType,
+  )) {
+    return previous
+  }
+
+  const byKey = new Map(previous.map(node => [node.key, node]))
+  return incoming.map((node) => {
+    const existing = byKey.get(node.key)
+    return existing && existing.tableType === node.tableType ? existing : node
+  })
+}
+
+export function mergeExpandedKeys(defaults: string[], overrides: ReadonlyMap<string, boolean>): string[] {
+  const expanded = new Set(defaults)
+  for (const [key, open] of overrides) {
+    if (open) {
+      expanded.add(key)
+    }
+    else {
+      expanded.delete(key)
+    }
+  }
+  return [...expanded]
 }
 
 export interface TableSearchContext {
@@ -36,70 +82,6 @@ export interface TableSearchTarget {
 export interface TableSearchPlan {
   filterKeyword: string
   target?: TableSearchTarget
-}
-
-function tableCacheKey(catalog: string, database: string): string {
-  return JSON.stringify([catalog, database])
-}
-
-export function createTableCache<T>(): TableCache<T> {
-  return {
-    values: {},
-    pending: new Map(),
-    generation: 0,
-  }
-}
-
-export async function loadTablesWithCache<T>(
-  cache: TableCache<T>,
-  catalog: string,
-  database: string,
-  fetchTables: () => Promise<T[]>,
-): Promise<T[]> {
-  const key = tableCacheKey(catalog, database)
-  if (Object.hasOwn(cache.values, key)) {
-    return cache.values[key]
-  }
-
-  const pendingRequest = cache.pending.get(key)
-  if (pendingRequest) {
-    return pendingRequest
-  }
-
-  const generation = cache.generation
-  const request = fetchTables()
-    .then((tables) => {
-      if (cache.generation === generation) {
-        cache.values[key] = tables
-      }
-      return tables
-    })
-    .finally(() => {
-      if (cache.pending.get(key) === request) {
-        cache.pending.delete(key)
-      }
-    })
-
-  cache.pending.set(key, request)
-  return request
-}
-
-export function clearTableCache<T>(cache: TableCache<T>): void {
-  cache.generation += 1
-  cache.pending.clear()
-  Object.keys(cache.values).forEach(key => delete cache.values[key])
-}
-
-export function getTableCacheGeneration<T>(cache: TableCache<T>): number {
-  return cache.generation
-}
-
-export function getCachedTables<T>(
-  cache: TableCache<T>,
-  catalog: string,
-  database: string,
-): T[] | undefined {
-  return cache.values[tableCacheKey(catalog, database)]
 }
 
 export function createTableSearchPlan(
@@ -139,50 +121,8 @@ export function createTableSearchPlan(
   }
 }
 
-export function getSelectedPathExpandedKeys(
-  currentExpandedKeys: string[],
-  catalog: string,
-): string[] {
-  const safeCatalog = catalog.trim()
-  if (!safeCatalog) {
-    return currentExpandedKeys
-  }
-
-  const catalogKey = `catalog:${safeCatalog}`
-  return currentExpandedKeys.includes(catalogKey)
-    ? currentExpandedKeys
-    : [...currentExpandedKeys, catalogKey]
-}
-
 export function getStoredCatalogExpandedKeys(storedExpandedKeys: string[]): string[] {
   return storedExpandedKeys.filter(
     key => key.startsWith('catalog:') && !key.includes('/db:'),
   )
-}
-
-export function getExpandedDatabaseKeys(expandedKeys: string[]): string[] {
-  return expandedKeys.filter(
-    key => key.startsWith('catalog:') && key.includes('/db:') && !key.includes('/table:'),
-  )
-}
-
-export async function refreshExpandedDatabaseNodes<T extends { key: string }>(
-  databaseNodes: T[],
-  expandedKeys: string[],
-  clearCollapsedNode: (node: T) => void,
-  reloadExpandedNode: (node: T) => Promise<void>,
-): Promise<void> {
-  const expandedDatabaseKeys = new Set(getExpandedDatabaseKeys(expandedKeys))
-  const reloads: Promise<void>[] = []
-
-  databaseNodes.forEach((node) => {
-    if (expandedDatabaseKeys.has(node.key)) {
-      reloads.push(Promise.resolve().then(() => reloadExpandedNode(node)))
-    }
-    else {
-      clearCollapsedNode(node)
-    }
-  })
-
-  await Promise.allSettled(reloads)
 }

@@ -62,12 +62,12 @@ watch(() => props.data, renderChart)
 </script>
 
 <template>
-  <a-card class="pie-chart-card">
-    <template #title>
+  <el-card class="pie-chart-card">
+    <template #header>
       <span class="card-title" v-text="title" />
     </template>
     <Chart :options="pieChartOption" />
-  </a-card>
+  </el-card>
 </template>
 
 <style scoped>

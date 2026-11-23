@@ -17,6 +17,7 @@ limitations under the License.
 / -->
 
 <script setup lang="ts">
+import { Close } from '@element-plus/icons-vue'
 import { onMounted, reactive, ref, watch } from 'vue'
 import type { IKeyAndValue, IMap } from '@/types/common.type'
 import { getUpgradeProperties } from '@/services/table.service'
@@ -75,11 +76,11 @@ async function getPropertiesList() {
   })
 }
 
-function filterOption(input: string, option: IMap<string>) {
-  return option.key.toUpperCase().includes(input.toUpperCase())
+function suggestProperties(input: string, done: (suggestions: IMap<string>[]) => void) {
+  done((options.value ?? []).filter(option => option.key.toUpperCase().includes(input.toUpperCase())))
 }
 
-function onSelect(_val: any, option: { key: any }, item: { uuid: string }) {
+function onSelect(option: { key: string }, item: { uuid: string }) {
   const key = option.key
   const selected = propertiesIncludeValueList.find((ele: IKeyAndValue) => ele.key === key)
   const selectVal = propertiesForm.data.find((ele: IItem) => ele.uuid === item.uuid)
@@ -93,7 +94,7 @@ function removeRule(item: any) {
   if (index !== -1) {
     propertiesForm.data.splice(index, 1)
   }
-  // propertiesFormRef.value.validateFields()
+  // propertiesFormRef.value.validate()
 }
 function addRule() {
   propertiesForm.data.push({
@@ -116,7 +117,7 @@ function addRule() {
 defineExpose({
   getProperties() {
     return propertiesFormRef.value
-      .validateFields()
+      .validate()
       .then(() => {
         const propObj: IMap<string> = {}
         propertiesForm.data.forEach((e) => {
@@ -145,49 +146,48 @@ onMounted(() => {
         {{ $t('value') }}
       </div>
     </div>
-    <a-form ref="propertiesFormRef" :model="propertiesForm" class="g-mt-12">
+    <el-form ref="propertiesFormRef" :model="propertiesForm" class="g-mt-12" label-position="left">
       <div v-for="(item, index) in propertiesForm.data" :key="item.uuid" class="config-row">
         <!-- validator: validateUnique -->
-        <a-form-item
-          :name="['data', index, 'key']"
+        <el-form-item
+          :prop="['data', index, 'key']"
           :rules="[{
             required: true,
             message: `${$t(placeholder.selectPh)}`,
           }]"
           class="g-mr-8"
         >
-          <a-auto-complete
-            v-model:value="item.key"
-            :options="options"
-            :filter-option="filterOption"
+          <el-autocomplete
+            v-model="item.key"
+            :fetch-suggestions="suggestProperties"
             style="width: 100%"
             class="g-mr-12"
-            @select="(val:any, option: any) => onSelect(val, option, item)"
+            @select="(option: { key: string }) => onSelect(option, item)"
           >
-            <template #option="{ key: key }">
-              <span>{{ key }}</span>
+            <template #default="{ item: option }">
+              <span>{{ option.key }}</span>
             </template>
-          </a-auto-complete>
-        </a-form-item>
-        <a-form-item
-          :name="['data', index, 'value']"
+          </el-autocomplete>
+        </el-form-item>
+        <el-form-item
+          :prop="['data', index, 'value']"
           :rules="[{
             required: true,
             message: `${$t(placeholder.inputPh)}`,
           }]"
         >
-          <a-input
-            v-model:value="item.value"
+          <el-input
+            v-model="item.value"
             :maxlength="64"
             style="width: 100%"
           />
-        </a-form-item>
-        <close-outlined class="icon-close" @click="removeRule(item)" />
+        </el-form-item>
+        <Close class="amoro-icon icon-close" @click="removeRule(item)" />
       </div>
-    </a-form>
-    <a-button class="config-btn" @click="addRule">
+    </el-form>
+    <el-button class="config-btn" @click="addRule">
       +
-    </a-button>
+    </el-button>
   </div>
 </template>
 
@@ -231,16 +231,16 @@ onMounted(() => {
       position: relative;
       padding-right: 32px;
       width: 100%;
-      .ant-form-item {
+      .el-form-item {
         width: 50%;
       }
-      .ant-select-auto-complete {
+      .el-autocomplete {
         width: 50%;
         input {
           color: #79809a;
         }
       }
-      .ant-input {
+      .el-input__inner {
         width: 50%;
       }
       .icon-close {

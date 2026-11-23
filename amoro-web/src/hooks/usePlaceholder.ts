@@ -16,39 +16,30 @@
  * limitations under the License.
  */
 
-import { computed } from 'vue'
+import { computed, reactive } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 export function usePlaceholder() {
   const { t } = useI18n()
-  const catalogPh = computed(() => t('catalog')).value
-  const dbNamePh = computed(() => t('databaseName')).value
-  const tableNamePh = computed(() => t('tableName')).value
-  const optimizerGroupPh = computed(() => t('optimizerGroup')).value
-  const resourceGroupPh = computed(() => t('resourceGroup')).value
-  const parallelismPh = computed(() => t('parallelism')).value
-  const usernamePh = computed(() => t('username')).value
-  const passwordPh = computed(() => t('password')).value
-  const filterDBPh = computed(() => t('database', 2)).value
-  const filterTablePh = computed(() => t('table', 2)).value
-  const namePh = computed(() => t('name')).value
-  const containerPh = computed(() => t('container')).value
-  return {
-    selectPh: t('selectPlaceholder'),
-    inputPh: t('inputPlaceholder'),
-    selectClPh: t('selectPlaceholder', { selectPh: catalogPh }),
-    selectDBPh: t('selectPlaceholder', { selectPh: dbNamePh }),
-    inputDBPh: t('inputPlaceholder', { inputPh: dbNamePh }),
-    inputClPh: t('inputPlaceholder', { inputPh: catalogPh }),
-    inputTNPh: t('inputPlaceholder', { inputPh: tableNamePh }),
-    selectOptGroupPh: t('inputPlaceholder', { inputPh: optimizerGroupPh }),
-    resourceGroupPh: t('inputPlaceholder', { inputPh: resourceGroupPh }),
-    parallelismPh: t('inputPlaceholder', { inputPh: parallelismPh }),
-    usernamePh: t('inputPlaceholder', { inputPh: usernamePh }),
-    passwordPh: t('inputPlaceholder', { inputPh: passwordPh }),
-    filterDBPh: t('filterPlaceholder', { inputPh: filterDBPh }),
-    filterTablePh: t('filterPlaceholder', { inputPh: filterTablePh }),
-    groupNamePh: t('inputPlaceholder', { inputPh: namePh }),
-    groupContainer: t('selectPlaceholder', { selectPh: containerPh }),
-  }
+  const select = (key: string) => t('selectPlaceholder', { selectPh: t(key) })
+  const input = (key: string) => t('inputPlaceholder', { inputPh: t(key) })
+
+  return reactive({
+    selectPh: computed(() => t('selectPlaceholder')),
+    inputPh: computed(() => t('inputPlaceholder')),
+    selectClPh: computed(() => select('catalog')),
+    selectDBPh: computed(() => select('databaseName')),
+    inputDBPh: computed(() => input('databaseName')),
+    inputClPh: computed(() => input('catalog')),
+    inputTNPh: computed(() => input('tableName')),
+    selectOptGroupPh: computed(() => input('optimizerGroup')),
+    resourceGroupPh: computed(() => input('resourceGroup')),
+    parallelismPh: computed(() => input('parallelism')),
+    usernamePh: computed(() => input('username')),
+    passwordPh: computed(() => input('password')),
+    filterDBPh: computed(() => t('filterPlaceholder', { inputPh: t('database', 2) })),
+    filterTablePh: computed(() => t('filterPlaceholder', { inputPh: t('table', 2) })),
+    groupNamePh: computed(() => input('name')),
+    groupContainer: computed(() => select('container')),
+  })
 }

@@ -17,12 +17,12 @@
  / -->
 
 <script setup lang="ts">
+import { ArrowDown, ChatDotRound, QuestionFilled, SwitchButton } from '@element-plus/icons-vue'
 import { onMounted, reactive } from 'vue'
-import { Modal } from 'ant-design-vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
+import { confirmAction } from '@/utils/ui-feedback'
 
-import { DownOutlined, LogoutOutlined, QuestionCircleOutlined, TranslationOutlined } from '@ant-design/icons-vue'
 import useStore from '@/store'
 import { getVersionInfo } from '@/services/global.service'
 import loginService from '@/services/login.service'
@@ -57,7 +57,7 @@ function goLoginPage() {
 }
 
 async function handleLogout() {
-  Modal.confirm({
+  confirmAction({
     title: t('logoutModalTitle'),
     onOk: async () => {
       try {
@@ -97,26 +97,30 @@ onMounted(() => {
 
 <template>
   <div class="custom-top-bar">
-    <div class="version-info">
+    <div class="version-info" :title="`${$t('version')}: ${verInfo.version} · ${$t('commitTime')}: ${verInfo.commitTime}`">
       <span class="g-mr-8">{{ `${$t('version')}:  ${verInfo.version}` }}</span>
-      <span class="g-mr-8">{{ `${$t('commitTime')}:  ${verInfo.commitTime}` }}</span>
+      <span class="g-mr-8 version-commit-time">{{ `${$t('commitTime')}:  ${verInfo.commitTime}` }}</span>
     </div>
-    <a-dropdown>
-      <span><span class="role-badge">{{ roleText() }}</span>{{ store.userInfo.userName }} <DownOutlined /></span>
-      <template #overlay>
-        <a-menu>
-          <a-menu-item key="userGuide" @click="goDocs">
-            <QuestionCircleOutlined /> {{ $t('userGuide') }}
-          </a-menu-item>
-          <a-menu-item key="locale" @click="setLocale">
-            <TranslationOutlined /> {{ locale === 'zh' ? '切换至英文' : 'Switch To Chinese' }}
-          </a-menu-item>
-          <a-menu-item key="logout" @click="handleLogout">
-            <LogoutOutlined /> {{ $t('logout') }}
-          </a-menu-item>
-        </a-menu>
+    <el-dropdown :trigger="['hover', 'click']">
+      <button type="button" class="account-trigger">
+        <span class="role-badge">{{ roleText() }}</span>
+        <span class="account-name">{{ store.userInfo.userName }}</span>
+        <ArrowDown class="amoro-icon" />
+      </button>
+      <template #dropdown>
+        <el-dropdown-menu>
+          <el-dropdown-item key="userGuide" @click="goDocs">
+            <QuestionFilled class="amoro-icon" /> {{ $t('userGuide') }}
+          </el-dropdown-item>
+          <el-dropdown-item key="locale" @click="setLocale">
+            <ChatDotRound class="amoro-icon" /> {{ locale === 'zh' ? '切换至英文' : 'Switch To Chinese' }}
+          </el-dropdown-item>
+          <el-dropdown-item key="logout" @click="handleLogout">
+            <SwitchButton class="amoro-icon" /> {{ $t('logout') }}
+          </el-dropdown-item>
+        </el-dropdown-menu>
       </template>
-    </a-dropdown>
+    </el-dropdown>
   </div>
 </template>
 
@@ -124,7 +128,8 @@ onMounted(() => {
   .custom-top-bar {
     height: 48px;
     display: flex;
-    flex: 1;
+    flex: 0 0 48px;
+    min-width: 0;
     align-items: center;
     justify-content: flex-end;
     background: #fff;
@@ -132,15 +137,48 @@ onMounted(() => {
     box-shadow: 0 1px 2px rgb(0 21 41 / 5%);
     padding: 0 12px 0 0;
     font-size: 12px;
+    gap: 8px;
+
+    .version-info {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .account-trigger {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      border: 0;
+      min-height: 36px;
+      background: transparent;
+      color: inherit;
+      font: inherit;
+      cursor: pointer;
+    }
+
+    .account-name {
+      max-width: 10ch;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    @media (max-width: 760px) {
+      padding-inline: 8px;
+      .version-commit-time { display: none; }
+      .role-badge { margin: 0; font-size: 10px; }
+    }
     .question-icon {
       font-size: 12px;
       margin-top: -2px;
     }
   }
-  .topbar-tooltip .ant-tooltip-inner {
+  .topbar-tooltip .el-popper {
     font-size: 12px;
   }
-  .logout-button.ant-btn {
+  .logout-button.el-button {
     border: none;
   }
   .logout-button:hover {

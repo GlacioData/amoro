@@ -17,6 +17,7 @@ limitations under the License.
 / -->
 
 <script lang="ts" setup>
+import { ArrowLeft } from '@element-plus/icons-vue'
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import schemaField from './components/Field.vue'
@@ -150,42 +151,43 @@ onMounted(() => {
 <template>
   <div class="upgrade-table">
     <div class="nav-bar">
-      <left-outlined @click="goBack" />
+      <ArrowLeft class="amoro-icon" @click="goBack" />
       <span class="title g-ml-8">{{ $t('upgradeHiveTable') }}</span>
     </div>
     <div class="content">
       <div class="table-attrs">
-        <a-form
+        <el-form
           name="fields"
           class="label-120"
+          label-position="left"
         >
-          <a-form-item
+          <el-form-item
             :label="$t('field')"
-            name="field"
+            prop="field"
           >
             <schema-field ref="schemaFieldRef" :loading="loading" :fields="field" />
-          </a-form-item>
-          <a-form-item
+          </el-form-item>
+          <el-form-item
             :label="$t('partitionField')"
-            name="partitonField"
+            prop="partitonField"
           >
             <partition-field :loading="loading" :partition-fields="partitionFields" />
-          </a-form-item>
-          <a-form-item
+          </el-form-item>
+          <el-form-item
             :label="$t('otherProperties')"
-            name="otherProperties"
+            prop="otherProperties"
           >
             <other-properties ref="propertiesRef" :properties-obj="propertiesObj" />
-          </a-form-item>
-        </a-form>
+          </el-form-item>
+        </el-form>
       </div>
       <div class="footer-btn">
-        <a-button type="primary" :loading="loading" class="btn g-mr-12" @click="onConfirm">
+        <el-button type="primary" :loading="loading" class="btn g-mr-12" @click="onConfirm">
           {{ $t('ok') }}
-        </a-button>
-        <a-button type="ghost" class="btn" @click="cancel">
+        </el-button>
+        <el-button type="ghost" class="btn" @click="cancel">
           {{ $t('cancel') }}
-        </a-button>
+        </el-button>
       </div>
     </div>
   </div>

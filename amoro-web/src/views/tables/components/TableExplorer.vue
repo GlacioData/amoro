@@ -17,19 +17,18 @@ limitations under the License.
 / -->
 
 <script setup lang="ts">
-import { computed, onBeforeMount, onBeforeUnmount, reactive, watch } from 'vue'
+import type { TreeInstance } from 'element-plus'
+import { CaretRight, Loading, Refresh, Search } from '@element-plus/icons-vue'
+import { computed, markRaw, nextTick, onBeforeMount, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
-  clearTableCache,
-  createTableCache,
+  createBranchLoader,
   createTableSearchPlan,
-  getCachedTables,
-  getSelectedPathExpandedKeys,
   getStoredCatalogExpandedKeys,
-  getTableCacheGeneration,
-  loadTablesWithCache,
-  refreshExpandedDatabaseNodes,
+  mergeExpandedKeys,
+  reconcileTreeNodes,
 } from './table-explorer-state'
+import spriteUrl from '@/assets/icons/sprite.svg?no-inline'
 import { getCatalogList, getDatabaseList, getTableList } from '@/services/table.service'
 import { tableTypeIconMap } from '@/types/common.type'
 import type { ICatalogItem } from '@/types/common.type'
@@ -45,7 +44,6 @@ interface TableItem {
 interface TreeNode {
   key: string
   title: string
-  isLeaf?: boolean
   children?: TreeNode[]
   // Custom fields
   nodeType: NodeType
@@ -60,28 +58,33 @@ const route = useRoute()
 
 const storageTableKey = 'easylake-menu-catalog-db-table'
 const expandedKeysSessionKey = 'tables_expanded_keys'
-const tableCache = createTableCache<TableItem>()
+const requestOptions = { handleError: false }
+const requestBranch = createBranchLoader<boolean>()
+const loadedRevisions = new WeakMap<TreeNode, number>()
+const branchStatus = reactive(new Map<string, 'loading' | 'error'>())
+const searchExpansion = reactive(new Map<string, boolean>())
+const treeVersion = ref(0)
+const rootStatus = ref<'loading' | 'error' | 'ready'>('loading')
+const searchStatus = ref<'idle' | 'loading' | 'error'>('idle')
+const treeBody = ref<HTMLElement>()
+let refreshRevision = 0
 let searchRequestId = 0
+let disposed = false
+let browseScrollTop = 0
 
 const state = reactive({
-  loading: false,
   refreshing: false,
   searchKey: '',
   filterKey: '',
   treeData: [] as TreeNode[],
   expandedKeys: [] as string[],
-  selectedKeys: [] as string[],
-  searchTablesByDatabase: {} as Record<string, TableItem[]>,
-  // Cache
-  catalogList: [] as string[],
-  dbListByCatalog: {} as Record<string, string[]>,
+  searchTablesByDatabase: {} as Record<string, TreeNode[]>,
 })
 
 function buildCatalogNode(catalog: string): TreeNode {
   return {
     key: `catalog:${catalog}`,
     title: catalog,
-    isLeaf: false,
     nodeType: 'catalog',
     catalog,
   }
@@ -91,7 +94,6 @@ function buildDatabaseNode(catalog: string, db: string): TreeNode {
   return {
     key: `catalog:${catalog}/db:${db}`,
     title: db,
-    isLeaf: false,
     nodeType: 'database',
     catalog,
     db,
@@ -99,170 +101,109 @@ function buildDatabaseNode(catalog: string, db: string): TreeNode {
 }
 
 function buildTableNode(catalog: string, db: string, table: TableItem): TreeNode {
-  return {
+  // Keep large, immutable leaf lists out of Vue's deep reactivity.
+  // https://vuejs.org/guide/best-practices/performance.html#reduce-reactivity-overhead-for-large-immutable-structures
+  return markRaw({
     key: `catalog:${catalog}/db:${db}/table:${table.name}`,
     title: table.name,
-    isLeaf: true,
     nodeType: 'table',
     catalog,
     db,
     table: table.name,
     tableType: table.type,
-  }
+  })
 }
 
-function updateTreeNodeChildren(targetKey: string, children: TreeNode[]) {
-  const loop = (nodes: TreeNode[]): boolean => {
-    for (const node of nodes) {
-      if (node.key === targetKey) {
-        node.children = children
-        return true
-      }
-      if (node.children && node.children.length && loop(node.children)) {
-        return true
-      }
-    }
-    return false
-  }
-
-  loop(state.treeData)
+function findCatalog(catalog: string) {
+  return state.treeData.find(node => node.catalog === catalog)
 }
 
-async function initRootCatalogs() {
-  state.loading = true
-  try {
-    const res = await getCatalogList()
-    const catalogs = (res || []).map((item: ICatalogItem) => item.catalogName)
-    state.catalogList = catalogs
-    state.treeData = catalogs.map(catalog => buildCatalogNode(catalog))
-  }
-  finally {
-    state.loading = false
-  }
+function findBranch(node: TreeNode) {
+  const catalog = findCatalog(node.catalog)
+  return node.nodeType === 'catalog'
+    ? catalog
+    : catalog?.children?.find(child => child.key === node.key)
 }
 
-async function loadChildren(node: any) {
-  const data = node?.dataRef || node
-  if (!data) {
-    return
-  }
-
-  const nodeType = data.nodeType as NodeType
-  if (nodeType === 'catalog') {
-    const catalog = data.catalog as string
-    if (!catalog || state.dbListByCatalog[catalog]) {
-      return
-    }
-
-    state.loading = true
+function loadCatalogs() {
+  return requestBranch('catalogs', refreshRevision, async () => {
+    rootStatus.value = 'loading'
     try {
-      const res = await getDatabaseList({ catalog, keywords: '' })
-      const dbs = (res || []) as string[]
-      state.dbListByCatalog[catalog] = dbs
-      if (!dbs.length) {
-        data.isLeaf = true
-        updateTreeNodeChildren(data.key as string, [])
-        return
-      }
-      data.isLeaf = false
-      const children = dbs.map(db => buildDatabaseNode(catalog, db))
-      updateTreeNodeChildren(data.key as string, children)
-    }
-    finally {
-      state.loading = false
-    }
-  }
-  else if (nodeType === 'database') {
-    const catalog = data.catalog as string
-    const db = data.db as string
-    if (!catalog || !db) {
-      return
-    }
-    state.loading = true
-    try {
-      const cacheGeneration = getTableCacheGeneration(tableCache)
-      const tables = await loadTablesWithCache(
-        tableCache,
-        catalog,
-        db,
-        async () => (await getTableList({ catalog, db, keywords: '' }) || []) as TableItem[],
+      const catalogs = await getCatalogList(requestOptions)
+      if (disposed)
+        return false
+      state.treeData = reconcileTreeNodes(
+        state.treeData,
+        (catalogs || []).map((item: ICatalogItem) => buildCatalogNode(item.catalogName)),
       )
-      if (getTableCacheGeneration(tableCache) !== cacheGeneration) {
-        return
-      }
-      if (!tables.length) {
-        data.isLeaf = false
-        updateTreeNodeChildren(data.key as string, [])
-        return
-      }
-      data.isLeaf = false
-      const children = tables.map(table => buildTableNode(catalog, db, table))
-      updateTreeNodeChildren(data.key as string, children)
+      rootStatus.value = 'ready'
+      return true
     }
-    finally {
-      state.loading = false
+    catch {
+      rootStatus.value = 'error'
+      return false
     }
-  }
+  })
 }
 
-async function expandCatalogBySelected(catalog: string) {
-  const safeCatalog = (catalog || '').trim()
+async function fetchChildren(node: TreeNode): Promise<TreeNode[]> {
+  const { catalog, db } = node
+  if (node.nodeType === 'catalog') {
+    const databases = await getDatabaseList({ catalog, keywords: '' }, requestOptions)
+    return (databases || []).map(database => buildDatabaseNode(catalog, database))
+  }
+  if (!db)
+    return []
+  const tables: TableItem[] = await getTableList({ catalog, db, keywords: '' }, requestOptions) || []
+  return tables.map(table => buildTableNode(catalog, db, table))
+}
 
-  if (!safeCatalog) {
+function loadChildren(source: TreeNode): Promise<boolean> {
+  const node = findBranch(source)
+  const revision = refreshRevision
+  if (!node)
+    return Promise.resolve(false)
+  if (loadedRevisions.get(node) === revision)
+    return Promise.resolve(true)
+
+  return requestBranch(node.key, revision, async () => {
+    const isCurrent = () => !disposed && revision === refreshRevision && findBranch(node) === node
+    if (!isCurrent())
+      return false
+
+    branchStatus.set(node.key, 'loading')
+    try {
+      const children = await fetchChildren(node)
+      if (!isCurrent())
+        return false
+
+      const updated = reconcileTreeNodes(node.children, children)
+      if (updated !== node.children) {
+        node.children = updated
+        treeVersion.value += 1
+      }
+      loadedRevisions.set(node, revision)
+      branchStatus.delete(node.key)
+      return true
+    }
+    catch {
+      if (isCurrent())
+        branchStatus.set(node.key, 'error')
+      return false
+    }
+  })
+}
+
+function setBrowseExpanded(key: string, expanded: boolean) {
+  const keys = state.expandedKeys
+  if (expanded === keys.includes(key))
     return
-  }
-
-  const catalogKey = `catalog:${safeCatalog}`
-  const catalogNode = state.treeData.find(node => node.key === catalogKey)
-  if (catalogNode) {
-    await loadChildren({ dataRef: catalogNode })
-  }
-
-  state.expandedKeys = getSelectedPathExpandedKeys(state.expandedKeys, safeCatalog)
+  state.expandedKeys = expanded ? [...keys, key] : keys.filter(item => item !== key)
   try {
     sessionStorage.setItem(expandedKeysSessionKey, JSON.stringify(state.expandedKeys))
   }
-  catch (e) {
-    // ignore sessionStorage write errors
-  }
-}
-
-function getDatabaseNodes(): TreeNode[] {
-  return state.treeData.flatMap(catalogNode =>
-    (catalogNode.children || []).filter(node => node.nodeType === 'database'),
-  )
-}
-
-async function refreshTableTree() {
-  if (state.refreshing) {
-    return
-  }
-
-  state.refreshing = true
-  try {
-    const databaseNodes = getDatabaseNodes()
-
-    cancelScheduledSearch()
-    state.searchTablesByDatabase = {}
-    clearTableCache(tableCache)
-
-    await refreshExpandedDatabaseNodes(
-      databaseNodes,
-      state.expandedKeys,
-      (node) => {
-        node.children = undefined
-        node.isLeaf = false
-      },
-      node => loadChildren({ dataRef: node }),
-    )
-
-    cancelScheduledSearch()
-    if (state.searchKey.trim()) {
-      await loadSearchTablesSafely(state.searchKey)
-    }
-  }
-  finally {
-    state.refreshing = false
+  catch {
+    // Browser storage is optional for embedders.
   }
 }
 
@@ -298,75 +239,50 @@ function handleSelectTable(catalog: string, db: string, tableName: string, table
   }
 }
 
-function handleTreeSelect(selectedKeys: (string | number)[], info: any) {
-  const node = info?.node
-  if (!node) {
+const treeRef = ref<TreeInstance>()
+
+function handleTreeSelect(node: TreeNode) {
+  if (node.nodeType !== 'table') {
+    syncCurrentTable()
+    toggleNodeExpand(node)
     return
   }
-
-  const dataRef = (node.dataRef || node) as TreeNode | undefined
-  if (!dataRef) {
-    return
-  }
-
-  if (dataRef.nodeType !== 'table') {
-    if (!dataRef.isLeaf) {
-      toggleNodeExpand(dataRef)
-    }
-    return
-  }
-
-  state.selectedKeys = selectedKeys.map(key => String(key))
-
-  const catalog = (dataRef.catalog || '') as string
-  const db = (dataRef.db || '') as string
-  const tableName = (dataRef.table || dataRef.title || '') as string
-  const tableType = (dataRef.tableType || '') as string
-
-  if (catalog && db && tableName) {
-    handleSelectTable(catalog, db, tableName, tableType)
-  }
+  handleSelectTable(node.catalog, node.db || '', node.table || '', node.tableType || '')
 }
 
-async function handleTreeExpand(expandedKeys: (string | number)[], info: any) {
-  state.expandedKeys = expandedKeys.map(key => String(key))
-  try {
-    sessionStorage.setItem(expandedKeysSessionKey, JSON.stringify(state.expandedKeys))
-  }
-  catch (e) {
-    // ignore sessionStorage write errors
-  }
-  const node = info?.node
-  if (!node || node.isLeaf || !info.expanded) {
+// Preserve the dashboard's directional navigation and Enter/Space activation.
+function handleTreeKeydown(event: KeyboardEvent) {
+  if (!['ArrowLeft', 'ArrowRight', 'Enter', ' '].includes(event.key))
+    return
+  const target = event.target as HTMLElement
+  if (target.closest('button'))
+    return
+  const row = target.closest<HTMLElement>('[role="treeitem"]')
+  const node = row?.dataset.key ? treeRef.value?.getNode(row.dataset.key) : undefined
+  if (!node)
+    return
+  event.preventDefault()
+  event.stopPropagation()
+
+  const data = node.data as TreeNode
+  if (event.key === 'Enter' || event.key === ' ') {
+    handleTreeSelect(data)
     return
   }
-  await loadChildren(node)
+
+  const opening = event.key === 'ArrowRight'
+  if (data.nodeType !== 'table' && node.expanded !== opening) {
+    setTreeExpanded(data, opening)
+    return
+  }
+
+  const nextKey = opening ? node.childNodes[0]?.key : node.level > 1 ? node.parent?.key : undefined
+  if (nextKey != null)
+    findTreeRow(String(nextKey))?.focus()
 }
 
-async function toggleNodeExpand(dataRef: TreeNode) {
-  if (!dataRef || dataRef.isLeaf) {
-    return
-  }
-
-  const key = String(dataRef.key)
-  const hasExpanded = state.expandedKeys.includes(key)
-
-  let nextExpandedKeys: string[]
-  if (hasExpanded) {
-    nextExpandedKeys = state.expandedKeys.filter(item => item !== key)
-  }
-  else {
-    nextExpandedKeys = [...state.expandedKeys, key]
-    await loadChildren({ dataRef })
-  }
-
-  state.expandedKeys = nextExpandedKeys
-  try {
-    sessionStorage.setItem(expandedKeysSessionKey, JSON.stringify(state.expandedKeys))
-  }
-  catch (e) {
-    // ignore sessionStorage write errors
-  }
+function findTreeRow(key: string) {
+  return treeBody.value?.querySelector<HTMLElement>(`[role="treeitem"][data-key="${CSS.escape(key)}"]`)
 }
 
 function getNodeIcon(node: TreeNode) {
@@ -402,9 +318,7 @@ function getSearchTreeSource(): TreeNode[] {
       catalogChanged = true
       return {
         ...databaseNode,
-        children: state.searchTablesByDatabase[databaseNode.key].map(table =>
-          buildTableNode(databaseNode.catalog, databaseNode.db || '', table),
-        ),
+        children: state.searchTablesByDatabase[databaseNode.key],
       }
     })
 
@@ -511,58 +425,63 @@ function filterTree(source: TreeNode[], rawKeyword: string): { tree: TreeNode[],
 
 let searchTimer: ReturnType<typeof setTimeout> | undefined
 
-async function loadSearchTables(rawKeyword: string) {
+async function loadSearchTables(rawKeyword: string, keepResults = false) {
   const requestId = ++searchRequestId
-  state.searchTablesByDatabase = {}
-
-  const searchPlan = createTableSearchPlan(rawKeyword, {
+  const { filterKeyword, target } = createTableSearchPlan(rawKeyword, {
     catalog: String(route.query.catalog || ''),
     database: String(route.query.db || ''),
   })
-  state.filterKey = searchPlan.filterKeyword
-
-  if (!searchPlan.target) {
-    return
+  const previousFilter = state.filterKey
+  if (filterKeyword && !previousFilter)
+    browseScrollTop = treeBody.value?.scrollTop || 0
+  if (!keepResults || filterKeyword !== previousFilter) {
+    state.searchTablesByDatabase = {}
+    searchExpansion.clear()
+  }
+  state.filterKey = filterKeyword
+  searchStatus.value = 'idle'
+  if (!filterKeyword && previousFilter) {
+    await nextTick()
+    if (requestId === searchRequestId && treeBody.value)
+      treeBody.value.scrollTop = browseScrollTop
   }
 
-  const target = searchPlan.target
-
-  const catalogKey = `catalog:${target.catalog}`
-  const catalogNode = state.treeData.find(node => node.key === catalogKey)
-  if (!catalogNode) {
+  const catalog = target && findCatalog(target.catalog)
+  if (!target || !catalog)
     return
-  }
 
-  await loadChildren({ dataRef: catalogNode })
-  if (requestId !== searchRequestId) {
-    return
-  }
+  searchStatus.value = 'loading'
+  try {
+    const loaded = await loadChildren(catalog)
+    if (requestId !== searchRequestId)
+      return
+    if (!loaded)
+      throw new Error('Unable to load databases')
 
-  const databaseKey = `${catalogKey}/db:${target.database}`
-  const databaseNode = catalogNode.children?.find(node => node.key === databaseKey)
-  if (!databaseNode) {
-    return
-  }
+    const database = catalog.children?.find(node => node.db === target.database)
+    if (!database || loadedRevisions.get(database) === refreshRevision) {
+      state.searchTablesByDatabase = {}
+      return
+    }
 
-  const cachedTables = getCachedTables(tableCache, target.catalog, target.database)
-  const tables = cachedTables
-    ?? (await getTableList({
+    const tables: TableItem[] = await getTableList({
       catalog: target.catalog,
       db: target.database,
       keywords: target.keyword,
-    }) || []) as TableItem[]
-
-  if (requestId === searchRequestId) {
-    state.searchTablesByDatabase[databaseKey] = tables
+    }, requestOptions) || []
+    if (requestId === searchRequestId && findBranch(database) === database) {
+      state.searchTablesByDatabase = {
+        [database.key]: tables.map(table => buildTableNode(target.catalog, target.database, table)),
+      }
+    }
   }
-}
-
-async function loadSearchTablesSafely(rawKeyword: string) {
-  try {
-    await loadSearchTables(rawKeyword)
+  catch {
+    if (requestId === searchRequestId)
+      searchStatus.value = 'error'
   }
-  catch (e) {
-    // Request errors are reported by the shared request interceptor.
+  finally {
+    if (requestId === searchRequestId && searchStatus.value === 'loading')
+      searchStatus.value = 'idle'
   }
 }
 
@@ -574,51 +493,78 @@ function cancelScheduledSearch() {
   searchRequestId += 1
 }
 
-watch(
-  () => state.searchKey,
-  (val) => {
-    cancelScheduledSearch()
-    searchTimer = setTimeout(() => {
-      searchTimer = undefined
-      void loadSearchTablesSafely(val || '')
-    }, 500)
-  },
-)
-
-onBeforeUnmount(() => {
+watch(() => state.searchKey, (value) => {
   cancelScheduledSearch()
-  clearTableCache(tableCache)
+  if (!value.trim()) {
+    void loadSearchTables('')
+    return
+  }
+  searchTimer = setTimeout(() => {
+    searchTimer = undefined
+    void loadSearchTables(value)
+  }, 500)
 })
 
-watch(
-  () => route.query,
-  async (value, oldValue) => {
-    const { catalog, db, table } = value as any
-    const { catalog: oldCatalog, db: oldDb, table: oldTable } = (oldValue || {}) as any
+onBeforeUnmount(() => {
+  disposed = true
+  cancelScheduledSearch()
+})
 
-    if (`${catalog || ''}${db || ''}${table || ''}` === `${oldCatalog || ''}${oldDb || ''}${oldTable || ''}`) {
-      return
-    }
+const selectedPath = computed(() => [
+  String(route.query.catalog || ''),
+  String(route.query.db || ''),
+  String(route.query.table || ''),
+] as const)
+const selectedKey = computed(() => {
+  const [catalog, db, table] = selectedPath.value
+  return catalog && db && table ? `catalog:${catalog}/db:${db}/table:${table}` : null
+})
+const showSearchScope = computed(() => state.filterKey && !state.filterKey.includes('.'))
 
-    const catalogStr = (catalog as string) || ''
-    const dbStr = (db as string) || ''
-    const tableStr = (table as string) || ''
+async function revealSelectedPath() {
+  const path = selectedPath.value
+  const [catalog, db, table] = path
+  const catalogNode = catalog && findCatalog(catalog)
+  if (!catalogNode || !db || state.filterKey)
+    return
 
-    if (catalogStr && dbStr) {
-      await expandCatalogBySelected(catalogStr)
-      if (tableStr) {
-        const tableKey = `catalog:${catalogStr}/db:${dbStr}/table:${tableStr}`
-        state.selectedKeys = [tableKey]
-      }
-      else {
-        state.selectedKeys = []
-      }
-    }
-    else {
-      state.selectedKeys = []
-    }
-  },
-)
+  setBrowseExpanded(catalogNode.key, true)
+  if (!await loadChildren(catalogNode) || state.filterKey || !isSelectedPath(path) || !table)
+    return
+  const database = catalogNode.children?.find(node => node.db === db)
+  if (!database)
+    return
+
+  setBrowseExpanded(database.key, true)
+  if (!await loadChildren(database) || state.filterKey || !isSelectedPath(path))
+    return
+  await nextTick()
+  const row = selectedKey.value ? findTreeRow(selectedKey.value) : undefined
+  scrollSelectedRowIntoView(row)
+}
+
+function scrollSelectedRowIntoView(row?: HTMLElement | null) {
+  const body = treeBody.value
+  if (!body || !row)
+    return
+  const item = row.querySelector('.el-tree-node__content')?.getBoundingClientRect()
+  const viewport = body.getBoundingClientRect()
+  if (!item)
+    return
+  if (item.top < viewport.top)
+    body.scrollTop += item.top - viewport.top
+  else if (item.bottom > viewport.bottom)
+    body.scrollTop += item.bottom - viewport.bottom
+}
+
+function isSelectedPath(path: readonly string[]) {
+  return path.every((item, index) => item === selectedPath.value[index])
+}
+
+watch(selectedPath, (_, previous) => {
+  if (!isSelectedPath(previous))
+    void revealSelectedPath()
+})
 
 const searchResult = computed(() => {
   const keyword = normalizeKeyword(state.filterKey)
@@ -632,114 +578,216 @@ const searchResult = computed(() => {
 })
 
 const displayTreeData = computed(() => searchResult.value.tree)
-const displayExpandedKeys = computed(() => searchResult.value.expandedKeys)
+const displayExpandedKeys = computed(() => state.filterKey
+  ? mergeExpandedKeys(searchResult.value.expandedKeys, searchExpansion)
+  : state.expandedKeys)
+
+async function refreshTableTree() {
+  if (state.refreshing)
+    return
+
+  const recoveringInitialLoad = rootStatus.value === 'error' && !state.treeData.length
+  state.refreshing = true
+  try {
+    if (!await loadCatalogs() || disposed)
+      return
+
+    refreshRevision += 1
+    cancelScheduledSearch()
+    branchStatus.clear()
+    const expandedCatalogs = state.treeData.filter(node => displayExpandedKeys.value.includes(node.key))
+    await Promise.all(expandedCatalogs.map(retryBranch))
+    if (recoveringInitialLoad)
+      await revealSelectedPath()
+
+    if (state.searchKey.trim()) {
+      cancelScheduledSearch()
+      await loadSearchTables(state.searchKey, true)
+    }
+  }
+  finally {
+    state.refreshing = false
+  }
+}
+
+async function retryBranch(branch: TreeNode) {
+  if (!await loadChildren(branch) || branch.nodeType !== 'catalog'
+    || !displayExpandedKeys.value.includes(branch.key)) {
+    return
+  }
+  const expanded = new Set(displayExpandedKeys.value)
+  const catalog = findCatalog(branch.catalog)
+  const databases = (catalog?.children || []).filter(node =>
+    expanded.has(node.key) && (!state.filterKey || loadedRevisions.has(node)),
+  )
+  await Promise.all(databases.map(loadChildren))
+}
+
+function setTreeExpanded(node: TreeNode, expanded: boolean) {
+  if (node.nodeType === 'table' || expanded === displayExpandedKeys.value.includes(node.key))
+    return
+
+  if (state.filterKey) {
+    searchExpansion.set(node.key, expanded)
+    if (expanded && !findBranch(node)?.children && !state.searchTablesByDatabase[node.key])
+      void loadChildren(node)
+  }
+  else {
+    setBrowseExpanded(node.key, expanded)
+    if (expanded)
+      void retryBranch(node)
+  }
+}
+
+function toggleNodeExpand(node: TreeNode) {
+  setTreeExpanded(node, !displayExpandedKeys.value.includes(node.key))
+}
+
+function syncCurrentTable() {
+  const tree = treeRef.value
+  const selected = selectedKey.value
+  if (tree && (tree.getCurrentKey() !== selected || tree.getCurrentNode() !== tree.getNode(selected || '')?.data))
+    tree.setCurrentKey(selected, false)
+}
+
+// ElTree's default-expanded-keys expands new entries but does not close removed
+// entries. Reconcile the public node handles so search and history stay controlled.
+// https://github.com/element-plus/element-plus/blob/2.14.8/docs/en-US/component/tree.md
+let synchronizedKeys = new Set<string>()
+watch([treeRef, displayTreeData, displayExpandedKeys, selectedKey, treeVersion], () => {
+  const tree = treeRef.value
+  if (!tree)
+    return
+  const expanded = new Set(displayExpandedKeys.value)
+  for (const key of synchronizedKeys) {
+    if (!expanded.has(key))
+      tree.getNode(key)?.collapse()
+  }
+  for (const key of expanded) {
+    const node = tree.getNode(key)
+    if (node && !node.expanded)
+      node.expand(undefined, false)
+  }
+  synchronizedKeys = expanded
+  syncCurrentTable()
+}, { flush: 'post' })
 
 onBeforeMount(async () => {
-  await initRootCatalogs()
-
-  let restoredExpandedKeys: string[] = []
-
   try {
-    const stored = sessionStorage.getItem(expandedKeysSessionKey)
-    if (stored) {
-      const parsed = JSON.parse(stored)
-      if (Array.isArray(parsed)) {
-        restoredExpandedKeys = getStoredCatalogExpandedKeys(
-          parsed.map((key: string | number) => String(key)),
-        )
-      }
-    }
+    const stored = JSON.parse(sessionStorage.getItem(expandedKeysSessionKey) || '[]')
+    if (Array.isArray(stored))
+      state.expandedKeys = getStoredCatalogExpandedKeys(stored.filter(key => typeof key === 'string'))
   }
-  catch (e) {
-    // ignore sessionStorage read/parse errors
+  catch {
+    // Invalid or unavailable browser storage does not block the explorer.
   }
 
-  if (restoredExpandedKeys.length) {
-    const catalogKeys = restoredExpandedKeys.filter(key => key.startsWith('catalog:') && !key.includes('/db:'))
-    for (const catalogKey of catalogKeys) {
-      const catalogNode = state.treeData.find(node => node.key === catalogKey)
-      if (catalogNode) {
-        await loadChildren({ dataRef: catalogNode })
-      }
-    }
-
-    state.expandedKeys = restoredExpandedKeys
-  }
-
-  const query = route.query || {}
-  const queryCatalog = (query.catalog as string) || ''
-  const queryDb = (query.db as string) || ''
-  const queryTable = (query.table as string) || ''
-
-  if (queryCatalog && queryDb) {
-    await expandCatalogBySelected(queryCatalog)
-    if (queryTable) {
-      const tableKey = `catalog:${queryCatalog}/db:${queryDb}/table:${queryTable}`
-      state.selectedKeys = [tableKey]
-    }
-  }
+  if (!await loadCatalogs() || disposed)
+    return
+  const expandedCatalogs = state.treeData.filter(node => state.expandedKeys.includes(node.key))
+  await Promise.all([revealSelectedPath(), ...expandedCatalogs.map(loadChildren)])
 })
 </script>
 
 <template>
   <div class="table-explorer">
     <div class="table-explorer-header">
-      <a-input
-        v-model:value="state.searchKey"
+      <el-input
+        v-model="state.searchKey"
         placeholder="Search catalog.database.table"
-        allow-clear
+        :aria-describedby="showSearchScope ? 'table-explorer-search-scope' : undefined"
+        clearable
         class="search-input"
       >
         <template #prefix>
-          <SearchOutlined class="search-input-prefix-icon" />
+          <Search class="amoro-icon search-input-prefix-icon" />
         </template>
-      </a-input>
-      <a-tooltip title="Refresh loaded table lists">
-        <a-button
-          type="text"
+      </el-input>
+      <el-tooltip content="Refresh catalogs and open branches">
+        <el-button
+          text
           size="small"
-          :loading="state.refreshing"
-          aria-label="Refresh loaded table lists"
+          :loading="state.refreshing || (rootStatus === 'loading' && !state.treeData.length)"
+          aria-label="Refresh catalogs and open branches"
           class="refresh-button"
           @click="refreshTableTree"
         >
           <template #icon>
-            <ReloadOutlined />
+            <Refresh class="amoro-icon" />
           </template>
-        </a-button>
-      </a-tooltip>
+        </el-button>
+      </el-tooltip>
     </div>
 
-    <div class="table-explorer-body">
-      <a-tree
+    <p v-if="showSearchScope" id="table-explorer-search-scope" class="search-scope">
+      Searches loaded branches and the current database. Use catalog.database.table to search another database.
+    </p>
+    <div v-if="rootStatus === 'error'" class="explorer-status" role="status">
+      <span>Could not load catalogs.</span>
+      <el-button link type="primary" @click="refreshTableTree">
+        Retry
+      </el-button>
+    </div>
+    <div v-if="searchStatus === 'error'" class="explorer-status" role="status">
+      <span>Could not finish searching.</span>
+      <el-button link type="primary" @click="loadSearchTables(state.searchKey, true)">
+        Retry
+      </el-button>
+    </div>
+    <div ref="treeBody" class="table-explorer-body" @keydown.capture="handleTreeKeydown">
+      <el-tree
         v-if="displayTreeData.length"
-        :tree-data="displayTreeData"
-        :expanded-keys="displayExpandedKeys"
-        :selected-keys="state.selectedKeys"
-        :show-line="{ showLeafIcon: false }"
-        :show-icon="false"
+        ref="treeRef"
+        node-key="key"
+        :data="displayTreeData"
+        :default-expanded-keys="displayExpandedKeys"
+        :current-node-key="selectedKey ?? undefined"
+        :props="{ label: 'title', children: 'children' }"
+        :expand-on-click-node="false"
         :auto-expand-parent="false"
-        block-node
-        @expand="handleTreeExpand"
-        @select="handleTreeSelect"
+        highlight-current
+        @node-expand="(data: TreeNode) => setTreeExpanded(data, true)"
+        @node-collapse="(data: TreeNode) => setTreeExpanded(data, false)"
+        @node-click="handleTreeSelect"
       >
-        <template #title="{ dataRef }">
-          <span
-            class="tree-node-title"
-            :class="`node-${dataRef.nodeType}`"
-          >
-            <svg-icon
-              :icon-class="getNodeIcon(dataRef)"
-              class="tree-node-icon"
-            />
-            <span class="tree-node-text">
-              {{ dataRef.title }}
+        <template #default="{ data: dataRef, node }">
+          <div class="tree-node-title" :aria-busy="(dataRef.nodeType !== 'table' && branchStatus.get(dataRef.key) === 'loading') || undefined">
+            <span
+              class="tree-node-toggle"
+              :class="{ 'tree-node-toggle--open': node.expanded }"
+              aria-hidden="true"
+            >
+              <template v-if="dataRef.nodeType !== 'table'">
+                <Loading v-if="branchStatus.get(dataRef.key) === 'loading'" class="tree-node-spinner" />
+                <CaretRight v-else />
+              </template>
             </span>
-          </span>
+            <svg class="tree-node-icon" aria-hidden="true">
+              <use :href="`${spriteUrl}#icon-${getNodeIcon(dataRef)}`" />
+            </svg>
+            <span class="tree-node-text" :title="dataRef.title">{{ dataRef.title }}</span>
+            <span
+              v-if="node.expanded && dataRef.children?.length === 0 && !branchStatus.has(dataRef.key)"
+              class="tree-node-empty"
+            >Empty</span>
+            <el-button
+              v-if="dataRef.nodeType !== 'table' && branchStatus.get(dataRef.key) === 'error'"
+              link
+              type="danger"
+              size="small"
+              :aria-label="`Retry loading ${dataRef.title}`"
+              @click.stop="retryBranch(dataRef)"
+            >
+              Retry
+            </el-button>
+          </div>
         </template>
-      </a-tree>
-      <div v-else class="empty-placeholder">
-        <span>No results..</span>
+      </el-tree>
+      <div v-else class="explorer-status" role="status">
+        <span v-if="rootStatus === 'loading' && !state.treeData.length">Loading catalogs…</span>
+        <span v-else-if="searchStatus === 'loading'">Searching…</span>
+        <span v-else-if="state.filterKey && searchStatus !== 'error'">No results</span>
+        <span v-else-if="rootStatus === 'ready' && !state.treeData.length">No catalogs</span>
       </div>
     </div>
   </div>
@@ -768,11 +816,11 @@ onBeforeMount(async () => {
       flex: 1;
       min-width: 0;
 
-      :deep(.ant-input-affix-wrapper) {
+      :deep(.el-input__wrapper) {
         height: 24px;
       }
 
-      :deep(.ant-input-prefix) {
+      :deep(.el-input__prefix) {
         display: flex;
         align-items: center;
         justify-content: center;
@@ -784,7 +832,7 @@ onBeforeMount(async () => {
         line-height: 24px;
       }
 
-      :deep(.ant-input) {
+      :deep(.el-input__inner) {
         line-height: 24px;
         font-size: 14px;
 
@@ -797,7 +845,23 @@ onBeforeMount(async () => {
 
     .refresh-button {
       flex: 0 0 auto;
+      min-width: 28px;
+      min-height: 26px;
     }
+  }
+
+  .search-scope,
+  .explorer-status {
+    margin: 0;
+    padding: 4px 8px 8px;
+    color: var(--el-text-color-secondary);
+  }
+
+  .explorer-status {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
   }
 
   .table-explorer-body {
@@ -806,42 +870,72 @@ onBeforeMount(async () => {
     overflow: auto;
     padding: 0 7px 0 8px;
 
-    :deep(.ant-tree) {
+    :deep(.el-tree),
+    :deep(.el-tree-node__content) {
+      min-width: 0;
+    }
+
+    :deep(.el-tree) {
       background-color: #fff;
     }
 
-    :deep(.ant-tree-indent-unit) {
-      width: 24px;
-    }
-
-    :deep(.ant-tree-switcher-line-icon) {
-      color: #d9d9e3;
-      font-size: 12px;
-    }
-
-    .tree-node-title {
-      display: inline-flex;
-      align-items: center;
-
-      .tree-node-icon {
-        margin-right: 6px;
-      }
-    }
-
-    .empty-placeholder {
-      padding: 8px 4px;
-      color: #999;
+    // Use the same row click for expansion, including when a branch has no
+    // children loaded and Element Plus considers it a leaf.
+    :deep(.el-tree-node__expand-icon) {
+      display: none;
     }
   }
-}
 
-.table-explorer-body .tree-node-title.node-catalog .tree-node-icon,
-.table-explorer-body .tree-node-title.node-database .tree-node-icon { transform: translateY(1px); }
-.table-explorer-body .tree-node-title.node-table .tree-node-icon { transform: none; }
+  .tree-node-title {
+    display: flex;
+    align-items: center;
+    width: 100%;
+    min-width: 0;
+    padding-right: 6px;
+    gap: 6px;
+  }
 
-/* Shift database and table rows left by 2px: indent + switcher + content together */
-:deep(.ant-tree-treenode:has(.tree-node-title.node-database)),
-:deep(.ant-tree-treenode:has(.tree-node-title.node-table)) {
-  transform: translateX(-1px); // Adjust to -3 or -4 for a larger shift if needed
+  .tree-node-toggle {
+    flex: 0 0 22px;
+    display: grid;
+    place-items: center;
+    color: var(--el-text-color-secondary);
+
+    svg {
+      width: 12px;
+      height: 12px;
+    }
+  }
+
+  .tree-node-toggle--open svg:not(.tree-node-spinner) {
+    transform: rotate(90deg);
+  }
+
+  .tree-node-spinner {
+    color: var(--el-color-primary);
+    animation: tree-node-rotate 1s linear infinite;
+  }
+
+  .tree-node-icon {
+    flex: 0 0 1em;
+    height: 1em;
+    fill: currentColor;
+  }
+
+  .tree-node-text {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  @keyframes tree-node-rotate {
+    to { transform: rotate(360deg); }
+  }
+
+  .tree-node-empty {
+    color: var(--el-text-color-secondary);
+    font-size: 12px;
+  }
 }
 </style>

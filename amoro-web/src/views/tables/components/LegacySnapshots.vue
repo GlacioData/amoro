@@ -17,30 +17,32 @@ limitations under the License.
 / -->
 
 <script lang="ts" setup>
-import { onMounted, reactive, ref, shallowReactive } from 'vue'
+import { CaretBottom, CaretRight } from '@element-plus/icons-vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute } from 'vue-router'
-import { CaretDownOutlined, CaretRightOutlined } from '@ant-design/icons-vue'
 import Selector from './Selector.vue'
 import { snapshotChartData } from './snapshot-chart-data'
+import SnapshotCharts from './SnapshotCharts.vue'
+import DashboardPagination from '@/components/DashboardPagination.vue'
+import { tableColumnProps } from '@/utils/table'
 import { usePagination } from '@/hooks/usePagination'
 import type { BreadcrumbSnapshotItem, IColumns, SnapshotItem, SnapshotItemSummary } from '@/types/common.type'
 import { getDetailBySnapshotId, getSnapshots } from '@/services/table.service'
 import { dateFormat } from '@/utils'
-import Chart from '@/components/echarts/Chart.vue'
 import type { ECOption } from '@/components/echarts'
 import { generateLineChartOption } from '@/utils/chart'
 
 const hasBreadcrumb = ref<boolean>(false)
 const { t } = useI18n()
-const columns: IColumns[] = shallowReactive([
-  { title: t('snapshotId'), dataIndex: 'snapshotId', ellipsis: true },
-  { title: t('operation'), dataIndex: 'operation' },
-  { title: t('records'), dataIndex: 'records' },
-  { title: t('fileCount'), dataIndex: 'fileCount' },
-  { title: t('commitTime'), dataIndex: 'commitTime' },
+const columns = computed<IColumns[]>(() => [
+  { title: t('snapshotId'), dataIndex: 'snapshotId', minWidth: 112, ellipsis: true },
+  { title: t('operation'), dataIndex: 'operation', minWidth: 112 },
+  { title: t('records'), dataIndex: 'records', minWidth: 96 },
+  { title: t('fileCount'), dataIndex: 'fileCount', minWidth: 112 },
+  { title: t('commitTime'), dataIndex: 'commitTime', minWidth: 164 },
 ])
-const breadcrumbColumns = shallowReactive([
+const breadcrumbColumns = computed(() => [
   { title: t('operation'), dataIndex: 'operation', width: 120, ellipsis: true },
   { title: t('file'), dataIndex: 'file', ellipsis: true },
   { title: t('partition'), dataIndex: 'partition', width: 120 },
@@ -244,89 +246,69 @@ onMounted(() => {
         @ref-change="onRefChange"
       >
         <template #extra>
-          <div class="snapshots-charts-header" @click="toggleCharts">
+          <button type="button" class="snapshots-charts-header" :aria-expanded="showCharts" @click="toggleCharts">
             <span class="snapshots-charts-title">{{ $t('charts') }}</span>
             <span class="snapshots-charts-icon">
-              <CaretRightOutlined v-if="!showCharts" />
-              <CaretDownOutlined v-else />
+              <CaretRight v-if="!showCharts" class="amoro-icon" />
+              <CaretBottom v-else class="amoro-icon" />
             </span>
-          </div>
+          </button>
         </template>
       </Selector>
-      <a-row v-if="showCharts" :gutter="32">
-        <a-col :span="12">
-          <div class="snapshots-chart-wrap">
-            <Chart height="300px" :loading="loading" :options="recordChartOption" />
-          </div>
-        </a-col>
-        <a-col :span="12">
-          <div class="snapshots-chart-wrap">
-            <Chart height="300px" :loading="loading" :options="fileChartOption" />
-          </div>
-        </a-col>
-      </a-row>
-      <a-table
-        row-key="snapshotId"
-        :columns="columns"
-        :data-source="dataSource"
-        :pagination="pagination"
-        :loading="loading"
-        @change="change"
-      >
-        <template #bodyCell="{ column, record }">
-          <template v-if="column.dataIndex === 'snapshotId'">
-            <a-button type="link" @click="toggleBreadcrumb(record)">
-              {{ record.snapshotId }}
-            </a-button>
+      <SnapshotCharts v-if="showCharts" :loading="loading" :record-options="recordChartOption" :file-options="fileChartOption" />
+      <el-table v-loading="loading" scrollbar-always-on row-key="snapshotId" :data="dataSource">
+        <el-table-column type="expand">
+          <template #default="{ row: record }">
+            <dl class="snapshot-summary">
+              <template v-for="(value, key) in record.summary" :key="key">
+                <dt>{{ key }} :</dt>
+                <dd>{{ value ?? '—' }}</dd>
+              </template>
+            </dl>
           </template>
-        </template>
-        <template #expandedRowRender="{ record }">
-          <a-row v-for="(value, key) in record.summary" :key="key" type="flex" :gutter="16">
-            <a-col flex="220px" style="text-align: right;">
-              {{ key }} :
-            </a-col>
-            <a-col flex="auto">
-              {{ value ?? '—' }}
-            </a-col>
-          </a-row>
-        </template>
-      </a-table>
+        </el-table-column>
+        <el-table-column v-for="column in columns" :key="column.dataIndex" v-bind="tableColumnProps(column, columns)">
+          <template v-if="column.dataIndex === 'snapshotId'" #default="{ row: record }">
+            <template v-if="column.dataIndex === 'snapshotId'">
+              <el-button link type="primary" @click="toggleBreadcrumb(record)">
+                {{ record.snapshotId }}
+              </el-button>
+            </template>
+          </template>
+        </el-table-column>
+      </el-table>
+      <DashboardPagination :pagination="pagination" @change="change" />
     </template>
     <template v-else>
-      <a-breadcrumb separator=">">
-        <a-breadcrumb-item class="text-active" @click="toggleBreadcrumb">
+      <el-breadcrumb separator=">">
+        <el-breadcrumb-item class="text-active" @click="toggleBreadcrumb">
           {{ $t('all') }}
-        </a-breadcrumb-item>
-        <a-breadcrumb-item>{{ `${$t('snapshotId')} ${snapshotId}` }}</a-breadcrumb-item>
-      </a-breadcrumb>
-      <a-table
-        row-key="file"
-        :columns="breadcrumbColumns"
-        :data-source="breadcrumbDataSource"
-        :pagination="breadcrumbPagination"
-        :loading="loading"
-        class="g-mt-8"
-        @change="change"
-      >
-        <template #bodyCell="{ column, record }">
-          <template v-if="column.dataIndex === 'path'">
-            <a-tooltip>
-              <template #title>
-                {{ record.path }}
-              </template>
-              <span>{{ record.path }}</span>
-            </a-tooltip>
+        </el-breadcrumb-item>
+        <el-breadcrumb-item>{{ `${$t('snapshotId')} ${snapshotId}` }}</el-breadcrumb-item>
+      </el-breadcrumb>
+      <el-table v-loading="loading" scrollbar-always-on row-key="file" class="g-mt-8" :data="breadcrumbDataSource">
+        <el-table-column v-for="column in breadcrumbColumns" :key="column.dataIndex" v-bind="tableColumnProps(column, breadcrumbColumns)">
+          <template v-if="column.dataIndex === 'file' || column.dataIndex === 'path'" #default="{ row: record }">
+            <template v-if="column.dataIndex === 'path'">
+              <el-tooltip>
+                <template #content>
+                  {{ record.path }}
+                </template>
+                <span>{{ record.path }}</span>
+              </el-tooltip>
+            </template>
+            <template v-if="column.dataIndex === 'file'">
+              <el-tooltip>
+                <template #content>
+                  {{ record.file }}
+                </template>
+                <span>{{ record.file }}</span>
+              </el-tooltip>
+            </template>
           </template>
-          <template v-if="column.dataIndex === 'file'">
-            <a-tooltip>
-              <template #title>
-                {{ record.file }}
-              </template>
-              <span>{{ record.file }}</span>
-            </a-tooltip>
-          </template>
-        </template>
-      </a-table>
+        </el-table-column>
+      </el-table>
+      <DashboardPagination :pagination="breadcrumbPagination" @change="change" />
     </template>
   </div>
 </template>
@@ -340,19 +322,28 @@ onMounted(() => {
     cursor: pointer;
   }
 
-  :deep(.ant-btn-link) {
+  :deep(.el-button.is-link) {
     padding: 0;
   }
 
-  :deep(.ant-table-row-expand-icon) {
+  :deep(.el-table__expand-icon) {
     border-radius: 0 !important;
   }
 
-  .ant-table-wrapper {
+  :deep(td.el-table__expanded-cell) {
+    background-color: #f7f7f7;
+  }
+
+  .el-table {
     margin-top: 18px;
   }
 
   .snapshots-charts-header {
+    border: 0;
+    background: none;
+    padding: 0;
+    color: inherit;
+    font: inherit;
     display: flex;
     align-items: center;
     cursor: pointer;

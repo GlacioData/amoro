@@ -31,9 +31,9 @@ export default defineComponent({
         404 - Not Found
       </p>
       <router-link to="/" style="text-align: center">
-        <a-button class="button g-mt-32">
+        <el-button class="button g-mt-32">
           {{ $t('backHome') }}
-        </a-button>
+        </el-button>
       </router-link>
     </div>
   </div>

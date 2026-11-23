@@ -39,6 +39,7 @@ export interface IColumns {
   key?: string
   ellipsis?: boolean
   width?: number | string
+  minWidth?: number
   scopedSlots?: any
   children?: IColumns[]
 }

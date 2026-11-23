@@ -17,9 +17,12 @@ limitations under the License.
 / -->
 
 <script lang="ts" setup>
-import { onMounted, reactive, ref, shallowReactive } from 'vue'
+import { CircleClose, Search } from '@element-plus/icons-vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute } from 'vue-router'
+import DashboardPagination from '@/components/DashboardPagination.vue'
+import { tableColumnProps } from '@/utils/table'
 import { usePagination } from '@/hooks/usePagination'
 import type { BreadcrumbPartitionItem, IColumns, PartitionItem } from '@/types/common.type'
 import { getPartitionFiles, getPartitionTable } from '@/services/table.service'
@@ -35,25 +38,26 @@ function formatTime(val: number | string) {
 }
 const hasBreadcrumb = ref<boolean>(false)
 const { t } = useI18n()
-const columns: IColumns[] = shallowReactive([
-  { title: t('partition'), dataIndex: 'partition', ellipsis: true },
-  { title: t('fileCount'), dataIndex: 'fileCount', width: 120, ellipsis: true },
-  { title: t('size'), dataIndex: 'size', width: 120, ellipsis: true },
-  { title: t('lastCommitTime'), dataIndex: 'lastCommitTime', width: 200, ellipsis: true },
+const columns = computed<IColumns[]>(() => [
+  { title: t('partition'), dataIndex: 'partition', minWidth: 220, ellipsis: true },
+  { title: t('fileCount'), dataIndex: 'fileCount', width: 100, ellipsis: true },
+  { title: t('size'), dataIndex: 'size', width: 88, ellipsis: true },
+  { title: t('lastCommitTime'), dataIndex: 'lastCommitTime', width: 164, ellipsis: true },
 ])
-const breadcrumbColumns = shallowReactive([
-  { title: t('file'), dataIndex: 'file', ellipsis: true },
-  // { title: t('fsn'), dataIndex: 'fsn' },
-  { title: t('fileType'), dataIndex: 'fileType', width: 120, ellipsis: true },
-  { title: t('size'), dataIndex: 'size', width: 120, ellipsis: true },
-  { title: t('commitTime'), dataIndex: 'commitTime', width: 200, ellipsis: true },
-  { title: t('commitId'), dataIndex: 'commitId', width: 200, ellipsis: true },
-  { title: t('path'), dataIndex: 'path', ellipsis: true, scopedSlots: { customRender: 'path' } },
+const breadcrumbColumns = computed<IColumns[]>(() => [
+  { title: t('file'), dataIndex: 'file', minWidth: 220, ellipsis: true },
+  { title: t('fileType'), dataIndex: 'fileType', width: 108, ellipsis: true },
+  { title: t('size'), dataIndex: 'size', width: 84, ellipsis: true },
+  { title: t('commitTime'), dataIndex: 'commitTime', width: 164, ellipsis: true },
+  { title: t('commitId'), dataIndex: 'commitId', width: 108, ellipsis: true },
+  { title: t('path'), dataIndex: 'path', minWidth: 176, ellipsis: true },
 ])
 
 const dataSource = reactive<PartitionItem[]>([])
 const breadcrumbDataSource = reactive<BreadcrumbPartitionItem[]>([])
 const partitionId = ref<string>('')
+const partitionSegments = computed(() => partitionId.value.split('/')
+  .map((segment, index, segments) => index < segments.length - 1 ? `${segment}/` : segment))
 const specId = ref<number>(0)
 const loading = ref<boolean>(false)
 const pagination = reactive(usePagination())
@@ -153,14 +157,12 @@ async function getFiles() {
   }
 }
 
-function toggleBreadcrumb(record: PartitionItem) {
+function openPartition(record: PartitionItem) {
   partitionId.value = record.partition
   specId.value = record.specId
-  hasBreadcrumb.value = !hasBreadcrumb.value
-  if (hasBreadcrumb.value) {
-    breadcrumbPagination.current = 1
-    getFiles()
-  }
+  hasBreadcrumb.value = true
+  breadcrumbPagination.current = 1
+  void getFiles()
 }
 
 onMounted(() => {
@@ -176,96 +178,132 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="table-partitons">
+  <div class="table-files">
     <template v-if="!hasBreadcrumb && hasPartition">
       <div class="filter-wrap">
-        <a-input-search
-          v-model:value="searchKey"
+        <el-input
+          v-model="searchKey"
           :placeholder="$t('fileSearchPlaceholder')"
-          style="width: 350px"
-          @search="(val: string) => handleSearch(val)"
+          style="width: 350px; max-width: 100%"
+          @keydown.enter="(event: KeyboardEvent) => { if (!event.isComposing) ((val: string) => handleSearch(val))((event.target as HTMLInputElement).value) }"
         >
           <template #prefix>
-            <SearchOutlined />
+            <Search class="amoro-icon" />
           </template>
           <template v-if="searchKey" #suffix>
-            <CloseCircleOutlined class="input-clear-icon" @click="handleSearch('')" />
+            <CircleClose class="amoro-icon input-clear-icon" @click="handleSearch('')" />
           </template>
-        </a-input-search>
+          <template #append>
+            <el-button :aria-label="$t('search')" @click="handleSearch(searchKey)">
+              <Search class="amoro-icon" />
+            </el-button>
+          </template>
+        </el-input>
       </div>
-      <a-table
-        row-key="partiton"
-        :columns="columns"
-        :data-source="dataSource"
-        :pagination="pagination"
-        :loading="loading"
-        @change="change"
-      >
-        <template #bodyCell="{ column, record }">
-          <template v-if="column.dataIndex === 'partition'">
-            <a-button type="link" @click="toggleBreadcrumb(record)">
+      <el-table v-loading="loading" scrollbar-always-on :row-key="(record: PartitionItem) => `${record.specId}:${record.partition}`" :data="dataSource">
+        <el-table-column
+          v-for="column in columns"
+          :key="column.dataIndex"
+          v-bind="tableColumnProps(column, columns)"
+          :align="column.dataIndex === 'fileCount' || column.dataIndex === 'size' ? 'right' : 'left'"
+        >
+          <template v-if="column.dataIndex === 'partition'" #default="{ row: record }">
+            <el-button link type="primary" class="partition-link" @click="openPartition(record)">
               {{ record.partition }}
-            </a-button>
+            </el-button>
           </template>
-        </template>
-      </a-table>
+        </el-table-column>
+      </el-table>
+      <DashboardPagination :pagination="pagination" @change="change" />
     </template>
     <template v-else>
-      <a-breadcrumb v-if="hasPartition" separator=">">
-        <a-breadcrumb-item class="text-active" @click="toggleBreadcrumb">
-          All
-        </a-breadcrumb-item>
-        <a-breadcrumb-item>{{ `${$t('partition')} ${partitionId}` }}</a-breadcrumb-item>
-      </a-breadcrumb>
-      <a-table
-        row-key="file"
-        :columns="breadcrumbColumns"
-        :data-source="breadcrumbDataSource"
-        :pagination="breadcrumbPagination"
-        :loading="loading"
-        @change="change"
-      >
-        <template #bodyCell="{ column, record }">
-          <template v-if="column.dataIndex === 'file'">
-            <a-tooltip>
-              <template #title>
-                {{ record.file }}
-              </template>
-              <span>{{ record.file }}</span>
-            </a-tooltip>
-          </template>
-          <template v-if="column.dataIndex === 'path'">
-            <a-tooltip>
-              <template #title>
-                {{ record.path }}
-              </template>
-              <span>{{ record.path }}</span>
-            </a-tooltip>
-          </template>
-        </template>
-      </a-table>
+      <el-breadcrumb v-if="hasPartition" class="files-breadcrumb" separator=">" :aria-label="$t('files')">
+        <el-breadcrumb-item>
+          <el-button link type="primary" class="breadcrumb-back" @click="hasBreadcrumb = false">
+            {{ $t('all') }}
+          </el-button>
+        </el-breadcrumb-item>
+        <el-breadcrumb-item>
+          {{ $t('partition') }}{{ ' ' }}
+          <span v-for="(segment, index) in partitionSegments" :key="index" class="partition-segment">{{ segment }}</span>
+        </el-breadcrumb-item>
+      </el-breadcrumb>
+      <el-table v-loading="loading" scrollbar-always-on row-key="file" :data="breadcrumbDataSource">
+        <el-table-column
+          v-for="column in breadcrumbColumns"
+          :key="column.dataIndex"
+          v-bind="tableColumnProps(column, breadcrumbColumns)"
+          :align="column.dataIndex === 'size' ? 'right' : 'left'"
+        />
+      </el-table>
+      <DashboardPagination :pagination="breadcrumbPagination" @change="change" />
     </template>
   </div>
 </template>
 
 <style lang="less" scoped>
-.table-partitons {
-  padding: 18px 0;
+.table-files {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+  padding-block: 16px 20px;
 
-  .text-active {
-    color: #1890ff;
-    cursor: pointer;
+  .dashboard-pagination {
+    margin-block: 0;
   }
 
-  .filter-wrap {
-    margin-bottom: 12px;
+  .files-breadcrumb {
+    display: flex;
+    align-items: baseline;
+    line-height: 1.5;
 
-    .input-clear-icon {
-      font-size: 12px;
+    :deep(.el-breadcrumb__item) {
+      display: flex;
+      align-items: baseline;
+    }
+
+    :deep(.el-breadcrumb__item:last-child) {
+      min-width: 0;
+      white-space: normal;
+
+      .el-breadcrumb__inner {
+        min-width: 0;
+      }
     }
   }
 
-  :deep(.ant-input-group-addon) {
+  .partition-segment {
+    display: inline-block;
+    max-width: 100%;
+    overflow-wrap: anywhere;
+    vertical-align: top;
+  }
+
+  .breadcrumb-back {
+    height: auto;
+    padding: 0;
+    line-height: inherit;
+  }
+
+  .partition-link {
+    max-width: 100%;
+
+    :deep(> span) {
+      display: block;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+  }
+
+  .input-clear-icon {
+    font-size: 12px;
+  }
+
+  :deep(.el-table .cell) {
+    padding-inline: 8px;
+  }
+
+  :deep(.el-input-group__append) {
     display: none;
   }
 }

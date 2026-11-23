@@ -31,14 +31,15 @@ const tableKey = computed(() => snapshotTableKey(route.query))
 
 <template>
   <div v-if="boundedSnapshotRead == null">
-    <a-alert
+    <el-alert
       :type="initializationError ? 'error' : 'info'"
-      :message="initializationError || $t('snapshotWaiting')"
+      :title="initializationError || $t('snapshotWaiting')"
       show-icon
+      :closable="false"
     />
-    <a-button v-if="initializationError" @click="$emit('retryInitialization')">
+    <el-button v-if="initializationError" @click="$emit('retryInitialization')">
       {{ $t('snapshotRetry') }}
-    </a-button>
+    </el-button>
   </div>
   <BoundedSnapshots v-else-if="boundedSnapshotRead" :key="tableKey" />
   <LegacySnapshots v-else :key="tableKey" />

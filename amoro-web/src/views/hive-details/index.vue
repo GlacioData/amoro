@@ -186,20 +186,20 @@ export default defineComponent({
       <div class="g-flex-jsb table-top">
         <span :title="tableName" class="table-name g-text-nowrap">{{ tableName }}</span>
         <div class="right-btn">
-          <a-button v-if="writable" type="primary" :disabled="status === upgradeStatus.upgrading" @click="upgradeTable">
+          <el-button v-if="writable" type="primary" :disabled="status === upgradeStatus.upgrading" @click="upgradeTable">
             {{ displayStatus }}
-          </a-button>
+          </el-button>
           <p v-if="status === upgradeStatus.failed" class="fail-msg" @click="showErrorMsg = true">
             {{ $t('lastUpgradingFailed') }}
           </p>
         </div>
       </div>
       <div class="content">
-        <a-tabs v-model:active-key="activeKey">
-          <a-tab-pane key="Details" tab="Details">
+        <el-tabs v-model="activeKey">
+          <el-tab-pane lazy key="Details" name="Details" label="Details">
             <UDetails :partition-column-list="partitionColumnList" :schema="schema" />
-          </a-tab-pane>
-        </a-tabs>
+          </el-tab-pane>
+        </el-tabs>
       </div>
     </div>
     <u-loading v-if="loading" />
@@ -242,7 +242,7 @@ export default defineComponent({
     max-width: 400px;
     padding-left: 12px;
   }
-  :deep(.ant-tabs-nav) {
+  :deep(.el-tabs__header) {
     padding-left: 24px;
     margin-bottom: 0;
   }

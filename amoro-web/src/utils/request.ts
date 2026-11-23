@@ -18,7 +18,7 @@
 
 import type { AxiosRequestConfig, AxiosResponse, Canceler } from 'axios'
 import axios from 'axios'
-import { message } from 'ant-design-vue'
+import { message } from '@/utils/ui-feedback'
 import useStore from '@/store'
 import router from '@/router'
 
@@ -197,28 +197,28 @@ const request: any = function (options: CustomAxiosRequestConfig) {
     })
 }
   ;['get', 'delete'].forEach((method) => {
-    request[method] = function (url: string, options: CustomAxiosRequestConfig = {}) {
-      options = Object.assign({}, options, {
-        url,
-        method,
-      })
-      return request(options)
-    }
-  })
-  ;['post', 'put'].forEach((method) => {
-    request[method] = function (
-      url: string,
+  request[method] = function (url: string, options: CustomAxiosRequestConfig = {}) {
+    options = Object.assign({}, options, {
+      url,
+      method,
+    })
+    return request(options)
+  }
+})
+;['post', 'put'].forEach((method) => {
+  request[method] = function (
+    url: string,
     data: Record<string, any> = {},
     options: CustomAxiosRequestConfig = {},
-    ) {
-      options = Object.assign({}, options, {
-        url,
-        method,
-        data,
-      })
-      return request(options)
-    }
-  })
+  ) {
+    options = Object.assign({}, options, {
+      url,
+      method,
+      data,
+    })
+    return request(options)
+  }
+})
 
 /**
  * file download
@@ -242,8 +242,6 @@ export function download(url: string, _blank = true) {
   }
 }
 
-
-
 /**
  * file download with header
  * @param url
@@ -252,16 +250,16 @@ export function download(url: string, _blank = true) {
 export function downloadWithHeader(url: string, fileName: string = 'download', _blank = true) {
   fetch(url, {
     headers: {
-      'X-Request-Source': 'Web'
-    }
+      'X-Request-Source': 'Web',
+    },
   })
-    .then(response => {
+    .then((response) => {
       if (!response.ok) {
         throw new Error(`HTTP error! Status: ${response.status}`)
       }
       return response.blob()
     })
-    .then(blob => {
+    .then((blob) => {
       const fileURL = window.URL.createObjectURL(blob)
       const link = document.createElement('a')
       link.href = fileURL
@@ -271,11 +269,10 @@ export function downloadWithHeader(url: string, fileName: string = 'download', _
       document.body.removeChild(link)
       window.URL.revokeObjectURL(fileURL)
     })
-    .catch(error => {
+    .catch((error) => {
       console.error('Download failed:', error)
     })
 }
-
 
 export function resetLoginTip() {
   loginTipShown = false

@@ -27,7 +27,6 @@ import VueI18n from './language/i18n'
 import RegisterComponents from './components/register'
 
 import './styles/index.less'
-import './assets/icons'
 import loginService from './services/login.service'
 import { getQueryString } from './utils'
 import { resetLoginTip } from './utils/request'
@@ -41,8 +40,6 @@ import {
   getDefaultRoute,
 } from './utils/permission'
 import SvgIcon from '@/components/svg-icon.vue'
-
-import 'virtual:svg-icons-register'
 
 const pinia = createPinia()
 const app = createApp(App).use(pinia)

@@ -152,6 +152,10 @@ export default defineComponent({
     })
 
     const hasSelectedTable = computed(() => !!(route.query?.catalog && route.query?.db && route.query?.table))
+    const explorerOpen = ref(false)
+    watch(() => [route.query.catalog, route.query.db, route.query.table], () => {
+      explorerOpen.value = false
+    })
     const isHiveTable = computed(() => route.query?.type === 'HIVE')
     const isHiveUpgrade = computed(() => route.path.includes('hive-upgrade'))
 
@@ -273,7 +277,9 @@ export default defineComponent({
       ...toRefs(state),
       detailRef,
       tableKey: computed(() => snapshotTableKey(route.query)),
+      tableDisplayName: computed(() => state.baseInfo.tableName || [route.query.catalog, route.query.db, route.query.table].join('.')),
       tabConfigs,
+      explorerOpen,
       store,
       isIceberg,
       hasSelectedTable,
@@ -296,9 +302,16 @@ export default defineComponent({
   <div ref="pageScrollRef" class="page-scroll">
     <div class="tables-wrap">
       <div v-if="!isSecondaryNav" class="tables-content">
+        <div v-if="hasSelectedTable" class="tables-explorer-toggle">
+          <el-button text type="primary" :aria-expanded="explorerOpen" aria-controls="tables-explorer-panel" @click="explorerOpen = !explorerOpen">
+            {{ $t('tables') }}
+          </el-button>
+        </div>
         <div
+          id="tables-explorer-panel"
           class="tables-sidebar"
-          :style="{ width: `${sidebarWidth}px`, flex: `0 0 ${sidebarWidth}px` }"
+          :class="{ 'tables-sidebar--closed': hasSelectedTable && !explorerOpen }"
+          :style="{ '--tables-sidebar-width': `${sidebarWidth}px` }"
         >
           <TableExplorer />
         </div>
@@ -310,26 +323,26 @@ export default defineComponent({
             <div class="tables-main-header g-flex-jsb">
               <div class="g-flex-col model-header">
                 <div class="g-flex">
-                  <span :title="baseInfo.tableName" class="table-name g-text-nowrap">{{ baseInfo.tableName }}</span>
+                  <span :title="tableDisplayName" class="table-name g-text-nowrap">{{ tableDisplayName }}</span>
                 </div>
                 <div v-if="baseInfo.comment" class="table-info g-flex-ac">
                   <p>{{ $t('Comment') }}: <span class="text-color">{{ baseInfo.comment }}</span></p>
                 </div>
                 <div class="table-info g-flex-ac">
-                  <p>{{ $t('optimizingStatus') }}: <span class="text-color">{{ baseInfo.optimizingStatus }}</span></p>
-                  <a-divider type="vertical" />
-                  <p>{{ $t('records') }}: <span class="text-color">{{ baseInfo.records }}</span></p>
-                  <a-divider type="vertical" />
+                  <p>{{ $t('optimizingStatus') }}: <span class="text-color">{{ detailLoaded ? baseInfo.optimizingStatus : '—' }}</span></p>
+                  <el-divider direction="vertical" />
+                  <p>{{ $t('records') }}: <span class="text-color">{{ detailLoaded ? baseInfo.records : '—' }}</span></p>
+                  <el-divider direction="vertical" />
                   <template v-if="!isIceberg">
                     <p :title="baseInfo.tableType === 'PAIMON' ? $t('paimonCreateTimeHelp') : undefined">
-                      {{ $t('createTime') }}: <span class="text-color">{{ baseInfo.createTime || (baseInfo.tableType === 'PAIMON' ? '—' : '') }}</span>
+                      {{ $t('createTime') }}: <span class="text-color">{{ baseInfo.createTime || (!detailLoaded || baseInfo.tableType === 'PAIMON' ? '—' : '') }}</span>
                     </p>
-                    <a-divider type="vertical" />
+                    <el-divider direction="vertical" />
                   </template>
                   <TableModel :format="baseInfo.tableType" :model="baseInfo.tableModel" />
-                  <a-divider type="vertical" />
-                  <p>{{ $t('tableFormat') }}: <span class="text-color">{{ baseInfo.tableFormat }}</span></p>
-                  <a-divider type="vertical" />
+                  <el-divider direction="vertical" />
+                  <p>{{ $t('tableFormat') }}: <span class="text-color">{{ detailLoaded ? baseInfo.tableFormat : '—' }}</span></p>
+                  <el-divider direction="vertical" />
                   <p>
                     {{ $t('healthScore') }}:
                     <UHealthScore :base-info="baseInfo" />
@@ -338,24 +351,28 @@ export default defineComponent({
               </div>
             </div>
             <div class="tables-main-body">
-              <a-tabs v-model:active-key="activeKey" destroy-inactive-tab-pane @change="onChangeTab">
-                <a-tab-pane key="Details" :tab="$t('details')" force-render>
+              <el-tabs v-model="activeKey" @tab-change="(name: string | number) => { const $event = String(name); onChangeTab($event) }">
+                <el-tab-pane key="Details" name="Details" :label="$t('details')">
                   <UDetails :key="tableKey" ref="detailRef" @set-base-detail-info="setBaseDetailInfo" @table-not-found="handleTableNotFound" @initialization-error="snapshotInitializationError = $event" />
-                </a-tab-pane>
-                <a-tab-pane v-if="detailLoaded" key="Files" :tab="$t('files')">
-                  <UFiles :has-partition="baseInfo.hasPartition" :table-format="baseInfo.tableFormat" />
-                </a-tab-pane>
-                <a-tab-pane v-for="tab in tabConfigs" :key="tab.key" :tab="$t(tab.label)">
-                  <USnapshots
-                    v-if="tab.key === 'Snapshots'"
-                    :bounded-snapshot-read="baseInfo.boundedSnapshotRead"
-                    :initialization-error="snapshotInitializationError"
-                    @retry-initialization="detailRef?.getTableDetails()"
-                  />
-                  <UTags v-else-if="tab.key === 'Tags' && detailLoaded" :key="tableKey" />
-                  <component :is="`U${tab.key}`" v-else-if="tab.key !== 'Tags'" />
-                </a-tab-pane>
-              </a-tabs>
+                </el-tab-pane>
+                <el-tab-pane v-if="detailLoaded" key="Files" name="Files" :label="$t('files')">
+                  <template v-if="activeKey === 'Files'">
+                    <UFiles :has-partition="baseInfo.hasPartition" :table-format="baseInfo.tableFormat" />
+                  </template>
+                </el-tab-pane>
+                <el-tab-pane v-for="tab in tabConfigs" :key="tab.key" :name="tab.key" :label="$t(tab.label)">
+                  <template v-if="activeKey === tab.key">
+                    <USnapshots
+                      v-if="tab.key === 'Snapshots'"
+                      :bounded-snapshot-read="baseInfo.boundedSnapshotRead"
+                      :initialization-error="snapshotInitializationError"
+                      @retry-initialization="detailRef?.getTableDetails()"
+                    />
+                    <UTags v-else-if="tab.key === 'Tags' && detailLoaded" :key="tableKey" />
+                    <component :is="`U${tab.key}`" v-else-if="tab.key !== 'Tags'" />
+                  </template>
+                </el-tab-pane>
+              </el-tabs>
             </div>
           </template>
           <div v-else class="empty-page" />
@@ -388,12 +405,15 @@ export default defineComponent({
   }
 
   .tables-sidebar {
-    flex: 0 0 auto;
+    flex: 0 0 min(var(--tables-sidebar-width), 45%);
+    min-width: 0;
     height: 100%;
     background-color: #fff;
     position: relative;
     padding-top: 12px;
   }
+
+  .tables-explorer-toggle { display: none; }
 
   .tables-main {
     flex: 1;
@@ -464,6 +484,7 @@ export default defineComponent({
     min-width: 0;
 
     .table-info {
+      overflow-wrap: anywhere;
       flex-wrap: wrap;
       row-gap: 8px;
 
@@ -473,12 +494,66 @@ export default defineComponent({
     }
   }
 
+  @media (max-width: 1024px) {
+    .tables-sidebar { flex-basis: min(240px, 32%); }
+    .tables-divider { display: none; }
+    .tables-main-body { padding-inline: 16px; }
+    .table-info, .table-name { padding-inline: 16px; }
+  }
+
+  @media (max-width: 760px) {
+    .tables-content { flex-direction: column; }
+    .tables-explorer-toggle {
+      display: block;
+      flex: none;
+      border-bottom: 1px solid #e8e8f0;
+      padding-inline: 4px;
+    }
+    .tables-sidebar {
+      flex: 0 0 min(240px, 38dvh);
+      min-height: 0;
+      height: auto;
+      padding-block: 8px;
+      border-bottom: 1px solid #e8e8f0;
+      &.tables-sidebar--closed { display: none; }
+      &:first-child { flex: 1 1 0; }
+    }
+    .tables-main {
+      height: auto;
+      min-height: 0;
+      padding-top: 8px;
+      overflow: auto;
+      flex: 1 1 0;
+    }
+    .tables-main:has(.empty-page) { display: none; }
+    .tables-main-header { flex: none; }
+    .tables-main-body {
+      overflow: visible;
+      padding: 0 12px 16px;
+    }
+    .table-name {
+      box-sizing: border-box;
+      width: 100%;
+      margin-right: 0;
+      padding-inline: 12px;
+      font-size: 18px;
+      white-space: normal;
+      overflow-wrap: anywhere;
+    }
+    .table-info {
+      padding: 8px 12px 0;
+      column-gap: 12px;
+    }
+    .table-info :deep(.el-divider--vertical) { display: none; }
+    .model-header .table-info > p { white-space: normal; }
+  }
+
   .table-edit {
     font-size: 18px;
     padding-right: 12px;
   }
 
-  :deep(.ant-tabs-nav) {
+  :deep(.el-tabs__header) {
     padding-left: 0;
     margin-bottom: 0;
   }

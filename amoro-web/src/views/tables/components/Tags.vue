@@ -17,16 +17,20 @@ limitations under the License.
 / -->
 
 <script setup lang="ts">
+import { Search } from '@element-plus/icons-vue'
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import axios from 'axios'
-import { message } from 'ant-design-vue'
-import { ClockCircleOutlined, CopyOutlined, DeleteOutlined } from '@ant-design/icons-vue'
+import TagRowActions from './TagRowActions.vue'
 import TagRetentionModal from './TagRetentionModal.vue'
 import TagSnapshotSelect from './TagSnapshotSelect.vue'
 import { canDeleteTag, canUpdateTagRetention, resolvedTagRetention, sameRetentionSource, tagErrorMessages, validTagForm } from './tag-management-state'
 import { requestEpoch } from './snapshot-page-state'
+import { useMediaQuery } from '@/hooks/useMediaQuery'
+import DashboardPagination from '@/components/DashboardPagination.vue'
+import { tableColumnProps } from '@/utils/table'
+import { message } from '@/utils/ui-feedback'
 import { copyTag, createTag, deleteTag, getTableDetail, getTags } from '@/services/table.service'
 import type { TableTag, TagCapabilities, TagScope, TagWriteRequest } from '@/types/tag.type'
 import { canManageTable } from '@/utils/permission'
@@ -59,14 +63,24 @@ const retentionRow = ref<TableTag | null>(null)
 const typedName = ref('')
 const form = reactive({ name: '', version: '', mode: 'NATIVE_DEFAULT', hours: 24 as number | null })
 const scope = computed<TagScope>(() => copying.value?.scope || capabilities.value?.supportedScopes[0] || { kind: 'DEFAULT' })
+const compactTags = useMediaQuery('(max-width: 760px)')
 const modes = computed(() => capabilities.value?.retention.supportedModes || [])
 const allowed = (action: string) => canManageTable() && capabilities.value?.actions.includes(action)
+function tagActionState(row: TableTag) {
+  return {
+    canCopy: allowed('COPY'),
+    canAdjust: allowed('UPDATE_RETENTION'),
+    canDelete: allowed('DELETE'),
+    observed: !busy.value && !loading.value && !!row.observationToken,
+    canAdjustRetention: !loading.value && canUpdateTagRetention(row, capabilities.value, busy.value),
+  }
+}
 const valid = computed(() => validTagForm(form.name, form.version, form.mode, form.hours) && !!resolvedTagRetention(form.mode, form.hours, capabilities.value))
 const columns = computed(() => [
-  { title: t('tagName'), dataIndex: 'name' },
-  { title: t('snapshotId'), dataIndex: 'version' },
-  { title: t('commitTime'), dataIndex: 'committedAt' },
-  { title: t('tagRetention'), dataIndex: 'retention' },
+  { title: t('tagName'), dataIndex: 'name', minWidth: 160, ellipsis: true },
+  { title: t('snapshotId'), dataIndex: 'version', minWidth: 112 },
+  { title: t('commitTime'), dataIndex: 'committedAt', minWidth: 170 },
+  { title: t('tagRetention'), dataIndex: 'retention', minWidth: 136 },
   { title: t('operation'), dataIndex: 'actions', width: 160 },
 ])
 function retentionText(value?: { state: string, ageLimit: string, maxAgeMillis?: number }) {
@@ -222,140 +236,158 @@ function openSnapshot(row: TableTag) {
 }
 onMounted(load)
 onBeforeUnmount(() => requests.invalidate())
-// Modal open/footer/confirmLoading follow Ant Design Vue 4.2.6:
-// https://github.com/vueComponent/ant-design-vue/blob/4.2.6/components/modal/Modal.tsx
 </script>
 
 <template>
   <div class="tags-page">
-    <a-alert v-for="failure in errorMessages" :key="failure.kind" type="error" :message="failure.message" show-icon class="g-mb-16" />
-    <a-alert v-if="capabilities?.unavailableReason" type="info" :message="$t('tagReadOnly')" :description="$t('tagUnavailable')" class="g-mb-16" />
+    <el-alert v-for="failure in errorMessages" :key="failure.kind" type="error" :title="failure.message" show-icon class="g-mb-16" :closable="false" />
+    <el-alert v-if="capabilities?.unavailableReason" type="info" :title="$t('tagReadOnly')" :description="$t('tagUnavailable')" class="g-mb-16" :closable="false" />
     <div class="tag-toolbar">
-      <a-input-search v-model:value="keyword" :placeholder="$t('tagSearch')" :maxlength="255" :disabled="busy" class="tag-search" @search="search" />
-      <a-space class="tag-toolbar-actions">
-        <a-button :disabled="busy || loading" @click="load">
+      <el-input v-model="keyword" :placeholder="$t('tagSearch')" :maxlength="255" :disabled="busy" class="tag-search" @keydown.enter="(event: KeyboardEvent) => { if (!event.isComposing) search() }">
+        <template #append>
+          <el-button :icon="Search" :aria-label="$t('tagSearch')" :disabled="busy" @click="search" />
+        </template>
+      </el-input>
+      <el-space class="tag-toolbar-actions">
+        <el-button :disabled="busy || loading" @click="load">
           {{ $t('tagRefresh') }}
-        </a-button>
-        <a-button v-if="allowed('CREATE')" type="primary" :disabled="busy || loading" @click="openForm(null)">
+        </el-button>
+        <el-button v-if="allowed('CREATE')" type="primary" :disabled="busy || loading" @click="openForm(null)">
           {{ $t('tagCreate') }}
-        </a-button>
-      </a-space>
+        </el-button>
+      </el-space>
     </div>
-    <a-table row-key="name" :columns="columns" :data-source="rows" :loading="loading" :pagination="false">
-      <template #bodyCell="{ column, record }">
-        <a-button v-if="column.dataIndex === 'version' && typedSnapshotReferences" type="link" @click="openSnapshot(record)">
-          {{ record.target.id }}
-        </a-button>
-        <template v-else-if="column.dataIndex === 'version'">
-          {{ record.target.id }}
+    <el-table v-if="!compactTags" v-loading="loading" row-key="name" :data="rows">
+      <el-table-column v-for="column in columns" :key="column.dataIndex" v-bind="tableColumnProps(column, columns)">
+        <template v-if="column.dataIndex === 'actions' || column.dataIndex === 'committedAt' || column.dataIndex === 'retention' || column.dataIndex === 'version'" #default="{ row: record }">
+          <el-button v-if="column.dataIndex === 'version' && typedSnapshotReferences" link type="primary" @click="openSnapshot(record)">
+            {{ record.target.id }}
+          </el-button>
+          <template v-else-if="column.dataIndex === 'version'">
+            {{ record.target.id }}
+          </template>
+          <template v-else-if="column.dataIndex === 'committedAt'">
+            {{ record.versionCommittedAtMillis ? dateFormat(record.versionCommittedAtMillis) : '—' }}
+          </template>
+          <template v-else-if="column.dataIndex === 'retention'">
+            {{ retentionText(record.retention) }}
+          </template>
+          <TagRowActions v-else-if="column.dataIndex === 'actions'" v-bind="tagActionState(record)" @copy="openForm(record)" @retention="retentionRow = { ...record }" @remove="openDelete(record)" />
         </template>
-        <template v-else-if="column.dataIndex === 'committedAt'">
-          {{ record.versionCommittedAtMillis ? dateFormat(record.versionCommittedAtMillis) : '—' }}
-        </template>
-        <template v-else-if="column.dataIndex === 'retention'">
-          {{ retentionText(record.retention) }}
-        </template>
-        <a-space v-else-if="column.dataIndex === 'actions'">
-          <a-tooltip v-if="allowed('COPY')" :title="$t('tagCopy')" :trigger="['hover', 'focus']">
-            <a-button shape="circle" :aria-label="$t('tagCopy')" :disabled="busy || loading || !record.observationToken" @click="openForm(record)">
-              <CopyOutlined />
-            </a-button>
-          </a-tooltip>
-          <a-tooltip v-if="allowed('UPDATE_RETENTION')" :title="$t('tagUpdateRetention')" :trigger="['hover', 'focus']">
-            <a-button shape="circle" :aria-label="$t('tagUpdateRetention')" :disabled="loading || !canUpdateTagRetention(record, capabilities, busy)" @click="retentionRow = { ...record }">
-              <ClockCircleOutlined />
-            </a-button>
-          </a-tooltip>
-          <a-tooltip v-if="allowed('DELETE')" :title="$t('tagDelete')" :trigger="['hover', 'focus']">
-            <a-button shape="circle" danger :aria-label="$t('tagDelete')" :disabled="busy || loading || !record.observationToken" @click="openDelete(record)">
-              <DeleteOutlined />
-            </a-button>
-          </a-tooltip>
-        </a-space>
-      </template>
-    </a-table>
-    <a-pagination :current="page" :page-size="pageSize" :total="total" show-quick-jumper show-size-changer :page-size-options="['20', '50', '100']" :show-total="(value: number) => $t('tagTotal', { total: value, pages: Math.ceil(value / pageSize) })" :disabled="busy || loading" class="g-mt-16" @change="changePage" />
-    <a-modal :open="editing" :title="copying ? $t(confirming ? 'tagCopyConfirm' : 'tagCopy') : $t('tagCreate')" :closable="!busy" :mask-closable="false" :keyboard="!busy" @cancel="editing = false">
+      </el-table-column>
+    </el-table>
+    <div v-else v-loading="loading" class="tag-card-list">
+      <el-empty v-if="!rows.length" :image-size="64" />
+      <article v-for="record in rows" :key="record.name" class="tag-card">
+        <h3>{{ record.name }}</h3>
+        <dl>
+          <dt>{{ $t('snapshotId') }}</dt>
+          <dd>
+            <el-button v-if="typedSnapshotReferences" link type="primary" @click="openSnapshot(record)">
+              {{ record.target.id }}
+            </el-button>
+            <span v-else>{{ record.target.id }}</span>
+          </dd>
+          <dt>{{ $t('commitTime') }}</dt>
+          <dd>{{ record.versionCommittedAtMillis ? dateFormat(record.versionCommittedAtMillis) : '—' }}</dd>
+          <dt>{{ $t('tagRetention') }}</dt>
+          <dd>{{ retentionText(record.retention) }}</dd>
+        </dl>
+        <TagRowActions v-bind="tagActionState(record)" @copy="openForm(record)" @retention="retentionRow = { ...record }" @remove="openDelete(record)" />
+      </article>
+    </div>
+    <DashboardPagination
+      :pagination="{
+        current: page,
+        pageSize,
+        total,
+        showQuickJumper: true,
+        showSizeChanger: true,
+        pageSizeOptions: [20, 50, 100],
+        showTotal: value => $t('tagTotal', { total: value, pages: Math.ceil(value / pageSize) }),
+      }"
+      :disabled="busy || loading"
+      @change="({ current, pageSize: size }) => changePage(current, size)"
+    />
+    <el-dialog :model-value="editing" :title="copying ? $t(confirming ? 'tagCopyConfirm' : 'tagCopy') : $t('tagCreate')" :show-close="!busy" :close-on-click-modal="false" :close-on-press-escape="!busy" :width="520" @update:model-value="(open: boolean) => { if (!open) editing = false }">
       <p>{{ source.catalog }}.{{ source.db }}.{{ source.table }} · {{ scope.branch || scope.kind }}</p>
-      <a-alert v-if="copying" type="info" :message="$t('tagSameSnapshot')" class="g-mb-16" />
-      <a-form v-if="!confirming" layout="vertical">
-        <a-form-item v-if="copying" :label="$t('tagSource')">
+      <el-alert v-if="copying" type="info" :title="$t('tagSameSnapshot')" class="g-mb-16" :closable="false" />
+      <el-form v-if="!confirming" label-position="top">
+        <el-form-item v-if="copying" :label="$t('tagSource')">
           {{ copying.name }} → {{ copying.target.id }}
-        </a-form-item>
-        <a-form-item :label="$t('tagName')">
-          <a-input v-model:value="form.name" :maxlength="255" :disabled="busy" />
-        </a-form-item>
-        <a-form-item :label="$t('snapshotId')" html-for="tag-create-snapshot">
-          <a-input v-if="copying" id="tag-create-snapshot" :value="form.version" disabled />
+        </el-form-item>
+        <el-form-item :label="$t('tagName')">
+          <el-input v-model="form.name" :maxlength="255" :disabled="busy" />
+        </el-form-item>
+        <el-form-item :label="$t('snapshotId')" for="tag-create-snapshot">
+          <el-input v-if="copying" id="tag-create-snapshot" :model-value="form.version" disabled />
           <TagSnapshotSelect v-else v-model:value="form.version" :source="source" :scope="scope" :active="editing" :disabled="busy" />
-        </a-form-item>
-        <a-form-item :label="$t('tagRetention')">
-          <a-select v-model:value="form.mode" :disabled="busy">
-            <a-select-option v-for="mode in modes" :key="mode" :value="mode">
-              {{ $t(`tagMode${mode}`) }}
-            </a-select-option>
-          </a-select>
-        </a-form-item>
-        <a-form-item v-if="form.mode === 'AGE_LIMIT'" :label="$t('tagHours')">
-          <a-input-number v-model:value="form.hours" :min="0.001" :max="2501999792" :disabled="busy" />
-        </a-form-item>
-      </a-form>
-      <a-descriptions v-else :column="1" bordered>
-        <a-descriptions-item :label="$t('tagSource')">
+        </el-form-item>
+        <el-form-item :label="$t('tagRetention')">
+          <el-select v-model="form.mode" :disabled="busy">
+            <el-option v-for="mode in modes" :key="mode" :label="$t(`tagMode${mode}`)" :value="mode" />
+          </el-select>
+        </el-form-item>
+        <el-form-item v-if="form.mode === 'AGE_LIMIT'" :label="$t('tagHours')">
+          <el-input-number v-model="form.hours" :min="0.001" :max="2501999792" :disabled="busy" />
+        </el-form-item>
+      </el-form>
+      <el-descriptions v-else :column="1" border>
+        <el-descriptions-item :label="$t('tagSource')">
           {{ copying?.name }}
-        </a-descriptions-item>
-        <a-descriptions-item :label="$t('tagName')">
+        </el-descriptions-item>
+        <el-descriptions-item :label="$t('tagName')">
           {{ form.name }}
-        </a-descriptions-item>
-        <a-descriptions-item :label="$t('snapshotId')">
+        </el-descriptions-item>
+        <el-descriptions-item :label="$t('snapshotId')">
           {{ form.version }}
-        </a-descriptions-item>
-        <a-descriptions-item :label="$t('tagRetention')">
+        </el-descriptions-item>
+        <el-descriptions-item :label="$t('tagRetention')">
           {{ chosenText }}
-        </a-descriptions-item>
-      </a-descriptions>
+        </el-descriptions-item>
+      </el-descriptions>
       <p class="g-mt-16">
         {{ ageModel }} · {{ chosenText }}
       </p>
       <p>{{ $t('tagExpiryNotice') }}</p>
       <template #footer>
-        <a-button :disabled="busy" @click="editing = false">
+        <el-button :disabled="busy" @click="editing = false">
           {{ $t('cancel') }}
-        </a-button>
-        <a-button v-if="confirming" :disabled="busy" @click="confirming = false">
+        </el-button>
+        <el-button v-if="confirming" :disabled="busy" @click="confirming = false">
           {{ $t('tagBackEdit') }}
-        </a-button>
-        <a-button v-if="copying && !confirming" type="primary" :disabled="!valid || busy" @click="confirming = true">
+        </el-button>
+        <el-button v-if="copying && !confirming" type="primary" :disabled="!valid || busy" @click="confirming = true">
           {{ $t('tagNextConfirm') }}
-        </a-button>
-        <a-button v-else type="primary" :disabled="!valid || busy" :loading="busy" @click="submit">
+        </el-button>
+        <el-button v-else type="primary" :disabled="!valid || busy" :loading="busy" @click="submit">
           {{ $t(copying ? 'tagConfirmCopy' : 'tagCreate') }}
-        </a-button>
+        </el-button>
       </template>
-    </a-modal>
+    </el-dialog>
     <TagRetentionModal :row="retentionRow" :capabilities="capabilities" :source="source" @close="retentionRow = null" @pending="busy = $event" @start="errors.read = ''; errors.mutation = ''" @saved="retentionSaved" @failure="retentionFailed" />
-    <a-modal :open="!!removing" :title="$t('tagDeleteConfirm')" :closable="!busy" :mask-closable="false" :keyboard="!busy" @cancel="removing = null">
+    <el-dialog :model-value="!!removing" :title="$t('tagDeleteConfirm')" :show-close="!busy" :close-on-click-modal="false" :close-on-press-escape="!busy" :width="520" @update:model-value="(open: boolean) => { if (!open) removing = null }">
       <p>{{ source.catalog }}.{{ source.db }}.{{ source.table }} · {{ removing?.scope.branch || removing?.scope.kind }}</p>
-      <a-descriptions :column="1" bordered>
-        <a-descriptions-item :label="$t('tagName')">
+      <el-descriptions :column="1" border>
+        <el-descriptions-item :label="$t('tagName')">
           {{ removing?.name }}
-        </a-descriptions-item>
-        <a-descriptions-item :label="$t('snapshotId')">
+        </el-descriptions-item>
+        <el-descriptions-item :label="$t('snapshotId')">
           {{ removing?.target.id }}
-        </a-descriptions-item>
-      </a-descriptions>
-      <a-alert type="warning" :message="$t(capabilities?.deleteEffect === 'MAY_CLEAN_HISTORY' ? 'tagDeleteHistoryWarning' : 'tagDeleteReferenceWarning')" show-icon class="g-mt-16 g-mb-16" />
+        </el-descriptions-item>
+      </el-descriptions>
+      <el-alert type="warning" :title="$t(capabilities?.deleteEffect === 'MAY_CLEAN_HISTORY' ? 'tagDeleteHistoryWarning' : 'tagDeleteReferenceWarning')" show-icon class="g-mt-16 g-mb-16" :closable="false" />
       <p>{{ $t('tagTypeName') }}</p>
-      <a-input v-model:value="typedName" :disabled="busy" :placeholder="removing?.name" />
+      <el-input v-model="typedName" :disabled="busy" :placeholder="removing?.name" />
       <template #footer>
-        <a-button :disabled="busy" @click="removing = null">
+        <el-button :disabled="busy" @click="removing = null">
           {{ $t('cancel') }}
-        </a-button>
-        <a-button type="primary" danger :loading="busy" :disabled="!removing || !canDeleteTag(removing.name, typedName, busy)" @click="remove">
+        </el-button>
+        <el-button type="danger" :loading="busy" :disabled="!removing || !canDeleteTag(removing.name, typedName, busy)" @click="remove">
           {{ $t('tagConfirmDelete') }}
-        </a-button>
+        </el-button>
       </template>
-    </a-modal>
+    </el-dialog>
   </div>
 </template>
 
@@ -364,4 +396,15 @@ onBeforeUnmount(() => requests.invalidate())
 .tag-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; }
 .tag-search { width: 320px; max-width: 100%; }
 .tag-toolbar-actions { margin-left: auto; flex-shrink: 0; }
+.tag-card-list { display: grid; gap: 12px; }
+.tag-card { padding: 12px; border: 1px solid var(--el-border-color-light); border-radius: 6px; overflow-wrap: anywhere; }
+.tag-card h3 { margin: 0 0 8px; font-size: 1rem; }
+.tag-card dl { display: grid; grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr); gap: 4px 8px; margin: 0 0 12px; }
+.tag-card dt { color: var(--el-text-color-regular); }
+.tag-card dd { margin: 0; min-width: 0; }
+.tag-card :deep(.el-button.is-link) { padding: 0; max-width: 100%; }
+@media (max-width: 760px) {
+  .tag-search { width: 100%; }
+  .tag-toolbar-actions { margin-left: 0; }
+}
 </style>

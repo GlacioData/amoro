@@ -87,31 +87,23 @@ onMounted(() => {
 </script>
 
 <template>
-  <a-card>
-    <template #title>
-      <a-row justify="space-between">
+  <el-card>
+    <template #header>
+      <el-row justify="space-between">
         <span class="card-title" v-text="t('dataSize')" />
         <div style="display: flex; justify-content: space-between; align-items: center;">
-          <a-select v-model:value="timeRange" style="width: 120px" @change="updateData">
-            <a-select-option value="1">
-              {{ t('last1h') }}
-            </a-select-option>
-            <a-select-option value="12">
-              {{ t('last12h') }}
-            </a-select-option>
-            <a-select-option value="24">
-              {{ t('last24h') }}
-            </a-select-option>
-            <a-select-option value="168">
-              {{ t('last7day') }}
-            </a-select-option>
-          </a-select>
+          <el-select v-model="timeRange" style="width: 120px" @change="updateData">
+            <el-option :label="t('last1h')" value="1" />
+            <el-option :label="t('last12h')" value="12" />
+            <el-option :label="t('last24h')" value="24" />
+            <el-option :label="t('last7day')" value="168" />
+          </el-select>
         </div>
-      </a-row>
+      </el-row>
     </template>
 
     <Chart :loading="loading" :options="dataSizeChartOption" />
-  </a-card>
+  </el-card>
 </template>
 
 <style scoped>

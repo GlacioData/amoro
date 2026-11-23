@@ -80,7 +80,7 @@ function score(raw: number): string {
         {{ t('healthComparisonUnavailable') }} {{ t(`healthComparisonReason_${comparison.reason || 'MISSING_INPUT'}`) }}
       </p>
       <template v-if="comparison.before || comparison.after">
-        <div class="comparison-scroll">
+        <div class="comparison-scroll" tabindex="0" role="region" :aria-label="t('healthComparisonTitle')">
           <table>
             <thead><tr><th>{{ t('healthMetrics') }}</th><th>{{ t('healthBefore') }}</th><th>{{ t('healthAfter') }}</th></tr></thead>
             <tbody>
@@ -112,11 +112,21 @@ function score(raw: number): string {
 </template>
 
 <style scoped>
-.health-comparison { margin-top: 24px; padding-top: 16px; border-top: 1px solid #e8eaef; }
-p { color: #667085; margin: 10px 0; }
-.comparison-scroll { overflow-x: auto; }
+.health-comparison { display: grid; gap: 8px; }
+h3 { margin: 0; font-weight: 600; }
+p { color: #667085; margin: 0; }
+.comparison-scroll { overflow-x: auto; border: 1px solid #e8eaef; border-radius: 4px; }
+.comparison-scroll:focus-visible { outline: 2px solid #1677ff; outline-offset: 2px; }
 table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
-th, td { padding: 10px 8px; border-bottom: 1px solid #e8eaef; text-align: right; white-space: nowrap; }
-th:first-child { text-align: left; }
+th, td { padding: 8px 10px; border-bottom: 1px solid #e8eaef; text-align: end; }
+th:first-child { text-align: start; }
+td { white-space: nowrap; }
+thead { color: #4f5d75; background: #f5f7fa; }
+thead th { font-weight: 600; }
+tbody tr:last-child > * { border-bottom: 0; }
 .comparison-warning { color: #ad6800; }
+
+@media (max-width: 600px) {
+  th, td { padding-inline: 6px; }
+}
 </style>

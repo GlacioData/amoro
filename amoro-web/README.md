@@ -18,6 +18,8 @@
 
 This is the Dashboard frontend for Amoro Management Service (AMS).
 
+界面组件使用 Element Plus `2.14.8`，图标使用 `@element-plus/icons-vue@2.3.2`。Vite 按需引入组件和样式。品牌及表格式图标通过本地 SVG sprite 提供。
+
 ## Requirements
 
 - Node.js `^22.13.0 || >=24.0.0`（满足 Vite 8 与 ESLint 10 的运行要求）。Maven 构建及本轮验收固定使用 `22.23.2`。
@@ -41,29 +43,12 @@ In the `amoro-web` directory, run `pnpm dev:mock` to start a development server 
 
 ### Configure the ams Server to connect to
 
-1. open the `vite.config.mts` under the folder `amoro-web`
-
-2. find the `proxy` configuration then unpack annotations and change the `target` to you server location
+如需连接本地 AMS，在 Vite 的 `server.proxy` 中将 API 和 Swagger 请求转发至实际 AMS 端口，然后从开发页面登录。
 
 ```ts
 proxy: {
-  '^/ams': {
-  // change the target to your backend server
-  // Such as target: 'http://127.0.0.1:xxx',
-  target: 'http://127.0.0.1:8080',
-  changeOrigin: true,
-  configure(_, options) {
-      // configure proxy header here
-      options.headers = {
-        'cookie': 'JSESSIONID=node07rhpm05aujgi1amdr8stpj9xa4.node0',
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Credentials': 'true',
-        'Access-Control-Allow-Headers':
-        'Content-Type, Content-Length, Authorization, Accept, X-Requested-With , yourHeaderFeild',
-        'Access-Control-Allow-Methods': 'PUT,POST,GET,DELETE,OPTIONS'
-      }
-    }
-  }
+  '/api/ams': { target: 'http://127.0.0.1:1630', changeOrigin: true },
+  '/swagger-docs': { target: 'http://127.0.0.1:1630', changeOrigin: true },
 }
 ```
 

@@ -17,6 +17,7 @@
  / -->
 
 <script lang="ts">
+import { CircleClose, Search as SearchIcon } from '@element-plus/icons-vue'
 import { computed, defineComponent, onBeforeMount, reactive, toRefs } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import CreateDBModal from './CreateDB.vue'
@@ -39,6 +40,8 @@ interface ITableItem {
 export default defineComponent({
   name: 'TablesMenu',
   components: {
+    CircleClose,
+    SearchIcon,
     CreateDBModal,
     VirtualRecycleScroller: virtualRecycleScroller,
   },
@@ -287,11 +290,11 @@ export default defineComponent({
   <div class="tables-menu">
     <div class="select-catalog g-flex-ac">
       <span class="label">{{ $t('catalog') }}</span>
-      <a-select
-        v-model:value="curCatalog"
+      <el-select
+        v-model="curCatalog"
         :options="catalogOptions"
         :loading="catalogLoading"
-        :get-popup-container="getPopupContainer"
+        :teleported="false"
         class="theme-dark"
         @change="catalogChange"
       />
@@ -301,22 +304,22 @@ export default defineComponent({
         <div class="list-wrap">
           <div class="add g-flex-jsb">
             <span class="label">{{ $t('database', 2) }}</span>
-            <!-- <plus-outlined @click="addDatabase" class="icon" /> -->
+            <!-- <Plus @click="addDatabase" class="icon" /> -->
           </div>
           <div class="filter-wrap">
-            <a-input-search
-              v-model:value="DBSearchInput"
+            <el-input
+              v-model="DBSearchInput"
               :placeholder="placeholder.filterDBPh"
               class="theme-dark"
-              @change="handleSearch('db')"
+              @input="handleSearch('db')"
             >
               <template #prefix>
-                <SearchOutlined />
+                <SearchIcon class="amoro-icon" />
               </template>
               <template v-if="DBSearchInput" #suffix>
-                <CloseCircleOutlined class="input-clear-icon" @click="clearSearch('db')" />
+                <CircleClose class="amoro-icon input-clear-icon" @click="clearSearch('db')" />
               </template>
-            </a-input-search>
+            </el-input>
           </div>
           <u-loading v-if="loading" />
           <VirtualRecycleScroller :loading="loading" :items="databaseList" :active-item="database" :item-size="40" icon-name="database" @handle-click-table="handleClickDb" />
@@ -326,22 +329,22 @@ export default defineComponent({
         <div class="list-wrap">
           <div class="add g-flex-jsb">
             <span class="label">{{ $t('table', 2) }}</span>
-            <!-- <plus-outlined @click="createTable" class="icon" /> -->
+            <!-- <Plus @click="createTable" class="icon" /> -->
           </div>
           <div class="filter-wrap">
-            <a-input-search
-              v-model:value="tableSearchInput"
+            <el-input
+              v-model="tableSearchInput"
               :placeholder="placeholder.filterTablePh"
               class="theme-dark"
-              @change="handleSearch('table')"
+              @input="handleSearch('table')"
             >
               <template #prefix>
-                <SearchOutlined />
+                <SearchIcon class="amoro-icon" />
               </template>
               <template v-if="tableSearchInput" #suffix>
-                <CloseCircleOutlined class="input-clear-icon" @click="clearSearch('table')" />
+                <CircleClose class="amoro-icon input-clear-icon" @click="clearSearch('table')" />
               </template>
-            </a-input-search>
+            </el-input>
           </div>
           <u-loading v-if="tableLoading" />
           <VirtualRecycleScroller :loading="tableLoading" :items="tableList" :active-item="tableName" :item-size="40" icon-name="tableOutlined" @handle-click-table="handleClickTable" />
@@ -369,7 +372,7 @@ export default defineComponent({
         font-size: 12px;
       }
     }
-    :deep(.ant-input-group-addon) {
+    :deep(.el-input-group__append) {
       display: none;
     }
     .database-list,
@@ -403,7 +406,7 @@ export default defineComponent({
       margin: 4px 4px 0;
       background-color: @dark-bg-primary-color;
     }
-    :deep(.select-catalog .ant-select) {
+    :deep(.select-catalog .el-select) {
       width: 240px;
       margin-left: 12px;
     }
