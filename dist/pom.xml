@@ -33,6 +33,19 @@
         <assembly.descriptor.file>src/main/assemblies/bin.xml</assembly.descriptor.file>
     </properties>
 
+    <dependencyManagement>
+        <dependencies>
+            <!-- Keep the embedded HTTP server and its WebSocket modules on the same patch. -->
+            <dependency>
+                <groupId>org.eclipse.jetty</groupId>
+                <artifactId>jetty-bom</artifactId>
+                <version>${jetty.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
     <dependencies>
         <dependency>
             <groupId>org.apache.amoro</groupId>

@@ -24,6 +24,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import io.javalin.Javalin;
+import io.javalin.http.HandlerType;
 import org.apache.amoro.config.Configurations;
 import org.apache.amoro.formats.paimon.PaimonCatalog;
 import org.apache.amoro.formats.paimon.PaimonCatalogFactory;
@@ -107,13 +108,13 @@ class TestTableTagHttp {
                   404,
                   context ->
                       DashboardServer.handleHttpError(
-                          context, io.javalin.http.HttpCode.NOT_FOUND, "page not found!"))
+                          context, io.javalin.http.HttpStatus.NOT_FOUND, "page not found!"))
               .error(
                   500,
                   context ->
                       DashboardServer.handleHttpError(
                           context,
-                          io.javalin.http.HttpCode.INTERNAL_SERVER_ERROR,
+                          io.javalin.http.HttpStatus.INTERNAL_SERVER_ERROR,
                           "internal error!"));
       try {
         app.start(0);
@@ -329,7 +330,7 @@ class TestTableTagHttp {
         new org.apache.amoro.server.authorization.DashboardPrivilegeMapper();
     for (String method : new String[] {"GET", "POST", "DELETE"}) {
       io.javalin.http.Context context = mock(io.javalin.http.Context.class);
-      when(context.method()).thenReturn(method);
+      when(context.method()).thenReturn(HandlerType.valueOf(method));
       when(context.path())
           .thenReturn(
               "/api/ams/v1/tables/catalogs/local/dbs/db/tables/test/tags/release/retention");

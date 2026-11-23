@@ -18,13 +18,13 @@
 
 package org.apache.amoro.server.dashboard.auth;
 
-import static io.javalin.core.util.Header.ACCESS_CONTROL_ALLOW_CREDENTIALS;
-import static io.javalin.core.util.Header.ACCESS_CONTROL_ALLOW_HEADERS;
-import static io.javalin.core.util.Header.ACCESS_CONTROL_ALLOW_METHODS;
-import static io.javalin.core.util.Header.ACCESS_CONTROL_ALLOW_ORIGIN;
-import static io.javalin.core.util.Header.ACCESS_CONTROL_MAX_AGE;
-import static io.javalin.core.util.Header.ORIGIN;
-import static io.javalin.core.util.Header.VARY;
+import static io.javalin.http.Header.ACCESS_CONTROL_ALLOW_CREDENTIALS;
+import static io.javalin.http.Header.ACCESS_CONTROL_ALLOW_HEADERS;
+import static io.javalin.http.Header.ACCESS_CONTROL_ALLOW_METHODS;
+import static io.javalin.http.Header.ACCESS_CONTROL_ALLOW_ORIGIN;
+import static io.javalin.http.Header.ACCESS_CONTROL_MAX_AGE;
+import static io.javalin.http.Header.ORIGIN;
+import static io.javalin.http.Header.VARY;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -36,34 +36,29 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import io.javalin.http.Context;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-
-import javax.servlet.http.HttpServletRequest;
-import javax.servlet.http.HttpServletResponse;
 
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 
-/**
- * Javalin 4.6.8's Context is an open class whose req/res are @JvmField final fields, so it cannot
- * be usefully stubbed with Mockito. Tests build a real Context over mocked servlet objects:
- * ctx.header(name) delegates to req.getHeader, ctx.header(name, value) to res.setHeader, and the
- * Vary values are read and appended through the servlet response.
- */
 public class TestCorsBeforeHandler {
 
   private static final String ALLOWED_ORIGIN = "https://dashboard.example.com";
 
   private final HttpServletRequest req = mock(HttpServletRequest.class);
   private final HttpServletResponse res = mock(HttpServletResponse.class);
-  private final Context ctx = new Context(req, res, Collections.emptyMap());
+  private final Context ctx = mock(Context.class, org.mockito.Mockito.CALLS_REAL_METHODS);
   private final Map<String, String> responseHeaders = new HashMap<>();
   private final Map<String, String> requestHeaders = new HashMap<>();
 
   @BeforeEach
   public void beforeEach() {
+    when(ctx.req()).thenReturn(req);
+    when(ctx.res()).thenReturn(res);
     responseHeaders.clear();
     requestHeaders.clear();
     when(req.getHeader(anyString()))

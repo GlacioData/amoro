@@ -27,8 +27,8 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-import io.javalin.core.validation.Validator;
 import io.javalin.http.Context;
+import io.javalin.validation.Validator;
 import org.apache.amoro.OptimizerProperties;
 import org.apache.amoro.api.OptimizerRegisterInfo;
 import org.apache.amoro.resource.ResourceGroup;

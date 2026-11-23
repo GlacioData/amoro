@@ -24,8 +24,8 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-import io.javalin.core.validation.Validator;
 import io.javalin.http.Context;
+import io.javalin.validation.Validator;
 import org.apache.amoro.server.dashboard.controller.ProcessController;
 import org.apache.amoro.server.dashboard.response.OkResponse;
 import org.apache.amoro.server.dashboard.response.PageResult;

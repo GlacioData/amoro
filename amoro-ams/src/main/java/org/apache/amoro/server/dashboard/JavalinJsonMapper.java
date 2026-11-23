@@ -18,7 +18,7 @@
 
 package org.apache.amoro.server.dashboard;
 
-import io.javalin.plugin.json.JsonMapper;
+import io.javalin.json.JsonMapper;
 import org.apache.amoro.TableFormat;
 import org.apache.amoro.shade.jackson2.com.fasterxml.jackson.core.JsonProcessingException;
 import org.apache.amoro.shade.jackson2.com.fasterxml.jackson.databind.ObjectMapper;
@@ -28,6 +28,7 @@ import org.jetbrains.annotations.NotNull;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.lang.reflect.Type;
 
 /** Json mapper to adapt shaded jackson. */
 public class JavalinJsonMapper implements JsonMapper {
@@ -49,7 +50,7 @@ public class JavalinJsonMapper implements JsonMapper {
 
   @NotNull
   @Override
-  public String toJsonString(@NotNull Object obj) {
+  public String toJsonString(@NotNull Object obj, @NotNull Type type) {
     if (obj instanceof String) {
       return (String) obj;
     }
@@ -62,7 +63,7 @@ public class JavalinJsonMapper implements JsonMapper {
 
   @NotNull
   @Override
-  public InputStream toJsonStream(@NotNull Object obj) {
+  public InputStream toJsonStream(@NotNull Object obj, @NotNull Type type) {
     if (obj instanceof String) {
       String result = (String) obj;
       return new ByteArrayInputStream(result.getBytes());
@@ -79,9 +80,9 @@ public class JavalinJsonMapper implements JsonMapper {
 
   @NotNull
   @Override
-  public <T> T fromJsonString(@NotNull String json, @NotNull Class<T> targetClass) {
+  public <T> T fromJsonString(@NotNull String json, @NotNull Type targetType) {
     try {
-      return objectMapper.readValue(json, targetClass);
+      return objectMapper.readValue(json, objectMapper.constructType(targetType));
     } catch (JsonProcessingException e) {
       throw new RuntimeException(e);
     }
@@ -89,9 +90,9 @@ public class JavalinJsonMapper implements JsonMapper {
 
   @NotNull
   @Override
-  public <T> T fromJsonStream(@NotNull InputStream json, @NotNull Class<T> targetClass) {
+  public <T> T fromJsonStream(@NotNull InputStream json, @NotNull Type targetType) {
     try {
-      return objectMapper.readValue(json, targetClass);
+      return objectMapper.readValue(json, objectMapper.constructType(targetType));
     } catch (IOException e) {
       throw new RuntimeException(e);
     }
