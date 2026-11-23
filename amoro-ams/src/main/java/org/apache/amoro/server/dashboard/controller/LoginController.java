@@ -79,9 +79,9 @@ public class LoginController {
     try {
       principal = this.loginAuthProvider.authenticate(credential);
     } catch (Exception e) {
+      // The cause names the authentication backend; it stays in the server log.
       LOG.error("authenticate user {} failed", user, e);
-      String causeMessage = e.getMessage() != null ? e.getMessage() : "unknown error";
-      throw new RuntimeException("invalid user " + user + " or password! Cause: " + causeMessage);
+      throw new RuntimeException("invalid user " + user + " or password!");
     }
 
     // Step 2: Resolve user role (LDAP group lookup)

@@ -937,7 +937,9 @@ public class TableController {
     try {
       client.cancelProcess(processId);
     } catch (TException e) {
-      throw new IllegalStateException("Failed to cancel optimizing process:" + e.getMessage());
+      // The transport error describes the server's internals; it stays in the server log.
+      LOG.warn("Failed to cancel optimizing process {}", processId, e);
+      throw new IllegalStateException("Failed to cancel optimizing process");
     }
     ctx.json(OkResponse.ok());
   }
