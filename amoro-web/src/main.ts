@@ -31,7 +31,6 @@ import loginService from './services/login.service'
 import { getQueryString } from './utils'
 import { resetLoginTip } from './utils/request'
 import {
-  canManagePlatform,
   canManageTable,
   canViewCatalog,
   canViewOptimizer,
@@ -93,14 +92,6 @@ RegisterComponents(app);
       if (!store.userInfo.userName && to.path !== '/login') {
         return {
           path: '/login',
-        }
-      }
-      if (
-        to.path === '/settings'
-        && !canManagePlatform()
-      ) {
-        return {
-          path: getDefaultRoute(),
         }
       }
       if ((to.path === '/hive-tables/upgrade' || to.path === '/tables/hive-upgrade') && !canManageTable()) {

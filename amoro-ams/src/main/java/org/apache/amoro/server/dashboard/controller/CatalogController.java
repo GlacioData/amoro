@@ -86,17 +86,17 @@ import org.apache.iceberg.rest.RESTCatalog;
 
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 
 /** The controller that handles catalog requests. */
 public class CatalogController {
-  private static final String CONFIG_TYPE_STORAGE = "storage-config";
-  private static final String CONFIG_TYPE_AUTH = "auth-config";
+  private static final String KERBEROS_PRINCIPAL_MASK = "****";
+  private static final int KERBEROS_PRINCIPAL_MASK_LENGTH = 5;
   // <configuration></configuration>  encoded with base64
   private static final String EMPTY_XML_BASE64 = "PGNvbmZpZ3VyYXRpb24+PC9jb25maWd1cmF0aW9uPg==";
   private static final Map<String, List<String>> CATALOG_REQUIRED_PROPERTIES;
@@ -264,7 +264,7 @@ public class CatalogController {
     String authType =
         serverAuthConfig
             .getOrDefault(AUTH_CONFIGS_KEY_TYPE, AUTH_CONFIGS_VALUE_TYPE_SIMPLE)
-            .toLowerCase();
+            .toLowerCase(Locale.ROOT);
     metaAuthConfig.put(AUTH_CONFIGS_KEY_TYPE, authType);
     Map<String, String> oldAuthConfig = new HashMap<>();
     if (oldCatalogMeta != null) {
@@ -278,6 +278,15 @@ public class CatalogController {
             serverAuthConfig.get(AUTH_CONFIGS_KEY_HADOOP_USERNAME));
         break;
       case AUTH_CONFIGS_VALUE_TYPE_KERBEROS:
+        String principal = serverAuthConfig.get(AUTH_CONFIGS_KEY_PRINCIPAL);
+        if (principal != null && principal.startsWith(KERBEROS_PRINCIPAL_MASK)) {
+          String oldPrincipal = oldAuthConfig.get(AUTH_CONFIGS_KEY_PRINCIPAL);
+          // The edit form submits the displayed mask when the principal is unchanged.
+          Preconditions.checkArgument(
+              principal.equals(maskKerberosPrincipal(oldPrincipal)),
+              "Provide a complete Kerberos principal");
+          principal = oldPrincipal;
+        }
         String keytabFileId = serverAuthConfig.get(AUTH_CONFIGS_KEY_KEYTAB);
         if (!StringUtils.isEmpty(keytabFileId)) {
           String keytabB64 =
@@ -294,8 +303,7 @@ public class CatalogController {
         } else {
           metaAuthConfig.put(AUTH_CONFIGS_KEY_KRB5, oldAuthConfig.get(AUTH_CONFIGS_KEY_KRB5));
         }
-        metaAuthConfig.put(
-            AUTH_CONFIGS_KEY_PRINCIPAL, serverAuthConfig.get(AUTH_CONFIGS_KEY_PRINCIPAL));
+        metaAuthConfig.put(AUTH_CONFIGS_KEY_PRINCIPAL, principal);
         break;
       case AUTH_CONFIGS_VALUE_TYPE_AK_SK:
         metaAuthConfig.put(
@@ -318,35 +326,46 @@ public class CatalogController {
     catalogMeta.setAuthConfigs(metaAuthConfig);
   }
 
+  private static String maskKerberosPrincipal(String principal) {
+    if (StringUtils.isEmpty(principal)) {
+      return principal;
+    }
+    int offset = 0;
+    for (int masked = 0;
+        masked < KERBEROS_PRINCIPAL_MASK_LENGTH && offset < principal.length();
+        masked++) {
+      char character = principal.charAt(offset);
+      if (character == '/' || character == '@') {
+        break;
+      }
+      // Escaped separators are part of the account name.
+      if (character == '\\' && offset + 1 < principal.length()) {
+        offset++;
+      }
+      offset += Character.charCount(principal.codePointAt(offset));
+    }
+    return KERBEROS_PRINCIPAL_MASK + principal.substring(offset);
+  }
+
   private Map<String, Object> extractAuthConfigsFromCatalogMeta(
       String catalogName, CatalogMeta catalogMeta, String storageType) {
     Map<String, Object> serverAuthConfig = new HashMap<>();
     Map<String, String> metaAuthConfig = catalogMeta.getAuthConfigs();
     String authType =
         metaAuthConfig.getOrDefault(AUTH_CONFIGS_KEY_TYPE, AUTH_CONFIGS_VALUE_TYPE_SIMPLE);
-    serverAuthConfig.put(AUTH_CONFIGS_KEY_TYPE, authType.toUpperCase());
-    switch (authType) {
+    serverAuthConfig.put(AUTH_CONFIGS_KEY_TYPE, authType.toUpperCase(Locale.ROOT));
+    switch (authType.toLowerCase(Locale.ROOT)) {
       case AUTH_CONFIGS_VALUE_TYPE_SIMPLE:
         serverAuthConfig.put(
             AUTH_CONFIGS_KEY_HADOOP_USERNAME, metaAuthConfig.get(AUTH_CONFIGS_KEY_HADOOP_USERNAME));
         break;
       case AUTH_CONFIGS_VALUE_TYPE_KERBEROS:
         serverAuthConfig.put(
-            AUTH_CONFIGS_KEY_PRINCIPAL, metaAuthConfig.get(AUTH_CONFIGS_KEY_PRINCIPAL));
+            AUTH_CONFIGS_KEY_PRINCIPAL,
+            maskKerberosPrincipal(metaAuthConfig.get(AUTH_CONFIGS_KEY_PRINCIPAL)));
 
-        serverAuthConfig.put(
-            AUTH_CONFIGS_KEY_KEYTAB,
-            new ConfigFileItem(
-                catalogName + ".keytab",
-                constructCatalogConfigFileUrl(
-                    catalogName, CONFIG_TYPE_AUTH, AUTH_CONFIGS_KEY_KEYTAB.replace("\\.", "-"))));
-
-        serverAuthConfig.put(
-            AUTH_CONFIGS_KEY_KRB5,
-            new ConfigFileItem(
-                "krb5.conf",
-                constructCatalogConfigFileUrl(
-                    catalogName, CONFIG_TYPE_AUTH, AUTH_CONFIGS_KEY_KRB5.replace("\\.", "-"))));
+        serverAuthConfig.put(AUTH_CONFIGS_KEY_KEYTAB, new ConfigFileItem(catalogName + ".keytab"));
+        serverAuthConfig.put(AUTH_CONFIGS_KEY_KRB5, new ConfigFileItem("krb5.conf"));
         break;
       case AUTH_CONFIGS_VALUE_TYPE_AK_SK:
         CatalogUtil.copyProperty(
@@ -382,36 +401,19 @@ public class CatalogController {
   }
 
   private Map<String, Object> extractStorageConfigsFromCatalogMeta(
-      String catalogName, CatalogMeta catalogMeta, String storageType, List<String> tableFormats) {
+      CatalogMeta catalogMeta, String storageType, List<String> tableFormats) {
     Map<String, Object> storageConfig = new HashMap<>();
     storageConfig.put(STORAGE_CONFIGS_KEY_TYPE, storageType);
     if (STORAGE_CONFIGS_VALUE_TYPE_HADOOP.equals(storageType)) {
       storageConfig.put(
           STORAGE_CONFIGS_KEY_CORE_SITE,
-          new ConfigFileItem(
-              AmoroManagementConf.CATALOG_CORE_SITE + ".xml",
-              constructCatalogConfigFileUrl(
-                  catalogName,
-                  CONFIG_TYPE_STORAGE,
-                  STORAGE_CONFIGS_KEY_CORE_SITE.replace("\\.", "-"))));
-
+          new ConfigFileItem(AmoroManagementConf.CATALOG_CORE_SITE + ".xml"));
       storageConfig.put(
           STORAGE_CONFIGS_KEY_HDFS_SITE,
-          new ConfigFileItem(
-              AmoroManagementConf.CATALOG_HDFS_SITE + ".xml",
-              constructCatalogConfigFileUrl(
-                  catalogName,
-                  CONFIG_TYPE_STORAGE,
-                  STORAGE_CONFIGS_KEY_HDFS_SITE.replace("\\.", "-"))));
-
+          new ConfigFileItem(AmoroManagementConf.CATALOG_HDFS_SITE + ".xml"));
       storageConfig.put(
           STORAGE_CONFIGS_KEY_HIVE_SITE,
-          new ConfigFileItem(
-              AmoroManagementConf.CATALOG_HIVE_SITE + ".xml",
-              constructCatalogConfigFileUrl(
-                  catalogName,
-                  CONFIG_TYPE_STORAGE,
-                  STORAGE_CONFIGS_KEY_HIVE_SITE.replace("\\.", "-"))));
+          new ConfigFileItem(AmoroManagementConf.CATALOG_HIVE_SITE + ".xml"));
     } else if (STORAGE_CONFIGS_VALUE_TYPE_S3.equals(storageType)) {
       CatalogUtil.copyProperty(
           catalogMeta.getCatalogProperties(),
@@ -662,7 +664,7 @@ public class CatalogController {
       info.setAuthConfig(extractAuthConfigsFromCatalogMeta(catalogName, catalogMeta, storageType));
       info.setStorageConfig(
           extractStorageConfigsFromCatalogMeta(
-              catalogName, catalogMeta, storageType, info.getTableFormatList()));
+              catalogMeta, storageType, info.getTableFormatList()));
 
       info.setProperties(
           PropertiesUtil.extractCatalogMetaProperties(catalogMeta.getCatalogProperties()));
@@ -715,37 +717,6 @@ public class CatalogController {
         StringUtils.isNotEmpty(ctx.pathParam("catalogName")), "Catalog name is empty!");
     catalogService.dropCatalog(catalogName);
     ctx.json(OkResponse.of("OK"));
-  }
-
-  /** Construct a url */
-  private String constructCatalogConfigFileUrl(String catalogName, String type, String key) {
-    return String.format(
-        "/api/ams/v1/catalogs/%s/config/%s/%s", catalogName, type, key.replaceAll("\\.", "-"));
-  }
-
-  /** Get the config file content uri("/catalogs/{catalogName}/config/{type}/{key} */
-  public void getCatalogConfFileContent(Context ctx) {
-    String catalogName = ctx.pathParam("catalogName");
-    String confType = ctx.pathParam("type");
-    String configKey = ctx.pathParam("key");
-    Preconditions.checkArgument(
-        StringUtils.isNotEmpty(catalogName)
-            && StringUtils.isNotEmpty(confType)
-            && StringUtils.isNotEmpty(configKey),
-        "Catalog name or auth type or config key is null!");
-
-    CatalogMeta catalogMeta = catalogService.getCatalogMeta(catalogName);
-    if (CONFIG_TYPE_STORAGE.equalsIgnoreCase(confType)) {
-      Map<String, String> storageConfig = catalogMeta.getStorageConfigs();
-      String key = configKey.replaceAll("-", "\\.");
-      ctx.result(Base64.getDecoder().decode(storageConfig.get(key)));
-    } else if (CONFIG_TYPE_AUTH.equalsIgnoreCase(confType)) {
-      Map<String, String> storageConfig = catalogMeta.getAuthConfigs();
-      String key = configKey.replaceAll("-", "\\.");
-      ctx.result(Base64.getDecoder().decode(storageConfig.get(key)));
-    } else {
-      throw new RuntimeException("Invalid request for " + confType);
-    }
   }
 
   public void getMetastoreTableFormats(Context ctx) {

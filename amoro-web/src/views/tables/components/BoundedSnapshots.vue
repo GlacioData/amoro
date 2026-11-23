@@ -71,12 +71,12 @@ const columns = computed(() => [
 ])
 const detailColumns = computed(() => [
   { title: t('operation'), dataIndex: 'operation', width: 120, ellipsis: true },
-  { title: t('file'), dataIndex: 'file', ellipsis: true },
+  { title: t('file'), dataIndex: 'file', minWidth: 240, ellipsis: true },
   { title: t('partition'), dataIndex: 'partition', width: 120 },
   { title: t('fileType'), dataIndex: 'fileType', width: 120, ellipsis: true },
   { title: t('size'), dataIndex: 'size', width: 120 },
   { title: t('commitTime'), dataIndex: 'commitTime', width: 200, ellipsis: true },
-  { title: t('path'), dataIndex: 'path', ellipsis: true },
+  { title: t('path'), dataIndex: 'path', minWidth: 280, ellipsis: true },
 ])
 const recordChart = computed(() => {
   const data: Record<string, SnapshotItemSummary> = {}
@@ -281,7 +281,7 @@ onBeforeUnmount(() => {
         </template>
       </Selector>
       <SnapshotCharts v-if="showCharts" :loading="loading" :record-options="recordChart" :file-options="fileChart" />
-      <el-table v-loading="loading" scrollbar-always-on :class="{ 'snapshot-table-ready': !loading }" row-key="snapshotId" :data="rows">
+      <el-table v-loading="loading" scrollbar-always-on class="dashboard-table" :class="{ 'snapshot-table-ready': !loading }" row-key="snapshotId" :data="rows">
         <el-table-column type="expand">
           <template #default="{ row: record }">
             <dl class="snapshot-summary">
@@ -316,15 +316,10 @@ onBeforeUnmount(() => {
         <el-breadcrumb-item><a @click="returnToList">{{ $t(fixedTag ? 'tags' : 'all') }}</a></el-breadcrumb-item>
         <el-breadcrumb-item>{{ $t('snapshotId') }} {{ selectedSnapshot }}</el-breadcrumb-item>
       </el-breadcrumb>
-      <el-table v-loading="loading" scrollbar-always-on :class="{ 'snapshot-table-ready': !loading }" row-key="rowKey" class="g-mt-8" :data="detailRows">
+      <el-table v-loading="loading" scrollbar-always-on :class="{ 'snapshot-table-ready': !loading }" row-key="rowKey" class="dashboard-table g-mt-8" :tooltip-options="{ popperClass: 'snapshot-file-tooltip' }" :data="detailRows">
         <el-table-column v-for="column in detailColumns" :key="column.dataIndex" v-bind="tableColumnProps(column, detailColumns)">
-          <template v-if="column.dataIndex === 'commitTime' || column.dataIndex === 'file' || column.dataIndex === 'path'" #default="{ row: record }">
-            <template v-if="column.dataIndex === 'commitTime'">
-              {{ record.commitTime ? dateFormat(record.commitTime) : '—' }}
-            </template>
-            <el-tooltip v-else-if="column.dataIndex === 'file' || column.dataIndex === 'path'" :content="record[column.dataIndex]">
-              {{ record[column.dataIndex] }}
-            </el-tooltip>
+          <template v-if="column.dataIndex === 'commitTime'" #default="{ row: record }">
+            {{ record.commitTime ? dateFormat(record.commitTime) : '—' }}
           </template>
         </el-table-column>
       </el-table>

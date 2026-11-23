@@ -306,7 +306,7 @@ onMounted(async () => {
         <template v-if="column.dataIndex === 'duration' || column.dataIndex === 'healthScore' || column.dataIndex === 'operation' || column.dataIndex === 'optimizeStatus' || column.dataIndex === 'quotaOccupation' || column.dataIndex === 'tableName'" #default="{ row: record }">
           <template v-if="column.dataIndex === 'tableName'">
             <router-link :to="tableDetailLocation(record)" :title="record.tableName" class="table-name-link">
-              {{ record.tableName }}
+              {{ record.tableIdentifier.database }}.{{ record.tableIdentifier.tableName }}
             </router-link>
           </template>
           <template v-if="column.dataIndex === 'duration'">
@@ -349,7 +349,7 @@ onMounted(async () => {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
     align-items: start;
-    gap: 8px;
+    gap: 12px;
     width: 100%;
     margin-bottom: 16px;
   }
@@ -365,7 +365,7 @@ onMounted(async () => {
 
   .filter-actions {
     display: flex;
-    gap: 8px;
+    gap: 12px;
 
     .el-button {
       flex: 1;
@@ -375,10 +375,6 @@ onMounted(async () => {
     .el-button + .el-button {
       margin-inline-start: 0;
     }
-  }
-
-  :deep(.el-table .cell) {
-    padding-inline: 8px;
   }
 
   .table-name-link {

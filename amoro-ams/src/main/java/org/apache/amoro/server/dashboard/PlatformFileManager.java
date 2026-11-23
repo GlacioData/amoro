@@ -22,8 +22,6 @@ import org.apache.amoro.server.dashboard.model.PlatformFileInfo;
 import org.apache.amoro.server.persistence.PersistentBase;
 import org.apache.amoro.server.persistence.mapper.PlatformFileMapper;
 
-import java.util.Base64;
-
 public class PlatformFileManager extends PersistentBase {
 
   /** Add a new file. */
@@ -36,11 +34,5 @@ public class PlatformFileManager extends PersistentBase {
   /** Get the content of a file encoded in base64. */
   public String getFileContentB64ById(Integer fileId) {
     return getAs(PlatformFileMapper.class, e -> e.getFileById(fileId));
-  }
-
-  /** Get the content of a file. */
-  public byte[] getFileContentById(Integer fileId) {
-    String fileContent = getAs(PlatformFileMapper.class, e -> e.getFileById(fileId));
-    return Base64.getDecoder().decode(fileContent);
   }
 }

@@ -25,7 +25,6 @@ import useStore from '@/store/index'
 import { getQueryString } from '@/utils'
 import { useMediaQuery } from '@/hooks/useMediaQuery'
 import {
-  canManagePlatform,
   canViewCatalog,
   canViewOptimizer,
   canViewSystem,
@@ -61,7 +60,6 @@ export default defineComponent({
     const canAccessCatalog = computed(() => canViewCatalog())
     const canAccessTable = computed(() => canViewTable())
     const canAccessOptimizer = computed(() => canViewOptimizer())
-    const canAccessSettings = computed(() => canManagePlatform())
     const menuList = computed(() => {
       const menu: MenuItem[] = [
         {
@@ -91,17 +89,9 @@ export default defineComponent({
           title: t('optimizing'),
           icon: 'optimizers',
         },
-        {
-          key: 'settings',
-          title: t('settings'),
-          icon: 'settings',
-        },
       ]
       const source = hasToken.value ? menu : allMenu
       return source.filter((item) => {
-        if (!canAccessSettings.value && item.key === 'settings') {
-          return false
-        }
         if (!canAccessSystem.value && item.key === 'overview') {
           return false
         }
@@ -209,7 +199,6 @@ export default defineComponent({
       canAccessCatalog,
       canAccessTable,
       canAccessOptimizer,
-      canAccessSettings,
       menuList,
       toggleCollapsed,
       navClick,

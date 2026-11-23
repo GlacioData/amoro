@@ -242,38 +242,6 @@ export function download(url: string, _blank = true) {
   }
 }
 
-/**
- * file download with header
- * @param url
- * @param _blank
- */
-export function downloadWithHeader(url: string, fileName: string = 'download', _blank = true) {
-  fetch(url, {
-    headers: {
-      'X-Request-Source': 'Web',
-    },
-  })
-    .then((response) => {
-      if (!response.ok) {
-        throw new Error(`HTTP error! Status: ${response.status}`)
-      }
-      return response.blob()
-    })
-    .then((blob) => {
-      const fileURL = window.URL.createObjectURL(blob)
-      const link = document.createElement('a')
-      link.href = fileURL
-      link.download = fileName
-      document.body.appendChild(link)
-      link.click()
-      document.body.removeChild(link)
-      window.URL.revokeObjectURL(fileURL)
-    })
-    .catch((error) => {
-      console.error('Download failed:', error)
-    })
-}
-
 export function resetLoginTip() {
   loginTipShown = false
 }

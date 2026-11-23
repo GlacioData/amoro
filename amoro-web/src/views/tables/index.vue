@@ -351,7 +351,11 @@ export default defineComponent({
               </div>
             </div>
             <div class="tables-main-body">
-              <el-tabs v-model="activeKey" @tab-change="(name: string | number) => { const $event = String(name); onChangeTab($event) }">
+              <el-tabs
+                v-model="activeKey"
+                class="table-detail-tabs"
+                @tab-change="(name: string | number) => { const $event = String(name); onChangeTab($event) }"
+              >
                 <el-tab-pane key="Details" name="Details" :label="$t('details')">
                   <UDetails :key="tableKey" ref="detailRef" @set-base-detail-info="setBaseDetailInfo" @table-not-found="handleTableNotFound" @initialization-error="snapshotInitializationError = $event" />
                 </el-tab-pane>
@@ -556,6 +560,16 @@ export default defineComponent({
   :deep(.el-tabs__header) {
     padding-left: 0;
     margin-bottom: 0;
+  }
+
+  .table-detail-tabs {
+    > :deep(.el-tabs__header) {
+      margin-block: 12px 8px;
+    }
+
+    > :deep(.el-tabs__header .el-tabs__nav) {
+      column-gap: 8px;
+    }
   }
 }
 </style>

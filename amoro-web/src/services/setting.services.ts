@@ -53,9 +53,3 @@ export function saveCatalogsSetting(params: {
   }
   return request.put(`api/ams/v1/catalogs/${name}`, { ...params })
 }
-export function getSystemSetting() {
-  return request.get('api/ams/v1/settings/system')
-}
-export function getContainersSetting() {
-  return request.get('api/ams/v1/settings/containers')
-}

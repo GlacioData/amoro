@@ -74,10 +74,6 @@ export function canManageOptimizer(): boolean {
   return hasPrivilege('MANAGE_OPTIMIZER')
 }
 
-export function canManagePlatform(): boolean {
-  return hasPrivilege('MANAGE_PLATFORM')
-}
-
 export function getDefaultRoute(): string {
   if (canViewTable()) {
     return '/tables'
@@ -90,9 +86,6 @@ export function getDefaultRoute(): string {
   }
   if (canViewSystem()) {
     return '/overview'
-  }
-  if (canManagePlatform()) {
-    return '/settings'
   }
   return '/login'
 }

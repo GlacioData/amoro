@@ -97,11 +97,9 @@ public class CatalogSettingInfo {
 
   public static class ConfigFileItem {
     String fileName;
-    String fileUrl;
 
-    public ConfigFileItem(String fileName, String fileUrl) {
+    public ConfigFileItem(String fileName) {
       this.fileName = fileName;
-      this.fileUrl = fileUrl;
     }
 
     public String getFileName() {
@@ -110,14 +108,6 @@ public class CatalogSettingInfo {
 
     public void setFileName(String fileName) {
       this.fileName = fileName;
-    }
-
-    public String getFileUrl() {
-      return fileUrl;
-    }
-
-    public void setFileUrl(String fileUrl) {
-      this.fileUrl = fileUrl;
     }
   }
 }

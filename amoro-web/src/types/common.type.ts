@@ -58,9 +58,9 @@ export interface IMap<T> {
   [key: string]: T
 }
 
-export interface IKeyAndValue {
+export interface IKeyAndValue<T = string> {
   key: string
-  value: string
+  value: T
 }
 
 export interface TableHealthComponent {
@@ -426,21 +426,6 @@ export interface IChartLineData {
   timeLine: string[]
   data1: number[] | string[]
   data2: number[] | string[]
-}
-
-export interface IOptimizeGroup {
-  container: string
-  name: string
-  properties: IMap<any>
-  innerPropertiesArray?: any[]
-}
-
-export interface IContainerSetting {
-  name: string
-  classpath: string
-  properties: IMap<string>
-  optimizeGroup: IOptimizeGroup[]
-  propertiesArray?: IMap<any>[]
 }
 
 export interface IResourceUsage {
