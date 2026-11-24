@@ -91,12 +91,21 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 /** The controller that handles catalog requests. */
 public class CatalogController {
   private static final String KERBEROS_PRINCIPAL_MASK = "****";
   private static final int KERBEROS_PRINCIPAL_MASK_LENGTH = 5;
+  // Match credential values without masking related options such as token-refresh-enabled.
+  private static final Pattern SENSITIVE_PROPERTY_NAME =
+      Pattern.compile(
+          "(?:^|[._-])(?:[a-z0-9]*(?:password|passwd|secret|token|credentials?|keytab)"
+              + "|(?:access|account|api|encryption|private|secret|session|signing)[._-]?key(?:[._-]?id)?"
+              + "|secret[._-]?access[._-]?key|authorization)$"
+              + "|^fs\\.azure\\.account\\.(?:key|oauth2\\.client\\.secret)\\.",
+          Pattern.CASE_INSENSITIVE);
   // <configuration></configuration>  encoded with base64
   private static final String EMPTY_XML_BASE64 = "PGNvbmZpZ3VyYXRpb24+PC9jb25maWd1cmF0aW9uPg==";
   private static final Map<String, List<String>> CATALOG_REQUIRED_PROPERTIES;
@@ -450,8 +459,10 @@ public class CatalogController {
     catalogMeta.setCatalogName(info.getName());
     String metastoreType = CatalogUtil.normalizeMetastoreType(info.getType());
     catalogMeta.setCatalogType(metastoreType);
-    catalogMeta.setCatalogProperties(
-        PropertiesUtil.unionCatalogProperties(info.getTableProperties(), info.getProperties()));
+    Map<String, String> catalogProperties =
+        PropertiesUtil.unionCatalogProperties(info.getTableProperties(), info.getProperties());
+    restoreMaskedProperties(catalogProperties, oldCatalogMeta);
+    catalogMeta.setCatalogProperties(catalogProperties);
     // fill catalog impl when catalog type is glue or rest
     if (CatalogMetaProperties.CATALOG_TYPE_GLUE.equals(metastoreType)) {
       catalogMeta.putToCatalogProperties(
@@ -580,6 +591,42 @@ public class CatalogController {
               DesensitizationUtil.desensitize(
                   info.getAuthConfig().get(AUTH_CONFIGS_KEY_SECRET_KEY)));
     }
+    maskSensitiveProperties(info.getProperties());
+    maskSensitiveProperties(info.getTableProperties());
+  }
+
+  private static void maskSensitiveProperties(Map<String, String> properties) {
+    properties.replaceAll(
+        (key, value) ->
+            value != null && isSensitiveProperty(key)
+                ? DesensitizationUtil.desensitize(value)
+                : value);
+  }
+
+  private static void restoreMaskedProperties(
+      Map<String, String> properties, CatalogMeta oldCatalogMeta) {
+    Map<String, String> stored =
+        oldCatalogMeta == null ? null : oldCatalogMeta.getCatalogProperties();
+    for (Map.Entry<String, String> property : properties.entrySet()) {
+      String key = property.getKey();
+      if (DesensitizationUtil.isDesensitized(property.getValue())
+          && isSensitiveProperty(
+              StringUtils.removeStart(key, CatalogMetaProperties.TABLE_PROPERTIES_PREFIX))) {
+        String oldValue = stored == null ? null : stored.get(key);
+        Preconditions.checkArgument(
+            oldValue != null, "Provide a value for sensitive property %s", key);
+        property.setValue(oldValue);
+      }
+    }
+  }
+
+  private static boolean isSensitiveProperty(String key) {
+    if (key == null) {
+      return false;
+    }
+    String name = key.trim();
+    return S3FileIOProperties.SSE_KEY.equalsIgnoreCase(name)
+        || SENSITIVE_PROPERTY_NAME.matcher(name).find();
   }
 
   private void unMaskSensitiveData(CatalogRegisterInfo newInfo, CatalogMeta oldCatalogMeta) {

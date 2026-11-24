@@ -30,7 +30,9 @@ import static org.apache.amoro.properties.CatalogMetaProperties.STORAGE_CONFIGS_
 import static org.apache.amoro.properties.CatalogMetaProperties.STORAGE_CONFIGS_KEY_TYPE;
 import static org.apache.amoro.properties.CatalogMetaProperties.STORAGE_CONFIGS_VALUE_TYPE_HADOOP;
 import static org.apache.amoro.properties.CatalogMetaProperties.TABLE_FORMATS;
+import static org.apache.amoro.server.dashboard.utils.DesensitizationUtil.COMMON_SECRET_FORMAT;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -51,6 +53,7 @@ import org.apache.amoro.server.dashboard.model.CatalogRegisterInfo;
 import org.apache.amoro.shade.guava32.com.google.common.collect.ImmutableMap;
 import org.apache.amoro.shade.jackson2.com.fasterxml.jackson.databind.JsonNode;
 import org.apache.amoro.utils.JacksonUtil;
+import org.apache.iceberg.aws.s3.S3FileIOProperties;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
@@ -62,6 +65,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.Map;
 
 class TestCatalogDashboardSecurity {
   private static final String CATALOG = "fixture";
@@ -96,6 +100,97 @@ class TestCatalogDashboardSecurity {
     assertFileName(storage.path(STORAGE_CONFIGS_KEY_HDFS_SITE), "hdfs-site.xml");
     assertFileName(storage.path(STORAGE_CONFIGS_KEY_HIVE_SITE), "hive-site.xml");
     assertEquals(principal, catalog.getAuthConfigs().get(AUTH_CONFIGS_KEY_PRINCIPAL));
+  }
+
+  @Test
+  void detailsMaskSensitivePropertyValuesWithoutChangingStoredMetadata() {
+    CatalogMeta catalog = existingCatalog(PRINCIPAL);
+    catalog.setCatalogProperties(
+        ImmutableMap.<String, String>builder()
+            .put(TABLE_FORMATS, TableFormat.ICEBERG.name())
+            .put(KEY_WAREHOUSE, "/warehouse")
+            .put(S3FileIOProperties.SSE_KEY, "fixture-sse-value")
+            .put("oauth2.credential", "fixture-oauth-value")
+            .put("rest.token-refresh-enabled", "true")
+            .put("table.jdbc.password", "fixture-jdbc-value")
+            .put("table.write.format.default", "parquet")
+            .build());
+    CatalogMeta before = catalog.deepCopy();
+
+    controller.getCatalogDetail(context);
+
+    JsonNode settings = result();
+    JsonNode properties = settings.path("properties");
+    assertEquals(COMMON_SECRET_FORMAT, properties.path(S3FileIOProperties.SSE_KEY).asText());
+    assertEquals(COMMON_SECRET_FORMAT, properties.path("oauth2.credential").asText());
+    assertEquals("/warehouse", properties.path(KEY_WAREHOUSE).asText());
+    assertEquals("true", properties.path("rest.token-refresh-enabled").asText());
+    JsonNode tableProperties = settings.path("tableProperties");
+    assertEquals(COMMON_SECRET_FORMAT, tableProperties.path("jdbc.password").asText());
+    assertEquals("parquet", tableProperties.path("write.format.default").asText());
+    assertEquals(before, catalog);
+  }
+
+  @Test
+  void editingPropertiesKeepsMaskedValuesAndAppliesExplicitReplacementsAndRemovals() {
+    CatalogMeta catalog = existingCatalog(PRINCIPAL);
+    catalog.setCatalogProperties(
+        ImmutableMap.of(
+            TABLE_FORMATS,
+            TableFormat.ICEBERG.name(),
+            S3FileIOProperties.SSE_KEY,
+            "fixture-sse-value",
+            "oauth2.credential",
+            "fixture-oauth-value",
+            "table.jdbc.password",
+            "fixture-jdbc-value",
+            "table.client.secret",
+            "fixture-removed-value"));
+    CatalogRegisterInfo request = registerInfo(MASKED_PRINCIPAL);
+    request.setProperties(
+        ImmutableMap.of(
+            KEY_WAREHOUSE,
+            "/warehouse",
+            S3FileIOProperties.SSE_KEY,
+            COMMON_SECRET_FORMAT,
+            "oauth2.credential",
+            "fixture-replacement",
+            "custom.value",
+            COMMON_SECRET_FORMAT));
+    request.setTableProperties(ImmutableMap.of("jdbc.password", COMMON_SECRET_FORMAT));
+
+    controller.updateCatalog(context);
+
+    Map<String, String> properties = updatedCatalog().getCatalogProperties();
+    assertEquals("fixture-sse-value", properties.get(S3FileIOProperties.SSE_KEY));
+    assertEquals("fixture-replacement", properties.get("oauth2.credential"));
+    assertEquals("fixture-jdbc-value", properties.get("table.jdbc.password"));
+    assertFalse(properties.containsKey("table.client.secret"));
+    assertEquals(COMMON_SECRET_FORMAT, properties.get("custom.value"));
+  }
+
+  @ParameterizedTest
+  @ValueSource(booleans = {false, true})
+  void aMaskCannotBeSavedForAPropertyWithoutAnExistingValue(boolean update) {
+    if (update) {
+      CatalogMeta catalog = existingCatalog(PRINCIPAL);
+      catalog.setCatalogProperties(
+          ImmutableMap.of(
+              TABLE_FORMATS,
+              TableFormat.ICEBERG.name(),
+              S3FileIOProperties.SSE_KEY,
+              "fixture-sse-value"));
+    }
+    CatalogRegisterInfo request = registerInfo(PRINCIPAL);
+    request.setTableProperties(ImmutableMap.of(S3FileIOProperties.SSE_KEY, COMMON_SECRET_FORMAT));
+
+    if (update) {
+      assertThrows(IllegalArgumentException.class, () -> controller.updateCatalog(context));
+    } else {
+      assertThrows(IllegalArgumentException.class, () -> controller.createCatalog(context));
+    }
+    verify(catalogs, never()).updateCatalog(any(CatalogMeta.class));
+    verify(catalogs, never()).createCatalog(any(CatalogMeta.class));
   }
 
   @Test
