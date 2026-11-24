@@ -35,6 +35,7 @@ import org.apache.amoro.server.catalog.CatalogManager;
 import org.apache.amoro.server.dashboard.controller.LoginController;
 import org.apache.amoro.server.resource.OptimizerManager;
 import org.apache.amoro.server.table.TableManager;
+import org.apache.amoro.shade.guava32.com.google.common.collect.ImmutableMap;
 import org.apache.amoro.shade.jackson2.com.fasterxml.jackson.databind.JsonNode;
 import org.apache.amoro.utils.JacksonUtil;
 import org.apache.commons.io.IOUtils;
@@ -65,6 +66,9 @@ class TestDashboardRemovedRoutes {
     {"GET", "/settings/system"},
     {"GET", "/settings/containers"},
     {"GET", "/catalogs/fixture/config/storage-config/hadoop-core-site"},
+    {"GET", "/catalogs/fixture/config/storage-config/hadoop-hdfs-site"},
+    {"GET", "/catalogs/fixture/config/storage-config/hive-site"},
+    {"GET", "/catalogs/fixture/config/auth-config/auth-kerberos-krb5"},
     {"GET", "/catalogs/fixture/config/auth-config/auth-kerberos-keytab"},
     {"GET", "/files/1"}
   };
@@ -132,10 +136,17 @@ class TestDashboardRemovedRoutes {
     catalog.setCatalogName("fixture");
     catalog.setCatalogType("filesystem");
     catalog.setAuthConfigs(
-        Collections.singletonMap(
-            CatalogMetaProperties.AUTH_CONFIGS_KEY_PRINCIPAL, "fixture@EXAMPLE.TEST"));
+        ImmutableMap.of(
+            CatalogMetaProperties.AUTH_CONFIGS_KEY_PRINCIPAL, "fixture@EXAMPLE.TEST",
+            CatalogMetaProperties.AUTH_CONFIGS_KEY_KEYTAB, "AQI=",
+            CatalogMetaProperties.AUTH_CONFIGS_KEY_KRB5, "YWJj"));
+    String site = "PGNvbmZpZ3VyYXRpb24vPg==";
     catalog.setStorageConfigs(
-        Collections.singletonMap(CatalogMetaProperties.STORAGE_CONFIGS_KEY_CORE_SITE, "AQI="));
+        ImmutableMap.of(
+            CatalogMetaProperties.STORAGE_CONFIGS_KEY_CORE_SITE, site,
+            CatalogMetaProperties.STORAGE_CONFIGS_KEY_HDFS_SITE, site,
+            CatalogMetaProperties.STORAGE_CONFIGS_KEY_HIVE_SITE, site));
+    when(catalogs.getCatalogMeta(catalog.getCatalogName())).thenReturn(catalog);
     when(catalogs.listCatalogMetas()).thenReturn(Collections.singletonList(catalog));
     DashboardServer server =
         new DashboardServer(

@@ -41,6 +41,7 @@ import static org.mockito.Mockito.when;
 
 import io.javalin.http.Context;
 import io.javalin.http.UploadedFile;
+import jakarta.servlet.http.Part;
 import org.apache.amoro.TableFormat;
 import org.apache.amoro.api.CatalogMeta;
 import org.apache.amoro.server.catalog.CatalogManager;
@@ -57,6 +58,8 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import java.io.ByteArrayInputStream;
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 import java.util.Collections;
 import java.util.HashMap;
 
@@ -96,17 +99,27 @@ class TestCatalogDashboardSecurity {
   }
 
   @Test
-  void updatingWithDisplayedPrincipalPreservesItAndAcceptsAnUploadedKeytab() {
+  void updatingCatalogPreservesThePrincipalAndAcceptsUploadedFiles() {
     CatalogMeta original = existingCatalog(PRINCIPAL);
     CatalogRegisterInfo request = registerInfo(MASKED_PRINCIPAL);
     request.getAuthConfig().put(AUTH_CONFIGS_KEY_KEYTAB, "7");
+    request.setStorageConfig(
+        ImmutableMap.of(
+            STORAGE_CONFIGS_KEY_TYPE,
+            STORAGE_CONFIGS_VALUE_TYPE_HADOOP,
+            STORAGE_CONFIGS_KEY_HDFS_SITE,
+            "8"));
     when(files.getFileContentB64ById(7)).thenReturn("AwQ=");
+    String uploadedSite =
+        Base64.getEncoder().encodeToString("<configuration/>\n".getBytes(StandardCharsets.UTF_8));
+    when(files.getFileContentB64ById(8)).thenReturn(uploadedSite);
 
     controller.updateCatalog(context);
 
     CatalogMeta update = updatedCatalog();
     assertEquals(PRINCIPAL, update.getAuthConfigs().get(AUTH_CONFIGS_KEY_PRINCIPAL));
     assertEquals("AwQ=", update.getAuthConfigs().get(AUTH_CONFIGS_KEY_KEYTAB));
+    assertEquals(uploadedSite, update.getStorageConfigs().get(STORAGE_CONFIGS_KEY_HDFS_SITE));
     assertEquals(
         original.getAuthConfigs().get(AUTH_CONFIGS_KEY_KRB5),
         update.getAuthConfigs().get(AUTH_CONFIGS_KEY_KRB5));
@@ -150,14 +163,10 @@ class TestCatalogDashboardSecurity {
   @Test
   void uploadReturnsAnIdWithoutADownloadUrl() throws Exception {
     byte[] content = {1, 2};
-    when(context.uploadedFile("file"))
-        .thenReturn(
-            new UploadedFile(
-                new ByteArrayInputStream(content),
-                "application/octet-stream",
-                "fixture.keytab",
-                "keytab",
-                content.length));
+    Part part = mock(Part.class);
+    when(part.getInputStream()).thenReturn(new ByteArrayInputStream(content));
+    when(part.getSubmittedFileName()).thenReturn("fixture.keytab");
+    when(context.uploadedFile("file")).thenReturn(new UploadedFile(part));
     when(files.addFile("fixture.keytab", "AQI=")).thenReturn(7);
 
     new PlatformFileInfoController(files).uploadFile(context);
