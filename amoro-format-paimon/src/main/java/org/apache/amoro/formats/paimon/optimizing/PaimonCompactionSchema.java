@@ -18,13 +18,18 @@
 
 package org.apache.amoro.formats.paimon.optimizing;
 
+import org.apache.paimon.io.DataFileMeta;
 import org.apache.paimon.schema.TableSchema;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.types.DataField;
 
+import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 /** 在创建合并 writer 前，为已固定的输入选择兼容的 schema。 */
 public final class PaimonCompactionSchema {
@@ -32,17 +37,18 @@ public final class PaimonCompactionSchema {
 
   private PaimonCompactionSchema() {}
 
-  static FileStoreTable refreshFixed(
-      FileStoreTable original, long requiredSchemaId, long snapshotId) {
-    FileStoreTable current = refresh(original, requiredSchemaId, snapshotId);
-    // Fixed append additionally preserves every column in its exact prepared inputs.
-    // Keep the existing primary-key and bucket-unaware refresh contract unchanged.
-    validateRewriteSchema(original, requiredSchemaId, current.schema().id());
-    return current;
+  static Set<Long> fileSchemaIds(Collection<DataFileMeta> files) {
+    return files.stream().map(DataFileMeta::schemaId).collect(Collectors.toSet());
   }
 
   static void validateRewriteSchema(
       FileStoreTable original, long requiredSchemaId, long outputSchemaId) {
+    validateRewriteSchema(original, Collections.singleton(requiredSchemaId), outputSchemaId);
+  }
+
+  static void validateRewriteSchema(
+      FileStoreTable original, Collection<Long> inputSchemaIds, long outputSchemaId) {
+    long requiredSchemaId = requiredSchemaId(inputSchemaIds);
     if (requiredSchemaId <= original.schema().id()) {
       if (outputSchemaId != original.schema().id()) {
         throw new IllegalArgumentException("Rewrite output changed the bound writer schema");
@@ -52,22 +58,20 @@ public final class PaimonCompactionSchema {
     if (outputSchemaId < requiredSchemaId) {
       throw new IllegalArgumentException("Rewrite output schema is behind prepared inputs");
     }
-    // Paimon ac223f47, AbstractFileStoreTable.java:382-393 retains bound execution options.
     // Validate the immutable schema used by the output, not a later concurrent latest schema.
-    TableSchema outputSchema = original.schemaManager().schema(outputSchemaId);
-    FileStoreTable output = original.copy(outputSchema.copy(original.options()));
+    FileStoreTable output = copyWithSchema(original, outputSchemaId);
     validateCompatibility(original, output);
-    FileStoreTable required =
-        original.copy(original.schemaManager().schema(requiredSchemaId).copy(original.options()));
-    // Same SHA, schema/SchemaEvolutionUtil.java:79-100 maps existing values by field id.
-    // A column added after the bound schema is still an input column: a later output schema
-    // must not silently discard it just because original -> output alone looks compatible.
-    validateCompatibility(original, required);
-    validateCompatibility(required, output);
+    validateInputSchemas(original, output, inputSchemaIds);
   }
 
   public static FileStoreTable refresh(
       FileStoreTable original, long requiredSchemaId, long snapshotId) {
+    return refresh(original, Collections.singleton(requiredSchemaId), snapshotId);
+  }
+
+  public static FileStoreTable refresh(
+      FileStoreTable original, Collection<Long> inputSchemaIds, long snapshotId) {
+    long requiredSchemaId = requiredSchemaId(inputSchemaIds);
     FileStoreTable current = original;
     int attempts = 0;
     try {
@@ -84,6 +88,7 @@ public final class PaimonCompactionSchema {
       if (current.schema().id() < requiredSchemaId) {
         throw new IllegalStateException("Schema remains behind prepared input files");
       }
+      validateInputSchemas(original, current, inputSchemaIds);
       return current;
     } catch (RuntimeException e) {
       throw new IllegalStateException(
@@ -99,6 +104,32 @@ public final class PaimonCompactionSchema {
               + attempts
               + "; replan with a fresh table after resolving schema compatibility",
           e);
+    }
+  }
+
+  private static long requiredSchemaId(Collection<Long> schemaIds) {
+    return schemaIds.stream().mapToLong(Long::longValue).max().orElse(-1L);
+  }
+
+  private static FileStoreTable copyWithSchema(FileStoreTable original, long schemaId) {
+    TableSchema schema = original.schemaManager().schema(schemaId);
+    if (schema == null) {
+      throw new IllegalStateException("Missing Paimon compaction schema id=" + schemaId);
+    }
+    return original.copy(schema.copy(original.options()));
+  }
+
+  private static void validateInputSchemas(
+      FileStoreTable original, FileStoreTable output, Collection<Long> inputSchemaIds) {
+    // Paimon 1.4.2 RawFileSplitRead#createFileReader builds a mapping for each file schema ID.
+    // The maximum ID chooses the writer version but can hide columns in another input version.
+    // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/operation/RawFileSplitRead.java#L227-L245
+    for (long schemaId : inputSchemaIds) {
+      if (schemaId > original.schema().id() && schemaId != output.schema().id()) {
+        FileStoreTable input = copyWithSchema(original, schemaId);
+        validateCompatibility(original, input);
+        validateCompatibility(input, output);
+      }
     }
   }
 

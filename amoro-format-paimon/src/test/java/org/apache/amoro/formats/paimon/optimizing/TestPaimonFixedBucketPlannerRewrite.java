@@ -22,18 +22,27 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 import org.apache.amoro.config.OptimizingConfig;
 import org.apache.amoro.exception.OptimizingCommitException;
 import org.apache.amoro.formats.paimon.PaimonTable;
 import org.apache.amoro.formats.paimon.optimizing.commit.PaimonTableCommit;
 import org.apache.amoro.formats.paimon.optimizing.plan.PaimonOptimizingPlanner;
+import org.apache.amoro.optimizing.OptimizationContext;
 import org.apache.amoro.optimizing.OptimizingPlanResult;
 import org.apache.amoro.optimizing.TableOptimizingCommitter.CommitMode;
 import org.apache.amoro.table.TableIdentifier;
 import org.apache.amoro.utils.SerializationUtil;
+import org.apache.paimon.data.BinaryString;
+import org.apache.paimon.data.GenericRow;
 import org.apache.paimon.io.DataFileMeta;
 import org.apache.paimon.manifest.ManifestEntry;
+import org.apache.paimon.table.AppendOnlyFileStoreTable;
+import org.apache.paimon.table.sink.BatchTableCommit;
+import org.apache.paimon.table.sink.BatchTableWrite;
+import org.apache.paimon.table.sink.BatchWriteBuilder;
 import org.apache.paimon.table.sink.CommitMessageImpl;
 import org.apache.paimon.table.sink.CommitMessageSerializer;
 import org.junit.jupiter.api.Test;
@@ -44,11 +53,13 @@ import org.junit.jupiter.params.provider.ValueSource;
 import java.nio.ByteBuffer;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Random;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -122,6 +133,92 @@ class TestPaimonFixedBucketPlannerRewrite {
           .commit(CommitMode.RECOVERY_REPLAY);
       assertEquals(committedSnapshot, fixture.table.latestSnapshot().get().id());
       assertEquals(rowsBefore, fixture.snapshotRows());
+    }
+  }
+
+  @Test
+  void orderedMinorAdmissionDoesNotCrossAnUnselectedFile(@TempDir Path warehouse) throws Exception {
+    Map<String, String> options = demandTestOptions();
+    try (PaimonFixedBucketTestSupport fixture =
+        new PaimonFixedBucketTestSupport(warehouse, false, true, options)) {
+      appendDemandFile(fixture.table, 0, 1, "small");
+      appendDemandFile(fixture.table, 0, 2, largeDemandPayload());
+      appendDemandFile(fixture.table, 0, 3, "small");
+      List<ManifestEntry> files = fixture.units().values().iterator().next();
+      assertEquals(3, files.size());
+      assertTrue(files.get(0).file().fileSize() < 16 * 1024);
+      assertTrue(files.get(1).file().fileSize() >= 32 * 1024);
+      assertTrue(files.get(2).file().fileSize() < 16 * 1024);
+      PaimonTable table =
+          new PaimonTable(TableIdentifier.of("test", "db", "fixed_append"), fixture.table);
+      assertDemandMatchesPlan(table, false, false);
+    }
+  }
+
+  @ParameterizedTest
+  @ValueSource(booleans = {true, false})
+  void fullAdmissionUsesCatalogPolicyWithinEachBucket(
+      boolean samePartition, @TempDir Path warehouse) throws Exception {
+    Map<String, String> options = demandTestOptions();
+    options.put("compaction.force-rewrite-all-files", "false");
+    try (PaimonFixedBucketTestSupport fixture =
+        new PaimonFixedBucketTestSupport(warehouse, !samePartition, true, options)) {
+      appendDemandFile(fixture.table, 0, 1, "small");
+      appendDemandFile(fixture.table, samePartition ? 0 : 1, 2, largeDemandPayload());
+      PaimonTable table =
+          new PaimonTable(
+              TableIdentifier.of("test", "db", "fixed_append"),
+              fixture.table,
+              Collections.singletonMap(
+                  "table." + PaimonAppendRewriteOptions.AMORO_FULL_REWRITE, "true"));
+      assertDemandMatchesPlan(table, true, samePartition);
+    }
+  }
+
+  private static Map<String, String> demandTestOptions() {
+    Map<String, String> options = new HashMap<>();
+    options.put("target-file-size", "32 kb");
+    options.put("compaction.min.file-num", "2");
+    return options;
+  }
+
+  private static void assertDemandMatchesPlan(PaimonTable table, boolean full, boolean necessary) {
+    OptimizingConfig config =
+        new OptimizingConfig()
+            .setEnabled(true)
+            .setMinorLeastInterval(full ? -1 : 0)
+            .setFullTriggerInterval(full ? 0 : -1)
+            .setFullRewriteAllFiles(full)
+            .setMaxTaskSize(MAX_TASK_BYTES);
+    OptimizationContext runtime = mock(OptimizationContext.class);
+    when(runtime.getOptimizingConfig()).thenReturn(config);
+    PaimonOptimizingPlanner planner =
+        new PaimonOptimizingPlanner(
+            table, TABLE_ID, PROCESS_ID, 1.0D, MAX_TASK_BYTES, config, 0L, 0L, 0L, null);
+    assertEquals(necessary, planner.isNecessary());
+    assertEquals(necessary, table.evaluatePendingInput(runtime, 10).get().optimizingNecessary());
+  }
+
+  private static String largeDemandPayload() {
+    byte[] payload = new byte[128 * 1024];
+    new Random(77L).nextBytes(payload);
+    return Base64.getEncoder().encodeToString(payload);
+  }
+
+  private static void appendDemandFile(
+      AppendOnlyFileStoreTable table, int partition, int sequence, String payload)
+      throws Exception {
+    BatchWriteBuilder builder = table.newBatchWriteBuilder();
+    try (BatchTableWrite writer = builder.newWrite();
+        BatchTableCommit commit = builder.newCommit()) {
+      writer.write(
+          GenericRow.of(
+              partition,
+              BinaryString.fromString("key"),
+              0,
+              sequence,
+              BinaryString.fromString(payload)));
+      commit.commit(writer.prepareCommit());
     }
   }
 

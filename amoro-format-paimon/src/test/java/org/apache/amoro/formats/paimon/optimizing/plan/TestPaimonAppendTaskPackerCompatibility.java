@@ -36,11 +36,15 @@ import org.junit.jupiter.params.provider.MethodSource;
 
 import java.io.InputStream;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Random;
+import java.util.Set;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 class TestPaimonAppendTaskPackerCompatibility {
@@ -55,9 +59,38 @@ class TestPaimonAppendTaskPackerCompatibility {
       expected.load(resource);
     }
     String key = type + "." + limit + "." + seed;
-    // Captured from the pre-R4 f3198e58c packer. Hash task boundaries and ordered file names,
-    // rather than checking only coverage, counts, or the new implementation's internal state.
-    assertEquals(expected.getProperty(key), digest(pack(type, limit, seed)), key);
+    CaseInputs inputs = buildInputs(limit, seed);
+    List<AppendCompactTask> actual =
+        new PaimonAppendTaskPacker(inputs.context)
+            .pack(
+                new PaimonPartitionEvaluation(
+                    BinaryRow.EMPTY_ROW,
+                    type,
+                    inputs.files,
+                    inputs.files,
+                    inputs.files.size(),
+                    0,
+                    0));
+
+    List<List<String>> expectedOversizedDvTasks = expectedOversizedDvTasks(inputs.files, limit);
+    Set<List<String>> oversizedDvSignatures =
+        expectedOversizedDvTasks.stream().collect(Collectors.toSet());
+    List<AppendCompactTask> nonOversizedDvTasks = new ArrayList<>();
+    List<List<String>> actualOversizedDvTasks = new ArrayList<>();
+    for (AppendCompactTask task : actual) {
+      List<String> names =
+          task.compactBefore().stream().map(DataFileMeta::fileName).collect(Collectors.toList());
+      if (oversizedDvSignatures.contains(names)) {
+        actualOversizedDvTasks.add(names);
+      } else {
+        nonOversizedDvTasks.add(task);
+      }
+    }
+    // Captured from the pre-R4 f3198e58c packer (which skipped oversized DV groups before C-02).
+    // Every non-oversized task boundary, partner pairing, and ordered file list must remain
+    // bit-for-bit identical, while every oversized DV group must be emitted as a standalone task.
+    assertEquals(expected.getProperty(key), digest(nonOversizedDvTasks), key);
+    assertEquals(expectedOversizedDvTasks, actualOversizedDvTasks, key + ".oversizedDv");
   }
 
   static Stream<Arguments> cases() {
@@ -72,7 +105,7 @@ class TestPaimonAppendTaskPackerCompatibility {
     return cases.build();
   }
 
-  static List<AppendCompactTask> pack(OptimizingType type, long limit, int seed) {
+  static CaseInputs buildInputs(long limit, int seed) {
     Map<String, String> options = new HashMap<>();
     options.put("target-file-size", "1000 b");
     options.put("compaction.small-file-ratio", "0.7");
@@ -124,10 +157,47 @@ class TestPaimonAppendTaskPackerCompatibility {
               dv ? new DeletionFile(group, 0L, 1L, 1L) : null,
               group));
     }
-    return new PaimonAppendTaskPacker(context)
-        .pack(
-            new PaimonPartitionEvaluation(
-                BinaryRow.EMPTY_ROW, type, files, files, files.size(), 0, 0));
+    return new CaseInputs(context, files);
+  }
+
+  private static List<List<String>> expectedOversizedDvTasks(
+      List<PaimonFileCandidate> files, long limit) {
+    Map<String, List<PaimonFileCandidate>> dvGroups = new LinkedHashMap<>();
+    for (PaimonFileCandidate file : files) {
+      if (file.dvGroupKey() != null) {
+        dvGroups.computeIfAbsent(file.dvGroupKey(), ignored -> new ArrayList<>()).add(file);
+      }
+    }
+    List<List<PaimonFileCandidate>> oversizedGroups = new ArrayList<>();
+    for (List<PaimonFileCandidate> group : dvGroups.values()) {
+      long totalSize = group.stream().mapToLong(PaimonFileCandidate::fileSize).sum();
+      if (totalSize > limit) {
+        oversizedGroups.add(
+            group.stream()
+                .sorted(Comparator.comparingLong(PaimonFileCandidate::fileSize))
+                .collect(Collectors.toList()));
+      }
+    }
+    oversizedGroups.sort(
+        Comparator.comparingLong(
+            group -> group.stream().mapToLong(PaimonFileCandidate::fileSize).sum()));
+    return oversizedGroups.stream()
+        .map(
+            group ->
+                group.stream()
+                    .map(candidate -> candidate.file().fileName())
+                    .collect(Collectors.toList()))
+        .collect(Collectors.toList());
+  }
+
+  private static final class CaseInputs {
+    private final PaimonPlanContext context;
+    private final List<PaimonFileCandidate> files;
+
+    private CaseInputs(PaimonPlanContext context, List<PaimonFileCandidate> files) {
+      this.context = context;
+      this.files = files;
+    }
   }
 
   static String digest(List<AppendCompactTask> tasks) {

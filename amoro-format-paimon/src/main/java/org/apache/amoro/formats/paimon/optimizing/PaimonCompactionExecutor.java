@@ -20,6 +20,7 @@ package org.apache.amoro.formats.paimon.optimizing;
 
 import org.apache.amoro.optimizing.OptimizingExecutor;
 import org.apache.paimon.CoreOptions;
+import org.apache.paimon.Snapshot;
 import org.apache.paimon.append.AppendCompactTask;
 import org.apache.paimon.io.DataFileMeta;
 import org.apache.paimon.operation.BaseAppendFileStoreWrite;
@@ -33,6 +34,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.Collections;
+import java.util.List;
 
 /**
  * Optimizer-side executor for ordinary Paimon Append compaction in either bucket mode.
@@ -144,20 +146,28 @@ public class PaimonCompactionExecutor implements OptimizingExecutor<PaimonCompac
             });
     // Paimon 1.4.2 AppendCompactTask#doCompact 只重写 compactBefore；不得另扫 latest 扩大输入。
     // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/append/AppendCompactTask.java
-    long requiredSchemaId =
-        task.compactBefore().stream().mapToLong(DataFileMeta::schemaId).max().orElse(-1);
     table =
         (AppendOnlyFileStoreTable)
-            PaimonCompactionSchema.refresh(table, requiredSchemaId, input.getTargetSnapshotId());
+            PaimonCompactionSchema.refresh(
+                table,
+                PaimonCompactionSchema.fileSchemaIds(task.compactBefore()),
+                input.getTargetSnapshotId());
 
-    BaseAppendFileStoreWrite write = table.store().newWrite(input.getCommitUser());
     CoreOptions coreOptions = table.coreOptions();
+    Snapshot boundDvSnapshot =
+        coreOptions.deletionVectorsEnabled()
+            ? loadBoundSnapshot(table, input.getTargetSnapshotId())
+            : null;
+    BaseAppendFileStoreWrite write = table.store().newWrite(input.getCommitUser());
     if (coreOptions.rowTrackingEnabled()) {
       write.withWriteType(SpecialFields.rowTypeWithRowTracking(table.rowType()));
     }
     CommitMessage message;
     try {
-      message = task.doCompact(table, write);
+      message =
+          boundDvSnapshot == null
+              ? task.doCompact(table, write)
+              : compactUnawareAtSnapshot(table, write, task, boundDvSnapshot);
     } catch (Exception e) {
       throw new IllegalStateException(
           "Failed to execute Paimon AppendCompactTask for partition " + input.getPartitionPath(),
@@ -173,5 +183,78 @@ public class PaimonCompactionExecutor implements OptimizingExecutor<PaimonCompac
       }
     }
     return message;
+  }
+
+  private static Snapshot loadBoundSnapshot(AppendOnlyFileStoreTable table, long targetSnapshotId) {
+    if (targetSnapshotId < org.apache.paimon.Snapshot.FIRST_SNAPSHOT_ID) {
+      throw new IllegalStateException(
+          "Target snapshot must be >= 1 for unaware deletion-vector compaction, got "
+              + targetSnapshotId);
+    }
+    try {
+      org.apache.paimon.Snapshot snapshot =
+          table.snapshotManager().tryGetSnapshot(targetSnapshotId);
+      if (snapshot == null) {
+        throw new IllegalStateException(
+            "Target snapshot "
+                + targetSnapshotId
+                + " does not exist before unaware deletion-vector compaction started");
+      }
+      return snapshot;
+    } catch (java.io.FileNotFoundException expired) {
+      throw new IllegalStateException(
+          "Target snapshot "
+              + targetSnapshotId
+              + " expired before unaware deletion-vector compaction started",
+          expired);
+    }
+  }
+
+  private static CommitMessage compactUnawareAtSnapshot(
+      AppendOnlyFileStoreTable table,
+      BaseAppendFileStoreWrite write,
+      AppendCompactTask task,
+      org.apache.paimon.Snapshot boundSnapshot)
+      throws Exception {
+    // Paimon 1.4.2 AppendCompactTask#doCompact reads table.snapshotManager().latestSnapshot(),
+    // which causes concurrent unaware tasks in the same partition to emit duplicate DELETE entries
+    // when an external DML repacks DV index files. Bind BaseAppendDeleteFileMaintainer to the
+    // planned snapshot and pass its getDeletionVector callback to 4-arg compactRewrite:
+    // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/append/AppendCompactTask.java#L75-L115
+    org.apache.paimon.deletionvectors.append.AppendDeleteFileMaintainer dvIndexFileMaintainer =
+        org.apache.paimon.deletionvectors.append.BaseAppendDeleteFileMaintainer.forUnawareAppend(
+            table.store().newIndexFileHandler(), boundSnapshot, task.partition());
+    List<DataFileMeta> compactBefore = new java.util.ArrayList<>(task.compactBefore());
+    List<DataFileMeta> compactAfter =
+        new java.util.ArrayList<>(
+            write.compactRewrite(
+                task.partition(),
+                BucketMode.UNAWARE_BUCKET,
+                dvIndexFileMaintainer::getDeletionVector,
+                compactBefore));
+    compactBefore.forEach(
+        file -> dvIndexFileMaintainer.notifyRemovedDeletionVector(file.fileName()));
+    List<org.apache.paimon.index.IndexFileMeta> newIndexFiles = new java.util.ArrayList<>();
+    List<org.apache.paimon.index.IndexFileMeta> deletedIndexFiles = new java.util.ArrayList<>();
+    for (org.apache.paimon.manifest.IndexManifestEntry entry : dvIndexFileMaintainer.persist()) {
+      if (entry.kind() == org.apache.paimon.manifest.FileKind.ADD) {
+        newIndexFiles.add(entry.indexFile());
+      } else {
+        deletedIndexFiles.add(entry.indexFile());
+      }
+    }
+    org.apache.paimon.io.CompactIncrement compactIncrement =
+        new org.apache.paimon.io.CompactIncrement(
+            compactBefore,
+            compactAfter,
+            java.util.Collections.emptyList(),
+            newIndexFiles,
+            deletedIndexFiles);
+    return new org.apache.paimon.table.sink.CommitMessageImpl(
+        task.partition(),
+        BucketMode.UNAWARE_BUCKET,
+        table.coreOptions().bucket(),
+        org.apache.paimon.io.DataIncrement.emptyIncrement(),
+        compactIncrement);
   }
 }

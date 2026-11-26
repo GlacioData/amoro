@@ -104,6 +104,8 @@ public class DefaultTableRuntime extends AbstractTableRuntime implements Optimiz
   private volatile TableAnalysisKey currentAnalysisKey;
   private volatile TableAnalysisKey deferredPlanningKey;
   private volatile RuntimeEvaluationDeadline evaluationDeadline;
+  // A retry of the same snapshot remains relevant when an older planning pass finishes.
+  private volatile RuntimeEvaluationDeadline planningRetryDeadline;
   private final AtomicReference<FormatTableAnalysis> tableAnalysisSlot = new AtomicReference<>();
   private final RuntimeHealthState runtimeHealthState;
   private final TableHealthSupport healthSupport;
@@ -447,14 +449,29 @@ public class DefaultTableRuntime extends AbstractTableRuntime implements Optimiz
                 && runtimeHealthState.hasSuccessfulAnalysis(key)));
   }
 
+  public boolean hasPlanningRetryForCurrentAnalysis() {
+    RuntimeEvaluationDeadline deadline = planningRetryDeadline;
+    return deadline != null && deadline.matchesKey(currentAnalysisKey);
+  }
+
   private boolean isEvaluationDeadlineDue(long now) {
-    if (evaluationDeadline == null) {
+    if (evaluationDeadline == null && planningRetryDeadline == null) {
       return false;
     }
     AtomicBoolean due = new AtomicBoolean(false);
     store()
         .synchronizedInvoke(
             () -> {
+              RuntimeEvaluationDeadline retry = planningRetryDeadline;
+              if (retry != null
+                  && retry.matchesKey(currentAnalysisKey)
+                  && getOptimizingConfig().isEnabled()) {
+                if (getProcessId() == 0L
+                    && (isIdle() || getOptimizingStatus() == OptimizingStatus.PENDING)) {
+                  due.set(retry.isDue(now));
+                }
+                return;
+              }
               if (evaluationDeadline == null) {
                 return;
               }
@@ -653,6 +670,19 @@ public class DefaultTableRuntime extends AbstractTableRuntime implements Optimiz
                           result.get().tableAnalysis().orElse(null)))) {
                 return;
               }
+              PendingInputResult evaluation = result.orElse(null);
+              boolean planningRetry =
+                  evaluation != null
+                      && evaluation.planningRetry()
+                      && getOptimizingConfig().isEnabled();
+              planningRetryDeadline =
+                  planningRetry
+                      ? RuntimeEvaluationDeadline.planningRetry(
+                          evaluation.tableAnalysis().get().key(), evaluation.nextEvaluationTime())
+                      : null;
+              if (planningRetry) {
+                deferredPlanningKey = null;
+              }
               if ((status != OptimizingStatus.IDLE && status != OptimizingStatus.PENDING)
                   || getProcessId() != 0L
                   || evaluatedPlanTime != getLastPlanTime()) {
@@ -665,8 +695,7 @@ public class DefaultTableRuntime extends AbstractTableRuntime implements Optimiz
                     .ifPresent(analysis -> deferredPlanningKey = analysis.key());
                 return;
               }
-              if (result.isPresent()) {
-                PendingInputResult evaluation = result.get();
+              if (evaluation != null) {
                 if (getOptimizingConfig().isEnabled() && evaluation.optimizingNecessary()) {
                   necessary.set(transitionToPending(evaluation, true));
                   return;
@@ -680,7 +709,7 @@ public class DefaultTableRuntime extends AbstractTableRuntime implements Optimiz
                   .updateState(
                       OPTIMIZING_STATE_KEY,
                       state -> {
-                        if (getOptimizingConfig().isEnabled()) {
+                        if (getOptimizingConfig().isEnabled() && !planningRetry) {
                           state.setLastOptimizedSnapshotId(state.getCurrentSnapshotId());
                           state.setLastOptimizedChangeSnapshotId(
                               state.getCurrentChangeSnapshotId());
@@ -696,7 +725,8 @@ public class DefaultTableRuntime extends AbstractTableRuntime implements Optimiz
                   .commit();
               deferredPlanningKey = null;
               evaluationDeadline = null;
-              if (getOptimizingConfig().isEnabled()
+              if (!planningRetry
+                  && getOptimizingConfig().isEnabled()
                   && result.isPresent()
                   && !result.get().optimizingNecessary()
                   && result.get().nextEvaluationTime() > 0L
@@ -1058,6 +1088,7 @@ public class DefaultTableRuntime extends AbstractTableRuntime implements Optimiz
   public void dispose() {
     runtimeHealthState.clear();
     deferredPlanningKey = null;
+    planningRetryDeadline = null;
     invalidateCurrentAnalysisKey();
     unregisterMetric();
     store()
@@ -1351,6 +1382,10 @@ public class DefaultTableRuntime extends AbstractTableRuntime implements Optimiz
     if (!Objects.equals(currentAnalysisKey, analysisKey)) {
       currentAnalysisKey = analysisKey;
       evaluationDeadline = null;
+      RuntimeEvaluationDeadline retry = planningRetryDeadline;
+      if (analysisKey != null && retry != null && !retry.matchesKey(analysisKey)) {
+        planningRetryDeadline = null;
+      }
       clearTableAnalysis();
     }
   }

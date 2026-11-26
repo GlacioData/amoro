@@ -164,6 +164,9 @@ final class PaimonPrimaryKeyCommitGuard {
     for (CommitMessage message : messages) {
       require(message instanceof CommitMessageImpl, "Unsupported native commit message");
       CommitMessageImpl nativeMessage = (CommitMessageImpl) message;
+      // Paimon 1.4.2 DynamicBucketIndexMaintainer marks modified only on notifyNewRecord, never
+      // on compact(), so HASH_DYNAMIC compaction also keeps newFilesIncrement empty:
+      // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/index/DynamicBucketIndexMaintainer.java#L66-L108
       require(nativeMessage.newFilesIncrement().isEmpty(), "Expected only COMPACT increments");
       if (nativeMessage.isEmpty()) {
         continue;

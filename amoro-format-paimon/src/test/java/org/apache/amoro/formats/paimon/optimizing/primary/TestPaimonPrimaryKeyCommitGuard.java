@@ -335,6 +335,38 @@ class TestPaimonPrimaryKeyCommitGuard {
     assertEquals(5, output.getProducedFileCount());
   }
 
+  @ParameterizedTest
+  @ValueSource(strings = {"added", "changed", "removed"})
+  void dynamicBucketDvTransitionRejectsAndAppliesGuard(String transition) {
+    Harness h = new Harness(2, !transition.equals("added"), BucketMode.HASH_DYNAMIC, -1);
+    assertTrue(PaimonPrimaryKeyReadDependency.required(h.table));
+    assertTrue(PaimonPrimaryKeyCommitGuard.applies(h.table, Collections.singletonList(h.task)));
+    h.indexState.put(
+        key(1),
+        transition.equals("removed")
+            ? Collections.emptyList()
+            : Collections.singletonList(index("replacement", 8, 3L)));
+    h.guard.prepare(h.messages);
+    assertThrows(PaimonPrimaryKeyCommitGuard.ReadConflict.class, h.guard::preflight);
+  }
+
+  @Test
+  void dynamicBucketRollingUpgradeRejectsMissingDependencyUnlessAlreadyPublished()
+      throws Exception {
+    Harness h = new Harness(1, false, BucketMode.HASH_DYNAMIC, -1);
+    h.task.getOutput().setReadDependency(null);
+    assertTrue(PaimonPrimaryKeyCommitGuard.applies(h.table, Collections.singletonList(h.task)));
+    assertEquals(PaimonPrimaryKeyCommitGuard.Publication.ABSENT, h.guard.inspectPublication());
+    assertThrows(PaimonPrimaryKeyCommitGuard.ReadConflict.class, () -> h.guard.prepare(h.messages));
+
+    Harness published = new Harness(1, false, BucketMode.HASH_DYNAMIC, -1);
+    published.task.getOutput().setReadDependency(null);
+    Snapshot committed = published.candidate(11);
+    when(published.manager.latestSnapshot()).thenReturn(committed);
+    assertEquals(
+        PaimonPrimaryKeyCommitGuard.Publication.PUBLISHED, published.guard.inspectPublication());
+  }
+
   static Pair<BinaryRow, Integer> key(int bucket) {
     return Pair.of(BinaryRow.EMPTY_ROW, bucket);
   }
@@ -353,10 +385,15 @@ class TestPaimonPrimaryKeyCommitGuard {
   }
 
   static CommitMessage message(int bucket, List<DataFileMeta> before, DataIncrement data) {
+    return message(bucket, 1024, before, data);
+  }
+
+  static CommitMessage message(
+      int bucket, int totalBuckets, List<DataFileMeta> before, DataIncrement data) {
     return new CommitMessageImpl(
         BinaryRow.EMPTY_ROW,
         bucket,
-        1024,
+        totalBuckets,
         data,
         new CompactIncrement(
             before, Collections.singletonList(file("output-" + bucket)), Collections.emptyList()));
@@ -375,7 +412,11 @@ class TestPaimonPrimaryKeyCommitGuard {
     final PaimonPrimaryKeyCommitGuard guard;
 
     Harness(int count, boolean existingDv) {
-      when(table.bucketMode()).thenReturn(BucketMode.HASH_FIXED);
+      this(count, existingDv, BucketMode.HASH_FIXED, 1024);
+    }
+
+    Harness(int count, boolean existingDv, BucketMode bucketMode, int totalBuckets) {
+      when(table.bucketMode()).thenReturn(bucketMode);
       when(table.options())
           .thenReturn(Collections.singletonMap("deletion-vectors.enabled", "true"));
       when(table.location()).thenReturn(new Path("/table"));
@@ -397,20 +438,24 @@ class TestPaimonPrimaryKeyCommitGuard {
       for (int bucket = 0; bucket < count; bucket++) {
         List<DataFileMeta> files = Arrays.asList(file("read-" + bucket), file("lookup-" + bucket));
         for (DataFileMeta file : files) {
-          entries.add(ManifestEntry.create(FileKind.ADD, BinaryRow.EMPTY_ROW, bucket, 1024, file));
+          entries.add(
+              ManifestEntry.create(FileKind.ADD, BinaryRow.EMPTY_ROW, bucket, totalBuckets, file));
         }
         List<IndexFileMeta> dv =
             existingDv
                 ? Collections.singletonList(index("dv-" + bucket, 7, 1L))
                 : Collections.emptyList();
-        restored.put(bucket, new RestoreFiles(snapshot, 1024, files, null, dv));
+        restored.put(bucket, new RestoreFiles(snapshot, totalBuckets, files, null, dv));
         indexState.put(key(bucket), dv);
         units.add(
             new PaimonBucketCompactionUnit(
                 SerializationUtils.serializeBinaryRow(BinaryRow.EMPTY_ROW), bucket, 2, 0, 0, 1));
         messages.add(
             message(
-                bucket, Collections.singletonList(files.get(0)), DataIncrement.emptyIncrement()));
+                bucket,
+                totalBuckets,
+                Collections.singletonList(files.get(0)),
+                DataIncrement.emptyIncrement()));
       }
       PaimonPrimaryKeyCompactionInput input = mock(PaimonPrimaryKeyCompactionInput.class);
       when(input.getTargetSnapshotId()).thenReturn(10L);

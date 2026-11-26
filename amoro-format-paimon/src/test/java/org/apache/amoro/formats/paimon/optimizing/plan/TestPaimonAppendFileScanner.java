@@ -28,22 +28,27 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import org.apache.amoro.config.OptimizingConfig;
 import org.apache.amoro.formats.paimon.PaimonCatalogFactory;
+import org.apache.amoro.formats.paimon.PaimonTable;
 import org.apache.amoro.formats.paimon.optimizing.health.PaimonAppendHealthEvaluator;
 import org.apache.amoro.formats.paimon.optimizing.health.PaimonAppendSnapshotAnalysis;
 import org.apache.amoro.formats.paimon.optimizing.health.PaimonAppendSnapshotAnalysis.PlannerFile;
 import org.apache.amoro.formats.paimon.optimizing.health.PaimonAppendSnapshotAnalysis.ScanTotals;
 import org.apache.amoro.formats.paimon.optimizing.health.PaimonHealthEvaluationContext;
 import org.apache.amoro.optimizing.OptimizationContext;
+import org.apache.amoro.table.TableIdentifier;
 import org.apache.amoro.table.health.TableHealthStructure;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.paimon.AppendOnlyFileStore;
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.append.AppendCompactTask;
 import org.apache.paimon.catalog.Catalog;
@@ -82,15 +87,18 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.io.FileNotFoundException;
 import java.lang.reflect.Field;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Random;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -164,6 +172,113 @@ class TestPaimonAppendFileScanner {
       assertTrue(historical.analysis().plannerFiles().isEmpty());
       assertFalse(historical.analysis().plannerFactsAvailable());
       assertHealthFactsEqual(analysis.analysis(), historical.analysis());
+    }
+  }
+
+  @Test
+  void analyzePropagatesOptimizationContextAndSharedTimestamp(@TempDir Path warehouse)
+      throws Exception {
+    try (Catalog catalog = fsCatalog(warehouse)) {
+      Map<String, String> options = new HashMap<>();
+      options.put("target-file-size", "64 kb");
+      options.put("compaction.min.file-num", "5");
+      options.put("source.split.open-file-cost", "10 b");
+      Table table = createAppendOnlyTable(catalog, "t_ctx_analyze", options, false);
+      writeRecords(
+          table, Collections.singletonList(GenericRow.of(1, BinaryString.fromString("a"))));
+      writeRecords(
+          table, Collections.singletonList(GenericRow.of(2, BinaryString.fromString("b"))));
+      AppendOnlyFileStoreTable append =
+          (AppendOnlyFileStoreTable) catalog.getTable(Identifier.create("db1", "t_ctx_analyze"));
+
+      OptimizingConfig cfg =
+          new OptimizingConfig()
+              .setEnabled(true)
+              .setMinorLeastInterval(1000)
+              .setFullTriggerInterval(-1);
+      OptimizationContext ctx = mock(OptimizationContext.class);
+      when(ctx.getOptimizingConfig()).thenReturn(cfg);
+      when(ctx.getLastMinorOptimizingTime()).thenReturn(2000L);
+      when(ctx.getLastFullOptimizingTime()).thenReturn(0L);
+
+      PaimonHealthEvaluationContext waitingHealth =
+          PaimonHealthEvaluationContext.captureAt(append, "db1.t_ctx_analyze", ctx, null, 2500L);
+      PaimonAppendSnapshotAnalysis waitingAnalysis =
+          PaimonAppendFileScanner.analyze(append, waitingHealth, ctx, null, 2500L);
+      assertEquals(2, waitingAnalysis.plannerFiles().size());
+      PaimonTable amoroTable =
+          new PaimonTable(TableIdentifier.of("test", "db1", "t_ctx_analyze"), append);
+      PaimonAppendFileScanner.AppendDemandEvaluation waitingDemand =
+          PaimonAppendFileScanner.evaluateAppendDemand(
+              amoroTable, waitingHealth, waitingAnalysis, append.options(), ctx, 2500L);
+      assertFalse(waitingDemand.necessary());
+      assertEquals(3001L, waitingDemand.nextEvaluationTime());
+      assertTrue(
+          PaimonAppendFileScanner.evaluateAppendDemand(
+                  amoroTable, waitingHealth, waitingAnalysis, append.options(), ctx, 3001L)
+              .necessary());
+    }
+  }
+
+  @Test
+  void unawareFullRetriesWhenSecondDeletionManifestReadFails(@TempDir Path warehouse)
+      throws Exception {
+    try (Catalog catalog = fsCatalog(warehouse)) {
+      Map<String, String> options = new HashMap<>();
+      options.put("deletion-vectors.enabled", "true");
+      options.put("target-file-size", "32 kb");
+      Table original = createAppendOnlyTable(catalog, "t_dv_retry", options, false);
+      writeRecords(
+          original, Collections.singletonList(GenericRow.of(1, BinaryString.fromString("small"))));
+      byte[] payload = new byte[128 * 1024];
+      new Random(77L).nextBytes(payload);
+      writeRecords(
+          original,
+          Collections.singletonList(
+              GenericRow.of(
+                  2, BinaryString.fromString(Base64.getEncoder().encodeToString(payload)))));
+      AppendOnlyFileStoreTable table =
+          spy((AppendOnlyFileStoreTable) catalog.getTable(Identifier.create("db1", "t_dv_retry")));
+      AppendOnlyFileStore store = spy(table.store());
+      IndexFileHandler index = mock(IndexFileHandler.class);
+      doReturn(store).when(table).store();
+      doReturn(index).when(store).newIndexFileHandler();
+
+      long now = 10_000L;
+      OptimizingConfig config =
+          new OptimizingConfig()
+              .setEnabled(true)
+              .setMinorLeastInterval(-1)
+              .setFullTriggerInterval(0)
+              .setFullRewriteAllFiles(true);
+      OptimizationContext runtime = mock(OptimizationContext.class);
+      when(runtime.getOptimizingConfig()).thenReturn(config);
+      PaimonTable amoroTable =
+          new PaimonTable(TableIdentifier.of("test", "db1", "t_dv_retry"), table);
+      PaimonHealthEvaluationContext health =
+          PaimonHealthEvaluationContext.captureAt(
+              table, amoroTable.id().toString(), runtime, table.options(), now);
+      when(index.scan(health.snapshot().get(), "DELETION_VECTORS"))
+          .thenReturn(Collections.emptyList())
+          .thenThrow(new RuntimeException(new FileNotFoundException("index manifest unavailable")))
+          .thenReturn(Collections.emptyList());
+      PaimonAppendSnapshotAnalysis analysis =
+          PaimonAppendFileScanner.analyze(table, health, runtime, null, now);
+      assertEquals(2L, analysis.fullSnapshotFileCount());
+      assertEquals(1, analysis.plannerFiles().size());
+      assertTrue(analysis.plannerFactsAvailable());
+      assertTrue(analysis.pendingInput().getHealthScore() >= 0);
+
+      PaimonAppendFileScanner.AppendDemandEvaluation failed =
+          PaimonAppendFileScanner.evaluateAppendDemand(
+              amoroTable, health, analysis, table.options(), runtime, now);
+      assertFalse(failed.necessary());
+      assertTrue(failed.retryPlanning());
+      assertEquals(now + 5_000L, failed.nextEvaluationTime());
+      assertTrue(
+          PaimonAppendFileScanner.evaluateAppendDemand(
+                  amoroTable, health, analysis, table.options(), runtime, now + 5_000L)
+              .necessary());
     }
   }
 
@@ -479,8 +594,7 @@ class TestPaimonAppendFileScanner {
   }
 
   @Test
-  void fullRewriteSharesOneManifestLookupAcrossPartitions(@TempDir Path warehouse)
-      throws Exception {
+  void fullRewriteReusesCompleteFactsAcrossPartitions(@TempDir Path warehouse) throws Exception {
     Catalog catalog = fsCatalog(warehouse);
     Map<String, String> options = new HashMap<>();
     options.put("deletion-vectors.enabled", "true");
@@ -522,12 +636,11 @@ class TestPaimonAppendFileScanner {
         .scan(eq(snapshot), eq("DELETION_VECTORS"), any(BinaryRow.class), anyInt());
 
     IndexFileHandler handoffHandler = mock(IndexFileHandler.class);
-    when(handoffHandler.scan(snapshot, "DELETION_VECTORS")).thenReturn(Collections.emptyList());
     Map<BinaryRow, List<PaimonFileCandidate>> handedOffFiles =
         new PaimonAppendFileScanner(appendTable, captured, fullRewriteContext, null, handoffHandler)
             .candidatesFromAnalysis(result.analysis());
     assertEquals(2, countFiles(handedOffFiles));
-    verify(handoffHandler, times(1)).scan(snapshot, "DELETION_VECTORS");
+    verify(handoffHandler, never()).scan(snapshot, "DELETION_VECTORS");
     verify(handoffHandler, never())
         .scan(eq(snapshot), eq("DELETION_VECTORS"), any(BinaryRow.class), anyInt());
   }

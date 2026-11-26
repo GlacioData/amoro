@@ -18,9 +18,14 @@
 
 package org.apache.amoro.formats.paimon.optimizing.plan;
 
+import org.apache.amoro.formats.paimon.PaimonTable;
+import org.apache.amoro.formats.paimon.optimizing.PaimonAppendRewriteOptions;
+import org.apache.amoro.formats.paimon.optimizing.PaimonFixedBucketTask;
+import org.apache.amoro.formats.paimon.optimizing.PaimonFixedBucketTaskSerializer;
 import org.apache.amoro.optimizing.OptimizingType;
 import org.apache.amoro.shade.guava32.com.google.common.math.LongMath;
 import org.apache.paimon.io.DataFileMeta;
+import org.apache.paimon.manifest.FileKind;
 import org.apache.paimon.manifest.ManifestEntry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -33,6 +38,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 /** Exact file groups only; the caller keeps the window's native bucket identity. */
 final class PaimonFixedBucketTaskPacker {
@@ -41,6 +47,46 @@ final class PaimonFixedBucketTaskPacker {
 
   PaimonFixedBucketTaskPacker(PaimonPlanContext context) {
     this.context = context;
+  }
+
+  Stream<PaimonFixedBucketTask> publishableTasks(
+      PaimonTable table,
+      PaimonFixedBucketFileWindow window,
+      PaimonPartitionEvaluation evaluation,
+      long snapshotId,
+      PaimonAppendRewriteOptions rewriteOptions) {
+    PaimonFixedBucketTaskSerializer serializer = new PaimonFixedBucketTaskSerializer();
+    // Paimon manifest entries carry the native bucket layout. Reuse the proven window's scope.
+    return pack(window, evaluation).stream()
+        .map(
+            group ->
+                group.stream()
+                    .map(
+                        file ->
+                            ManifestEntry.create(
+                                FileKind.ADD,
+                                window.unit().partition(),
+                                window.unit().bucket(),
+                                window.totalBuckets(),
+                                file))
+                    .collect(Collectors.toList()))
+        .flatMap(
+            entries ->
+                serializer
+                    .splitForPublication(
+                        table, entries, snapshotId, evaluation.optimizingType(), rewriteOptions)
+                    .stream())
+        .filter(
+            task ->
+                PaimonAppendCompactBenefit.shouldKeep(
+                    task.optimizingType(),
+                    task.files().stream()
+                        .map(
+                            file ->
+                                PaimonFileCandidate.from(
+                                    task.partition(), file, context, null, null))
+                        .collect(Collectors.toList()),
+                    context));
   }
 
   List<List<DataFileMeta>> pack(

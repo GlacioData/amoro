@@ -27,7 +27,6 @@ import org.apache.amoro.formats.paimon.optimizing.PaimonCompactionExecutorFactor
 import org.apache.amoro.formats.paimon.optimizing.PaimonCompactionInput;
 import org.apache.amoro.formats.paimon.optimizing.PaimonCompactionTask;
 import org.apache.amoro.formats.paimon.optimizing.PaimonFixedBucketTask;
-import org.apache.amoro.formats.paimon.optimizing.PaimonFixedBucketTaskSerializer;
 import org.apache.amoro.formats.paimon.optimizing.PaimonOptimizingEligibility;
 import org.apache.amoro.formats.paimon.optimizing.health.PaimonAppendSnapshotAnalysis;
 import org.apache.amoro.formats.paimon.optimizing.health.PaimonHealthEvaluationContext;
@@ -42,8 +41,6 @@ import org.apache.paimon.CoreOptions;
 import org.apache.paimon.append.AppendCompactTask;
 import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.io.DataFileMeta;
-import org.apache.paimon.manifest.FileKind;
-import org.apache.paimon.manifest.ManifestEntry;
 import org.apache.paimon.options.Options;
 import org.apache.paimon.predicate.Predicate;
 import org.apache.paimon.table.AppendOnlyFileStoreTable;
@@ -483,7 +480,6 @@ public class PaimonOptimizingPlanner implements TableOptimizingPlanner {
     List<PlannedAppendTask> tasks = new ArrayList<>();
     PaimonPartitionEvaluator evaluator = new PaimonPartitionEvaluator(context);
     PaimonFixedBucketTaskPacker packer = new PaimonFixedBucketTaskPacker(context);
-    PaimonFixedBucketTaskSerializer serializer = new PaimonFixedBucketTaskSerializer();
     for (PaimonFixedBucketFileWindow window : scanner.fixedBucketWindows(usedAnalysis).values()) {
       if (!window.safe()) {
         LOG.warn(
@@ -495,44 +491,14 @@ public class PaimonOptimizingPlanner implements TableOptimizingPlanner {
         continue;
       }
       PaimonPartitionEvaluation evaluation = evaluator.evaluate(window);
-      List<List<DataFileMeta>> groups = packer.pack(window, evaluation);
+      List<PaimonFixedBucketTask> published =
+          packer
+              .publishableTasks(paimonTable, window, evaluation, targetSnapshotId, rewriteOptions)
+              .collect(Collectors.toList());
       long packedFiles = 0L;
-      int publishedTasks = 0;
-      for (List<DataFileMeta> group : groups) {
-        // Paimon ac223f47, manifest/FileEntry.java:49-57: bucket and totalBuckets belong to the
-        // native manifest scope. Reuse the proven window identity, never an unaware sentinel.
-        List<ManifestEntry> entries =
-            group.stream()
-                .map(
-                    file ->
-                        ManifestEntry.create(
-                            FileKind.ADD,
-                            window.unit().partition(),
-                            window.unit().bucket(),
-                            window.totalBuckets(),
-                            file))
-                .collect(Collectors.toList());
-        for (PaimonFixedBucketTask bounded :
-            serializer.splitForPublication(
-                paimonTable,
-                entries,
-                targetSnapshotId,
-                evaluation.optimizingType(),
-                rewriteOptions)) {
-          // A protocol split must still satisfy MAJOR's existing reduction requirement.
-          List<PaimonFileCandidate> candidates =
-              bounded.files().stream()
-                  .map(
-                      file ->
-                          PaimonFileCandidate.from(bounded.partition(), file, context, null, null))
-                  .collect(Collectors.toList());
-          if (PaimonAppendCompactBenefit.shouldKeep(
-              bounded.optimizingType(), candidates, context)) {
-            tasks.add(new PlannedAppendTask(bounded));
-            packedFiles += bounded.files().size();
-            publishedTasks++;
-          }
-        }
+      for (PaimonFixedBucketTask bounded : published) {
+        tasks.add(new PlannedAppendTask(bounded));
+        packedFiles += bounded.files().size();
       }
       LOG.info(
           "Paimon fixed unit partition={},bucket={},snapshot={},type={},totalFiles={},"
@@ -546,7 +512,7 @@ public class PaimonOptimizingPlanner implements TableOptimizingPlanner {
           window.files().size(),
           evaluation.selectedFiles().size(),
           packedFiles,
-          publishedTasks,
+          published.size(),
           window.complete(),
           window.provenPrefix(),
           window.omittedFileCount(),

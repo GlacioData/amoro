@@ -35,8 +35,16 @@ final class RuntimeEvaluationDeadline {
     this.lastPlanTime = lastPlanTime;
   }
 
+  static RuntimeEvaluationDeadline planningRetry(TableAnalysisKey key, long deadline) {
+    return new RuntimeEvaluationDeadline(key, deadline, 0L, 0L);
+  }
+
+  boolean matchesKey(TableAnalysisKey currentKey) {
+    return key.equals(currentKey);
+  }
+
   boolean matches(TableAnalysisKey currentKey, long currentMinorTime, long currentPlanTime) {
-    return key.equals(currentKey)
+    return matchesKey(currentKey)
         && lastMinorTime == currentMinorTime
         && lastPlanTime == currentPlanTime;
   }

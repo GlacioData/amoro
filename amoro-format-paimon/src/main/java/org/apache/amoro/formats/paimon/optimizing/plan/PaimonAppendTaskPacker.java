@@ -144,14 +144,12 @@ final class PaimonAppendTaskPacker {
     long total = 0L;
     for (int i = 0; i < units.size(); i++) {
       AtomicUnit unit = units.get(i);
-      if (shouldSkipOversizedUnit(unit, limit)) {
-        LOG.warn(
-            "Skip oversized Paimon compact atomic unit for partition {} with {} file(s), "
-                + "size={} bytes, limit={} bytes.",
-            evaluation.partition(),
-            unit.files().size(),
-            unit.totalSize(),
-            limit);
+      if (isOversizedDeletionVector(unit, limit)) {
+        // Paimon 1.4.2 packs dozens of data files' DVs into one 2MB index file; an indivisible
+        // dvGroup exceeding the per-task target limit must run as its own standalone task without
+        // merging into or clearing reserved regular partners in MajorFullBin:
+        // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/deletionvectors/append/AppendDeleteFileMaintainer.java#L315-L348
+        addTask(tasks, evaluation, unit.files());
         continue;
       }
       if (isOversizedRegular(unit, limit) && !bin.isEmpty()) {
@@ -198,32 +196,23 @@ final class PaimonAppendTaskPacker {
    */
   private List<AppendCompactTask> packLegalUnitsWithPaimonBinPacking(
       PaimonPartitionEvaluation evaluation, List<AtomicUnit> units, long limit) {
-    List<AtomicUnit> packable = new ArrayList<>();
     for (AtomicUnit unit : units) {
       if (!unit.hasDeletionVector()) {
         return null;
       }
-      if (shouldSkipOversizedUnit(unit, limit)) {
-        LOG.warn(
-            "Skip oversized Paimon compact atomic unit for partition {} with {} file(s), "
-                + "size={} bytes, limit={} bytes.",
-            evaluation.partition(),
-            unit.files().size(),
-            unit.totalSize(),
-            limit);
-        continue;
-      }
-      packable.add(unit);
     }
 
+    // Paimon 1.4.2 BinPacking.packForOrdered flushes any non-empty bin before and after an item
+    // whose weight exceeds targetWeight, keeping every oversized DV unit in a standalone bin:
+    // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-common/src/main/java/org/apache/paimon/utils/BinPacking.java#L33-L62
     List<AppendCompactTask> tasks = new ArrayList<>();
-    for (List<AtomicUnit> bin : BinPacking.packForOrdered(packable, AtomicUnit::totalSize, limit)) {
+    for (List<AtomicUnit> bin : BinPacking.packForOrdered(units, AtomicUnit::totalSize, limit)) {
       addTaskFromUnits(tasks, evaluation, bin);
     }
     return tasks;
   }
 
-  private boolean shouldSkipOversizedUnit(AtomicUnit unit, long limit) {
+  private boolean isOversizedDeletionVector(AtomicUnit unit, long limit) {
     return unit.hasDeletionVector() && unit.totalSize() > limit;
   }
 
@@ -480,7 +469,7 @@ final class PaimonAppendTaskPacker {
             oversizedRegularFrom[i + 1] + (isOversizedRegular(unit, limit) ? 1 : 0);
         regularPartnersFrom[i] =
             regularPartnersFrom[i + 1] + (isRegularPartner(unit, limit) ? 1 : 0);
-        packableFrom[i] = packableFrom[i + 1] || !shouldSkipOversizedUnit(unit, limit);
+        packableFrom[i] = packableFrom[i + 1] || !isOversizedDeletionVector(unit, limit);
       }
     }
 

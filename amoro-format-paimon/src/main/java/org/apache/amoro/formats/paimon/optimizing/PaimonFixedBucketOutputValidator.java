@@ -53,10 +53,9 @@ final class PaimonFixedBucketOutputValidator {
         metrics.inputRecords() == metrics.outputRecords(),
         "Fixed non-DV rewrite must preserve every input row");
 
-    long requiredSchema =
-        payload.files().stream().mapToLong(DataFileMeta::schemaId).max().getAsLong();
     long outputSchema = message.compactIncrement().compactAfter().get(0).schemaId();
-    PaimonCompactionSchema.validateRewriteSchema(table, requiredSchema, outputSchema);
+    PaimonCompactionSchema.validateRewriteSchema(
+        table, PaimonCompactionSchema.fileSchemaIds(payload.files()), outputSchema);
     boolean external =
         table
             .store()

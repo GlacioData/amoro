@@ -1146,6 +1146,86 @@ public class TestPaimonOptimizingPlanner {
         PaimonOptimizingPlanner.applyQuota(null, 1.0, 1024, fixedSize(0L), "t_null").isEmpty());
   }
 
+  @Test
+  @DisplayName("MAJOR plans oversized DV atomic group through packer and applyQuota")
+  void testMajorPlansOversizedDeletionVectorGroupThroughQuota(@TempDir Path warehouse)
+      throws Exception {
+    Catalog catalog = fsCatalog(warehouse);
+    Map<String, String> opts = new HashMap<>();
+    opts.put("target-file-size", "64 kb");
+    opts.put("compaction.small-file-ratio", "0.7");
+    opts.put("compaction.min.file-num", "2");
+    opts.put("deletion-vectors.enabled", "true");
+    opts.put("compaction.delete-ratio-threshold", "0.1");
+    Table table = createAppendOnlyTable(catalog, "t_oversized_dv_major", opts);
+    for (int i = 0; i < 2; i++) {
+      writeRecords(
+          table,
+          java.util.Arrays.asList(
+              GenericRow.of(i * 10 + 1, BinaryString.fromString(valueWithLength(4096))),
+              GenericRow.of(i * 10 + 2, BinaryString.fromString(valueWithLength(4096)))));
+    }
+    Identifier id = Identifier.create("db1", "t_oversized_dv_major");
+    AppendOnlyFileStoreTable appendTable = (AppendOnlyFileStoreTable) catalog.getTable(id);
+    List<DataFileMeta> dataFiles = new ArrayList<>();
+    appendTable
+        .newReadBuilder()
+        .newScan()
+        .plan()
+        .splits()
+        .forEach(s -> dataFiles.addAll(((org.apache.paimon.table.source.DataSplit) s).dataFiles()));
+    assertEquals(2, dataFiles.size());
+
+    org.apache.paimon.deletionvectors.append.AppendDeleteFileMaintainer maintainer =
+        org.apache.paimon.deletionvectors.append.BaseAppendDeleteFileMaintainer.forUnawareAppend(
+            appendTable.store().newIndexFileHandler(),
+            appendTable.snapshotManager().latestSnapshot(),
+            org.apache.paimon.data.BinaryRow.EMPTY_ROW);
+    for (DataFileMeta df : dataFiles) {
+      org.apache.paimon.deletionvectors.BitmapDeletionVector dv =
+          new org.apache.paimon.deletionvectors.BitmapDeletionVector();
+      dv.delete(0);
+      maintainer.notifyNewDeletionVector(df.fileName(), dv);
+    }
+    List<org.apache.paimon.index.IndexFileMeta> addedIndexes =
+        maintainer.persist().stream()
+            .filter(e -> e.kind() == org.apache.paimon.manifest.FileKind.ADD)
+            .map(org.apache.paimon.manifest.IndexManifestEntry::indexFile)
+            .collect(java.util.stream.Collectors.toList());
+    try (BatchTableCommit commit = appendTable.newBatchWriteBuilder().newCommit()) {
+      commit.commit(
+          Collections.singletonList(
+              new org.apache.paimon.table.sink.CommitMessageImpl(
+                  org.apache.paimon.data.BinaryRow.EMPTY_ROW,
+                  0,
+                  -1,
+                  org.apache.paimon.io.DataIncrement.emptyIncrement(),
+                  new org.apache.paimon.io.CompactIncrement(
+                      Collections.emptyList(),
+                      Collections.emptyList(),
+                      Collections.emptyList(),
+                      addedIndexes,
+                      Collections.emptyList()))));
+    }
+
+    PaimonTable paimonTable = wrap(catalog.getTable(id), "t_oversized_dv_major");
+    PaimonOptimizingPlanner planner =
+        new PaimonOptimizingPlanner(
+            paimonTable,
+            1L,
+            1L,
+            2.0,
+            128L,
+            defaultOptimizingConfig().setMaxTaskSize(128L),
+            0L,
+            0L,
+            0L,
+            null);
+    OptimizingPlanResult<PaimonCompactionTask> result = planner.plan();
+    assertEquals(OptimizingType.MAJOR, result.getOptimizingType());
+    assertEquals(1, result.getTasks().size());
+  }
+
   private static OptimizingConfig defaultOptimizingConfig() {
     return new OptimizingConfig()
         .setEnabled(true)

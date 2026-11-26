@@ -48,6 +48,7 @@ import org.apache.paimon.types.DataTypes;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.file.Path;
@@ -211,6 +212,53 @@ public class TestPaimonPrimaryKeySchemaFailure {
       verify(tracked, never()).copy(anyMap());
       verify(tracked, never()).newBatchWriteBuilder();
       assertEquals(2, current.latestSnapshot().get().id());
+    }
+  }
+
+  @ParameterizedTest
+  @CsvSource({"drop,false", "rename,false", "drop,true", "rename,true"})
+  void intermediateAddedThenDroppedOrRenamedColumnRejectsOldTaskAndHealsOnReplan(
+      String mode, boolean writeLatest, @TempDir Path warehouse) throws Exception {
+    try (Catalog catalog = catalog(warehouse)) {
+      Map<String, String> opts = options(true);
+      opts.put("num-sorted-run.compaction-trigger", "2");
+      FileStoreTable schema0 = table(catalog, "pk_intermediate", opts);
+      append(schema0, GenericRow.of(1, 10, 20, 1L));
+      PaimonPrimaryKeyCompactionInput plannedAt0 = input(schema0, OptimizingType.MINOR, 101L);
+
+      Identifier id = Identifier.create("db", "pk_intermediate");
+      catalog.alterTable(
+          id,
+          Collections.singletonList(SchemaChange.addColumn("temp_col", DataTypes.INT())),
+          false);
+      FileStoreTable schema1 = (FileStoreTable) catalog.getTable(id);
+      append(schema1, GenericRow.of(1, 11, 21, 2L, 777));
+
+      SchemaChange step2 =
+          mode.equals("drop")
+              ? SchemaChange.dropColumn("temp_col")
+              : SchemaChange.renameColumn("temp_col", "renamed_col");
+      catalog.alterTable(id, Collections.singletonList(step2), false);
+
+      FileStoreTable schema2 = (FileStoreTable) catalog.getTable(id);
+      if (writeLatest) {
+        append(
+            schema2,
+            mode.equals("drop") ? GenericRow.of(1, 12, 22, 3L) : GenericRow.of(1, 12, 22, 3L, 888));
+      }
+
+      IllegalStateException error =
+          assertThrows(
+              IllegalStateException.class,
+              () -> new PaimonPrimaryKeyCompactionExecutor(plannedAt0).execute());
+      assertTrue(error.getMessage().contains("Unsafe Paimon compaction schema"));
+
+      // Replanning at schema 2 self-heals and compacts the historical schema 1 file cleanly.
+      PaimonPrimaryKeyCompactionInput freshAt2 = input(schema2, OptimizingType.MINOR, 102L);
+      PaimonPrimaryKeyCompactionOutput freshOutput =
+          new PaimonPrimaryKeyCompactionExecutor(freshAt2).execute();
+      assertEquals(writeLatest ? 3 : 2, freshOutput.getCompactedFileCount());
+      commit(schema2, freshAt2, freshOutput);
     }
   }
 

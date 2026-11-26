@@ -252,6 +252,26 @@ class TestPaimonFixedBucketFileScanner {
   }
 
   @Test
+  void completeFactsProveFixedWindowsWithoutAnotherScan(@TempDir Path warehouse) throws Exception {
+    try (Catalog catalog = catalog(warehouse)) {
+      AppendOnlyFileStoreTable table = createTable(catalog, Collections.emptyMap());
+      writeRounds(table, 2, 3);
+      PaimonHealthEvaluationContext health =
+          PaimonHealthEvaluationContext.capture(table, table.fullName(), null);
+      PaimonAppendFileScanner scanner =
+          new PaimonAppendFileScanner(table, health, context(table, 16), null);
+      PaimonAppendSnapshotAnalysis analysis = scanner.scan().analysis();
+      assertEquals(12, analysis.plannerFiles().size());
+      Map<PaimonAppendUnitKey, PaimonFixedBucketFileWindow> windows =
+          scanner.fixedBucketWindows(analysis);
+      assertEquals(4, windows.size());
+      assertTrue(windows.values().stream().allMatch(PaimonFixedBucketFileWindow::safe));
+      assertTrue(windows.values().stream().allMatch(PaimonFixedBucketFileWindow::complete));
+      assertEquals(0, scanner.fixedScopeScanCount());
+    }
+  }
+
+  @Test
   void provesBoundedWindowsWithOneScopeScanAtTheOriginalSnapshot(@TempDir Path warehouse)
       throws Exception {
     try (Catalog catalog = catalog(warehouse)) {

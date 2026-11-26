@@ -178,6 +178,28 @@ class TestPaimonPlanContext {
     assertEquals("dv-index", deleted.dvGroupKey());
   }
 
+  @org.junit.jupiter.params.ParameterizedTest
+  @org.junit.jupiter.params.provider.ValueSource(
+      strings = {"-0.01", "1.01", "NaN", "Infinity", "-Infinity"})
+  void rejectsOutOfRangeOrNonFiniteSmallFileRatio(String invalid) {
+    Map<String, String> options = new HashMap<>();
+    options.put("target-file-size", "1000 b");
+    options.put("compaction.small-file-ratio", invalid);
+
+    org.junit.jupiter.api.Assertions.assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            PaimonPlanContext.forOptions(
+                CoreOptions.fromMap(options),
+                new OptimizingConfig(),
+                0L,
+                0L,
+                0L,
+                1.0,
+                1024L,
+                10_000L));
+  }
+
   private static DataFileMeta file(String name, long size, long rows, Long deleteRows) {
     return DataFileMeta.create(
         name,

@@ -138,6 +138,56 @@ class TestPaimonPrimaryKeyReadDependencies {
     }
   }
 
+  @ParameterizedTest
+  @ValueSource(strings = {"none", "lookup"})
+  void dynamicBucketLookupCompactionCannotInvalidateStaleManagedCompaction(
+      String producer, @TempDir Path warehouse) throws Exception {
+    try (Catalog catalog = catalog(warehouse)) {
+      FileStoreTable t = dynamicFixture(catalog, producer);
+      assertEquals(org.apache.paimon.table.BucketMode.HASH_DYNAMIC, t.bucketMode());
+      DataFileMeta older = files(t).stream().filter(f -> f.level() == 3).findFirst().get();
+      DataFileMeta newer = files(t).stream().filter(f -> f.level() == 2).findFirst().get();
+
+      PaimonPrimaryKeyCompactionInput planned = input(t, OptimizingType.MINOR, 9911L);
+      PaimonPrimaryKeyCompactionOutput prepared =
+          new PaimonPrimaryKeyCompactionExecutor(planned).execute();
+      org.junit.jupiter.api.Assertions.assertNotNull(
+          prepared.getReadDependency(),
+          "HASH_DYNAMIC + DV executor must capture bucketed read dependency");
+      List<CommitMessageImpl> aMessages = decode(prepared.getCommitMessageBytesList());
+      Set<String> aDeleted = deletedFiles(aMessages);
+      assertTrue(aDeleted.contains(older.fileName()));
+      assertTrue(aDeleted.contains(newer.fileName()));
+
+      appendDynamicBucketZero(t, GenericRow.of(1, 11, 11, 2L));
+      assertTrue(levels(t).contains(0));
+      List<CommitMessageImpl> bMessages = independentLookupCompact(t, 0);
+      assertTrue(
+          bMessages.stream().anyMatch(m -> !m.compactIncrement().newIndexFiles().isEmpty()),
+          "B must write a bucketed DV index on HASH_DYNAMIC");
+
+      List<String> expected = new ArrayList<>();
+      expected.add("1|11|11|2");
+      for (int i = 0; i < 1000; i++) {
+        expected.add((100 + i) + "|" + i + "|" + i + "|1");
+      }
+      Collections.sort(expected);
+      assertEquals(expected, rows(t));
+
+      boolean rejected = false;
+      try {
+        PaimonPrimaryKeyIntervalTestSupport.commit(t, planned, prepared);
+      } catch (OptimizingCommitException | RuntimeException conflict) {
+        rejected = true;
+      }
+      assertEquals(expected, rows(t), "stale HASH_DYNAMIC compact must never resurrect old row");
+      assertTrue(rejected, "HASH_DYNAMIC + DV must reject stale read dependency");
+
+      PaimonPrimaryKeyIntervalTestSupport.compact(t, OptimizingType.FULL, 9912L);
+      assertEquals(expected, rows(t));
+    }
+  }
+
   static FileStoreTable fixture(Catalog catalog, String producer) throws Exception {
     Map<String, String> opts = options(false);
     opts.put("deletion-vectors.enabled", "true");
@@ -176,6 +226,11 @@ class TestPaimonPrimaryKeyReadDependencies {
 
   private static void upgrade(FileStoreTable table, DataFileMeta before, int level)
       throws Exception {
+    upgrade(table, before, level, 1);
+  }
+
+  private static void upgrade(
+      FileStoreTable table, DataFileMeta before, int level, int totalBuckets) throws Exception {
     // Paimon represents a level upgrade as a real compact-before/compact-after manifest pair;
     // the data file stays identical, so the fixture does not forge a physical data file.
     try (BatchTableCommit commit = table.newBatchWriteBuilder().newCommit()) {
@@ -184,7 +239,7 @@ class TestPaimonPrimaryKeyReadDependencies {
               new CommitMessageImpl(
                   BinaryRow.EMPTY_ROW,
                   0,
-                  1,
+                  totalBuckets,
                   DataIncrement.emptyIncrement(),
                   new CompactIncrement(
                       Collections.singletonList(before),
@@ -194,6 +249,45 @@ class TestPaimonPrimaryKeyReadDependencies {
     assertTrue(
         files(table).stream()
             .anyMatch(f -> f.fileName().equals(before.fileName()) && f.level() == level));
+  }
+
+  static FileStoreTable dynamicFixture(Catalog catalog, String producer) throws Exception {
+    Map<String, String> opts = options(false);
+    opts.put("bucket", "-1");
+    opts.put("deletion-vectors.enabled", "true");
+    opts.put("changelog-producer", producer);
+    opts.put("num-levels", "4");
+    opts.put("num-sorted-run.compaction-trigger", "2");
+    opts.put("compaction.max-size-amplification-percent", "1000000");
+    opts.put("compaction.size-ratio", "1000000");
+    FileStoreTable t = table(catalog, "dv_dynamic_disjoint", opts);
+
+    appendDynamicBucketZero(t, GenericRow.of(1, 10, 10, 1L));
+    DataFileMeta older = onlyFile(t);
+    upgrade(t, older, 3, -1);
+
+    GenericRow[] bulk = new GenericRow[1000];
+    for (int i = 0; i < bulk.length; i++) {
+      bulk[i] = GenericRow.of(100 + i, i, i, 1L);
+    }
+    appendDynamicBucketZero(t, bulk);
+    DataFileMeta newer = files(t).stream().filter(f -> f.level() == 0).findFirst().get();
+    upgrade(t, newer, 2, -1);
+    assertEquals(2, files(t).size());
+    assertEquals(new HashSet<>(Arrays.asList(2, 3)), levels(t));
+    return t;
+  }
+
+  private static void appendDynamicBucketZero(FileStoreTable table, GenericRow... rowsToWrite)
+      throws Exception {
+    BatchWriteBuilder builder = table.newBatchWriteBuilder();
+    try (BatchTableWrite write = builder.newWrite();
+        BatchTableCommit commit = builder.newCommit()) {
+      for (GenericRow row : rowsToWrite) {
+        write.write(row, 0);
+      }
+      commit.commit(write.prepareCommit());
+    }
   }
 
   static List<CommitMessageImpl> independentLookupCompact(FileStoreTable table) throws Exception {

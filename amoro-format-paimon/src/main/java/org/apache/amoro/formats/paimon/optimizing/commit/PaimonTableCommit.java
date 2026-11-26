@@ -208,6 +208,7 @@ public class PaimonTableCommit implements TableOptimizingCommitter {
     PaimonFixedBucketCommitGuard guard =
         PaimonFixedBucketCommitGuard.validate(
             table, successTasks, messages, commitUser, commitIdentifier);
+    validateUnawareDisjointDeletedIndexes(messages);
     if (mode == CommitMode.RECOVERY_REPLAY) {
       try {
         filterAndCommitOnce(messages, mode, "recovery", guard);
@@ -278,6 +279,45 @@ public class PaimonTableCommit implements TableOptimizingCommitter {
     AppendOnlyFileStoreTable bound = guard == null ? table : guard.table();
     try (StreamTableCommit directCommit = bound.newCommit(commitUser)) {
       directCommit.commit(commitIdentifier, messages);
+    }
+  }
+
+  private void validateUnawareDisjointDeletedIndexes(List<CommitMessage> messages)
+      throws OptimizingCommitException {
+    if (table.bucketMode() != org.apache.paimon.table.BucketMode.BUCKET_UNAWARE) {
+      return;
+    }
+    // Paimon 1.4.2 IndexManifestFileHandler.GlobalCombiner fails with IllegalStateException if two
+    // CommitMessages in the same batch delete the same unaware DV index file:
+    // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/index/IndexManifestFileHandler.java#L535-L548
+    java.util.Map<org.apache.paimon.data.BinaryRow, java.util.Set<String>> deletedByPartition =
+        new java.util.HashMap<>();
+    for (CommitMessage message : messages) {
+      if (!(message instanceof org.apache.paimon.table.sink.CommitMessageImpl)) {
+        continue;
+      }
+      org.apache.paimon.table.sink.CommitMessageImpl nativeMessage =
+          (org.apache.paimon.table.sink.CommitMessageImpl) message;
+      java.util.List<org.apache.paimon.index.IndexFileMeta> deleted =
+          nativeMessage.compactIncrement().deletedIndexFiles();
+      if (deleted.isEmpty()) {
+        continue;
+      }
+      java.util.Set<String> seen =
+          deletedByPartition.computeIfAbsent(
+              nativeMessage.partition().copy(), ignored -> new java.util.HashSet<>());
+      for (org.apache.paimon.index.IndexFileMeta indexFile : deleted) {
+        if (!seen.add(indexFile.fileName())) {
+          throw new OptimizingCommitException(
+              "Duplicate deleted deletion-vector index file '"
+                  + indexFile.fileName()
+                  + "' across unaware append tasks for table="
+                  + table.name()
+                  + " identifier="
+                  + commitIdentifier,
+              true);
+        }
+      }
     }
   }
 

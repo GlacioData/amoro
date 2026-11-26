@@ -321,7 +321,7 @@ class TestPaimonAppendTaskPacker {
   }
 
   @Test
-  void majorPackingSkipsOversizedDvGroup() {
+  void majorAndFullPackingEmitBeneficialOversizedDvGroupAsStandaloneTask() {
     PaimonPlanContext context = context(900L);
     PaimonFileCandidate left =
         new PaimonFileCandidateForTestFactory()
@@ -335,12 +335,97 @@ class TestPaimonAppendTaskPacker {
             .withFile(file("dv-right", 600, 100))
             .withDvGroupKey("oversized-dv-index")
             .create();
+
+    for (OptimizingType type : Arrays.asList(OptimizingType.MAJOR, OptimizingType.FULL)) {
+      PaimonPartitionEvaluation evaluation = evaluation(type, Arrays.asList(left, right));
+      List<AppendCompactTask> tasks = new PaimonAppendTaskPacker(context).pack(evaluation);
+      assertEquals(1, tasks.size(), "Oversized beneficial dvGroup must emit 1 task under " + type);
+      assertEquals(2, tasks.get(0).compactBefore().size());
+      assertEquals(new HashSet<>(Arrays.asList("dv-left", "dv-right")), fileNames(tasks));
+    }
+  }
+
+  @Test
+  void majorPackingKeepsOversizedSingleDvFileAndFiltersUnbeneficialRegularPair() {
+    PaimonPlanContext context = context(900L);
+    PaimonFileCandidate singleDv =
+        PaimonFileCandidate.from(
+            BinaryRow.EMPTY_ROW,
+            file("dv-large", 1_500, 1_000),
+            context,
+            new DeletionFile("oversized-single-dv", 0L, 1L, 1L),
+            "oversized-single-dv");
+    PaimonFileCandidate nearTarget =
+        PaimonFileCandidate.from(
+            BinaryRow.EMPTY_ROW, file("near-target", 990, 100), context, null, null);
+    PaimonFileCandidate tail =
+        PaimonFileCandidate.from(BinaryRow.EMPTY_ROW, file("tail", 300, 100), context, null, null);
     PaimonPartitionEvaluation evaluation =
-        evaluation(OptimizingType.MAJOR, Arrays.asList(left, right));
+        evaluation(OptimizingType.MAJOR, Arrays.asList(nearTarget, tail, singleDv));
 
     List<AppendCompactTask> tasks = new PaimonAppendTaskPacker(context).pack(evaluation);
 
-    assertTrue(tasks.isEmpty());
+    assertEquals(1, tasks.size());
+    assertEquals(Collections.singleton("dv-large"), fileNames(tasks));
+  }
+
+  @Test
+  void mixedPackingKeepsOversizedDvStandaloneAndPreservesBidirectionalRegularPartners() {
+    PaimonPlanContext context = context(900L);
+    PaimonFileCandidate smallPartner =
+        PaimonFileCandidate.from(
+            BinaryRow.EMPTY_ROW, file("small-partner", 100, 100), context, null, null);
+    PaimonFileCandidate dvLeft =
+        new PaimonFileCandidateForTestFactory()
+            .withContext(context)
+            .withFile(file("dv-left", 600, 100))
+            .withDvGroupKey("oversized-dv")
+            .create();
+    PaimonFileCandidate dvRight =
+        new PaimonFileCandidateForTestFactory()
+            .withContext(context)
+            .withFile(file("dv-right", 600, 100))
+            .withDvGroupKey("oversized-dv")
+            .create();
+    PaimonFileCandidate oversizedRegular =
+        PaimonFileCandidate.from(
+            BinaryRow.EMPTY_ROW, file("oversized-regular", 10_000, 100), context, null, null);
+
+    // Direction 1: [smallPartner(100), oversizedDv(1200), oversizedRegular(10_000)]
+    // oversizedDv must stay standalone without wiping smallPartner needed by oversizedRegular.
+    List<AppendCompactTask> forwardTasks =
+        new PaimonAppendTaskPacker(context)
+            .pack(
+                evaluation(
+                    OptimizingType.FULL,
+                    Arrays.asList(smallPartner, dvLeft, dvRight, oversizedRegular)));
+    assertEquals(2, forwardTasks.size());
+    assertEquals(
+        new HashSet<>(Arrays.asList("dv-left", "dv-right")),
+        forwardTasks.get(0).compactBefore().stream()
+            .map(DataFileMeta::fileName)
+            .collect(Collectors.toSet()));
+    assertEquals(
+        new HashSet<>(Arrays.asList("small-partner", "oversized-regular")),
+        forwardTasks.get(1).compactBefore().stream()
+            .map(DataFileMeta::fileName)
+            .collect(Collectors.toSet()));
+
+    // Direction 2: [r0(400), r1(400), r2(400), oversizedDv(1200)] under limit=900
+    // oversizedDv never joins MajorFullBin, so r2 must stay with [r0, r1] instead of being
+    // stranded.
+    List<PaimonFileCandidate> trailingScenario = new ArrayList<>();
+    trailingScenario.addAll(
+        candidates(context, file("r0", 400, 100), file("r1", 400, 100), file("r2", 400, 100)));
+    trailingScenario.add(dvLeft);
+    trailingScenario.add(dvRight);
+    List<AppendCompactTask> trailingTasks =
+        new PaimonAppendTaskPacker(context)
+            .pack(evaluation(OptimizingType.MAJOR, trailingScenario));
+    assertEquals(2, trailingTasks.size());
+    assertEquals(
+        new HashSet<>(Arrays.asList("r0", "r1", "r2", "dv-left", "dv-right")),
+        fileNames(trailingTasks));
   }
 
   @Test

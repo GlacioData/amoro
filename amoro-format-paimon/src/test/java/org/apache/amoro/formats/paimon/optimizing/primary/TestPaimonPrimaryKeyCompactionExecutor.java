@@ -215,11 +215,13 @@ class TestPaimonPrimaryKeyCompactionExecutor {
     when(table.primaryKeys()).thenReturn(Collections.singletonList("id"));
     when(table.bucketMode()).thenReturn(BucketMode.HASH_DYNAMIC);
     when(table.options()).thenReturn(Collections.singletonMap("deletion-vectors.enabled", "true"));
+    when(table.location()).thenReturn(new org.apache.paimon.fs.Path("file:/tmp/table"));
     FileStoreTable compactTable = mock(FileStoreTable.class);
     when(table.copy(anyMap())).thenReturn(compactTable);
     when(compactTable.options()).thenReturn(Collections.emptyMap());
     SnapshotManager snapshotManager = mock(SnapshotManager.class);
     Snapshot restoreSnapshot = mock(Snapshot.class);
+    when(restoreSnapshot.id()).thenReturn(restoreSnapshotId);
     when(table.snapshotManager()).thenReturn(snapshotManager);
     when(table.schema())
         .thenReturn(org.mockito.Mockito.mock(org.apache.paimon.schema.TableSchema.class));
@@ -238,8 +240,12 @@ class TestPaimonPrimaryKeyCompactionExecutor {
     IndexFileHandler indexFileHandler = mock(IndexFileHandler.class);
     ManifestEntry entry = mock(ManifestEntry.class);
     DataFileMeta dataFile = mock(DataFileMeta.class);
+    when(dataFile.fileName()).thenReturn("data-0");
+    when(dataFile.externalPath()).thenReturn(Optional.empty());
     IndexFileMeta dynamicBucketIndex = mock(IndexFileMeta.class);
     IndexFileMeta deletionVectorIndex = mock(IndexFileMeta.class);
+    when(deletionVectorIndex.indexType()).thenReturn(DELETION_VECTORS_INDEX);
+    when(deletionVectorIndex.fileName()).thenReturn("index-0");
     when(table.store()).thenReturn((FileStore) store);
     when(store.newScan()).thenReturn(scan);
     when(store.newIndexFileHandler()).thenReturn(indexFileHandler);
@@ -270,7 +276,10 @@ class TestPaimonPrimaryKeyCompactionExecutor {
             "user",
             1L);
 
-    new PaimonPrimaryKeyCompactionExecutor(input).execute();
+    PaimonPrimaryKeyCompactionOutput output =
+        new PaimonPrimaryKeyCompactionExecutor(input).execute();
+    assertNotNull(output.getReadDependency());
+    assertEquals(restoreSnapshotId, output.getReadDependency().snapshotId);
 
     ArgumentCaptor<WriteRestore> restoreCaptor = ArgumentCaptor.forClass(WriteRestore.class);
     verify(write).withWriteRestore(restoreCaptor.capture());

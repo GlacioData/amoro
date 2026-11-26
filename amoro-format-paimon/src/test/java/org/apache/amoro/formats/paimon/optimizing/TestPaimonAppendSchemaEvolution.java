@@ -151,6 +151,42 @@ public class TestPaimonAppendSchemaEvolution {
     }
   }
 
+  @org.junit.jupiter.api.Test
+  void twoStepAdditiveSchemaEvolutionPassesIntermediateRefresh(@TempDir Path warehouse)
+      throws Exception {
+    try (Catalog catalog =
+        PaimonCatalogFactory.paimonCatalog(
+            Collections.singletonMap("warehouse", warehouse.toUri().toString()),
+            new Configuration())) {
+      catalog.createDatabase("db", true);
+      Identifier id = Identifier.create("db", "append_two_step_add");
+      catalog.createTable(
+          id,
+          Schema.newBuilder()
+              .column("id", DataTypes.INT())
+              .column("a", DataTypes.INT())
+              .option("bucket", "-1")
+              .option("write-only", "true")
+              .option("self-optimizing.enabled", "true")
+              .option("compaction.min.file-num", "2")
+              .build(),
+          false);
+      AppendOnlyFileStoreTable schema0 = (AppendOnlyFileStoreTable) catalog.getTable(id);
+      append(schema0, GenericRow.of(1, 10));
+      append(schema0, GenericRow.of(2, 20));
+      catalog.alterTable(
+          id, Collections.singletonList(SchemaChange.addColumn("c1", DataTypes.INT())), false);
+      AppendOnlyFileStoreTable schema1 = (AppendOnlyFileStoreTable) catalog.getTable(id);
+      append(schema1, GenericRow.of(3, 30, 100));
+      PaimonCompactionInput stalePlanned = plan(schema0).get(0).getInput();
+      catalog.alterTable(
+          id, Collections.singletonList(SchemaChange.addColumn("c2", DataTypes.INT())), false);
+
+      PaimonCompactionOutput output = new PaimonCompactionExecutor(stalePlanned).execute();
+      assertEquals(3, output.getCompactedFileCount());
+    }
+  }
+
   static PaimonTable wrap(FileStoreTable table) {
     return new PaimonTable(TableIdentifier.of("test", "db", "append_schema"), table);
   }

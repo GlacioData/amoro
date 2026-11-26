@@ -182,9 +182,10 @@ public class PaimonTable implements AmoroTable<Table>, Serializable {
           if (!PaimonOptimizingEligibility.isEligible(tableProperties)) {
             return Optional.empty();
           }
+          long now = System.currentTimeMillis();
           PaimonHealthEvaluationContext healthContext =
-              PaimonHealthEvaluationContext.capture(
-                  fileStoreTable, id().toString(), context, tableProperties);
+              PaimonHealthEvaluationContext.captureAt(
+                  fileStoreTable, id().toString(), context, tableProperties, now);
           if (fileStoreTable instanceof PrimaryKeyFileStoreTable) {
             if (healthContext.pkClusteringOverride()) {
               return Optional.of(
@@ -194,7 +195,7 @@ public class PaimonTable implements AmoroTable<Table>, Serializable {
               return Optional.of(unsupportedResult(healthContext, UNSUPPORTED_BUCKET_MODE));
             }
             return Optional.of(
-                evaluatePrimaryKey(fileStoreTable, healthContext, context, tableProperties));
+                evaluatePrimaryKey(fileStoreTable, healthContext, context, tableProperties, now));
           }
           if (fileStoreTable instanceof AppendOnlyFileStoreTable) {
             return Optional.of(
@@ -202,7 +203,8 @@ public class PaimonTable implements AmoroTable<Table>, Serializable {
                     (AppendOnlyFileStoreTable) fileStoreTable,
                     healthContext,
                     context,
-                    tableProperties));
+                    tableProperties,
+                    now));
           }
           return Optional.of(unsupportedResult(healthContext, UNSUPPORTED_TABLE_SHAPE));
         });
@@ -258,21 +260,36 @@ public class PaimonTable implements AmoroTable<Table>, Serializable {
       AppendOnlyFileStoreTable appendTable,
       PaimonHealthEvaluationContext healthContext,
       OptimizationContext context,
-      Map<String, String> tableProperties) {
+      Map<String, String> tableProperties,
+      long now) {
     PaimonAppendSnapshotAnalysis analysis =
-        PaimonAppendFileScanner.analyze(appendTable, healthContext, null);
+        PaimonAppendFileScanner.analyze(appendTable, healthContext, context, null, now);
     Optional<String> rejection = PaimonAppendCapabilities.appendRejection(appendTable);
-    boolean appendSupported = !rejection.isPresent();
     rejection.ifPresent(
         reason ->
             LOG.info("Paimon table [{}] Append optimization is unsupported: {}", id(), reason));
-    if (appendTable.bucketMode() == BucketMode.HASH_FIXED) {
-      // Paimon ac223f47, operation/BucketedAppendFileStoreWrite.java:75-85 and
-      // CoreOptions.java:3654-3658 define the native ordered/unordered and clustering modes.
-      // Reuse the same current capability gate as planning; refusal is not a health read failure.
-      appendSupported = appendSupported && analysis.plannerFactsAvailable();
+    // Paimon ac223f47, operation/BucketedAppendFileStoreWrite.java:75-85 and
+    // CoreOptions.java:3654-3658 define the native ordered/unordered and clustering modes.
+    // Gate both HASH_FIXED and BUCKET_UNAWARE on snapshot presence and available planner facts so
+    // empty, healthy, or scan-failed tables stay IDLE without triggering fallback double scans.
+    boolean appendSupported =
+        !rejection.isPresent()
+            && healthContext.snapshot().isPresent()
+            && analysis.plannerFactsAvailable();
+    boolean eligible = isOptimizingEligible(tableProperties, context) && appendSupported;
+    PaimonAppendFileScanner.AppendDemandEvaluation demand =
+        eligible
+            ? PaimonAppendFileScanner.evaluateAppendDemand(
+                this, healthContext, analysis, tableProperties, context, now)
+            : PaimonAppendFileScanner.AppendDemandEvaluation.none();
+    if (demand.retryPlanning()) {
+      return PendingInputResult.retryPlanning(
+          analysis.withoutPlannerFacts(), demand.nextEvaluationTime());
     }
-    boolean optimizingNecessary = isOptimizingEligible(tableProperties, context) && appendSupported;
+    boolean optimizingNecessary = eligible && demand.necessary();
+    // DefaultTableRuntime#applyRefreshableEvaluation arms RuntimeEvaluationDeadline only when
+    // !optimizingNecessary && nextEvaluationTime > 0L.
+    long nextEvaluationTime = eligible && !optimizingNecessary ? demand.nextEvaluationTime() : 0L;
     PaimonPendingInput pendingInput = analysis.pendingInput();
     PaimonPendingInput optimizingPendingInput = copyPendingInput(pendingInput);
     // Paimon 1.4.2 source:
@@ -285,7 +302,7 @@ public class PaimonTable implements AmoroTable<Table>, Serializable {
                 || appendTable.bucketMode() == BucketMode.BUCKET_UNAWARE)
             && optimizingNecessary);
     return new PendingInputResult(
-        pendingInput, optimizingPendingInput, optimizingNecessary, analysis);
+        pendingInput, optimizingPendingInput, optimizingNecessary, analysis, nextEvaluationTime);
   }
 
   @Override
@@ -308,7 +325,8 @@ public class PaimonTable implements AmoroTable<Table>, Serializable {
       FileStoreTable fileStoreTable,
       PaimonHealthEvaluationContext healthContext,
       OptimizationContext context,
-      Map<String, String> tableProperties) {
+      Map<String, String> tableProperties,
+      long now) {
     PaimonPrimaryKeyOptimizingEvaluation evaluation =
         PaimonPrimaryKeyOptimizingEvaluator.evaluate(
             fileStoreTable,
@@ -318,7 +336,7 @@ public class PaimonTable implements AmoroTable<Table>, Serializable {
             context == null ? 0L : context.getLastMinorOptimizingTime(),
             context == null ? 0L : context.getLastFullOptimizingTime(),
             null,
-            System.currentTimeMillis(),
+            now,
             context == null ? 0L : context.getFullRetryNotBefore());
     PaimonPrimaryKeySnapshotAnalysis analysis =
         evaluation

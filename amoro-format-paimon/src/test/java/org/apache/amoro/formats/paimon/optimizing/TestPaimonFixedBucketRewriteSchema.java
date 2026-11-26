@@ -214,7 +214,7 @@ class TestPaimonFixedBucketRewriteSchema {
       assertFalse(latest.fieldNames().contains("input_added"));
       assertThrows(
           IllegalStateException.class,
-          () -> PaimonCompactionSchema.refreshFixed(fixture.table, required.id(), 1L));
+          () -> PaimonCompactionSchema.refresh(fixture.table, required.id(), 1L));
     }
   }
 

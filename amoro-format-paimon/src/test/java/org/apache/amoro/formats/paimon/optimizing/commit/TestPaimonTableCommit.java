@@ -655,6 +655,77 @@ public class TestPaimonTableCommit {
         "Commit must not create a snapshot when any success task output is missing");
   }
 
+  @Test
+  @DisplayName(
+      "Pre-commit guard atomically rejects duplicate deleted DV index files in same partition")
+  void testRejectsDuplicateDeletedDvIndexAcrossTasksInSamePartition(@TempDir Path warehouse)
+      throws Exception {
+    Catalog catalog = fsCatalog(warehouse);
+    catalog.createDatabase("db1", true);
+    Identifier id = Identifier.create("db1", "t_dup_dv_delete");
+    catalog.createTable(
+        id,
+        Schema.newBuilder()
+            .column("id", DataTypes.INT())
+            .column("name", DataTypes.STRING())
+            .option("bucket", "-1")
+            .option("deletion-vectors.enabled", "true")
+            .option("write-only", "true")
+            .option(PaimonOptimizingEligibility.SELF_OPTIMIZING_ENABLED, "true")
+            .build(),
+        true);
+    appendRows(catalog, id, GenericRow.of(1, BinaryString.fromString("a")));
+    appendRows(catalog, id, GenericRow.of(2, BinaryString.fromString("b")));
+    AppendOnlyFileStoreTable table = (AppendOnlyFileStoreTable) catalog.getTable(id);
+    long snapshotBefore = table.snapshotManager().latestSnapshot().id();
+
+    org.apache.paimon.index.IndexFileMeta sharedDeletedIndex =
+        new org.apache.paimon.index.IndexFileMeta(
+            org.apache.paimon.deletionvectors.DeletionVectorsIndexFile.DELETION_VECTORS_INDEX,
+            "index-shared-conflict",
+            64L,
+            1L,
+            new java.util.LinkedHashMap<>(),
+            null);
+    CommitMessageSerializer serializer = new CommitMessageSerializer();
+    List<PaimonCompactionTask> conflictingTasks = new ArrayList<>();
+    for (int i = 0; i < 2; i++) {
+      CommitMessageImpl msg =
+          new CommitMessageImpl(
+              org.apache.paimon.data.BinaryRow.EMPTY_ROW,
+              0,
+              -1,
+              org.apache.paimon.io.DataIncrement.emptyIncrement(),
+              new org.apache.paimon.io.CompactIncrement(
+                  Collections.emptyList(),
+                  Collections.emptyList(),
+                  Collections.emptyList(),
+                  Collections.emptyList(),
+                  Collections.singletonList(sharedDeletedIndex)));
+      PaimonCompactionOutput out =
+          new PaimonCompactionOutput(
+              serializer.serialize(msg), serializer.getVersion(), 0L, 0L, 0L, 0L);
+      ByteBuffer buf = SerializationUtil.simpleSerialize(out);
+      byte[] bytes = new byte[buf.remaining()];
+      buf.get(bytes);
+      PaimonCompactionTask task = new PaimonCompactionTask(1L, "p-" + i, null, new HashMap<>());
+      task.setOutputBytes(bytes);
+      conflictingTasks.add(task);
+    }
+
+    for (CommitMode mode : Arrays.asList(CommitMode.NORMAL, CommitMode.RECOVERY_REPLAY)) {
+      OptimizingCommitException ex =
+          assertThrows(
+              OptimizingCommitException.class,
+              () -> new PaimonTableCommit(table, conflictingTasks, "amoro-user", 88L).commit(mode));
+      assertTrue(ex.getMessage().contains("index-shared-conflict"));
+    }
+    assertEquals(
+        snapshotBefore,
+        ((AppendOnlyFileStoreTable) catalog.getTable(id)).snapshotManager().latestSnapshot().id(),
+        "Conflicting deleted DV index batch must fail atomically before creating any snapshot");
+  }
+
   private static AppendOnlyFileStoreTable mockOrdinaryAppendTable() {
     AppendOnlyFileStoreTable table = mock(AppendOnlyFileStoreTable.class);
     when(table.coreOptions())
