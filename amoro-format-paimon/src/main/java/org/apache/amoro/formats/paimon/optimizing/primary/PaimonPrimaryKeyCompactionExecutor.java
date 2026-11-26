@@ -101,7 +101,7 @@ public class PaimonPrimaryKeyCompactionExecutor
           e);
     }
     FileStoreTable refreshed =
-        PaimonCompactionSchema.refresh(table, restore.requiredSchemaId(), restore.snapshotId());
+        PaimonCompactionSchema.refresh(table, restore.inputSchemaIds(), restore.snapshotId());
 
     // In Paimon 1.4.2, the writer uses MergeTreeCompactManagerFactory#createCompactStrategy to
     // recreate

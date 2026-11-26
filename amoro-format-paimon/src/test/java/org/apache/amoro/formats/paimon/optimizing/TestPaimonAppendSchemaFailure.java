@@ -44,6 +44,7 @@ import org.apache.paimon.table.AppendOnlyFileStoreTable;
 import org.apache.paimon.types.DataTypes;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.file.Path;
@@ -116,6 +117,71 @@ public class TestPaimonAppendSchemaFailure {
       verify(tracked, times(mode.equals("behind") ? 3 : 1)).copyWithLatestSchema();
       verify(store, never()).newWrite(anyString());
       assertEquals(3, current.latestSnapshot().get().id());
+    }
+  }
+
+  @ParameterizedTest
+  @CsvSource({"drop,false", "rename,false", "drop,true", "rename,true"})
+  void rejectsIntermediateAddedThenDroppedOrRenamedColumnAndHealsOnReplan(
+      String mode, boolean writeLatest, @TempDir Path warehouse) throws Exception {
+    try (Catalog catalog =
+        PaimonCatalogFactory.paimonCatalog(
+            Collections.singletonMap("warehouse", warehouse.toUri().toString()),
+            new Configuration())) {
+      catalog.createDatabase("db", true);
+      Identifier id = Identifier.create("db", "append_intermediate_schema");
+      catalog.createTable(
+          id,
+          Schema.newBuilder()
+              .column("id", DataTypes.INT())
+              .column("a", DataTypes.INT())
+              .option("bucket", "-1")
+              .option("write-only", "true")
+              .option("self-optimizing.enabled", "true")
+              .option("compaction.min.file-num", "2")
+              .build(),
+          false);
+      AppendOnlyFileStoreTable schema0 = (AppendOnlyFileStoreTable) catalog.getTable(id);
+      append(schema0, GenericRow.of(1, 10));
+      append(schema0, GenericRow.of(2, 20));
+
+      catalog.alterTable(
+          id,
+          Collections.singletonList(SchemaChange.addColumn("temp_col", DataTypes.INT())),
+          false);
+      AppendOnlyFileStoreTable schema1 = (AppendOnlyFileStoreTable) catalog.getTable(id);
+      append(schema1, GenericRow.of(3, 30, 999));
+
+      // Stale planner bound to schema 0 plans files including schema 1 file (requiredSchemaId=1).
+      PaimonCompactionInput stalePlanned = plan(schema0).get(0).getInput();
+
+      // Evolve to schema 2 by dropping or renaming the intermediate column temp_col.
+      SchemaChange step2 =
+          mode.equals("drop")
+              ? SchemaChange.dropColumn("temp_col")
+              : SchemaChange.renameColumn("temp_col", "renamed_col");
+      catalog.alterTable(id, Collections.singletonList(step2), false);
+
+      AppendOnlyFileStoreTable schema2 = (AppendOnlyFileStoreTable) catalog.getTable(id);
+      if (writeLatest) {
+        append(schema2, mode.equals("drop") ? GenericRow.of(4, 40) : GenericRow.of(4, 40, 888));
+        // A stale planner can scan the latest snapshot including files from schemas 0, 1 and 2.
+        stalePlanned = plan(schema0).get(0).getInput();
+      }
+      PaimonCompactionInput staleInput = stalePlanned;
+
+      IllegalStateException ex =
+          assertThrows(
+              IllegalStateException.class,
+              () -> new PaimonCompactionExecutor(staleInput).execute());
+      assertTrue(ex.getMessage().contains("Unsafe Paimon compaction schema"));
+
+      // Replanning at schema 2 must self-heal and compact historical schema 0 & schema 1 files.
+      List<PaimonCompactionTask> freshTasks = plan(schema2);
+      assertEquals(1, freshTasks.size());
+      PaimonCompactionOutput freshOut =
+          new PaimonCompactionExecutor(freshTasks.get(0).getInput()).execute();
+      assertEquals(writeLatest ? 4 : 3, freshOut.getCompactedFileCount());
     }
   }
 }

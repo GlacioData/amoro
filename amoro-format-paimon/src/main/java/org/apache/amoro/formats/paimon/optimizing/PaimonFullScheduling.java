@@ -23,11 +23,13 @@ import org.apache.amoro.config.OptimizingConfig;
 import org.apache.amoro.formats.paimon.PaimonTable;
 import org.apache.amoro.formats.paimon.optimizing.plan.PaimonPrimaryKeyOptimizingPlanner;
 import org.apache.amoro.optimizing.OptimizationContext;
+import org.apache.paimon.table.AppendOnlyFileStoreTable;
+import org.apache.paimon.table.BucketMode;
 import org.apache.paimon.table.PrimaryKeyFileStoreTable;
 
 /**
- * Refresh wakeups and scheduling admission for Paimon primary-key FULL compaction; the format
- * planner still selects files.
+ * Refresh wakeups and scheduling admission for Paimon primary-key FULL compaction and Append
+ * pending revocation; the format planner still selects files.
  */
 public final class PaimonFullScheduling {
   private PaimonFullScheduling() {}
@@ -37,8 +39,25 @@ public final class PaimonFullScheduling {
         && table.originalTable() instanceof PrimaryKeyFileStoreTable;
   }
 
+  public static boolean isSupportedAppendTable(AmoroTable<?> table) {
+    if (!(table instanceof PaimonTable)
+        || !(table.originalTable() instanceof AppendOnlyFileStoreTable)) {
+      return false;
+    }
+    BucketMode mode = ((AppendOnlyFileStoreTable) table.originalTable()).bucketMode();
+    return mode == BucketMode.HASH_FIXED || mode == BucketMode.BUCKET_UNAWARE;
+  }
+
   public static boolean shouldEvaluate(
       OptimizationContext runtime, AmoroTable<?> table, boolean pending, long now) {
+    if (isSupportedAppendTable(table)) {
+      // The analysis key and deadline already trigger refresh on snapshot, config and clock
+      // changes.
+      // Force a refresh only to revoke pending work when optimization is no longer allowed.
+      return pending
+          && (!runtime.getOptimizingConfig().isEnabled()
+              || !PaimonOptimizingEligibility.isEligible(table.properties()));
+    }
     if (!isPrimaryKeyTable(table)) {
       return false;
     }

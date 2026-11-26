@@ -92,7 +92,10 @@ public class TableRuntimeRefreshExecutor extends PeriodicTableScheduler {
       boolean planningNeedsEvaluation =
           keyBasedEvaluation && defaultTableRuntime.shouldEvaluateCurrentPlanningAnalysis();
       boolean retryUnoptimizedSnapshot =
-          optimizingConfig.isEnabled() && defaultTableRuntime.isIdle() && snapshotChanged;
+          optimizingConfig.isEnabled()
+              && defaultTableRuntime.isIdle()
+              && snapshotChanged
+              && !defaultTableRuntime.hasPlanningRetryForCurrentAnalysis();
       boolean formatEvaluation =
           table.shouldEvaluatePendingInput(
               defaultTableRuntime,

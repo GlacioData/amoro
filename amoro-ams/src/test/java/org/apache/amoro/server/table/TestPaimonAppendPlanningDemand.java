@@ -145,11 +145,10 @@ class TestPaimonAppendPlanningDemand extends PersistentBase {
 
   @ParameterizedTest
   @CsvSource({"1,MINOR", "1,FULL", "-1,MINOR", "-1,FULL"})
-  void unchangedBeforeDueAndDueEmptyPlansDoNotRepeatScans(int buckets, OptimizingType type)
+  void singleFileStaysIdleAfterIntervalAndDoesNotRepeatScans(int buckets, OptimizingType type)
       throws Exception {
     initialize(buckets, type, 1);
     refresh.execute(runtime);
-    finishEmpty(startPlanning());
     refresh.execute(runtime);
     refresh.execute(runtime);
     assertEquals(OptimizingStatus.IDLE, runtime.getOptimizingStatus());
@@ -157,16 +156,61 @@ class TestPaimonAppendPlanningDemand extends PersistentBase {
 
     setOptimizationTimes(1L);
     refresh.execute(runtime);
-    assertEquals(OptimizingStatus.PENDING, runtime.getOptimizingStatus());
-    assertTrue(pending().isSameSnapshotPlanningPending());
-    finishEmpty(startPlanning());
+    assertEquals(OptimizingStatus.IDLE, runtime.getOptimizingStatus());
+    assertFalse(pending().isSameSnapshotPlanningPending());
     refresh.execute(runtime);
     refresh.execute(runtime);
     assertEquals(OptimizingStatus.IDLE, runtime.getOptimizingStatus());
     assertFalse(pending().isSameSnapshotPlanningPending());
     assertFalse(runtime.shouldEvaluateCurrentPlanningAnalysis());
-    assertEquals(2, table.evaluations, "unchanged due empty plans must not poll manifests");
+    assertEquals(2, table.evaluations, "an unchanged single-file snapshot must not poll manifests");
     assertPersistedDemand(OptimizingStatus.IDLE, false);
+  }
+
+  @ParameterizedTest
+  @CsvSource({"false", "true"})
+  void inconclusivePlanningKeepsHealthAndRetriesTheSameKey(boolean planningInProgress)
+      throws Exception {
+    initialize(1, OptimizingType.FULL, 2);
+    setOptimizationTimes(1L);
+    if (planningInProgress) {
+      runtime.beginPlanning();
+    } else {
+      store
+          .begin()
+          .updateState(
+              DefaultTableRuntime.OPTIMIZING_STATE_KEY,
+              state -> {
+                state.setLastOptimizedSnapshotId(0L);
+                return state;
+              })
+          .commit();
+    }
+    long beforeFailure = runtime.getLastOptimizedSnapshotId();
+    long retryAt = System.currentTimeMillis() + 60_000L;
+    table.retryAtOnNextEvaluation = retryAt;
+    refresh.execute(runtime);
+
+    TableAnalysisKey key = runtime.getCurrentAnalysisKey().get();
+    assertTrue(runtime.getRuntimeHealthSnapshot().get().getCurrentHealthScore() >= 0);
+    assertEquals(beforeFailure, runtime.getLastOptimizedSnapshotId());
+    assertEquals(
+        planningInProgress ? OptimizingStatus.PLANNING : OptimizingStatus.IDLE,
+        runtime.getOptimizingStatus());
+    refresh.execute(runtime);
+    assertEquals(1, table.evaluations);
+    if (planningInProgress) {
+      assertFalse(runtime.shouldEvaluateCurrentPlanningAnalysis(retryAt));
+      runtime.completeEmptyProcess();
+      runtime.refresh(table);
+      assertEquals(key, runtime.getCurrentAnalysisKey().get());
+    }
+    assertFalse(runtime.shouldEvaluateCurrentPlanningAnalysis(retryAt - 1L));
+    assertTrue(runtime.shouldEvaluateCurrentPlanningAnalysis(retryAt));
+    runtime.evaluatePendingInputAndTransition(table, 100);
+    assertEquals(key, runtime.getCurrentAnalysisKey().get());
+    assertEquals(OptimizingStatus.PENDING, runtime.getOptimizingStatus());
+    assertFalse(runtime.hasPlanningRetryForCurrentAnalysis());
   }
 
   private void assertPersistedDemand(OptimizingStatus status, boolean pending) {
@@ -301,6 +345,7 @@ class TestPaimonAppendPlanningDemand extends PersistentBase {
 
   private static final class CountingTable extends PaimonTable {
     private int evaluations;
+    private long retryAtOnNextEvaluation;
 
     private CountingTable(AppendOnlyFileStoreTable table) {
       super(TableIdentifier.of("test", "db", "append_demand"), table);
@@ -310,7 +355,15 @@ class TestPaimonAppendPlanningDemand extends PersistentBase {
     public Optional<PendingInputResult> evaluatePendingInput(
         OptimizationContext context, int limit) {
       evaluations++;
-      return super.evaluatePendingInput(context, limit);
+      Optional<PendingInputResult> result = super.evaluatePendingInput(context, limit);
+      if (retryAtOnNextEvaluation > 0L) {
+        long retryAt = retryAtOnNextEvaluation;
+        retryAtOnNextEvaluation = 0L;
+        return result.map(
+            evaluation ->
+                PendingInputResult.retryPlanning(evaluation.tableAnalysis().get(), retryAt));
+      }
+      return result;
     }
   }
 }

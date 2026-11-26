@@ -42,9 +42,11 @@ import java.io.UncheckedIOException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Stream;
 
 /**
@@ -81,10 +83,10 @@ final class PaimonPrimaryKeySnapshotWriteRestore implements WriteRestore {
   private final boolean dynamicIndex;
   private final boolean deletionVectors;
   private final Map<BinaryRow, Map<Integer, RestoreFiles>> prepared = new HashMap<>();
-  private long requiredSchemaId = -1;
+  private final Set<Long> inputSchemaIds = new HashSet<>();
 
-  long requiredSchemaId() {
-    return requiredSchemaId;
+  Set<Long> inputSchemaIds() {
+    return Collections.unmodifiableSet(inputSchemaIds);
   }
 
   long snapshotId() {
@@ -135,7 +137,7 @@ final class PaimonPrimaryKeySnapshotWriteRestore implements WriteRestore {
       RestoreFiles files = scanFiles(partition, unit.getBucket(), dynamicIndex, deletionVectors);
       buckets.put(unit.getBucket(), files);
       for (DataFileMeta file : files.dataFiles()) {
-        requiredSchemaId = Math.max(requiredSchemaId, file.schemaId());
+        inputSchemaIds.add(file.schemaId());
       }
     }
   }

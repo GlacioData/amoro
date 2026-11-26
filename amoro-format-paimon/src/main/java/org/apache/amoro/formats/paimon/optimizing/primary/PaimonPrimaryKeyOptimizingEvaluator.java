@@ -556,7 +556,7 @@ public class PaimonPrimaryKeyOptimizingEvaluator {
     return sorted;
   }
 
-  private static PaimonPrimaryKeyOptimizingEvaluation evaluateFull(
+  static PaimonPrimaryKeyOptimizingEvaluation evaluateFull(
       FileStoreTable table,
       String tableName,
       SnapshotFiles snapshotFiles,
@@ -591,7 +591,12 @@ public class PaimonPrimaryKeyOptimizingEvaluator {
     for (PaimonBucketCompactionUnit unit : allUnits) {
       long lastCreationTime = unit.getLastFileCreationTime();
       if (!table.partitionKeys().isEmpty()) {
-        lastCreationTime = partitionWatermarks.get(ByteBuffer.wrap(unit.getPartitionBytes()));
+        Long partitionWatermark =
+            partitionWatermarks.get(ByteBuffer.wrap(unit.getPartitionBytes()));
+        if (partitionWatermark == null) {
+          throw new IllegalStateException("Missing partition watermark for analyzed bucket");
+        }
+        lastCreationTime = partitionWatermark;
       }
       if (isIdle(lastCreationTime, idleTime, planTime)) {
         fullCandidates.add(unit);
@@ -725,12 +730,12 @@ public class PaimonPrimaryKeyOptimizingEvaluator {
     return watermarks;
   }
 
-  private static class SnapshotFiles {
+  static class SnapshotFiles {
 
-    private final SnapshotReader reader;
+    final SnapshotReader reader;
     private final Map<BucketKey, BucketFiles> buckets = new LinkedHashMap<>();
 
-    private SnapshotFiles(SnapshotReader reader) {
+    SnapshotFiles(SnapshotReader reader) {
       this.reader = reader;
     }
 

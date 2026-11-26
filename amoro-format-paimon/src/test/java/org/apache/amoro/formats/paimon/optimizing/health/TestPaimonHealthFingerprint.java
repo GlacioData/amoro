@@ -333,6 +333,34 @@ class TestPaimonHealthFingerprint {
     }
   }
 
+  @ParameterizedTest
+  @ValueSource(strings = {"-0.1", "1.5", "NaN"})
+  void invalidSmallFileRatioMarksConfigurationErrorAndDisablesPlannerFacts(String invalid)
+      throws Exception {
+    try (Catalog catalog =
+        PaimonCatalogFactory.paimonCatalog(
+            Collections.singletonMap("warehouse", warehouse.toUri().toString()),
+            new Configuration())) {
+      AppendOnlyFileStoreTable table = fixedTable(catalog);
+      write(table, 1);
+      AppendOnlyFileStoreTable invalidTable =
+          (AppendOnlyFileStoreTable)
+              table.copy(Collections.singletonMap("compaction.small-file-ratio", invalid));
+      PaimonHealthEvaluationContext context =
+          PaimonHealthEvaluationContext.capture(invalidTable, "t", null);
+      assertTrue(context.configurationError().isPresent());
+      PaimonAppendSnapshotAnalysis analysis =
+          PaimonAppendFileScanner.analyze(invalidTable, context, null);
+      assertFalse(analysis.plannerFactsAvailable());
+      assertEquals(-1, analysis.pendingInput().getHealthScore());
+      assertTrue(
+          analysis
+              .healthDetails()
+              .getReasonCodes()
+              .contains(PaimonAppendHealthEvaluator.INVALID_SCORING_CONFIG));
+    }
+  }
+
   private static FormatTableAnalysis analyze(FileStoreTable table, OptimizationContext runtime) {
     PaimonHealthEvaluationContext context =
         PaimonHealthEvaluationContext.capture(table, "t", runtime);

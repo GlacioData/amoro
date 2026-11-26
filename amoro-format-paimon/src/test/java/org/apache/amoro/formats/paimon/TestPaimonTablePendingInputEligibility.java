@@ -115,11 +115,24 @@ class TestPaimonTablePendingInputEligibility {
   }
 
   @Test
-  @DisplayName("append-only BUCKET_UNAWARE table can request optimizing")
+  @DisplayName(
+      "append-only BUCKET_UNAWARE table stays idle when empty and requests optimizing when candidates exist")
   void appendOnlyBucketUnawareTableIsOptimizingNecessary(@TempDir Path warehouse) throws Exception {
     Catalog catalog = fsCatalog(warehouse);
-    Table table = createAppendOnlyTable(catalog, "t_append", eligibleRuntimeOptions());
-    PaimonTable paimonTable = wrap(table, "t_append");
+    Table emptyTable = createAppendOnlyTable(catalog, "t_append", eligibleRuntimeOptions());
+    PaimonTable emptyWrapper = wrap(emptyTable, "t_append");
+    PendingInputResult emptyResult =
+        emptyWrapper
+            .evaluatePendingInput(optimizationContext(true), 10)
+            .orElseThrow(AssertionError::new);
+    assertFalse(emptyResult.optimizingNecessary());
+    assertFalse(
+        ((PaimonPendingInput) emptyResult.optimizingPendingInput())
+            .isSameSnapshotPlanningPending());
+
+    writeCommits(emptyTable, 2);
+    PaimonTable paimonTable =
+        wrap(catalog.getTable(Identifier.create("db1", "t_append")), "t_append");
 
     PendingInputResult result =
         paimonTable
@@ -184,7 +197,8 @@ class TestPaimonTablePendingInputEligibility {
   }
 
   @Test
-  @DisplayName("append-only eligibility keeps legacy semantics when health scan fails")
+  @DisplayName(
+      "append-only scan failure keeps diagnostic reason without requesting fallback planning")
   void appendOnlyScanFailureStillRequestsPlannerFallback() {
     AppendOnlyFileStoreTable table = mock(AppendOnlyFileStoreTable.class);
     AppendOnlyFileStore store = mock(AppendOnlyFileStore.class);
@@ -210,7 +224,9 @@ class TestPaimonTablePendingInputEligibility {
             .evaluatePendingInput(optimizationContext(true), 10)
             .orElseThrow(AssertionError::new);
 
-    assertTrue(result.optimizingNecessary());
+    assertFalse(result.optimizingNecessary());
+    assertFalse(
+        ((PaimonPendingInput) result.optimizingPendingInput()).isSameSnapshotPlanningPending());
     assertEquals(-1, ((PaimonPendingInput) result.pendingInput()).getHealthScore());
     assertFalse(
         ((PaimonAppendSnapshotAnalysis) result.tableAnalysis().get()).plannerFactsAvailable());
@@ -456,14 +472,23 @@ class TestPaimonTablePendingInputEligibility {
   }
 
   @Test
-  @DisplayName("supported fixed-bucket append-only table is eligible for optimizing")
+  @DisplayName(
+      "supported fixed-bucket append-only table stays idle when empty and requests optimizing when candidates exist")
   void fixedBucketAppendOnlyTableIsEligibleForOptimizing(@TempDir Path warehouse) throws Exception {
     Catalog catalog = fsCatalog(warehouse);
     Map<String, String> options = eligibleRuntimeOptions();
     options.put("bucket", "2");
     options.put("bucket-key", "id");
-    Table table = createAppendOnlyTable(catalog, "t_fixed_bucket", options);
-    PaimonTable paimonTable = wrap(table, "t_fixed_bucket");
+    Table emptyTable = createAppendOnlyTable(catalog, "t_fixed_bucket", options);
+    PendingInputResult emptyResult =
+        wrap(emptyTable, "t_fixed_bucket")
+            .evaluatePendingInput(optimizationContext(true), 10)
+            .orElseThrow(AssertionError::new);
+    assertFalse(emptyResult.optimizingNecessary());
+
+    writeCommits(emptyTable, 2, 0);
+    PaimonTable paimonTable =
+        wrap(catalog.getTable(Identifier.create("db1", "t_fixed_bucket")), "t_fixed_bucket");
 
     PendingInputResult result =
         paimonTable
@@ -654,7 +679,9 @@ class TestPaimonTablePendingInputEligibility {
   void catalogTableDefaultsDoNotParticipateInEligibilityAndAnalysisKey(@TempDir Path warehouse)
       throws Exception {
     Catalog catalog = fsCatalog(warehouse);
-    Table table = createAppendOnlyTable(catalog, "t_catalog_default", new HashMap<>());
+    Table created = createAppendOnlyTable(catalog, "t_catalog_default", new HashMap<>());
+    writeCommits(created, 2);
+    Table table = catalog.getTable(Identifier.create("db1", "t_catalog_default"));
     TableIdentifier id = TableIdentifier.of("test_catalog", "db1", "t_catalog_default");
     Map<String, String> catalogDefaults =
         runtimeOptions(
@@ -746,6 +773,111 @@ class TestPaimonTablePendingInputEligibility {
     assertEquals(-1, roundTripped.getFileWithDeleteCount());
     assertEquals(-1L, roundTripped.getDeleteRecordCount());
     assertFalse(roundTripped.isSameSnapshotPlanningPending());
+  }
+
+  @Test
+  @DisplayName("healthy append-only table with no problem files stays idle")
+  void healthyAppendOnlyTableDoesNotRequestOptimizing(@TempDir Path warehouse) throws Exception {
+    Catalog catalog = fsCatalog(warehouse);
+    Map<String, String> options = eligibleRuntimeOptions("target-file-size", "64 b");
+    Table table = createAppendOnlyTable(catalog, "t_healthy_append", options);
+    BatchWriteBuilder writeBuilder = table.newBatchWriteBuilder();
+    try (BatchTableWrite write = writeBuilder.newWrite();
+        BatchTableCommit commit = writeBuilder.newCommit()) {
+      StringBuilder big = new StringBuilder();
+      for (int i = 0; i < 200; i++) {
+        big.append("healthy-payload-");
+      }
+      write.write(GenericRow.of(1, BinaryString.fromString(big.toString())));
+      commit.commit(write.prepareCommit());
+    }
+    PaimonTable paimonTable =
+        wrap(catalog.getTable(Identifier.create("db1", "t_healthy_append")), "t_healthy_append");
+    PendingInputResult result =
+        paimonTable
+            .evaluatePendingInput(optimizationContext(true), 10)
+            .orElseThrow(AssertionError::new);
+    assertFalse(result.optimizingNecessary());
+    assertEquals(0L, result.nextEvaluationTime());
+    assertFalse(
+        ((PaimonPendingInput) result.optimizingPendingInput()).isSameSnapshotPlanningPending());
+  }
+
+  @Test
+  @DisplayName(
+      "static append-only table arms minor/full wakeup before interval and admits when due")
+  void staticAppendOnlyTableArmsMinorAndFullWakeupThenAdmitsWhenDue(@TempDir Path warehouse)
+      throws Exception {
+    Catalog catalog = fsCatalog(warehouse);
+    Map<String, String> options =
+        eligibleRuntimeOptions(
+            "compaction.min.file-num",
+            "5",
+            "target-file-size",
+            "64 kb",
+            "source.split.open-file-cost",
+            "10 b");
+    Table table = createAppendOnlyTable(catalog, "t_static_append", options);
+    writeCommits(table, 2);
+    PaimonTable paimonTable =
+        wrap(catalog.getTable(Identifier.create("db1", "t_static_append")), "t_static_append");
+
+    long future = System.currentTimeMillis() + 60_000L;
+    OptimizingConfig minorCfg =
+        new OptimizingConfig()
+            .setEnabled(true)
+            .setMinorLeastInterval(1000)
+            .setFullTriggerInterval(-1)
+            .setFullRewriteAllFiles(false);
+    PendingInputResult waitingMinor =
+        paimonTable
+            .evaluatePendingInput(optimizationContext(minorCfg, future, 0L), 10)
+            .orElseThrow(AssertionError::new);
+    assertFalse(waitingMinor.optimizingNecessary());
+    assertEquals(future + 1001L, waitingMinor.nextEvaluationTime());
+
+    PendingInputResult dueMinor =
+        paimonTable
+            .evaluatePendingInput(optimizationContext(minorCfg, 0L, 0L), 10)
+            .orElseThrow(AssertionError::new);
+    assertTrue(dueMinor.optimizingNecessary());
+    assertEquals(0L, dueMinor.nextEvaluationTime());
+
+    OptimizingConfig fullCfg =
+        new OptimizingConfig()
+            .setEnabled(true)
+            .setMinorLeastInterval(-1)
+            .setFullTriggerInterval(2000)
+            .setFullRewriteAllFiles(false);
+    PendingInputResult waitingFull =
+        paimonTable
+            .evaluatePendingInput(optimizationContext(fullCfg, 0L, future), 10)
+            .orElseThrow(AssertionError::new);
+    assertFalse(waitingFull.optimizingNecessary());
+    assertEquals(future + 2001L, waitingFull.nextEvaluationTime());
+
+    PendingInputResult dueFull =
+        paimonTable
+            .evaluatePendingInput(optimizationContext(fullCfg, 0L, 0L), 10)
+            .orElseThrow(AssertionError::new);
+    assertTrue(dueFull.optimizingNecessary());
+    assertEquals(0L, dueFull.nextEvaluationTime());
+
+    PendingInputResult saturatingDeadline =
+        paimonTable
+            .evaluatePendingInput(optimizationContext(minorCfg, Long.MAX_VALUE - 5L, 0L), 10)
+            .orElseThrow(AssertionError::new);
+    assertFalse(saturatingDeadline.optimizingNecessary());
+    assertEquals(Long.MAX_VALUE, saturatingDeadline.nextEvaluationTime());
+
+    // Also verify PaimonFullScheduling revokes PENDING without polling IDLE unconditionally.
+    OptimizationContext ctx = optimizationContext(minorCfg, 0L, 0L);
+    assertFalse(paimonTable.shouldEvaluatePendingInput(ctx, true, System.currentTimeMillis()));
+    assertFalse(paimonTable.shouldEvaluatePendingInput(ctx, false, System.currentTimeMillis()));
+
+    OptimizationContext disabledCtx = optimizationContext(false);
+    assertTrue(
+        paimonTable.shouldEvaluatePendingInput(disabledCtx, true, System.currentTimeMillis()));
   }
 
   private static Catalog fsCatalog(Path warehouse) {

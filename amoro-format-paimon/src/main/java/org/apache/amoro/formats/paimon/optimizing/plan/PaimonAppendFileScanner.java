@@ -21,7 +21,9 @@ package org.apache.amoro.formats.paimon.optimizing.plan;
 import static org.apache.paimon.deletionvectors.DeletionVectorsIndexFile.DELETION_VECTORS_INDEX;
 
 import org.apache.amoro.config.OptimizingConfig;
+import org.apache.amoro.formats.paimon.PaimonTable;
 import org.apache.amoro.formats.paimon.optimizing.PaimonAppendCapabilities;
+import org.apache.amoro.formats.paimon.optimizing.PaimonAppendRewriteOptions;
 import org.apache.amoro.formats.paimon.optimizing.health.PaimonAppendHealthEvaluator;
 import org.apache.amoro.formats.paimon.optimizing.health.PaimonAppendHealthEvaluator.UnitAccumulator;
 import org.apache.amoro.formats.paimon.optimizing.health.PaimonAppendHealthEvaluator.UnitStatistics;
@@ -31,6 +33,7 @@ import org.apache.amoro.formats.paimon.optimizing.health.PaimonAppendSnapshotAna
 import org.apache.amoro.formats.paimon.optimizing.health.PaimonDeletionVectorCounts;
 import org.apache.amoro.formats.paimon.optimizing.health.PaimonHealthEvaluationContext;
 import org.apache.amoro.formats.paimon.optimizing.health.PaimonHealthStructureCollector;
+import org.apache.amoro.optimizing.OptimizationContext;
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.Snapshot;
 import org.apache.paimon.data.BinaryRow;
@@ -52,6 +55,7 @@ import org.slf4j.LoggerFactory;
 
 import javax.annotation.Nullable;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -73,6 +77,7 @@ public final class PaimonAppendFileScanner {
   private static final Logger LOG = LoggerFactory.getLogger(PaimonAppendFileScanner.class);
   // Keep synchronous planning bounded: three selection rounds, each with at most one proof.
   private static final int MAX_FIXED_WINDOW_ROUNDS = 3;
+  private static final long PLANNING_RETRY_DELAY_MS = 5_000L;
 
   private final AppendOnlyFileStoreTable table;
   private final PaimonHealthEvaluationContext healthContext;
@@ -117,33 +122,273 @@ public final class PaimonAppendFileScanner {
       AppendOnlyFileStoreTable table,
       PaimonHealthEvaluationContext healthContext,
       @Nullable Predicate partitionFilter) {
-    return analyze(table, healthContext, partitionFilter, true);
+    return analyze(table, healthContext, null, partitionFilter, true, System.currentTimeMillis());
+  }
+
+  public static PaimonAppendSnapshotAnalysis analyze(
+      AppendOnlyFileStoreTable table,
+      PaimonHealthEvaluationContext healthContext,
+      @Nullable OptimizationContext context,
+      @Nullable Predicate partitionFilter,
+      long now) {
+    return analyze(table, healthContext, context, partitionFilter, true, now);
   }
 
   /** Evaluate historical health without retaining candidates for a future optimizing plan. */
   public static PaimonAppendSnapshotAnalysis analyzeHealth(
       AppendOnlyFileStoreTable table, PaimonHealthEvaluationContext healthContext) {
-    return analyze(table, healthContext, null, false).withoutPlannerFacts();
+    return analyze(table, healthContext, null, null, false, System.currentTimeMillis())
+        .withoutPlannerFacts();
   }
 
   private static PaimonAppendSnapshotAnalysis analyze(
       AppendOnlyFileStoreTable table,
       PaimonHealthEvaluationContext healthContext,
+      @Nullable OptimizationContext context,
       @Nullable Predicate partitionFilter,
-      boolean collectPlannerFacts) {
+      boolean collectPlannerFacts,
+      long now) {
+    if (healthContext.configurationError().isPresent()
+        || !healthContext.coreOptions().isPresent()) {
+      return PaimonAppendSnapshotAnalysis.invalid(
+          healthContext, PaimonAppendHealthEvaluator.INVALID_SCORING_CONFIG);
+    }
+    OptimizingConfig optimizingConfig =
+        context == null || context.getOptimizingConfig() == null
+            ? new OptimizingConfig()
+            : context.getOptimizingConfig();
     PaimonPlanContext planContext =
-        PaimonPlanContext.forOptions(
-            CoreOptions.fromMap(table.options()),
-            new OptimizingConfig(),
-            0L,
-            0L,
-            0L,
-            1.0D,
-            Long.MAX_VALUE,
-            System.currentTimeMillis());
+        buildAnalysisPlanContext(
+            healthContext.coreOptions().get(),
+            optimizingConfig,
+            context == null ? 0L : context.getLastMinorOptimizingTime(),
+            context == null ? 0L : context.getLastMajorOptimizingTime(),
+            context == null ? 0L : context.getLastFullOptimizingTime(),
+            now);
     return new PaimonAppendFileScanner(table, healthContext, planContext, partitionFilter)
         .scanForAnalysis(collectPlannerFacts)
         .analysis();
+  }
+
+  private static PaimonPlanContext buildAnalysisPlanContext(
+      CoreOptions coreOptions,
+      OptimizingConfig optimizingConfig,
+      long lastMinor,
+      long lastMajor,
+      long lastFull,
+      long planTime) {
+    return PaimonPlanContext.forOptions(
+        coreOptions,
+        optimizingConfig,
+        lastMinor,
+        lastMajor,
+        lastFull,
+        1.0D,
+        Long.MAX_VALUE,
+        planTime);
+  }
+
+  public static AppendDemandEvaluation evaluateAppendDemand(
+      PaimonTable paimonTable,
+      PaimonHealthEvaluationContext healthContext,
+      PaimonAppendSnapshotAnalysis analysis,
+      Map<String, String> tableProperties,
+      @Nullable OptimizationContext context,
+      long now) {
+    AppendOnlyFileStoreTable table = (AppendOnlyFileStoreTable) paimonTable.originalTable();
+    if (analysis.snapshot() == null
+        || !analysis.plannerFactsAvailable()
+        || analysis.plannerFiles().isEmpty()) {
+      return AppendDemandEvaluation.none();
+    }
+    OptimizingConfig config =
+        context == null || context.getOptimizingConfig() == null
+            ? new OptimizingConfig()
+            : context.getOptimizingConfig();
+    if (!config.isEnabled()) {
+      return AppendDemandEvaluation.none();
+    }
+    long lastMinor = context == null ? 0L : context.getLastMinorOptimizingTime();
+    long lastMajor = context == null ? 0L : context.getLastMajorOptimizingTime();
+    long lastFull = context == null ? 0L : context.getLastFullOptimizingTime();
+    PaimonPlanContext planContext =
+        buildAnalysisPlanContext(
+            healthContext.coreOptions().get(), config, lastMinor, lastMajor, lastFull, now);
+    PaimonAppendRewriteOptions rewriteOptions = null;
+    if (table.bucketMode() == BucketMode.HASH_FIXED) {
+      try {
+        rewriteOptions = PaimonAppendRewriteOptions.from(tableProperties);
+        planContext = planContext.withFixedRewriteOptions(rewriteOptions);
+      } catch (IllegalArgumentException invalidRewriteOptions) {
+        return AppendDemandEvaluation.none();
+      }
+    }
+
+    try {
+      if (hasDemandAt(paimonTable, table, healthContext, analysis, planContext, rewriteOptions)) {
+        return new AppendDemandEvaluation(true, 0L, false);
+      }
+      if (planContext.reachFullInterval()) {
+        return AppendDemandEvaluation.none();
+      }
+      long minorDueAt =
+          planContext.reachMinorInterval()
+              ? 0L
+              : saturatedDeadline(lastMinor, config.getMinorLeastInterval());
+      long fullDueAt = saturatedDeadline(lastFull, config.getFullTriggerInterval());
+
+      // FULL takes precedence in every unit with problem files. Once FULL is due, a later
+      // MINOR deadline cannot change its file selection, so probe that scope only once.
+      if (minorDueAt > 0L
+          && (fullDueAt == 0L || minorDueAt < fullDueAt)
+          && hasDemandAt(
+              paimonTable,
+              table,
+              healthContext,
+              analysis,
+              planContext.atTime(minorDueAt, 0L, lastFull),
+              rewriteOptions)) {
+        return new AppendDemandEvaluation(false, minorDueAt, false);
+      }
+      if (fullDueAt > 0L
+          && hasDemandAt(
+              paimonTable,
+              table,
+              healthContext,
+              analysis,
+              planContext.atTime(fullDueAt, lastMinor, 0L),
+              rewriteOptions)) {
+        return new AppendDemandEvaluation(false, fullDueAt, false);
+      }
+      return AppendDemandEvaluation.none();
+    } catch (RuntimeException failure) {
+      if (!(failure instanceof IncompleteScopeException) && !causedByIo(failure)) {
+        throw failure;
+      }
+      // Paimon 1.4.2 wraps Manifest List IOExceptions in RuntimeException. Keep the
+      // completed primary analysis and retry planning on a later refresh.
+      // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/utils/ObjectsFile.java#L123-L147
+      LOG.warn(
+          "Unable to read Paimon Append planning scope for table [{}] at snapshot [{}]",
+          healthContext.key().getTableId(),
+          analysis.snapshot().id(),
+          failure);
+      return new AppendDemandEvaluation(
+          false, saturatedDeadline(now, PLANNING_RETRY_DELAY_MS - 1), true);
+    }
+  }
+
+  private static boolean causedByIo(RuntimeException failure) {
+    for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
+      if (cause instanceof IOException) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private static boolean hasDemandAt(
+      PaimonTable paimonTable,
+      AppendOnlyFileStoreTable table,
+      PaimonHealthEvaluationContext healthContext,
+      PaimonAppendSnapshotAnalysis analysis,
+      PaimonPlanContext planContext,
+      @Nullable PaimonAppendRewriteOptions rewriteOptions) {
+    PaimonAppendFileScanner scanner =
+        new PaimonAppendFileScanner(table, healthContext, planContext, null);
+    PaimonPartitionEvaluator evaluator = new PaimonPartitionEvaluator(planContext);
+    if (rewriteOptions != null) {
+      if (!hasFixedTrigger(analysis, planContext, evaluator)) {
+        return false;
+      }
+      // Paimon 1.4.2 starts the output sequence at the first input, so an unselected active
+      // file can split two candidates. Prove the same exact scope used by fixed planning.
+      // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/operation/BaseAppendFileStoreWrite.java#L187-L211
+      PaimonFixedBucketTaskPacker packer = new PaimonFixedBucketTaskPacker(planContext);
+      return scanner.fixedBucketWindows(analysis).values().stream()
+          .filter(PaimonFixedBucketFileWindow::safe)
+          .anyMatch(
+              window ->
+                  packer
+                      .publishableTasks(
+                          paimonTable,
+                          window,
+                          evaluator.evaluate(window),
+                          analysis.snapshot().id(),
+                          rewriteOptions)
+                      .findFirst()
+                      .isPresent());
+    }
+    PaimonAppendTaskPacker packer = new PaimonAppendTaskPacker(planContext);
+    return scanner.candidatesFromAnalysis(analysis, true).entrySet().stream()
+        .anyMatch(
+            entry -> !packer.pack(evaluator.evaluate(entry.getKey(), entry.getValue())).isEmpty());
+  }
+
+  private static boolean hasFixedTrigger(
+      PaimonAppendSnapshotAnalysis analysis,
+      PaimonPlanContext planContext,
+      PaimonPartitionEvaluator evaluator) {
+    Map<PaimonAppendUnitKey, List<PaimonFileCandidate>> candidatesByUnit = new HashMap<>();
+    for (PlannerFile fact : analysis.plannerFiles()) {
+      BinaryRow partition = fact.partition();
+      PaimonAppendUnitKey unit = new PaimonAppendUnitKey(partition, fact.bucket());
+      candidatesByUnit
+          .computeIfAbsent(unit, ignored -> new ArrayList<>())
+          .add(PaimonFileCandidate.from(partition, fact.file(), planContext, null, null));
+    }
+    return candidatesByUnit.entrySet().stream()
+        .anyMatch(
+            entry -> evaluator.evaluate(entry.getKey().partition(), entry.getValue()).necessary());
+  }
+
+  static long saturatedDeadline(long lastOptimizingTime, long interval) {
+    if (interval < 0L) {
+      return 0L;
+    }
+    long base = Math.max(0L, lastOptimizingTime);
+    if (Long.MAX_VALUE - base <= interval) {
+      return Long.MAX_VALUE;
+    }
+    return base + interval + 1L;
+  }
+
+  private static final class IncompleteScopeException extends RuntimeException {
+    private IncompleteScopeException() {
+      super("Deletion-vector metadata unavailable for Append planning scope");
+    }
+  }
+
+  public static final class AppendDemandEvaluation {
+    private static final AppendDemandEvaluation NONE = new AppendDemandEvaluation(false, 0L, false);
+
+    private final boolean necessary;
+    private final long nextEvaluationTime;
+
+    private final boolean retryPlanning;
+
+    private AppendDemandEvaluation(
+        boolean necessary, long nextEvaluationTime, boolean retryPlanning) {
+      this.necessary = necessary;
+      this.nextEvaluationTime = nextEvaluationTime;
+      this.retryPlanning = retryPlanning;
+    }
+
+    public boolean retryPlanning() {
+      return retryPlanning;
+    }
+
+    public static AppendDemandEvaluation none() {
+      return NONE;
+    }
+
+    public boolean necessary() {
+      return necessary;
+    }
+
+    public long nextEvaluationTime() {
+      return nextEvaluationTime;
+    }
   }
 
   ScanResult scanForAnalysis(boolean collectPlannerFacts) {
@@ -195,7 +440,7 @@ public final class PaimonAppendFileScanner {
           && !result.files().isEmpty()) {
         return new ScanResult(
             result.snapshotId(),
-            scanAllFilesInPartitions(snapshot, result.files(), deletionMetadataLookup),
+            scanAllFilesInPartitions(snapshot, result.files(), deletionMetadataLookup, false),
             result.analysis());
       }
       return result;
@@ -423,6 +668,11 @@ public final class PaimonAppendFileScanner {
 
   Map<BinaryRow, List<PaimonFileCandidate>> candidatesFromAnalysis(
       PaimonAppendSnapshotAnalysis analysis) {
+    return candidatesFromAnalysis(analysis, false);
+  }
+
+  private Map<BinaryRow, List<PaimonFileCandidate>> candidatesFromAnalysis(
+      PaimonAppendSnapshotAnalysis analysis, boolean retryIncompleteScope) {
     if (table.bucketMode() != BucketMode.BUCKET_UNAWARE) {
       // Fixed buckets require their own range proof; never mix them into partition-only inputs.
       return Collections.emptyMap();
@@ -447,10 +697,14 @@ public final class PaimonAppendFileScanner {
       count++;
       candidates.computeIfAbsent(partition, ignored -> new ArrayList<>()).add(candidate);
     }
-    if (context.reachFullInterval() && context.fullRewriteAllFiles() && !candidates.isEmpty()) {
+    if (context.reachFullInterval()
+        && context.fullRewriteAllFiles()
+        && !candidates.isEmpty()
+        && !(count == analysis.plannerFiles().size() && coversAllActiveFiles(analysis))) {
       Snapshot snapshot = analysis.snapshot();
       if (snapshot != null) {
-        return scanAllFilesInPartitions(snapshot, candidates, deletionMetadataLookup(snapshot));
+        return scanAllFilesInPartitions(
+            snapshot, candidates, deletionMetadataLookup(snapshot), retryIncompleteScope);
       }
     }
     return candidates;
@@ -459,7 +713,11 @@ public final class PaimonAppendFileScanner {
   private Map<BinaryRow, List<PaimonFileCandidate>> scanAllFilesInPartitions(
       Snapshot snapshot,
       Map<BinaryRow, List<PaimonFileCandidate>> candidateFiles,
-      DeletionMetadataLookup deletionMetadataLookup) {
+      DeletionMetadataLookup deletionMetadataLookup,
+      boolean retryIncompleteScope) {
+    if (retryIncompleteScope && deletionMetadataLookup.manifestScanFailed) {
+      throw new IncompleteScopeException();
+    }
     Map<PaimonAppendUnitKey, Map<String, Long>> bucketedCounts = new HashMap<>();
     Set<PaimonAppendUnitKey> failedDvUnits = new HashSet<>();
     Map<BinaryRow, List<PaimonFileCandidate>> allFiles = new LinkedHashMap<>();
@@ -475,6 +733,9 @@ public final class PaimonAppendFileScanner {
       DeleteLookup delete =
           deletionMetadata(entry, unitKey, deletionMetadataLookup, bucketedCounts, failedDvUnits);
       if (delete.healthCount == null) {
+        if (retryIncompleteScope) {
+          throw new IncompleteScopeException();
+        }
         return Collections.emptyMap();
       }
       PaimonFileCandidate candidate =
@@ -608,6 +869,19 @@ public final class PaimonAppendFileScanner {
   private Iterator<ManifestEntry> fixedScopeIterator(
       PaimonAppendSnapshotAnalysis analysis,
       Map<PaimonAppendUnitKey, PaimonFixedBucketFileWindow> windows) {
+    // Fixed rewrite payloads require the exact manifest metadata, including retained stats.
+    if (!context.coreOptions().manifestDeleteFileDropStats() && coversAllActiveFiles(analysis)) {
+      return analysis.plannerFiles().stream()
+          .map(
+              file ->
+                  ManifestEntry.create(
+                      FileKind.ADD,
+                      file.partition(),
+                      file.bucket(),
+                      file.totalBuckets(),
+                      file.file()))
+          .iterator();
+    }
     Set<BinaryRow> partitions = new HashSet<>();
     windows.keySet().forEach(unit -> partitions.add(unit.partition()));
     // Paimon ac223f47, operation/FileStoreScan.java:54-74 accepts one selected-unit predicate
@@ -624,6 +898,11 @@ public final class PaimonAppendFileScanner {
             (partition, bucket, total) ->
                 windows.containsKey(new PaimonAppendUnitKey(partition, bucket)))
         .readFileIterator();
+  }
+
+  private static boolean coversAllActiveFiles(PaimonAppendSnapshotAnalysis analysis) {
+    return analysis.canReusePlannerFiles(true)
+        && analysis.plannerFiles().size() == analysis.fullSnapshotFileCount();
   }
 
   int fixedScopeScanCount() {

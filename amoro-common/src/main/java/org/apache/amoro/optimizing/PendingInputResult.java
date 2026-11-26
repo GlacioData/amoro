@@ -30,6 +30,7 @@ public class PendingInputResult {
   private final boolean optimizingNecessary;
   private final FormatTableAnalysis tableAnalysis;
   private final long nextEvaluationTime;
+  private final boolean planningRetry;
 
   public PendingInputResult(FormatPendingInput pendingInput, boolean optimizingNecessary) {
     this(pendingInput, pendingInput, optimizingNecessary, null);
@@ -63,12 +64,38 @@ public class PendingInputResult {
       boolean optimizingNecessary,
       FormatTableAnalysis tableAnalysis,
       long nextEvaluationTime) {
+    this(
+        pendingInput,
+        optimizingPendingInput,
+        optimizingNecessary,
+        tableAnalysis,
+        nextEvaluationTime,
+        false);
+  }
+
+  /** Keep completed health facts while retrying an inconclusive planning evaluation. */
+  public static PendingInputResult retryPlanning(FormatTableAnalysis analysis, long retryAtMillis) {
+    if (retryAtMillis <= 0L) {
+      throw new IllegalArgumentException("Planning retry requires a deadline");
+    }
+    return new PendingInputResult(
+        analysis.pendingInput(), null, false, analysis, retryAtMillis, true);
+  }
+
+  private PendingInputResult(
+      FormatPendingInput pendingInput,
+      FormatPendingInput optimizingPendingInput,
+      boolean optimizingNecessary,
+      FormatTableAnalysis tableAnalysis,
+      long nextEvaluationTime,
+      boolean planningRetry) {
     this.pendingInput = pendingInput;
     this.optimizingPendingInput =
         optimizingPendingInput == null ? pendingInput : optimizingPendingInput;
     this.optimizingNecessary = optimizingNecessary;
     this.tableAnalysis = tableAnalysis;
     this.nextEvaluationTime = nextEvaluationTime;
+    this.planningRetry = planningRetry;
   }
 
   public FormatPendingInput pendingInput() {
@@ -86,6 +113,10 @@ public class PendingInputResult {
   /** Earliest requested reevaluation time in epoch milliseconds; zero means no deadline. */
   public long nextEvaluationTime() {
     return nextEvaluationTime;
+  }
+
+  public boolean planningRetry() {
+    return planningRetry;
   }
 
   public Optional<FormatTableAnalysis> tableAnalysis() {

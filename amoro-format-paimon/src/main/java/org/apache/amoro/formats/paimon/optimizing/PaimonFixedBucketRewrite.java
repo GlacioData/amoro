@@ -46,13 +46,12 @@ final class PaimonFixedBucketRewrite {
         throw new IllegalArgumentException("Fixed task snapshot binding mismatch");
       }
       AppendOnlyFileStoreTable table = (AppendOnlyFileStoreTable) input.getTable().originalTable();
-      long requiredSchemaId =
-          task.files().stream().mapToLong(DataFileMeta::schemaId).max().orElse(task.schemaId());
       // Paimon ac223f47, table/AbstractFileStoreTable.java:382 preserves original options.
       // Reuse Amoro's compatibility guard only when a prepared file requires a newer schema.
       table =
           (AppendOnlyFileStoreTable)
-              PaimonCompactionSchema.refreshFixed(table, requiredSchemaId, task.snapshotId());
+              PaimonCompactionSchema.refresh(
+                  table, PaimonCompactionSchema.fileSchemaIds(task.files()), task.snapshotId());
       List<DataFileMeta> after;
       // Source:
       // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/operation/BaseAppendFileStoreWrite.java#L187-L229

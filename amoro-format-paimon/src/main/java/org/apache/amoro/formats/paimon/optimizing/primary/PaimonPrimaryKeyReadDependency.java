@@ -54,10 +54,24 @@ final class PaimonPrimaryKeyReadDependency implements Serializable {
   final long snapshotId;
   final List<Bucket> buckets;
 
-  static boolean required(FileStoreTable table) {
-    return table != null
-        && table.bucketMode() == BucketMode.HASH_FIXED
+  static boolean isBucketedDeletionVectorMode(FileStoreTable table) {
+    if (table == null) {
+      return false;
+    }
+    // Paimon 1.4.2 supports bucketed deletion vectors on both HASH_FIXED and HASH_DYNAMIC,
+    // while ConflictDetection skips bucketed DV checks and IndexManifestFileHandler's
+    // BucketedCombiner replaces the entire bucket's DV index on commit:
+    // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/schema/SchemaValidation.java#L605-L607
+    // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/KeyValueFileStore.java#L170-L177
+    // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/operation/commit/ConflictDetection.java#L229-L250
+    // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/index/IndexManifestFileHandler.java#L485-L489
+    BucketMode mode = table.bucketMode();
+    return (mode == BucketMode.HASH_FIXED || mode == BucketMode.HASH_DYNAMIC)
         && CoreOptions.fromMap(table.options()).deletionVectorsEnabled();
+  }
+
+  static boolean required(FileStoreTable table) {
+    return isBucketedDeletionVectorMode(table);
   }
 
   PaimonPrimaryKeyReadDependency(

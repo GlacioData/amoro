@@ -698,6 +698,46 @@ class TestPaimonPrimaryKeyOptimizingEvaluator {
   }
 
   @Test
+  @DisplayName(
+      "standalone evaluate overload rejects missing partition watermark with IllegalStateException instead of NPE")
+  void standaloneEvaluateFullRejectsMissingPartitionWatermarkWithoutNpe(@TempDir Path warehouse)
+      throws Exception {
+    Catalog catalog = fsCatalog(warehouse);
+    Map<String, String> options = primaryKeyOptions();
+    options.put(PaimonPrimaryKeyOptions.PARTITION_IDLE_TIME, "0s");
+    BinaryRow partition = BinaryRow.singleColumn(BinaryString.fromString("p_missing"));
+    HealthFixture fixture =
+        healthFixture(
+            catalog,
+            "t_standalone_missing_watermark",
+            options,
+            Collections.singletonList(
+                entry(partition, 0, file("data", 100L, 10L, 0, 1, 1L, 1_000L))),
+            true,
+            BucketMode.HASH_FIXED);
+    when(fixture.reader.partitionEntries()).thenReturn(Collections.emptyList());
+
+    PaimonBucketCompactionUnit unit =
+        unit(SerializationUtils.serializeBinaryRow(partition), 0, 1L, 1L, 100L);
+    IllegalStateException ex =
+        assertThrows(
+            IllegalStateException.class,
+            () ->
+                PaimonPrimaryKeyOptimizingEvaluator.evaluateFull(
+                    fixture.table,
+                    "t_standalone_missing_watermark",
+                    new PaimonPrimaryKeyOptimizingEvaluator.SnapshotFiles(fixture.reader),
+                    Collections.singletonList(unit),
+                    PaimonPrimaryKeyOptions.from(options),
+                    defaultConfig().setFullTriggerInterval(1),
+                    0L,
+                    10_000L,
+                    1L,
+                    0L));
+    assertTrue(ex.getMessage().contains("Missing partition watermark"));
+  }
+
+  @Test
   @DisplayName("enabled table without snapshot is not necessary")
   void noSnapshotIsNotNecessary(@TempDir Path warehouse) throws Exception {
     Catalog catalog = fsCatalog(warehouse);

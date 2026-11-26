@@ -412,6 +412,19 @@ public final class PaimonHealthEvaluationContext {
     return interval >= 0 && now >= lastOptimizingTime && now - lastOptimizingTime > interval;
   }
 
+  /** Validate {@code compaction.small-file-ratio} identically across health and planning paths. */
+  public static double validateSmallFileRatio(double ratio) {
+    if (!Double.isFinite(ratio) || ratio < 0.0D || ratio > 1.0D) {
+      throw new IllegalArgumentException(
+          "Invalid "
+              + COMPACTION_SMALL_FILE_RATIO
+              + ": "
+              + ratio
+              + "; expected finite value in [0.0, 1.0]");
+    }
+    return ratio;
+  }
+
   private static void addFixedAppendPlanningOptions(
       FingerprintBuilder builder,
       AppendOnlyFileStoreTable table,
@@ -495,6 +508,8 @@ public final class PaimonHealthEvaluationContext {
       return;
     }
     builder
+        .add("optimizingEnabled", config.isEnabled())
+        .add("maxTaskSize", config.getMaxTaskSize())
         .add("minorLeastInterval", config.getMinorLeastInterval())
         .add("fullTriggerInterval", config.getFullTriggerInterval())
         .add("fullRewriteAllFiles", config.isFullRewriteAllFiles())
@@ -760,7 +775,10 @@ public final class PaimonHealthEvaluationContext {
         Options options = Options.fromMap(rawOptions);
         long smallFileBoundary =
             options.containsKey(COMPACTION_SMALL_FILE_RATIO)
-                ? (long) (targetFileSize * options.getDouble(COMPACTION_SMALL_FILE_RATIO, 0.7D))
+                ? (long)
+                    (targetFileSize
+                        * validateSmallFileRatio(
+                            options.getDouble(COMPACTION_SMALL_FILE_RATIO, 0.7D)))
                 : compactionFileSize;
         return new EffectiveOptions(
             targetFileSize,

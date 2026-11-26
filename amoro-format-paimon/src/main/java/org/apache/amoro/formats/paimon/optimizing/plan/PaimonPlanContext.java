@@ -99,7 +99,10 @@ final class PaimonPlanContext {
 
   private static long smallFileBoundary(CoreOptions coreOptions, Options options, long targetSize) {
     if (options.containsKey(COMPACTION_SMALL_FILE_RATIO)) {
-      return (long) (targetSize * options.getDouble(COMPACTION_SMALL_FILE_RATIO, 0.7D));
+      double ratio =
+          PaimonHealthEvaluationContext.validateSmallFileRatio(
+              options.getDouble(COMPACTION_SMALL_FILE_RATIO, 0.7D));
+      return (long) (targetSize * ratio);
     }
     return coreOptions.compactionFileSize(false);
   }
@@ -139,6 +142,19 @@ final class PaimonPlanContext {
         maxInputSizePerThread,
         planTime,
         java.util.Objects.requireNonNull(options, "fixed rewrite options"));
+  }
+
+  PaimonPlanContext atTime(long time, long lastMinor, long lastFull) {
+    return new PaimonPlanContext(
+        coreOptions,
+        optimizingConfig,
+        lastMinor,
+        lastMajorOptimizingTime,
+        lastFull,
+        availableCore,
+        maxInputSizePerThread,
+        time,
+        fixedRewriteOptions);
   }
 
   OptimizingConfig optimizingConfig() {
