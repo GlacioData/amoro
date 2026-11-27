@@ -3410,13 +3410,14 @@
         "type": "prometheus",
         "uid": "${Datasource}"
       },
-      "description": "表优化开关统计：开启优化 = ams_self_optimizing_tables{enabled=\"true\"}（JSPT-2867）；未开启 = 总表数（按表级 counter 序列去重计数）- 开启数；开启占比 = 开启数 / 总表数。注意：enabled gauge 无库/表标签，选择具体 Database/Table 时未开启数会偏低、占比可能失真。",
+      "description": "所选 AMS 实例与 Catalog 中，自优化开关可判定的已加载表数量。Total 为 Enabled 与 Disabled 之和，总数为零时不显示开启占比。",
       "fieldConfig": {
         "defaults": {
           "color": {
             "fixedColor": "text",
             "mode": "thresholds"
           },
+          "decimals": 0,
           "mappings": [],
           "thresholds": {
             "mode": "absolute",
@@ -3430,6 +3431,21 @@
           "unit": "none"
         },
         "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Total"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "text",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
           {
             "matcher": {
               "id": "byName",
@@ -3486,8 +3502,8 @@
         ]
       },
       "gridPos": {
-        "h": 5,
-        "w": 12,
+        "h": 4,
+        "w": 24,
         "x": 0,
         "y": 37
       },
@@ -3519,6 +3535,25 @@
           "disableTextWrap": false,
           "editorMode": "code",
           "exemplar": false,
+          "expr": "sum(amoro_ams_self_optimizing_tables{instance=~\"$Instance\", catalog=~\"$Catalog\"})",
+          "fullMetaSearch": false,
+          "hide": false,
+          "includeNullMetadata": true,
+          "instant": true,
+          "interval": "",
+          "legendFormat": "Total",
+          "range": false,
+          "refId": "A",
+          "useBackend": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${Datasource}"
+          },
+          "disableTextWrap": false,
+          "editorMode": "code",
+          "exemplar": false,
           "expr": "sum(amoro_ams_self_optimizing_tables{instance=~\"$Instance\", catalog=~\"$Catalog\", enabled=\"true\"})",
           "fullMetaSearch": false,
           "hide": false,
@@ -3538,7 +3573,7 @@
           "disableTextWrap": false,
           "editorMode": "code",
           "exemplar": false,
-          "expr": "count(count by (catalog, database, table) (amoro_table_optimizing_process_total_count_total{instance=~\"$Instance\", catalog=~\"$Catalog\", database=~\"$Database\", table=~\"$Table\"})) - sum(amoro_ams_self_optimizing_tables{instance=~\"$Instance\", catalog=~\"$Catalog\", enabled=\"true\"})",
+          "expr": "sum(amoro_ams_self_optimizing_tables{instance=~\"$Instance\", catalog=~\"$Catalog\", enabled=\"false\"})",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
@@ -3557,7 +3592,7 @@
           "disableTextWrap": false,
           "editorMode": "code",
           "exemplar": false,
-          "expr": "sum(amoro_ams_self_optimizing_tables{instance=~\"$Instance\", catalog=~\"$Catalog\", enabled=\"true\"}) / count(count by (catalog, database, table) (amoro_table_optimizing_process_total_count_total{instance=~\"$Instance\", catalog=~\"$Catalog\", database=~\"$Database\", table=~\"$Table\"}))",
+          "expr": "sum(amoro_ams_self_optimizing_tables{instance=~\"$Instance\", catalog=~\"$Catalog\", enabled=\"true\"}) / (sum(amoro_ams_self_optimizing_tables{instance=~\"$Instance\", catalog=~\"$Catalog\"}) > 0)",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
@@ -3577,7 +3612,7 @@
         "type": "prometheus",
         "uid": "${Datasource}"
       },
-      "description": "开启优化与未开启优化的表数量两线对比（左轴，绝对数量），叠加开启占比曲线（右轴，开启数/总表数）。新表接入、开关变更都会体现为阶梯变化。口径与左侧 stat 面板一致。",
+      "description": "所选 AMS 实例与 Catalog 的已加载表数量趋势，按自优化开关分类展示 Total、Enabled 和 Disabled。",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -3600,7 +3635,7 @@
               "viz": false
             },
             "insertNulls": false,
-            "lineInterpolation": "linear",
+            "lineInterpolation": "stepAfter",
             "lineWidth": 1,
             "pointSize": 5,
             "scaleDistribution": {
@@ -3629,9 +3664,24 @@
               }
             ]
           },
-          "unit": "short"
+          "unit": "none"
         },
         "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Total"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "light-blue",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
           {
             "matcher": {
               "id": "byName",
@@ -3661,6 +3711,168 @@
                 }
               }
             ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 41
+      },
+      "id": 60,
+      "options": {
+        "legend": {
+          "calcs": [
+            "firstNotNull",
+            "lastNotNull"
+          ],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "11.5.2",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${Datasource}"
+          },
+          "disableTextWrap": false,
+          "editorMode": "code",
+          "exemplar": false,
+          "expr": "sum(amoro_ams_self_optimizing_tables{instance=~\"$Instance\", catalog=~\"$Catalog\"})",
+          "fullMetaSearch": false,
+          "hide": false,
+          "includeNullMetadata": true,
+          "instant": false,
+          "interval": "",
+          "legendFormat": "Total",
+          "range": true,
+          "refId": "A",
+          "useBackend": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${Datasource}"
+          },
+          "disableTextWrap": false,
+          "editorMode": "code",
+          "exemplar": false,
+          "expr": "sum(amoro_ams_self_optimizing_tables{instance=~\"$Instance\", catalog=~\"$Catalog\", enabled=\"true\"})",
+          "fullMetaSearch": false,
+          "hide": false,
+          "includeNullMetadata": true,
+          "instant": false,
+          "interval": "",
+          "legendFormat": "Enabled",
+          "range": true,
+          "refId": "B",
+          "useBackend": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${Datasource}"
+          },
+          "disableTextWrap": false,
+          "editorMode": "code",
+          "exemplar": false,
+          "expr": "sum(amoro_ams_self_optimizing_tables{instance=~\"$Instance\", catalog=~\"$Catalog\", enabled=\"false\"})",
+          "fullMetaSearch": false,
+          "hide": false,
+          "includeNullMetadata": true,
+          "instant": false,
+          "interval": "",
+          "legendFormat": "Disabled",
+          "range": true,
+          "refId": "C",
+          "useBackend": false
+        }
+      ],
+      "title": "Self Optimizing Tables Trend",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${Datasource}"
+      },
+      "description": "所选 AMS 实例与 Catalog 的开启趋势。左轴自动缩放并展示 Enabled 表数，右轴展示 Enabled Ratio 开启占比。",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "decimals": 0,
+          "mappings": [],
+          "noValue": "无数据",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Enabled"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "dark-green",
+                  "mode": "fixed"
+                }
+              }
+            ]
           },
           {
             "matcher": {
@@ -3677,14 +3889,6 @@
                 "value": 1
               },
               {
-                "id": "min",
-                "value": 0
-              },
-              {
-                "id": "max",
-                "value": 1
-              },
-              {
                 "id": "color",
                 "value": {
                   "fixedColor": "blue",
@@ -3696,8 +3900,12 @@
                 "value": "right"
               },
               {
-                "id": "custom.axisLabel",
-                "value": "开启占比"
+                "id": "custom.fillOpacity",
+                "value": 0
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 1
               }
             ]
           }
@@ -3707,12 +3915,13 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 37
+        "y": 41
       },
-      "id": 60,
+      "id": 66,
       "options": {
         "legend": {
           "calcs": [
+            "firstNotNull",
             "lastNotNull"
           ],
           "displayMode": "list",
@@ -3743,7 +3952,7 @@
           "interval": "",
           "legendFormat": "Enabled",
           "range": true,
-          "refId": "B",
+          "refId": "A",
           "useBackend": false
         },
         {
@@ -3754,26 +3963,7 @@
           "disableTextWrap": false,
           "editorMode": "code",
           "exemplar": false,
-          "expr": "count(count by (catalog, database, table) (amoro_table_optimizing_process_total_count_total{instance=~\"$Instance\", catalog=~\"$Catalog\", database=~\"$Database\", table=~\"$Table\"})) - sum(amoro_ams_self_optimizing_tables{instance=~\"$Instance\", catalog=~\"$Catalog\", enabled=\"true\"})",
-          "fullMetaSearch": false,
-          "hide": false,
-          "includeNullMetadata": true,
-          "instant": false,
-          "interval": "",
-          "legendFormat": "Disabled",
-          "range": true,
-          "refId": "C",
-          "useBackend": false
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${Datasource}"
-          },
-          "disableTextWrap": false,
-          "editorMode": "code",
-          "exemplar": false,
-          "expr": "sum(amoro_ams_self_optimizing_tables{instance=~\"$Instance\", catalog=~\"$Catalog\", enabled=\"true\"}) / count(count by (catalog, database, table) (amoro_table_optimizing_process_total_count_total{instance=~\"$Instance\", catalog=~\"$Catalog\", database=~\"$Database\", table=~\"$Table\"}))",
+          "expr": "sum(amoro_ams_self_optimizing_tables{instance=~\"$Instance\", catalog=~\"$Catalog\", enabled=\"true\"}) / (sum(amoro_ams_self_optimizing_tables{instance=~\"$Instance\", catalog=~\"$Catalog\"}) > 0)",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
@@ -3781,11 +3971,11 @@
           "interval": "",
           "legendFormat": "Enabled Ratio",
           "range": true,
-          "refId": "D",
+          "refId": "B",
           "useBackend": false
         }
       ],
-      "title": "Self Optimizing Tables Trend",
+      "title": "Self Optimizing Enabled Trend",
       "type": "timeseries"
     },
     {
@@ -3794,7 +3984,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 45
+        "y": 49
       },
       "id": 45,
       "panels": [
@@ -4772,14 +4962,14 @@
           "type": "prometheus",
           "uid": "${Datasource}"
         },
-        "definition": "label_values(amoro_ams_jvm_cpu_load,instance)",
+        "definition": "label_values({__name__=~\"amoro_ams_jvm_cpu_load|amoro_ams_self_optimizing_tables\"},instance)",
         "includeAll": true,
         "label": "Host",
         "multi": true,
         "name": "Instance",
         "options": [],
         "query": {
-          "query": "label_values(amoro_ams_jvm_cpu_load,instance)",
+          "query": "label_values({__name__=~\"amoro_ams_jvm_cpu_load|amoro_ams_self_optimizing_tables\"},instance)",
           "refId": "PrometheusVariableQueryEditor-VariableQuery"
         },
         "refresh": 1,
@@ -4798,13 +4988,13 @@
           "type": "prometheus",
           "uid": "${Datasource}"
         },
-        "definition": "label_values(amoro_table_optimizing_process_total_count_total{instance=~\"$Instance\"},catalog)",
+        "definition": "label_values({__name__=~\"amoro_ams_self_optimizing_tables|amoro_table_optimizing_process_total_count_total\",instance=~\"$Instance\"},catalog)",
         "includeAll": true,
         "multi": true,
         "name": "Catalog",
         "options": [],
         "query": {
-          "query": "label_values(amoro_table_optimizing_process_total_count_total{instance=~\"$Instance\"},catalog)",
+          "query": "label_values({__name__=~\"amoro_ams_self_optimizing_tables|amoro_table_optimizing_process_total_count_total\",instance=~\"$Instance\"},catalog)",
           "refId": "PrometheusVariableQueryEditor-VariableQuery"
         },
         "refresh": 1,
