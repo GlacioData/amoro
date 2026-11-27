@@ -353,6 +353,9 @@ class TestPaimonTableDescriptorOptimizingProcesses {
     SnapshotManager manager = mock(SnapshotManager.class);
     when(manager.latestSnapshotId()).thenReturn(20L);
     when(manager.earliestSnapshotId()).thenReturn(1L);
+    for (Snapshot s : firstWindow) {
+      when(manager.tryGetSnapshot(s.id())).thenReturn(s);
+    }
     when(manager.snapshotsWithinRange(any(), any())).thenReturn(firstWindow.iterator());
 
     AmoroTable<?> amoroTable = wireAmoroTable(manager, manifestList, manifestFile);
@@ -385,6 +388,9 @@ class TestPaimonTableDescriptorOptimizingProcesses {
     SnapshotManager manager = mock(SnapshotManager.class);
     when(manager.latestSnapshotId()).thenReturn(20L);
     when(manager.earliestSnapshotId()).thenReturn(1L);
+    for (Snapshot s : cursorWindow) {
+      when(manager.tryGetSnapshot(s.id())).thenReturn(s);
+    }
     when(manager.snapshotsWithinRange(any(), any())).thenReturn(cursorWindow.iterator());
 
     AmoroTable<?> amoroTable = wireAmoroTable(manager, manifestList, manifestFile);
@@ -410,6 +416,13 @@ class TestPaimonTableDescriptorOptimizingProcesses {
     long latest = snapshots.stream().mapToLong(Snapshot::id).max().orElseThrow(AssertionError::new);
     when(manager.earliestSnapshotId()).thenReturn(earliest);
     when(manager.latestSnapshotId()).thenReturn(latest);
+    try {
+      for (Snapshot snapshot : snapshots) {
+        when(manager.tryGetSnapshot(snapshot.id())).thenReturn(snapshot);
+      }
+    } catch (java.io.FileNotFoundException impossible) {
+      throw new AssertionError(impossible);
+    }
     when(manager.snapshotsWithinRange(any(), any()))
         .thenAnswer(
             (InvocationOnMock invocation) -> {
@@ -542,6 +555,9 @@ class TestPaimonTableDescriptorOptimizingProcesses {
     SnapshotManager manager = mock(SnapshotManager.class);
     when(manager.latestSnapshotId()).thenReturn(20L);
     when(manager.earliestSnapshotId()).thenReturn(1L);
+    for (Snapshot s : all) {
+      when(manager.tryGetSnapshot(s.id())).thenReturn(s);
+    }
     when(manager.snapshotsWithinRange(any(), any())).thenReturn(all.iterator());
 
     AmoroTable<?> amoroTable = wirePrimaryKeyAmoroTable(manager, manifestList, manifestFile);
@@ -572,6 +588,9 @@ class TestPaimonTableDescriptorOptimizingProcesses {
     SnapshotManager manager = mock(SnapshotManager.class);
     when(manager.latestSnapshotId()).thenReturn(20L);
     when(manager.earliestSnapshotId()).thenReturn(1L);
+    for (Snapshot s : all) {
+      when(manager.tryGetSnapshot(s.id())).thenReturn(s);
+    }
     when(manager.snapshotsWithinRange(any(), any())).thenReturn(all.iterator());
 
     AmoroTable<?> amoroTable = wireAmoroTable(manager, manifestList, manifestFile);
@@ -640,6 +659,9 @@ class TestPaimonTableDescriptorOptimizingProcesses {
     SnapshotManager manager = mock(SnapshotManager.class);
     when(manager.latestSnapshotId()).thenReturn(10L);
     when(manager.earliestSnapshotId()).thenReturn(1L);
+    for (Snapshot s : all) {
+      when(manager.tryGetSnapshot(s.id())).thenReturn(s);
+    }
     when(manager.snapshotsWithinRange(any(), any())).thenReturn(all.iterator());
 
     AmoroTable<?> amoroTable = wireAmoroTable(manager, manifestList, manifestFile);
@@ -651,5 +673,107 @@ class TestPaimonTableDescriptorOptimizingProcesses {
     assertEquals(5, result.getLeft().size(), "only the 5 COMPACT snapshots must surface");
     assertEquals(5, result.getRight(), "the scan reaches earliest, so no sentinel is needed");
     verify(manager, never()).snapshots();
+  }
+
+  @Test
+  void multiPartitionCompactSeparatesBucketsAndExcludesLevelUpgradedFiles() throws Exception {
+    Snapshot compact = mockSnapshot(55L, Snapshot.CommitKind.COMPACT);
+    when(compact.timeMillis()).thenReturn(10_000L);
+    SnapshotManager manager = mockRangeSnapshotManager(Collections.singletonList(compact));
+    when(manager.tryGetSnapshot(55L)).thenReturn(compact);
+
+    ManifestList manifestList = mock(ManifestList.class);
+    ManifestFile manifestFile = mock(ManifestFile.class);
+    ManifestFileMeta meta = mock(ManifestFileMeta.class);
+    when(meta.fileName()).thenReturn("compact-delta");
+    when(manifestList.readDeltaManifests(compact)).thenReturn(Collections.singletonList(meta));
+
+    org.apache.paimon.data.BinaryRow partA =
+        org.apache.paimon.data.BinaryRow.singleColumn(
+            org.apache.paimon.data.BinaryString.fromString("2026-11-26"));
+    org.apache.paimon.data.BinaryRow partB =
+        org.apache.paimon.data.BinaryRow.singleColumn(
+            org.apache.paimon.data.BinaryString.fromString("2026-11-27"));
+
+    // Partition A, bucket 0: in-place level upgrade (same fileName in DELETE and ADD).
+    ManifestEntry upgDel =
+        namedEntry(partA, 0, FileKind.DELETE, "data-upgraded.orc", 500L, 50L, 0, 100L);
+    ManifestEntry upgAdd =
+        namedEntry(partA, 0, FileKind.ADD, "data-upgraded.orc", 500L, 50L, 4, 100L);
+
+    // Partition B, bucket 0: real physical rewrite of 2 files -> 1 output file.
+    ManifestEntry rewDel1 =
+        namedEntry(partB, 0, FileKind.DELETE, "data-in-1.orc", 300L, 30L, 0, 2_000L);
+    ManifestEntry rewDel2 =
+        namedEntry(partB, 0, FileKind.DELETE, "data-in-2.orc", 200L, 20L, 0, 3_000L);
+    ManifestEntry rewAdd =
+        namedEntry(partB, 0, FileKind.ADD, "data-out-1.orc", 420L, 45L, 4, 9_000L);
+
+    when(manifestFile.read("compact-delta"))
+        .thenReturn(Arrays.asList(upgDel, upgAdd, rewDel1, rewDel2, rewAdd));
+
+    AmoroTable<?> amoroTable = wirePrimaryKeyAmoroTable(manager, manifestList, manifestFile);
+    FileStoreTable storeTable = (FileStoreTable) amoroTable.originalTable();
+    when(storeTable.partitionKeys()).thenReturn(Collections.singletonList("dt"));
+    when(storeTable.rowType())
+        .thenReturn(
+            org.apache.paimon.types.RowType.of(
+                new org.apache.paimon.types.DataType[] {
+                  org.apache.paimon.types.DataTypes.STRING(),
+                  org.apache.paimon.types.DataTypes.INT()
+                },
+                new String[] {"dt", "id"}));
+
+    PaimonTableDescriptor descriptor = new PaimonTableDescriptor();
+    OptimizingProcessInfo info =
+        descriptor.getOptimizingProcessesInfo(amoroTable, null, null, 5, 0, null).getLeft().get(0);
+
+    assertEquals("FULL", info.getOptimizingType());
+    assertEquals(
+        2, info.getTotalTasks(), "Two distinct (partition, bucket-0) units must count as 2");
+    assertEquals(2, info.getInputFiles().getFileCnt());
+    assertEquals(500L, info.getInputFiles().getTotalSize());
+    assertEquals(1, info.getOutputFiles().getFileCnt());
+    assertEquals(420L, info.getOutputFiles().getTotalSize());
+    assertEquals("50", info.getSummary().get("input-data-records(rewrite)"));
+    assertEquals("45", info.getSummary().get("output-data-records"));
+    assertEquals(9_000L, info.getStartTime(), "Upgraded file creationTime must not skew startTime");
+    assertEquals(1_000L, info.getDuration());
+
+    List<OptimizingTaskInfo> tasks = descriptor.getOptimizingTaskInfos(amoroTable, "55");
+    assertEquals(2, tasks.size(), "Each (partition, bucket) must produce its own task row");
+    Map<String, OptimizingTaskInfo> byPart =
+        tasks.stream().collect(Collectors.toMap(OptimizingTaskInfo::getPartitionData, t -> t));
+    OptimizingTaskInfo taskA = byPart.get("dt=2026-11-26/bucket-0");
+    OptimizingTaskInfo taskB = byPart.get("dt=2026-11-27/bucket-0");
+    assertEquals(0, taskA.getInputFiles().getFileCnt());
+    assertEquals(0, taskA.getOutputFiles().getFileCnt());
+    assertEquals(2, taskB.getInputFiles().getFileCnt());
+    assertEquals(1, taskB.getOutputFiles().getFileCnt());
+  }
+
+  private static ManifestEntry namedEntry(
+      org.apache.paimon.data.BinaryRow partition,
+      int bucket,
+      FileKind kind,
+      String fileName,
+      long fileSize,
+      long rowCount,
+      int level,
+      long creationMillis) {
+    DataFileMeta file = mock(DataFileMeta.class);
+    when(file.fileName()).thenReturn(fileName);
+    when(file.fileSize()).thenReturn(fileSize);
+    when(file.rowCount()).thenReturn(rowCount);
+    when(file.deleteRowCount()).thenReturn(Optional.of(0L));
+    when(file.level()).thenReturn(level);
+    when(file.creationTime())
+        .thenReturn(org.apache.paimon.data.Timestamp.fromEpochMillis(creationMillis));
+    ManifestEntry entry = mock(ManifestEntry.class);
+    when(entry.partition()).thenReturn(partition);
+    when(entry.bucket()).thenReturn(bucket);
+    when(entry.kind()).thenReturn(kind);
+    when(entry.file()).thenReturn(file);
+    return entry;
   }
 }

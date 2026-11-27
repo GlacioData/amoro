@@ -49,21 +49,16 @@ import java.util.stream.Collectors;
 class TestSnapShotsScanUtils {
 
   /**
-   * Builds a fake {@link SnapshotManager} covering ids in {@code [earliest, latest]} inclusive. The
-   * mock {@code snapshotsWithinRange(max, min)} returns every id in {@code [min, max)} descending —
-   * upper-exclusive, matching the call-site's expectation that the cursor id itself is not
-   * re-emitted on the following page.
+   * Builds a fake {@link SnapshotManager} covering ids in {@code [earliest, latest]} inclusive,
+   * matching Paimon 1.4.2 {@link SnapshotManager#tryGetSnapshot(long)} and closed-interval {@link
+   * SnapshotManager#snapshotsWithinRange(Optional, Optional)} semantics.
    */
   private static SnapshotManager mockSnapshotManager(long earliest, long latest) {
     SnapshotManager manager = mock(SnapshotManager.class);
 
     if (latest < earliest) {
-      // Empty table: latestSnapshotId() returns null; earliestSnapshot() still
-      // hands back a non-null snapshot (any id) because scanWithPagination calls
-      // .id() on it before checking the null guard.
-      Snapshot emptySnap = mock(Snapshot.class);
-      when(emptySnap.id()).thenReturn(0L);
-      when(manager.earliestSnapshot()).thenReturn(emptySnap);
+      when(manager.earliestSnapshot()).thenReturn(null);
+      when(manager.earliestSnapshotId()).thenReturn(null);
       when(manager.latestSnapshotId()).thenReturn(null);
       return manager;
     }
@@ -71,17 +66,28 @@ class TestSnapShotsScanUtils {
     Snapshot earliestSnap = mock(Snapshot.class);
     when(earliestSnap.id()).thenReturn(earliest);
     when(manager.earliestSnapshot()).thenReturn(earliestSnap);
+    when(manager.earliestSnapshotId()).thenReturn(earliest);
     when(manager.latestSnapshotId()).thenReturn(latest);
+
+    try {
+      for (long id = earliest; id <= latest; id++) {
+        Snapshot s = mock(Snapshot.class);
+        when(s.id()).thenReturn(id);
+        when(manager.tryGetSnapshot(id)).thenReturn(s);
+      }
+    } catch (java.io.FileNotFoundException impossible) {
+      throw new AssertionError(impossible);
+    }
 
     when(manager.snapshotsWithinRange(any(), any()))
         .thenAnswer(
             (InvocationOnMock invocation) -> {
               Optional<Long> upper = invocation.getArgument(0);
               Optional<Long> lower = invocation.getArgument(1);
-              long max = upper.orElse(latest);
-              long min = lower.orElse(earliest);
+              long max = Math.min(latest, upper.orElse(latest));
+              long min = Math.max(earliest, lower.orElse(earliest));
               List<Snapshot> out = new ArrayList<>();
-              for (long id = max - 1; id >= min; id--) {
+              for (long id = min; id <= max; id++) {
                 Snapshot s = mock(Snapshot.class);
                 when(s.id()).thenReturn(id);
                 out.add(s);
@@ -167,5 +173,55 @@ class TestSnapShotsScanUtils {
 
     assertTrue(result.getLeft().isEmpty(), "empty snapshot manager must yield empty list");
     assertEquals(0, result.getRight(), "empty snapshot manager must yield zero count");
+  }
+
+  @Test
+  void realEmptyTableWithNullEarliestSnapshotDoesNotThrowNpeAndClosedRangeSkipsExpired()
+      throws Exception {
+    // Real Paimon SnapshotManager returns null for BOTH earliestSnapshot() and earliestSnapshotId()
+    // on a 0-snapshot table.
+    SnapshotManager emptyReal = mock(SnapshotManager.class);
+    when(emptyReal.earliestSnapshot()).thenReturn(null);
+    when(emptyReal.earliestSnapshotId()).thenReturn(null);
+    when(emptyReal.latestSnapshotId()).thenReturn(null);
+
+    Pair<List<Snapshot>, Integer> emptyRes =
+        SnapShotsScanUtils.getSnapshotsWithPagination(emptyReal, null, 5, 0, null);
+    assertTrue(emptyRes.getLeft().isEmpty());
+    assertEquals(0, emptyRes.getRight());
+
+    // Closed-interval Paimon SnapshotManager [1..6] where snapshot-4 expired concurrently
+    // (tryGetSnapshot(4) throws FileNotFoundException, snapshot(4) throws RuntimeException).
+    SnapshotManager closedManager = mock(SnapshotManager.class);
+    when(closedManager.earliestSnapshotId()).thenReturn(1L);
+    when(closedManager.latestSnapshotId()).thenReturn(6L);
+    for (long id = 1L; id <= 6L; id++) {
+      if (id == 4L) {
+        when(closedManager.tryGetSnapshot(4L))
+            .thenThrow(new java.io.FileNotFoundException("snapshot-4 expired"));
+        when(closedManager.snapshot(4L))
+            .thenThrow(new RuntimeException(new java.io.FileNotFoundException("snapshot-4")));
+      } else {
+        Snapshot s = mock(Snapshot.class);
+        when(s.id()).thenReturn(id);
+        when(s.commitKind()).thenReturn(Snapshot.CommitKind.COMPACT);
+        when(closedManager.tryGetSnapshot(id)).thenReturn(s);
+        when(closedManager.snapshot(id)).thenReturn(s);
+      }
+    }
+
+    // Page 1 (limit=2): [6, 5]; Page 2 with cursor=5L must NOT duplicate 5L and must skip expired
+    // 4L cleanly to return [3, 2]!
+    List<Long> page1 =
+        idsOf(SnapShotsScanUtils.getSnapshotsWithPagination(closedManager, null, 2, 0, null));
+    assertEquals(java.util.Arrays.asList(6L, 5L), page1);
+    List<Long> page2 =
+        idsOf(SnapShotsScanUtils.getSnapshotsWithPagination(closedManager, null, 2, 2, 5L));
+    assertEquals(java.util.Arrays.asList(3L, 2L), page2);
+
+    Pair<List<Long>, Integer> mappedPage2 =
+        SnapShotsScanUtils.getMappedSnapshotsWithPagination(
+            closedManager, s -> Optional.of(s.id()), 2, 2, 5L);
+    assertEquals(java.util.Arrays.asList(3L, 2L), mappedPage2.getLeft());
   }
 }

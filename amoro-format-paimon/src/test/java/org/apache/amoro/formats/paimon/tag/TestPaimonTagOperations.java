@@ -759,4 +759,58 @@ class TestPaimonTagOperations {
       assertEquals("UNSET", row.getRetention().getAgeLimit());
     }
   }
+
+  @Test
+  void tagPaginationSkipsConcurrentlyExpiredTagsAndAdjustsSurvivingTotal() throws Exception {
+    try (Catalog catalog = catalog()) {
+      PaimonTable owner = table(catalog);
+      FileStoreTable realTable = (FileStoreTable) owner.originalTable();
+      long id = commit(realTable, 1);
+      TableTagOperations ops = owner.tagOperations().get();
+      ops.createTag(create(ops, "tag-a", id));
+      ops.createTag(create(ops, "tag-b", id));
+      ops.createTag(create(ops, "tag-c", id));
+      ops.createTag(create(ops, "tag-d", id));
+      ops.createTag(create(ops, "tag-e", id));
+
+      // Simulate both a pre-window tag (tag-a) and a post-window tag (tag-e) expiring concurrently
+      // right after tagPaths() lists all 5 tag files; surviving set is [tag-b, tag-c, tag-d].
+      java.util.List<org.apache.paimon.fs.FileStatus> fullSnapshotListing =
+          java.util.Arrays.asList(
+              realTable.fileIO().listStatus(realTable.tagManager().tagDirectory()));
+      realTable.fileIO().deleteQuietly(realTable.tagManager().tagPath("tag-a"));
+      realTable.fileIO().deleteQuietly(realTable.tagManager().tagPath("tag-e"));
+      org.apache.paimon.fs.FileIO spiedIo = spy(realTable.fileIO());
+      org.mockito.Mockito.doReturn(
+              fullSnapshotListing.toArray(new org.apache.paimon.fs.FileStatus[0]))
+          .when(spiedIo)
+          .listStatus(realTable.tagManager().tagDirectory());
+      FileStoreTable spiedTable = spy(realTable);
+      org.mockito.Mockito.doReturn(spiedIo).when(spiedTable).fileIO();
+
+      TagQuery page1 = new TagQuery();
+      page1.setPage(1);
+      page1.setPageSize(2);
+      org.apache.commons.lang3.tuple.Pair<java.util.List<TableTagInfo>, Long> firstPage =
+          PaimonTagReader.page(owner, spiedTable, page1);
+      assertEquals(3L, firstPage.getRight());
+      assertEquals(
+          java.util.Arrays.asList("tag-b", "tag-c"),
+          firstPage.getLeft().stream()
+              .map(TableTagInfo::getName)
+              .collect(java.util.stream.Collectors.toList()));
+
+      TagQuery page2 = new TagQuery();
+      page2.setPage(2);
+      page2.setPageSize(2);
+      org.apache.commons.lang3.tuple.Pair<java.util.List<TableTagInfo>, Long> secondPage =
+          PaimonTagReader.page(owner, spiedTable, page2);
+      assertEquals(3L, secondPage.getRight());
+      assertEquals(
+          java.util.Collections.singletonList("tag-d"),
+          secondPage.getLeft().stream()
+              .map(TableTagInfo::getName)
+              .collect(java.util.stream.Collectors.toList()));
+    }
+  }
 }

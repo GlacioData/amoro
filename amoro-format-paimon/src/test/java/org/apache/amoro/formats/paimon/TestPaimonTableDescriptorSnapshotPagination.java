@@ -307,4 +307,58 @@ class TestPaimonTableDescriptorSnapshotPagination {
         assertThrows(SnapshotReadException.class, () -> page(OperationType.ALL, 0)).getReason());
     verify(manager, never()).tryGetSnapshot(anyLong());
   }
+
+  @Test
+  void nonMainBranchWithoutHintFilesResolvesSnapshotsViaBranchManager() throws Exception {
+    BranchManager branches = mock(BranchManager.class);
+    when(table.branchManager()).thenReturn(branches);
+    when(branches.branchExists("branch-dev")).thenReturn(true);
+
+    SnapshotManager branchMgr = mock(SnapshotManager.class);
+    when(manager.copyWithBranch("branch-dev")).thenReturn(branchMgr);
+    when(branchMgr.branch()).thenReturn("branch-dev");
+    when(branchMgr.fileIO()).thenReturn(io);
+    Path branchSnapshotDir = new Path("/table/branch/branch-branch-dev/snapshot");
+    when(branchMgr.snapshotDirectory()).thenReturn(branchSnapshotDir);
+    when(branchMgr.snapshotPath(7L)).thenReturn(new Path(branchSnapshotDir, "snapshot-7"));
+    // Newly branched from a tag at snapshot-7: EARLIEST and LATEST hint files do NOT exist.
+    when(io.readOverwrittenFileUtf8(new Path(branchSnapshotDir, "EARLIEST")))
+        .thenReturn(Optional.empty());
+    when(io.readOverwrittenFileUtf8(new Path(branchSnapshotDir, "LATEST")))
+        .thenReturn(Optional.empty());
+    when(io.exists(new Path(branchSnapshotDir, "EARLIEST"))).thenReturn(false);
+    when(io.exists(new Path(branchSnapshotDir, "LATEST"))).thenReturn(false);
+    when(io.exists(branchSnapshotDir)).thenReturn(true);
+    when(io.exists(new Path(branchSnapshotDir, "snapshot-7"))).thenReturn(true);
+    when(branchMgr.earliestSnapshotId()).thenReturn(7L);
+    when(branchMgr.latestSnapshotId()).thenReturn(7L);
+    Snapshot snap7 = mock(Snapshot.class);
+    when(snap7.id()).thenReturn(7L);
+    when(snap7.commitKind()).thenReturn(Snapshot.CommitKind.APPEND);
+    when(branchMgr.tryGetSnapshot(7L)).thenReturn(snap7);
+
+    Pair<List<AmoroSnapshotsOfTable>, Long> branchPage =
+        descriptor.getSnapshots(amoro, "branch-dev", OperationType.ALL, 25, 0, null);
+    assertEquals(1L, branchPage.getRight());
+    assertEquals(1, branchPage.getLeft().size());
+    assertEquals("7", branchPage.getLeft().get(0).getSnapshotId());
+
+    // After a new commit (snapshot-8) on the branch, LATEST hint exists (8) while EARLIEST hint is
+    // still absent because no snapshot expiration has run on the branch yet.
+    when(branchMgr.snapshotPath(8L)).thenReturn(new Path(branchSnapshotDir, "snapshot-8"));
+    when(io.exists(new Path(branchSnapshotDir, "snapshot-8"))).thenReturn(true);
+    when(io.readOverwrittenFileUtf8(new Path(branchSnapshotDir, "LATEST")))
+        .thenReturn(Optional.of("8"));
+    Snapshot snap8 = mock(Snapshot.class);
+    when(snap8.id()).thenReturn(8L);
+    when(snap8.commitKind()).thenReturn(Snapshot.CommitKind.APPEND);
+    when(branchMgr.tryGetSnapshot(8L)).thenReturn(snap8);
+
+    Pair<List<AmoroSnapshotsOfTable>, Long> afterCommitPage =
+        descriptor.getSnapshots(amoro, "branch-dev", OperationType.ALL, 25, 0, null);
+    assertEquals(2L, afterCommitPage.getRight());
+    assertEquals(2, afterCommitPage.getLeft().size());
+    assertEquals("8", afterCommitPage.getLeft().get(0).getSnapshotId());
+    assertEquals("7", afterCommitPage.getLeft().get(1).getSnapshotId());
+  }
 }

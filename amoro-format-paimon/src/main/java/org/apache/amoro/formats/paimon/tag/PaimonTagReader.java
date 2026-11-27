@@ -58,24 +58,27 @@ public final class PaimonTagReader {
             .filter(name -> query.getKeyword() == null || name.contains(query.getKeyword()))
             .sorted()
             .collect(Collectors.toList());
-    List<TableTagInfo> rows = new ArrayList<>();
-    for (int i = Math.min(offset, names.size());
-        i < Math.min((long) offset + query.getPageSize(), names.size());
-        i++) {
-      String name = names.get(i);
-      Tag tag =
-          manager
-              .get(name)
-              .orElseThrow(
-                  () ->
-                      new TagOperationException(
-                          409,
-                          "CAPABILITY_CHANGED",
-                          "NOT_APPLIED",
-                          "Tag list changed; refresh the page"));
-      rows.add(view(owner, table, name, tag));
+    // Concurrent auto-tag expiration may remove tag files between tagPaths() listing and Tag JSON
+    // loading; materialize the surviving (name, Tag) list first just like Paimon 1.4.2
+    // TagManager#tagObjects (TagManager.java#L406-L431) so both page offset slicing and total
+    // count operate on the exact same live tag set while projecting views only for the active page.
+    // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/utils/TagManager.java#L406-L431
+    List<Pair<String, Tag>> surviving = new ArrayList<>(names.size());
+    for (String name : names) {
+      java.util.Optional<Tag> tag = manager.get(name);
+      if (tag.isPresent()) {
+        surviving.add(Pair.of(name, tag.get()));
+      }
     }
-    return Pair.of(rows, (long) names.size());
+    int start = Math.min(Math.max(0, offset), surviving.size());
+    int end =
+        (int) Math.min((long) surviving.size(), (long) start + Math.max(0, query.getPageSize()));
+    List<TableTagInfo> rows = new ArrayList<>(end - start);
+    for (int i = start; i < end; i++) {
+      Pair<String, Tag> entry = surviving.get(i);
+      rows.add(view(owner, table, entry.getLeft(), entry.getRight()));
+    }
+    return Pair.of(rows, (long) surviving.size());
   }
 
   public static List<TagOrBranchInfo> legacy(FileStoreTable table) {

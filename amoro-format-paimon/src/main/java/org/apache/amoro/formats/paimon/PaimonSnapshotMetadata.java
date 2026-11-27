@@ -191,9 +191,12 @@ public final class PaimonSnapshotMetadata {
   }
 
   private static long[] range(SnapshotManager manager, PaimonSnapshotReadDeadline deadline) {
-    // Paimon 1.4.2 findLatest/findEarliest fall back to directory listing. Only readHint is
-    // bounded.
-    // https://github.com/apache/paimon/blob/release-1.4.2/paimon-core/src/main/java/org/apache/paimon/utils/HintFileUtils.java
+    // Paimon 1.4.2 findLatest/findEarliest fall back to directory listing; on the main branch only
+    // readHint is bounded. Non-main branches created from tags > 1 copy snapshot-<id> without
+    // writing EARLIEST/LATEST hints (see FileSystemBranchManager.java#L103-L120 and
+    // BranchManager.java#L77-L83), so missing non-main hints resolve via SnapshotManager bounds.
+    // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/utils/FileSystemBranchManager.java#L103-L120
+    boolean isMain = BranchManager.isMainBranch(BranchManager.normalizeBranch(manager.branch()));
     Long min =
         deadline.call(
             () ->
@@ -209,7 +212,35 @@ public final class PaimonSnapshotMetadata {
         && !deadline.call(() -> manager.fileIO().exists(manager.snapshotDirectory()))) {
       return null;
     }
-    if (min == null && max != null && max > 0) {
+    if (!isMain) {
+      if (min == null) {
+        if (deadline.call(
+            () ->
+                manager
+                    .fileIO()
+                    .exists(
+                        new org.apache.paimon.fs.Path(
+                            manager.snapshotDirectory(), HintFileUtils.EARLIEST)))) {
+          throw new SnapshotReadException(UNAVAILABLE, "Snapshot earliest hint is unreadable");
+        }
+        min = deadline.call(manager::earliestSnapshotId);
+      }
+      if (max == null) {
+        if (deadline.call(
+            () ->
+                manager
+                    .fileIO()
+                    .exists(
+                        new org.apache.paimon.fs.Path(
+                            manager.snapshotDirectory(), HintFileUtils.LATEST)))) {
+          throw new SnapshotReadException(UNAVAILABLE, "Snapshot latest hint is unreadable");
+        }
+        max = deadline.call(manager::latestSnapshotId);
+      }
+      if (min == null && max == null) {
+        return null;
+      }
+    } else if (min == null && max != null && max > 0) {
       if (deadline.call(
           () ->
               manager

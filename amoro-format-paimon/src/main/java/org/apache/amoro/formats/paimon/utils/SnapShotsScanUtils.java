@@ -25,9 +25,9 @@ import org.apache.paimon.utils.SnapshotManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.FileNotFoundException;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Optional;
 import java.util.function.Function;
@@ -111,9 +111,12 @@ public class SnapShotsScanUtils {
       return Pair.of(Collections.emptyList(), 0);
     }
 
-    Long earliestSnapshotId = snapshotManager.earliestSnapshotId();
     Long latestSnapshotId = snapshotManager.latestSnapshotId();
-    if (earliestSnapshotId == null || latestSnapshotId == null) {
+    if (latestSnapshotId == null) {
+      return Pair.of(Collections.emptyList(), 0);
+    }
+    Long earliestSnapshotId = snapshotManager.earliestSnapshotId();
+    if (earliestSnapshotId == null) {
       return Pair.of(Collections.emptyList(), 0);
     }
 
@@ -131,14 +134,8 @@ public class SnapShotsScanUtils {
 
     while (currentMaxSnapshotId >= earliestSnapshotId && mappedResults.size() <= limit) {
       long minSnapshotId = Math.max(earliestSnapshotId, currentMaxSnapshotId - scanSize + 1L);
-      Iterator<Snapshot> rangeSnapshots =
-          snapshotManager.snapshotsWithinRange(
-              Optional.of(currentMaxSnapshotId), Optional.of(minSnapshotId));
-      List<Snapshot> snapshots = new ArrayList<>();
-      while (rangeSnapshots.hasNext()) {
-        snapshots.add(rangeSnapshots.next());
-      }
-      snapshots.sort((left, right) -> Long.compare(right.id(), left.id()));
+      List<Snapshot> snapshots =
+          readSnapshotsDescending(snapshotManager, currentMaxSnapshotId, minSnapshotId);
 
       for (Snapshot snapshot : snapshots) {
         Optional<T> mapped = mapper.apply(snapshot);
@@ -210,19 +207,27 @@ public class SnapShotsScanUtils {
       int offset,
       Long lastSnapshotId,
       String logPrefix) {
-
-    Long earliestSnapshotId = snapshotManager.earliestSnapshot().id();
-    Long latestSnapshotId = snapshotManager.latestSnapshotId();
-
-    if (earliestSnapshotId == null || latestSnapshotId == null) {
+    if (limit <= 0) {
       return Pair.of(Collections.emptyList(), 0);
     }
 
-    // Determine the starting point based on cursor or offset
+    Long latestSnapshotId = snapshotManager.latestSnapshotId();
+    if (latestSnapshotId == null) {
+      return Pair.of(Collections.emptyList(), 0);
+    }
+    Long earliestSnapshotId = snapshotManager.earliestSnapshotId();
+    if (earliestSnapshotId == null) {
+      return Pair.of(Collections.emptyList(), 0);
+    }
+
+    if (lastSnapshotId != null && lastSnapshotId <= earliestSnapshotId) {
+      return Pair.of(Collections.emptyList(), 0);
+    }
+
+    // Determine the starting point based on cursor or offset. Scan windows [min, max] are closed on
+    // both ends, so cursor mode starts at lastSnapshotId - 1L to avoid re-emitting the cursor ID.
     long currentStart =
-        lastSnapshotId != null
-            ? lastSnapshotId // Cursor-based: start from lastSnapshotId
-            : latestSnapshotId; // Offset-based: start from the latest
+        lastSnapshotId != null ? Math.min(latestSnapshotId, lastSnapshotId - 1L) : latestSnapshotId;
 
     // For cursor-based pagination, we can be more precise about the range to scan
     int targetRange =
@@ -307,26 +312,13 @@ public class SnapShotsScanUtils {
           maxSnapshotId,
           context.needCounting);
 
-      // Get snapshots in current range
-      Iterator<Snapshot> rangeSnapshots =
-          snapshotManager.snapshotsWithinRange(
-              Optional.of(maxSnapshotId), Optional.of(minSnapshotId));
-
       LOG.info(
-          "Querying snapshotsWithinRange - maxSnapshotId:{}, minSnapshotId:{}",
+          "Querying tryGetSnapshot descending - maxSnapshotId:{}, minSnapshotId:{}",
           maxSnapshotId,
           minSnapshotId);
 
-      // Collect and sort snapshots in this range
-      List<Snapshot> snapshotsInRange = new ArrayList<>();
-      while (rangeSnapshots.hasNext()) {
-        snapshotsInRange.add(rangeSnapshots.next());
-      }
-
-      // Sort in descending order (newest first)
-      if (!snapshotsInRange.isEmpty()) {
-        snapshotsInRange.sort((s1, s2) -> Long.compare(s2.id(), s1.id()));
-      }
+      List<Snapshot> snapshotsInRange =
+          readSnapshotsDescending(snapshotManager, maxSnapshotId, minSnapshotId);
 
       // Process snapshots in this range
       int rangeMatchingCount = 0;
@@ -337,9 +329,10 @@ public class SnapShotsScanUtils {
         if (filter.test(snapshot)) {
           rangeMatchingCount++;
 
-          if (context.remainingOffset > 0) {
+          if (context.remainingOffset - rangeSkippedCount > 0) {
             rangeSkippedCount++;
-          } else if (context.accumulatedSnapshots.size() < context.limit) {
+          } else if (context.accumulatedSnapshots.size() + rangeResultSnapshots.size()
+              < context.limit) {
             rangeResultSnapshots.add(snapshot);
           }
         }
@@ -397,6 +390,41 @@ public class SnapShotsScanUtils {
     }
 
     return Pair.of(context.accumulatedSnapshots, context.accumulatedCount);
+  }
+
+  /**
+   * Reads snapshots in {@code [minSnapshotId, maxSnapshotId]} from newest to oldest while skipping
+   * snapshots concurrently deleted by expiration.
+   *
+   * <p>Paimon 1.4.2 {@code SnapshotManager#snapshotsWithinRange} invokes {@code snapshot(id)} on
+   * the closed interval {@code [min, max]} and throws {@code RuntimeException} when a snapshot file
+   * disappears mid-scan ({@code SnapshotManager.java#L548-L552}). Using {@link
+   * SnapshotManager#tryGetSnapshot(long)} mirrors {@code SnapshotManager#safelyGetAllSnapshots}
+   * ({@code SnapshotManager.java#L136-L146, #L555-L570}).
+   *
+   * <p>Reference: <a
+   * href="https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/utils/SnapshotManager.java#L548-L570">
+   * SnapshotManager.java#L548-L570</a>
+   */
+  private static List<Snapshot> readSnapshotsDescending(
+      SnapshotManager snapshotManager, long maxSnapshotId, long minSnapshotId) {
+    if (maxSnapshotId < minSnapshotId) {
+      return Collections.emptyList();
+    }
+    int initialCapacity =
+        (int) Math.min(MAX_PROGRESSIVE_SCAN_SIZE, maxSnapshotId - minSnapshotId + 1L);
+    List<Snapshot> snapshots = new ArrayList<>(initialCapacity);
+    for (long id = maxSnapshotId; id >= minSnapshotId; id--) {
+      try {
+        Snapshot snapshot = snapshotManager.tryGetSnapshot(id);
+        if (snapshot != null) {
+          snapshots.add(snapshot);
+        }
+      } catch (FileNotFoundException ignored) {
+        // Snapshot expired concurrently during pagination; skip cleanly.
+      }
+    }
+    return snapshots;
   }
 
   /** Encapsulates pagination state to reduce parameter count and improve readability. */
