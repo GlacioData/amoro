@@ -43,6 +43,7 @@ import org.apache.amoro.server.persistence.TableRuntimeMeta;
 import org.apache.amoro.server.persistence.TableRuntimeState;
 import org.apache.amoro.server.persistence.mapper.TableMetaMapper;
 import org.apache.amoro.server.persistence.mapper.TableRuntimeMapper;
+import org.apache.amoro.server.process.ProcessFactoryRouter;
 import org.apache.amoro.shade.guava32.com.google.common.annotations.VisibleForTesting;
 import org.apache.amoro.shade.guava32.com.google.common.base.MoreObjects;
 import org.apache.amoro.shade.guava32.com.google.common.base.Objects;
@@ -86,9 +87,7 @@ public class DefaultTableService extends PersistentBase implements TableService 
   private final long externalCatalogRefreshingInterval;
 
   private final Map<Long, TableRuntime> tableRuntimeMap = new ConcurrentHashMap<>();
-  private final SelfOptimizingTableMetrics selfOptimizingTableMetrics =
-      new SelfOptimizingTableMetrics(
-          MetricManager.getInstance().getGlobalRegistry(), tableRuntimeMap::values);
+  private final SelfOptimizingTableMetrics selfOptimizingTableMetrics;
 
   private final ScheduledExecutorService tableExplorerScheduler =
       Executors.newSingleThreadScheduledExecutor(
@@ -136,7 +135,7 @@ public class DefaultTableService extends PersistentBase implements TableService 
       Configurations configuration,
       CatalogManager catalogManager,
       TableRuntimeFactory tableRuntimeFactory) {
-    this(configuration, catalogManager, tableRuntimeFactory, null, null);
+    this(configuration, catalogManager, tableRuntimeFactory, null, null, null);
   }
 
   public DefaultTableService(
@@ -145,6 +144,16 @@ public class DefaultTableService extends PersistentBase implements TableService 
       TableRuntimeFactory tableRuntimeFactory,
       HighAvailabilityContainer haContainer,
       BucketAssignStore bucketAssignStore) {
+    this(configuration, catalogManager, tableRuntimeFactory, haContainer, bucketAssignStore, null);
+  }
+
+  public DefaultTableService(
+      Configurations configuration,
+      CatalogManager catalogManager,
+      TableRuntimeFactory tableRuntimeFactory,
+      HighAvailabilityContainer haContainer,
+      BucketAssignStore bucketAssignStore,
+      ProcessFactoryRouter optimizingRouter) {
     this.catalogManager = catalogManager;
     this.externalCatalogRefreshingInterval =
         configuration.get(AmoroManagementConf.REFRESH_EXTERNAL_CATALOGS_INTERVAL).toMillis();
@@ -156,6 +165,11 @@ public class DefaultTableService extends PersistentBase implements TableService 
     this.isMasterSlaveMode = configuration.getBoolean(AmoroManagementConf.HA_USE_MASTER_SLAVE_MODE);
     this.bucketTableSyncInterval =
         configuration.get(AmoroManagementConf.HA_BUCKET_TABLE_SYNC_INTERVAL).toMillis();
+    this.selfOptimizingTableMetrics =
+        new SelfOptimizingTableMetrics(
+            MetricManager.getInstance().getGlobalRegistry(),
+            tableRuntimeMap::values,
+            optimizingRouter);
   }
 
   @Override

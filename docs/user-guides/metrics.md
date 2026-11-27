@@ -65,9 +65,9 @@ Amoro has supported built-in metrics to measure status of table self-optimizing 
 
 ## Self-optimizing table counts
 
-`ams_self_optimizing_tables` is a gauge grouped by `catalog`, `format`, and `enabled`. It counts tables whose runtimes are loaded on the local AMS instance, with `enabled="true"` for self-optimizing enabled and `enabled="false"` for self-optimizing disabled. The enabled state comes from the parsed runtime configuration, which is updated by the existing metadata refresh process.
+`ams_self_optimizing_tables` is a gauge grouped by `catalog`, `format`, and `enabled`. It counts tables whose runtimes are loaded on the local AMS instance. A table counts as `enabled="true"` when the cached table switch is on, an active optimizing plugin supports its format, and the table satisfies the plugin's configuration rules. For Paimon, set `paimon-optimizer.enabled=true` in the AMS process factory configuration and set both `write-only=true` and `self-optimizing.enabled=true` on the table. Loaded tables that fail these checks count as `enabled="false"`.
 
-The metric uses the same registration and collection mechanism as other table metrics. Configuration changes and runtime loading or unloading are reflected in the next scrape. Tables without a loaded runtime or configuration are excluded. Registered label combinations return zero after all matching runtimes are unloaded. The metrics are unregistered when the local table service shuts down.
+The metric uses the same registration and collection mechanism as other table metrics. A scrape reads cached runtime configuration after the existing metadata refresh process updates it. Tables with an unloaded runtime, missing configuration, or an eligibility evaluation failure are excluded. Registered label combinations return zero after all matching runtimes are unloaded. The metrics are unregistered when the local table service shuts down.
 
 Prometheus adds the `amoro_` prefix automatically. Reporter include and exclude filters use the internal name `ams_self_optimizing_tables`. To query the number of tables with self-optimizing enabled per instance:
 
@@ -76,6 +76,8 @@ sum by (instance) (amoro_ams_self_optimizing_tables{enabled="true"})
 ```
 
 Use `enabled="false"` to query disabled counts, and group by `catalog` and `format` as needed. Each AMS instance reports its locally loaded runtimes, so counts may overlap or be temporarily absent during instance transitions. Dashboards should distinguish missing series from actual zero values.
+
+The Grafana template sums these series over the selected **Instance** and **Catalog** values. **Total** is **Enabled** plus **Disabled**, and **Enabled Ratio** is available when **Total** is positive. Select a single instance to view its local counts. **Database** and **Table** apply to per-table panels.
 
 ## Optimizer Group metrics
 

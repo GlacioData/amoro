@@ -19,12 +19,16 @@
 package org.apache.amoro.server.table;
 
 import org.apache.amoro.TableRuntime;
-import org.apache.amoro.config.TableConfiguration;
 import org.apache.amoro.metrics.Gauge;
 import org.apache.amoro.metrics.MetricDefine;
 import org.apache.amoro.metrics.MetricKey;
 import org.apache.amoro.metrics.MetricRegistry;
+import org.apache.amoro.server.process.ProcessFactoryRouter;
 import org.apache.amoro.shade.guava32.com.google.common.collect.ImmutableMap;
+import org.apache.amoro.table.TableProperties;
+import org.apache.amoro.utils.CompatiblePropertyUtil;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -36,6 +40,8 @@ import java.util.function.Supplier;
 
 /** Counts the runtimes currently loaded by this table service, using ordinary in-memory gauges. */
 final class SelfOptimizingTableMetrics implements AutoCloseable {
+  private static final Logger LOG = LoggerFactory.getLogger(SelfOptimizingTableMetrics.class);
+
   static final MetricDefine TABLES =
       MetricDefine.defineGauge("ams_self_optimizing_tables")
           .withDescription("Locally loaded tables by the effective self-optimizing switch")
@@ -44,12 +50,21 @@ final class SelfOptimizingTableMetrics implements AutoCloseable {
 
   private final MetricRegistry registry;
   private final Supplier<Collection<TableRuntime>> runtimes;
+  private final ProcessFactoryRouter optimizingRouter;
   private final Map<List<String>, List<MetricKey>> registered = new HashMap<>();
   private boolean closed;
 
   SelfOptimizingTableMetrics(MetricRegistry registry, Supplier<Collection<TableRuntime>> runtimes) {
+    this(registry, runtimes, null);
+  }
+
+  SelfOptimizingTableMetrics(
+      MetricRegistry registry,
+      Supplier<Collection<TableRuntime>> runtimes,
+      ProcessFactoryRouter optimizingRouter) {
     this.registry = registry;
     this.runtimes = runtimes;
+    this.optimizingRouter = optimizingRouter;
   }
 
   synchronized void register(TableRuntime runtime) {
@@ -84,15 +99,35 @@ final class SelfOptimizingTableMetrics implements AutoCloseable {
     for (TableRuntime runtime : runtimes.get()) {
       if (catalog.equals(runtime.getTableIdentifier().getCatalog())
           && format.equals(runtime.getTableIdentifier().getFormat().name())) {
-        TableConfiguration configuration = runtime.getTableConfiguration();
-        if (configuration != null
-            && configuration.getOptimizingConfig() != null
-            && configuration.getOptimizingConfig().isEnabled() == enabled) {
+        Boolean effectiveEnabled = isSelfOptimizingEnabled(runtime);
+        if (effectiveEnabled != null && effectiveEnabled == enabled) {
           count++;
         }
       }
     }
     return count;
+  }
+
+  private Boolean isSelfOptimizingEnabled(TableRuntime runtime) {
+    try {
+      Map<String, String> tableConfig = runtime.getTableConfig();
+      if (tableConfig == null) {
+        return null;
+      }
+      return CompatiblePropertyUtil.propertyAsBoolean(
+              tableConfig,
+              TableProperties.ENABLE_SELF_OPTIMIZING,
+              TableProperties.ENABLE_SELF_OPTIMIZING_DEFAULT)
+          && (optimizingRouter == null
+              || (optimizingRouter.supportedFormats().contains(runtime.getFormat())
+                  && optimizingRouter.isOptimizingEligible(runtime)));
+    } catch (RuntimeException e) {
+      LOG.debug(
+          "Failed to evaluate self-optimizing metric eligibility for table ID {} ({})",
+          runtime.getTableIdentifier().getId(),
+          e.getClass().getSimpleName());
+      return null;
+    }
   }
 
   @Override

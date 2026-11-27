@@ -50,6 +50,7 @@ import org.apache.amoro.server.persistence.HttpSessionHandlerFactory;
 import org.apache.amoro.server.persistence.PersistenceFailureReporter;
 import org.apache.amoro.server.persistence.PersistenceUnavailableDuringStartupException;
 import org.apache.amoro.server.persistence.SqlSessionFactoryProvider;
+import org.apache.amoro.server.process.ProcessFactoryRouter;
 import org.apache.amoro.server.process.ProcessService;
 import org.apache.amoro.server.process.ProcessService.ExecuteEngineManager;
 import org.apache.amoro.server.process.TableProcessFactoryManager;
@@ -272,9 +273,15 @@ public class AmoroServiceContainer {
 
     List<ActionCoordinator> actionCoordinators = defaultRuntimeFactory.supportedCoordinators();
 
+    ProcessFactoryRouter optimizingRouter = new ProcessFactoryRouter(processFactories);
     tableService =
         new DefaultTableService(
-            serviceConfig, catalogManager, defaultRuntimeFactory, haContainer, bucketAssignStore);
+            serviceConfig,
+            catalogManager,
+            defaultRuntimeFactory,
+            haContainer,
+            bucketAssignStore,
+            optimizingRouter);
     processService = new ProcessService(tableService, actionCoordinators, executeEngineManager);
     optimizingService =
         new DefaultOptimizingService(
