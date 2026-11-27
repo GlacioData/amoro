@@ -43,6 +43,7 @@ import org.apache.amoro.optimizing.OptimizingExecutor;
 import org.apache.amoro.optimizing.OptimizingPlanResult;
 import org.apache.amoro.optimizing.OptimizingType;
 import org.apache.amoro.table.TableIdentifier;
+import org.apache.amoro.utils.SerializationUtil;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.FileStore;
@@ -61,7 +62,9 @@ import org.apache.paimon.operation.FileStoreScan;
 import org.apache.paimon.operation.RestoreFiles;
 import org.apache.paimon.operation.WriteRestore;
 import org.apache.paimon.options.CatalogOptions;
+import org.apache.paimon.reader.RecordReader;
 import org.apache.paimon.schema.Schema;
+import org.apache.paimon.schema.SchemaChange;
 import org.apache.paimon.table.BucketMode;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.Table;
@@ -70,6 +73,7 @@ import org.apache.paimon.table.sink.BatchTableWrite;
 import org.apache.paimon.table.sink.BatchWriteBuilder;
 import org.apache.paimon.table.sink.CommitMessage;
 import org.apache.paimon.table.sink.InnerTableWrite;
+import org.apache.paimon.table.source.ReadBuilder;
 import org.apache.paimon.types.DataTypes;
 import org.apache.paimon.types.RowKind;
 import org.apache.paimon.utils.SerializationUtils;
@@ -79,6 +83,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.mockito.ArgumentCaptor;
 
+import java.nio.ByteBuffer;
 import java.nio.file.Path;
 import java.util.Collections;
 import java.util.HashMap;
@@ -218,6 +223,7 @@ class TestPaimonPrimaryKeyCompactionExecutor {
     when(table.location()).thenReturn(new org.apache.paimon.fs.Path("file:/tmp/table"));
     FileStoreTable compactTable = mock(FileStoreTable.class);
     when(table.copy(anyMap())).thenReturn(compactTable);
+    when(table.copyWithoutTimeTravel(anyMap())).thenReturn(compactTable);
     when(compactTable.options()).thenReturn(Collections.emptyMap());
     SnapshotManager snapshotManager = mock(SnapshotManager.class);
     Snapshot restoreSnapshot = mock(Snapshot.class);
@@ -558,6 +564,87 @@ class TestPaimonPrimaryKeyCompactionExecutor {
     verify(table, never()).copy(anyMap());
   }
 
+  @Test
+  @DisplayName("compaction with time-travel option preserves newly added column values")
+  void compactionWithTimeTravelOptionPreservesAddedColumnValues(@TempDir Path warehouse)
+      throws Exception {
+    try (Catalog catalog = fsCatalog(warehouse)) {
+      Map<String, String> options = primaryKeyOptions();
+      options.put("num-sorted-run.compaction-trigger", "2");
+      Identifier id = createPrimaryKeyTable(catalog, "t_time_travel_schema", options);
+      writeCommits(catalog.getTable(id), 1);
+
+      catalog.alterTable(
+          id,
+          Collections.singletonList(SchemaChange.addColumn("extra", DataTypes.STRING())),
+          false);
+
+      FileStoreTable evolved = (FileStoreTable) catalog.getTable(id);
+      BatchWriteBuilder writeBuilder = evolved.newBatchWriteBuilder();
+      try (BatchTableWrite write = writeBuilder.newWrite()) {
+        write.write(
+            GenericRow.of(
+                2, BinaryString.fromString("name-2"), BinaryString.fromString("extra-2")));
+        List<CommitMessage> messages = write.prepareCommit();
+        try (BatchTableCommit commit = writeBuilder.newCommit()) {
+          commit.commit(messages);
+        }
+      }
+
+      // Mirrors PaimonCatalog#withRuntimeTableDefaults injecting catalog-level table.scan.* options
+      // via copyWithoutTimeTravel while keeping the latest 3-column TableSchema.
+      FileStoreTable tableWithScanOption =
+          evolved.copyWithoutTimeTravel(Collections.singletonMap("scan.snapshot-id", "1"));
+      assertEquals("1", tableWithScanOption.options().get("scan.snapshot-id"));
+      assertEquals(3, tableWithScanOption.rowType().getFieldCount());
+
+      OptimizingPlanResult<PaimonPrimaryKeyCompactionTask> planResult =
+          new PaimonPrimaryKeyOptimizingPlanner(
+                  wrap(tableWithScanOption, id.getObjectName()),
+                  100L,
+                  7L,
+                  4.0,
+                  64L * 1024 * 1024,
+                  defaultConfig(),
+                  0L,
+                  0L,
+                  0L,
+                  null)
+              .plan();
+      List<PaimonPrimaryKeyCompactionTask> tasks = planResult.getTasks();
+      assertEquals(1, tasks.size());
+
+      for (PaimonPrimaryKeyCompactionTask task : tasks) {
+        PaimonPrimaryKeyCompactionOutput output =
+            new PaimonPrimaryKeyCompactionExecutor(task.getInput()).execute();
+        ByteBuffer buffer = SerializationUtil.simpleSerialize(output);
+        byte[] bytes = new byte[buffer.remaining()];
+        buffer.get(bytes);
+        task.setOutputBytes(bytes);
+      }
+      new PaimonPrimaryKeyTableCommit(
+              wrap(tableWithScanOption, id.getObjectName()), tableWithScanOption, tasks)
+          .commit();
+
+      FileStoreTable readerTable = (FileStoreTable) catalog.getTable(id);
+      ReadBuilder readBuilder = readerTable.newReadBuilder();
+      List<String> actualRows = new java.util.ArrayList<>();
+      try (RecordReader<org.apache.paimon.data.InternalRow> reader =
+          readBuilder.newRead().createReader(readBuilder.newScan().plan())) {
+        reader.forEachRemaining(
+            row ->
+                actualRows.add(
+                    row.getInt(0)
+                        + "|"
+                        + row.getString(1)
+                        + "|"
+                        + (row.isNullAt(2) ? "NULL" : row.getString(2).toString())));
+      }
+      Collections.sort(actualRows);
+      assertEquals(java.util.Arrays.asList("0|name-0|NULL", "2|name-2|extra-2"), actualRows);
+    }
+  }
+
   private static PaimonPrimaryKeyCompactionInput copyInput(
       PaimonPrimaryKeyCompactionInput input,
       List<PaimonBucketCompactionUnit> units,
@@ -580,6 +667,7 @@ class TestPaimonPrimaryKeyCompactionExecutor {
     when(table.options()).thenReturn(Collections.emptyMap());
     FileStoreTable compactTable = mock(FileStoreTable.class);
     when(table.copy(anyMap())).thenReturn(compactTable);
+    when(table.copyWithoutTimeTravel(anyMap())).thenReturn(compactTable);
     when(compactTable.options()).thenReturn(Collections.emptyMap());
     SnapshotManager snapshotManager = mock(SnapshotManager.class);
     Snapshot plannedSnapshot = mock(Snapshot.class);
