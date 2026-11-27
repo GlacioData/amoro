@@ -78,6 +78,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.Callable;
@@ -536,40 +537,47 @@ public class PaimonTableDescriptor implements FormatTableDescriptor {
     List<ManifestFileMeta> manifestFileMetas = manifestList.readDeltaManifests(s);
     boolean hasMaxLevels = false;
     long minCreateTime = Long.MAX_VALUE;
-    long maxCreateTime = Long.MIN_VALUE;
-    Set<Integer> buckets = new HashSet<>();
-    HashMap<String, String> summary = new HashMap<>(8);
-    Long totalAddRowCount = 0L;
-    Long deleteAddRowCount = 0L;
+    Map<PartitionBucketKey, List<ManifestEntry>> entriesByBucket = new LinkedHashMap<>();
     for (ManifestFileMeta manifestFileMeta : manifestFileMetas) {
       List<ManifestEntry> compactManifestEntries = manifestFile.read(manifestFileMeta.fileName());
       for (ManifestEntry compactManifestEntry : compactManifestEntries) {
-        long addRowCount = compactManifestEntry.file().rowCount();
-        totalAddRowCount += addRowCount;
-        Optional<Long> deleteRowCount = compactManifestEntry.file().deleteRowCount();
-        if (deleteRowCount.isPresent()) {
-          deleteAddRowCount += deleteRowCount.get();
-        }
         if (compactManifestEntry.file().level() == maxLevel) {
           hasMaxLevels = true;
         }
-        buckets.add(compactManifestEntry.bucket());
+        PartitionBucketKey key =
+            new PartitionBucketKey(compactManifestEntry.partition(), compactManifestEntry.bucket());
+        entriesByBucket.computeIfAbsent(key, k -> new ArrayList<>()).add(compactManifestEntry);
+      }
+    }
+
+    long inputRowCount = 0L;
+    long outputRowCount = 0L;
+    for (List<ManifestEntry> bucketEntries : entriesByBucket.values()) {
+      Set<String> retainedNames = retainedUpgradeFileNames(bucketEntries);
+      for (ManifestEntry compactManifestEntry : bucketEntries) {
+        String fileName = compactManifestEntry.file().fileName();
+        if (fileName != null && retainedNames.contains(fileName)) {
+          continue;
+        }
         if (compactManifestEntry.kind() == FileKind.DELETE) {
           inputBuilder.addFile(compactManifestEntry.file().fileSize());
+          inputRowCount += compactManifestEntry.file().rowCount();
         } else {
           minCreateTime = Math.min(minCreateTime, getFileCreationTimeMillis(compactManifestEntry));
-          maxCreateTime = Math.max(maxCreateTime, getFileCreationTimeMillis(compactManifestEntry));
           outputBuilder.addFile(compactManifestEntry.file().fileSize());
+          outputRowCount += compactManifestEntry.file().rowCount();
         }
       }
     }
+
+    HashMap<String, String> summary = new HashMap<>(8);
     if (isPrimaryTable && hasMaxLevels) {
       optimizingProcessInfo.setOptimizingType(PAIMON_OPTIMIZING_TYPE_FULL);
     } else {
       optimizingProcessInfo.setOptimizingType(PAIMON_OPTIMIZING_TYPE_MINOR);
     }
-    optimizingProcessInfo.setSuccessTasks(buckets.size());
-    optimizingProcessInfo.setTotalTasks(buckets.size());
+    optimizingProcessInfo.setSuccessTasks(entriesByBucket.size());
+    optimizingProcessInfo.setTotalTasks(entriesByBucket.size());
     long startTime = minCreateTime == Long.MAX_VALUE ? s.timeMillis() : minCreateTime;
     optimizingProcessInfo.setStartTime(startTime);
     optimizingProcessInfo.setDuration(s.timeMillis() - startTime);
@@ -581,12 +589,12 @@ public class PaimonTableDescriptor implements FormatTableDescriptor {
     summary.put(
         "input-data-size(rewrite)",
         String.valueOf(optimizingProcessInfo.getInputFiles().getTotalSize()));
-    summary.put("input-data-records(rewrite)", String.valueOf(totalAddRowCount));
+    summary.put("input-data-records(rewrite)", String.valueOf(inputRowCount));
     summary.put(
         "output-data-files", String.valueOf(optimizingProcessInfo.getOutputFiles().getFileCnt()));
     summary.put(
         "output-data-size", String.valueOf(optimizingProcessInfo.getOutputFiles().getTotalSize()));
-    summary.put("output-data-records", String.valueOf(deleteAddRowCount));
+    summary.put("output-data-records", String.valueOf(outputRowCount));
     optimizingProcessInfo.setSummary(summary);
     return optimizingProcessInfo;
   }
@@ -617,37 +625,55 @@ public class PaimonTableDescriptor implements FormatTableDescriptor {
       SnapshotManager snapshotManager = store.snapshotManager();
       ManifestList manifestList = store.manifestListFactory().create();
       ManifestFile manifestFile = store.manifestFileFactory().create();
-      snapshot = snapshotManager.tryGetSnapshot(id);
+      try {
+        snapshot = snapshotManager.tryGetSnapshot(id);
+      } catch (java.io.FileNotFoundException missing) {
+        return Collections.emptyList();
+      }
+      if (snapshot == null) {
+        return Collections.emptyList();
+      }
       Snapshot.CommitKind commitKind = snapshot.commitKind();
       if (commitKind == Snapshot.CommitKind.COMPACT) {
         List<ManifestFileMeta> manifestFileMetas = manifestList.readDeltaManifests(snapshot);
 
-        // Group manifest entries by bucket for per-bucket statistics
-        Map<Integer, BucketStatistics> bucketStatsMap = new HashMap<>();
+        // Group manifest entries by (partition, bucket) so distinct partitions sharing bucket-0
+        // remain separate task units, and exclude in-place LSM level-upgraded files.
+        Map<PartitionBucketKey, List<ManifestEntry>> entriesByBucket = new LinkedHashMap<>();
 
         for (ManifestFileMeta manifestFileMeta : manifestFileMetas) {
           List<ManifestEntry> compactManifestEntries =
               manifestFile.read(manifestFileMeta.fileName());
           for (ManifestEntry compactManifestEntry : compactManifestEntries) {
-            int bucket = compactManifestEntry.bucket();
-            BucketStatistics bucketStats =
-                bucketStatsMap.computeIfAbsent(bucket, k -> new BucketStatistics());
-            if (compactManifestEntry.kind() == FileKind.DELETE) {
-              bucketStats.removedFileCount++;
-              bucketStats.inputSize += compactManifestEntry.file().fileSize();
-            } else {
-              bucketStats.addedFileCount++;
-              bucketStats.outputSize += compactManifestEntry.file().fileSize();
-            }
+            PartitionBucketKey key =
+                new PartitionBucketKey(
+                    compactManifestEntry.partition(), compactManifestEntry.bucket());
+            entriesByBucket.computeIfAbsent(key, k -> new ArrayList<>()).add(compactManifestEntry);
           }
         }
 
-        // Convert bucket statistics to OptimizingTaskInfo objects
-        List<OptimizingTaskInfo> results = new ArrayList<>();
+        // Convert (partition, bucket) statistics to OptimizingTaskInfo objects
+        List<OptimizingTaskInfo> results = new ArrayList<>(entriesByBucket.size());
         int taskId = 1;
-        for (Map.Entry<Integer, BucketStatistics> entry : bucketStatsMap.entrySet()) {
-          Integer bucket = entry.getKey();
-          BucketStatistics stats = entry.getValue();
+        for (Map.Entry<PartitionBucketKey, List<ManifestEntry>> entry :
+            entriesByBucket.entrySet()) {
+          PartitionBucketKey key = entry.getKey();
+          List<ManifestEntry> bucketEntries = entry.getValue();
+          Set<String> retainedNames = retainedUpgradeFileNames(bucketEntries);
+          BucketStatistics stats = new BucketStatistics();
+          for (ManifestEntry compactManifestEntry : bucketEntries) {
+            String fileName = compactManifestEntry.file().fileName();
+            if (fileName != null && retainedNames.contains(fileName)) {
+              continue;
+            }
+            if (compactManifestEntry.kind() == FileKind.DELETE) {
+              stats.removedFileCount++;
+              stats.inputSize += compactManifestEntry.file().fileSize();
+            } else {
+              stats.addedFileCount++;
+              stats.outputSize += compactManifestEntry.file().fileSize();
+            }
+          }
 
           // Create FilesStatistics for input and output
           FilesStatistics inputFiles =
@@ -658,7 +684,7 @@ public class PaimonTableDescriptor implements FormatTableDescriptor {
 
           // Create summary with bucket information
           Map<String, String> summary = new HashMap<>();
-          summary.put("bucket", String.valueOf(bucket));
+          summary.put("bucket", String.valueOf(key.bucket));
           summary.put("removed-files", String.valueOf(stats.removedFileCount));
           summary.put("added-files", String.valueOf(stats.addedFileCount));
 
@@ -668,7 +694,7 @@ public class PaimonTableDescriptor implements FormatTableDescriptor {
                   null, // tableId
                   processId, // processId
                   taskId++, // taskId
-                  "bucket-" + bucket, // partitionData
+                  formatTaskPartitionBucket(table, key), // partitionData
                   ProcessTaskStatus.SUCCESS, // status
                   0, // retryNum
                   "paimon-internal-optimizer", // optimizerToken
@@ -701,6 +727,95 @@ public class PaimonTableDescriptor implements FormatTableDescriptor {
     long outputSize = 0;
 
     public BucketStatistics() {}
+  }
+
+  /**
+   * Identifies filenames retained across {@link FileKind#DELETE} and {@link FileKind#ADD} within a
+   * single {@code (partition, bucket)} — i.e., in-place LSM level upgrades produced by {@code
+   * AbstractCompactRewriter#upgrade} without physically rewriting data bytes (see Paimon 1.4.2
+   * {@code AbstractCompactRewriter.java#L34-L36} and {@code MergeTreeWriter.java#L359-L365}).
+   *
+   * <p>Reference: <a
+   * href="https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/mergetree/MergeTreeWriter.java#L359-L365">
+   * MergeTreeWriter.java#L359-L365</a>
+   */
+  private static Set<String> retainedUpgradeFileNames(List<ManifestEntry> bucketEntries) {
+    Set<String> deletedNames = new HashSet<>();
+    Set<String> retainedNames = new HashSet<>();
+    for (ManifestEntry entry : bucketEntries) {
+      if (entry.kind() == FileKind.DELETE) {
+        String fileName = entry.file().fileName();
+        if (fileName != null) {
+          deletedNames.add(fileName);
+        }
+      }
+    }
+    if (deletedNames.isEmpty()) {
+      return Collections.emptySet();
+    }
+    for (ManifestEntry entry : bucketEntries) {
+      if (entry.kind() != FileKind.DELETE) {
+        String fileName = entry.file().fileName();
+        if (fileName != null && deletedNames.contains(fileName)) {
+          retainedNames.add(fileName);
+        }
+      }
+    }
+    return retainedNames;
+  }
+
+  private String formatTaskPartitionBucket(FileStoreTable table, PartitionBucketKey key) {
+    List<String> partitionKeys = table.partitionKeys();
+    if (partitionKeys == null || partitionKeys.isEmpty() || key.partition.getFieldCount() == 0) {
+      return "bucket-" + key.bucket;
+    }
+    FileStore<?> store = table.store();
+    FileStorePathFactory pathFactory = store == null ? null : store.pathFactory();
+    if (pathFactory != null) {
+      String partitionString = pathFactory.getPartitionString(key.partition);
+      if (partitionString != null) {
+        return canonicalPartitionBucket(key.partition, key.bucket, pathFactory);
+      }
+    }
+    CoreOptions coreOptions = new CoreOptions(table.options());
+    InternalRowPartitionComputer computer =
+        new InternalRowPartitionComputer(
+            coreOptions.partitionDefaultName(),
+            table.rowType().project(partitionKeys),
+            partitionKeys.toArray(new String[0]),
+            coreOptions.legacyPartitionName());
+    String generated =
+        PartitionPathUtils.generatePartitionPath(computer.generatePartValues(key.partition));
+    return generated.isEmpty()
+        ? "bucket-" + key.bucket
+        : generated.substring(0, generated.length() - 1) + "/bucket-" + key.bucket;
+  }
+
+  private static final class PartitionBucketKey {
+    final BinaryRow partition;
+    final int bucket;
+
+    PartitionBucketKey(BinaryRow partition, int bucket) {
+      this.partition = partition == null ? BinaryRow.EMPTY_ROW : partition.copy();
+      this.bucket = bucket;
+    }
+
+    @Override
+    public boolean equals(Object o) {
+      if (this == o) {
+        return true;
+      }
+      if (!(o instanceof PartitionBucketKey)) {
+        return false;
+      }
+      PartitionBucketKey that = (PartitionBucketKey) o;
+      return bucket == that.bucket && Objects.equals(partition, that.partition);
+    }
+
+    @Override
+    public int hashCode() {
+      return Objects.hash(partition, bucket);
+    }
   }
 
   /** Resolved partition/bucket target used to push both filters into a single current Scan. */
