@@ -27,7 +27,6 @@ function state(): GlobalState {
       privileges: [],
     // token: ''
     } as UserInfo,
-    isShowTablesMenu: false,
     historyPathInfo: {
       path: '',
       query: {},
@@ -35,20 +34,9 @@ function state(): GlobalState {
   }
 }
 
-const getters = {
-  // necessary to display the secondary navigation of tables
-  getShowTablesMenu(state: GlobalState): boolean {
-    return state.isShowTablesMenu
-  },
-}
-
 export default defineStore('datalake', {
   state,
-  getters,
   actions: {
-    updateTablesMenu(data: boolean): void {
-      this.isShowTablesMenu = data
-    },
     updateUserInfo(data: UserInfo): void {
       this.userInfo = data
     },

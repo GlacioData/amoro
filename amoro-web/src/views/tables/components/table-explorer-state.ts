@@ -121,6 +121,41 @@ export function createTableSearchPlan(
   }
 }
 
+export function getSelectedPathExpandedKeys(
+  currentExpandedKeys: string[],
+  catalog: string,
+): string[] {
+  const safeCatalog = catalog.trim()
+  if (!safeCatalog) {
+    return currentExpandedKeys
+  }
+
+  const catalogKey = `catalog:${safeCatalog}`
+  return currentExpandedKeys.includes(catalogKey)
+    ? currentExpandedKeys
+    : [...currentExpandedKeys, catalogKey]
+}
+
+export function getRevealScrollKey(
+  expandedKeys: readonly string[],
+  catalog: string,
+  db: string,
+  table: string,
+): string | null {
+  const safeCatalog = catalog.trim()
+  const safeDb = db.trim()
+  if (!safeCatalog || !safeDb) {
+    return null
+  }
+
+  const dbKey = `catalog:${safeCatalog}/db:${safeDb}`
+  const safeTable = table.trim()
+  if (safeTable && expandedKeys.includes(dbKey)) {
+    return `${dbKey}/table:${safeTable}`
+  }
+  return dbKey
+}
+
 export function getStoredCatalogExpandedKeys(storedExpandedKeys: string[]): string[] {
   return storedExpandedKeys.filter(
     key => key.startsWith('catalog:') && !key.includes('/db:'),

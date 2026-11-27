@@ -20,6 +20,7 @@ limitations under the License.
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute } from 'vue-router'
+import { buildOperationRowKey } from './table-subviews-state'
 import DashboardPagination from '@/components/DashboardPagination.vue'
 import { tableColumnProps } from '@/utils/table'
 import { copyText } from '@/utils/clipboard'
@@ -37,7 +38,8 @@ const columns = computed<IColumns[]>(() => [
 const visible = ref<boolean>(false)
 const activeCopyText = ref<string>('')
 
-const dataSource = reactive<OperationItem[]>([])
+type OperationRow = OperationItem & { rowKey: string }
+const dataSource = reactive<OperationRow[]>([])
 
 const loading = ref<boolean>(false)
 const pagination = reactive(usePagination())
@@ -61,9 +63,13 @@ async function getOperationInfo() {
     })
     const { total, list } = result
     pagination.total = total;
-    (list || []).forEach((ele: OperationItem) => {
-      ele.ts = ele.ts ? dateFormat(ele.ts) : ''
-      dataSource.push(ele)
+    (list || []).forEach((ele: OperationItem, index: number) => {
+      const formattedTs = ele.ts ? dateFormat(ele.ts) : ''
+      dataSource.push({
+        ...ele,
+        ts: formattedTs,
+        rowKey: buildOperationRowKey({ ts: ele.ts, operation: ele.operation }, pagination.current, index),
+      })
     })
   }
   catch (error) {
@@ -107,7 +113,7 @@ onMounted(() => {
 
 <template>
   <div class="table-operations">
-    <el-table v-loading="loading" row-key="partiton" :data="dataSource">
+    <el-table v-loading="loading" row-key="rowKey" :data="dataSource">
       <el-table-column v-for="column in columns" :key="column.dataIndex" v-bind="tableColumnProps(column, columns)">
         <template v-if="column.dataIndex === 'operation'" #default="{ row: record }">
           <template v-if="column.dataIndex === 'operation'">
@@ -140,7 +146,7 @@ onMounted(() => {
 .table-operations {
   padding: 12px 0;
 
-  .el-table__body > tr > td {
+  .el-table__body tbody > tr > td {
     white-space: pre;
   }
 
@@ -153,6 +159,7 @@ onMounted(() => {
 .operation-wrap .el-dialog__body {
   max-height: 360px;
   overflow-y: auto;
-  white-space: pre;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 </style>

@@ -18,6 +18,19 @@
 
 export default [
   {
+    url: '/mock/api/ams/v1/optimize/optimizerGroups',
+    method: 'get',
+    response: () => ({
+      code: 200,
+      msg: 'success',
+      result: [
+        { optimizerGroupName: 'local' },
+        { optimizerGroupName: 'local11' },
+        { optimizerGroupName: 'local22' },
+      ],
+    }),
+  },
+  {
     url: '/mock/api/ams/v1/optimize/resourceGroups/get',
     method: 'get',
     response: () => ({

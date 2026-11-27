@@ -31,9 +31,11 @@ const { outputText } = ts.transpileModule(descriptor.script.content, {
   compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ESNext },
 })
 
-async function mountChart() {
+async function mountChart(initialOptions = {}) {
   const host = { clientWidth: 425, clientHeight: 300 }
   const canvas = { width: host.clientWidth, height: host.clientHeight, drawn: true, resizeCount: 0 }
+  const setOptionCalls = []
+  const currentOptions = vue.ref(initialOptions)
   let deliverResize
   const context = createContext({
     window: { addEventListener() {}, removeEventListener() {} },
@@ -46,7 +48,9 @@ async function mountChart() {
   const echarts = {
     init() {
       return {
-        setOption() {},
+        setOption(option, opts) {
+          setOptionCalls.push({ option, opts })
+        },
         getWidth: () => canvas.width,
         getHeight: () => canvas.height,
         resize() {
@@ -69,21 +73,31 @@ async function mountChart() {
   await module.link(specifier => ({ 'vue': vueModule, './index': echartsModule })[specifier])
   await module.evaluate()
 
+  const ChartComponent = {
+    ...module.namespace.default,
+    render: () => vue.h('div', { ref: 'echart' }),
+  }
   const renderer = vue.createRenderer({
     createElement: () => host,
     insert() {},
     patchProp() {},
     remove() {},
+    parentNode: () => null,
+    nextSibling: () => null,
   })
   const app = renderer.createApp({
-    ...module.namespace.default,
-    render: () => vue.h('div', { ref: 'echart' }),
+    render: () => vue.h(ChartComponent, { options: currentOptions.value }),
   })
   app.mount({})
   return {
     app,
     canvas,
     host,
+    setOptionCalls,
+    updateOptions: async (next) => {
+      currentOptions.value = next
+      await vue.nextTick()
+    },
     notifyResize: () => deliverResize?.(),
     isObserving: () => Boolean(deliverResize),
   }
@@ -112,4 +126,15 @@ test('closing a chart releases the canvas and stops observing its container', as
   app.unmount()
   assert.equal(canvas.drawn, false)
   assert.equal(isObserving(), false)
+})
+
+test('updating chart options uses notMerge so removed series do not linger', async (t) => {
+  const { app, setOptionCalls, updateOptions } = await mountChart({ series: [{ name: 'A' }, { name: 'B' }] })
+  t.after(() => app.unmount())
+  const nextOption = { series: [{ name: 'A' }] }
+  await updateOptions(nextOption)
+  const lastCall = setOptionCalls.at(-1)
+  assert.deepEqual(lastCall?.option, nextOption)
+  assert.equal(lastCall?.opts?.notMerge, true)
+  assert.deepEqual(Object.keys(lastCall?.opts ?? {}), ['notMerge'])
 })

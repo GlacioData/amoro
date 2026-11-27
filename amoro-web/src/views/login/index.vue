@@ -18,10 +18,13 @@ limitations under the License.
 
 <script lang="ts">
 import { defineComponent, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { useI18n } from 'vue-i18n'
+import { useRouter } from 'vue-router'
 import { message } from '@/utils/ui-feedback'
 import loginService from '@/services/login.service'
 import { usePlaceholder } from '@/hooks/usePlaceholder'
 import useStore from '@/store'
+import { resolvePostLoginTarget } from '@/utils/permission'
 
 interface FormState {
   username: string
@@ -32,6 +35,8 @@ export default defineComponent({
   name: 'Login',
   setup() {
     const store = useStore()
+    const router = useRouter()
+    const { t } = useI18n()
     const formState = reactive<FormState>({
       username: '',
       password: '',
@@ -123,9 +128,9 @@ export default defineComponent({
           roles,
           privileges,
         })
-        setTimeout(() => {
-          window.location.href = '/'
-        }, 100)
+        const target = resolvePostLoginTarget(store.historyPathInfo)
+        store.setHistoryPath({ path: '', query: {} })
+        await router.replace(target)
       }
       catch (error) {
         message.error((error as Error).message)
@@ -145,6 +150,7 @@ export default defineComponent({
       togglePassword,
       currentKeyword,
       handleInput,
+      t,
     }
   },
 })
@@ -166,7 +172,7 @@ export default defineComponent({
     <div class="login-content">
       <div class="terminal-header">
         <img src="@/assets/images/logo-all1.svg" class="header-logo" alt="Amoro">
-        <a href="https://amoro.apache.org" target="_blank" class="docs-link">
+        <a href="https://amoro.apache.org" target="_blank" rel="noopener noreferrer" class="docs-link">
           <span class="docs-dot" />
           Docs
         </a>
@@ -217,7 +223,13 @@ export default defineComponent({
               @input="handleInput"
               @change="handleInput"
             >
-            <span class="password-toggle" @click="togglePassword">
+            <button
+              type="button"
+              class="password-toggle"
+              :aria-label="passwordVisible ? t('hidePassword') : t('showPassword')"
+              :aria-pressed="passwordVisible"
+              @click="togglePassword"
+            >
               <svg v-if="!passwordVisible" class="eye-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
                 <circle cx="12" cy="12" r="3" />
@@ -226,7 +238,7 @@ export default defineComponent({
                 <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" />
                 <line x1="1" y1="1" x2="23" y2="23" />
               </svg>
-            </span>
+            </button>
           </div>
         </div>
 
@@ -237,10 +249,10 @@ export default defineComponent({
         <div class="status-bar">
           <div class="status-item">
             <div class="license-dot" />
-            <a href="https://www.apache.org/licenses/LICENSE-2.0" target="_blank" class="license-link">Apache License 2.0</a>
+            <a href="https://www.apache.org/licenses/LICENSE-2.0" target="_blank" rel="noopener noreferrer" class="license-link">Apache License 2.0</a>
           </div>
           <div class="status-item">
-            <a href="https://github.com/apache/incubator-amoro" target="_blank" class="github-link">
+            <a href="https://github.com/apache/incubator-amoro" target="_blank" rel="noopener noreferrer" class="github-link">
               <svg class="github-icon" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
                 <path d="M12 0C5.374 0 0 5.373 0 12c0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23A11.509 11.509 0 0112 5.803c1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576C20.566 21.797 24 17.3 24 12c0-6.627-5.373-12-12-12z" />
               </svg>
@@ -534,10 +546,10 @@ export default defineComponent({
   line-height: 44px !important;
   border: none !important;
   outline: none !important;
-  font: 14px/44px !important;
+  font: 14px/44px Helvetica, Tahoma, Arial, 'Microsoft YaHei', 'Hiragino Sans GB', 'WenQuanYi Micro Hei', sans-serif !important;
   color: #0a0a0a !important;
   background: transparent !important;
-  padding: 0 14px 0 0 !important;
+  padding: 0 38px 0 0 !important;
   margin: 0 !important;
   box-sizing: border-box;
   box-shadow: none !important;
@@ -571,6 +583,9 @@ export default defineComponent({
   top: 50%;
   transform: translateY(-50%);
   cursor: pointer;
+  background: transparent;
+  border: 0;
+  padding: 0;
   color: #999;
   font-size: 16px;
   user-select: none;

@@ -86,7 +86,8 @@ export default [
         "createTime": 0,
         "creator": null,
         "tableWatermark": null,
-        "baseWatermark": null
+        "baseWatermark": null,
+        "boundedSnapshotRead": false
       }
     }),
   },
@@ -191,11 +192,6 @@ export default [
         "total": 1
       }
     }),
-  },
-  {
-    url: '/mock/api/ams/v1/tables/catalogs/test_catalog/dbs/db/tables/user/operations',
-    method: 'get',
-    response: () => ({ "message": "success", "code": 200, "result": { "list": [], "total": 0 } }),
   },
   {
     url: '/mock/api/ams/v1/tables/catalogs/test_catalog/dbs/db/tables/user/partitions/:filter/files',

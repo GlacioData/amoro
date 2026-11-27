@@ -30,8 +30,7 @@ import UHealthScore from './components/HealthScoreDetails.vue'
 import TableExplorer from './components/TableExplorer.vue'
 import HiveDetails from './components/HiveDetails.vue'
 import TableModel from './components/TableModel.vue'
-import { snapshotTableKey } from './components/snapshot-page-state'
-import useStore from '@/store/index'
+import { resolveTableActiveTab, snapshotTableKey } from './components/snapshot-page-state'
 import type { IBaseDetailInfo } from '@/types/common.type'
 import { usePageScroll } from '@/hooks/usePageScroll'
 
@@ -53,7 +52,6 @@ export default defineComponent({
   setup() {
     const router = useRouter()
     const route = useRoute()
-    const store = useStore()
 
     const detailRef = ref()
     const { pageScrollRef } = usePageScroll()
@@ -124,7 +122,6 @@ export default defineComponent({
 
     const state = reactive({
       activeKey: 'Details',
-      isSecondaryNav: false,
       baseInfo: {
         boundedSnapshotRead: null,
         optimizingStatus: '',
@@ -193,14 +190,12 @@ export default defineComponent({
     }
 
     const goBack = () => {
-      state.isSecondaryNav = false
       router.back()
     }
 
     const refreshVisibleTableDetails = () => {
       if (
         document.visibilityState !== 'visible'
-        || state.isSecondaryNav
         || !hasSelectedTable.value
         || isHiveTable.value
         || isHiveUpgrade.value
@@ -212,24 +207,16 @@ export default defineComponent({
     }
 
     watch(
-      () => route.path,
-      () => {
-        state.isSecondaryNav = !!(route.path.includes('create'))
-      },
-      { immediate: true },
-    )
-
-    watch(
       () => route.query,
       (value, oldVal) => {
         if (isHiveTable.value || isHiveUpgrade.value) {
-          state.activeKey = (value.tab as string) || 'Details'
+          state.activeKey = resolveTableActiveTab(value.tab)
           return
         }
         if (snapshotTableKey(value) !== snapshotTableKey(oldVal)) {
           handleTableNotFound()
           state.snapshotInitializationError = ''
-          state.activeKey = (value.tab as string) || 'Details'
+          state.activeKey = resolveTableActiveTab(value.tab)
           nextTick(() => {
             if (detailRef.value) {
               detailRef.value.getTableDetails()
@@ -237,7 +224,7 @@ export default defineComponent({
           })
           return
         }
-        state.activeKey = value.tab as string
+        state.activeKey = resolveTableActiveTab(value.tab)
       },
     )
 
@@ -252,7 +239,7 @@ export default defineComponent({
 
     onMounted(() => {
       initSidebarWidth()
-      state.activeKey = (route.query?.tab as string) || 'Details'
+      state.activeKey = resolveTableActiveTab(route.query?.tab)
 
       nextTick(() => {
         if (detailRef.value && hasSelectedTable.value && !isHiveTable.value && !isHiveUpgrade.value) {
@@ -280,7 +267,6 @@ export default defineComponent({
       tableDisplayName: computed(() => state.baseInfo.tableName || [route.query.catalog, route.query.db, route.query.table].join('.')),
       tabConfigs,
       explorerOpen,
-      store,
       isIceberg,
       hasSelectedTable,
       isHiveTable,
@@ -301,7 +287,7 @@ export default defineComponent({
 <template>
   <div ref="pageScrollRef" class="page-scroll">
     <div class="tables-wrap">
-      <div v-if="!isSecondaryNav" class="tables-content">
+      <div class="tables-content">
         <div v-if="hasSelectedTable" class="tables-explorer-toggle">
           <el-button text type="primary" :aria-expanded="explorerOpen" aria-controls="tables-explorer-panel" @click="explorerOpen = !explorerOpen">
             {{ $t('tables') }}
@@ -361,29 +347,30 @@ export default defineComponent({
                 </el-tab-pane>
                 <el-tab-pane v-if="detailLoaded" key="Files" name="Files" :label="$t('files')">
                   <template v-if="activeKey === 'Files'">
-                    <UFiles :has-partition="baseInfo.hasPartition" :table-format="baseInfo.tableFormat" />
+                    <UFiles :key="tableKey" :has-partition="baseInfo.hasPartition" :table-format="baseInfo.tableFormat" />
                   </template>
                 </el-tab-pane>
                 <el-tab-pane v-for="tab in tabConfigs" :key="tab.key" :name="tab.key" :label="$t(tab.label)">
                   <template v-if="activeKey === tab.key">
                     <USnapshots
                       v-if="tab.key === 'Snapshots'"
+                      :key="tableKey"
                       :bounded-snapshot-read="baseInfo.boundedSnapshotRead"
                       :initialization-error="snapshotInitializationError"
                       @retry-initialization="detailRef?.getTableDetails()"
                     />
                     <UTags v-else-if="tab.key === 'Tags' && detailLoaded" :key="tableKey" />
-                    <component :is="`U${tab.key}`" v-else-if="tab.key !== 'Tags'" />
+                    <component :is="`U${tab.key}`" v-else-if="tab.key !== 'Tags'" :key="tableKey" />
                   </template>
                 </el-tab-pane>
               </el-tabs>
             </div>
           </template>
-          <div v-else class="empty-page" />
+          <div v-else class="empty-page">
+            <el-empty :description="$t('selectTablePrompt')" :image-size="72" />
+          </div>
         </div>
       </div>
-      <!-- Create table secondary page -->
-      <router-view v-else @go-back="goBack" />
     </div>
   </div>
 </template>
@@ -456,15 +443,10 @@ export default defineComponent({
 
   .tables-main .empty-page {
     height: 100%;
-  }
-
-  .tables-menu-wrap {
-    position: fixed;
-    width: 100%;
-    height: 100%;
-    top: 0;
-    left: 200px;
-    z-index: 100;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
   }
 
   .table-name {

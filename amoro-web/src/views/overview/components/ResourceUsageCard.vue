@@ -17,8 +17,9 @@ limitations under the License.
 / -->
 
 <script lang="ts" setup>
+import { computed, onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { onMounted, ref } from 'vue'
+import { buildResourceUsageOption } from '../overview-state'
 import Chart from '@/components/echarts/Chart.vue'
 import { bytesToSize, dateFormat } from '@/utils'
 import { getResourceUsageList } from '@/services/overview.service'
@@ -27,33 +28,17 @@ import type { ResourceUsageItem } from '@/types/common.type'
 const { t } = useI18n()
 const timeRange = ref('24')
 const loading = ref<boolean>(false)
-
-function resourceFormatter(params: any[]): string {
-  const cpuParam = params[0]
-  const memoryParam = params[1]
-  const memorySize = bytesToSize(memoryParam.value)
-  let str = `<span style="font-size: 12px">${params[0].axisValue}</span><br/>`
-  str += `<span style="display: inline-block;background-color:${cpuParam.color}; margin-right: 6px; width: 6px;height: 6px;"></span>${t('cpu')}: ${cpuParam.value} Core<br/>`
-  str += `<span style="display: inline-block;background-color:${memoryParam.color}; margin-right: 6px; width: 6px;height: 6px;"></span>${t('memory')}: ${memorySize}<br/>`
-  return str
-}
-
-const option = ref({
-  tooltip: {
-    trigger: 'axis',
-    formatter: resourceFormatter,
-  },
-  legend: { data: [t('cpu'), t('memory')] },
-  xAxis: { type: 'category', data: [''] },
-  yAxis: [
-    { type: 'value', name: t('cpuCores'), axisLabel: { formatter: '{value}' } },
-    { type: 'value', name: t('memory'), axisLabel: { formatter: (value: number) => { return `${bytesToSize(value)}` } } },
-  ],
-  series: [
-    { name: t('cpu'), type: 'line', yAxisIndex: 0, data: [-1] },
-    { name: t('memory'), type: 'line', yAxisIndex: 1, data: [-1] },
-  ],
+const seriesData = reactive({
+  times: [] as string[],
+  cpu: [] as number[],
+  memory: [] as number[],
 })
+
+const option = computed(() => buildResourceUsageOption(
+  seriesData,
+  { cpu: t('cpu'), cpuCores: t('cpuCores'), memory: t('memory') },
+  bytesToSize,
+))
 
 async function updateData() {
   try {
@@ -64,14 +49,14 @@ async function updateData() {
 
     const startTime = Date.now() - Number.parseFloat(timeRange.value) * 60 * 60 * 1000
     const result: ResourceUsageItem[] = await getResourceUsageList(startTime)
-    result.forEach((item) => {
+    ;(result || []).forEach((item) => {
       times.push(dateFormat(item.ts))
       cpu.push(item.totalCpu)
       memory.push(item.totalMemory)
     })
-    option.value.xAxis.data = times
-    option.value.series[0].data = cpu
-    option.value.series[1].data = memory
+    seriesData.times = times
+    seriesData.cpu = cpu
+    seriesData.memory = memory
   }
   catch (error) {
   }

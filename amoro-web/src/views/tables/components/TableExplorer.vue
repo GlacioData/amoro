@@ -20,10 +20,13 @@ limitations under the License.
 import type { TreeInstance } from 'element-plus'
 import { CaretRight, Loading, Refresh, Search } from '@element-plus/icons-vue'
 import { computed, markRaw, nextTick, onBeforeMount, onBeforeUnmount, reactive, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter } from 'vue-router'
 import {
   createBranchLoader,
   createTableSearchPlan,
+  getRevealScrollKey,
+  getSelectedPathExpandedKeys,
   getStoredCatalogExpandedKeys,
   mergeExpandedKeys,
   reconcileTreeNodes,
@@ -53,6 +56,7 @@ interface TreeNode {
   tableType?: string
 }
 
+const { t } = useI18n()
 const router = useRouter()
 const route = useRoute()
 
@@ -194,17 +198,21 @@ function loadChildren(source: TreeNode): Promise<boolean> {
   })
 }
 
-function setBrowseExpanded(key: string, expanded: boolean) {
-  const keys = state.expandedKeys
-  if (expanded === keys.includes(key))
-    return
-  state.expandedKeys = expanded ? [...keys, key] : keys.filter(item => item !== key)
+function persistBrowseExpandedKeys(nextKeys: string[]) {
+  state.expandedKeys = nextKeys
   try {
     sessionStorage.setItem(expandedKeysSessionKey, JSON.stringify(state.expandedKeys))
   }
   catch {
     // Browser storage is optional for embedders.
   }
+}
+
+function setBrowseExpanded(key: string, expanded: boolean) {
+  const keys = state.expandedKeys
+  if (expanded === keys.includes(key))
+    return
+  persistBrowseExpandedKeys(expanded ? [...keys, key] : keys.filter(item => item !== key))
 }
 
 function handleSelectTable(catalog: string, db: string, tableName: string, tableType: string) {
@@ -528,18 +536,18 @@ async function revealSelectedPath() {
   if (!catalogNode || !db || state.filterKey)
     return
 
-  setBrowseExpanded(catalogNode.key, true)
-  if (!await loadChildren(catalogNode) || state.filterKey || !isSelectedPath(path) || !table)
+  const nextExpandedKeys = getSelectedPathExpandedKeys(state.expandedKeys, catalog)
+  if (nextExpandedKeys !== state.expandedKeys)
+    persistBrowseExpandedKeys(nextExpandedKeys)
+  if (!await loadChildren(catalogNode) || state.filterKey || !isSelectedPath(path))
     return
   const database = catalogNode.children?.find(node => node.db === db)
   if (!database)
     return
 
-  setBrowseExpanded(database.key, true)
-  if (!await loadChildren(database) || state.filterKey || !isSelectedPath(path))
-    return
   await nextTick()
-  const row = selectedKey.value ? findTreeRow(selectedKey.value) : undefined
+  const targetKey = getRevealScrollKey(state.expandedKeys, catalog, db, table)
+  const row = (targetKey ? findTreeRow(targetKey) : undefined) ?? findTreeRow(database.key)
   scrollSelectedRowIntoView(row)
 }
 
@@ -694,7 +702,7 @@ onBeforeMount(async () => {
     <div class="table-explorer-header">
       <el-input
         v-model="state.searchKey"
-        placeholder="Search catalog.database.table"
+        :placeholder="t('tableExplorerSearchPlaceholder')"
         :aria-describedby="showSearchScope ? 'table-explorer-search-scope' : undefined"
         clearable
         class="search-input"
@@ -703,12 +711,12 @@ onBeforeMount(async () => {
           <Search class="amoro-icon search-input-prefix-icon" />
         </template>
       </el-input>
-      <el-tooltip content="Refresh catalogs and open branches">
+      <el-tooltip :content="t('tableExplorerRefreshTooltip')">
         <el-button
           text
           size="small"
           :loading="state.refreshing || (rootStatus === 'loading' && !state.treeData.length)"
-          aria-label="Refresh catalogs and open branches"
+          :aria-label="t('tableExplorerRefreshTooltip')"
           class="refresh-button"
           @click="refreshTableTree"
         >
@@ -720,18 +728,18 @@ onBeforeMount(async () => {
     </div>
 
     <p v-if="showSearchScope" id="table-explorer-search-scope" class="search-scope">
-      Searches loaded branches and the current database. Use catalog.database.table to search another database.
+      {{ t('tableExplorerSearchScope') }}
     </p>
     <div v-if="rootStatus === 'error'" class="explorer-status" role="status">
-      <span>Could not load catalogs.</span>
+      <span>{{ t('tableExplorerLoadCatalogsFailed') }}</span>
       <el-button link type="primary" @click="refreshTableTree">
-        Retry
+        {{ t('retry') }}
       </el-button>
     </div>
     <div v-if="searchStatus === 'error'" class="explorer-status" role="status">
-      <span>Could not finish searching.</span>
+      <span>{{ t('tableExplorerSearchFailed') }}</span>
       <el-button link type="primary" @click="loadSearchTables(state.searchKey, true)">
-        Retry
+        {{ t('retry') }}
       </el-button>
     </div>
     <div ref="treeBody" class="table-explorer-body" @keydown.capture="handleTreeKeydown">
@@ -769,25 +777,25 @@ onBeforeMount(async () => {
             <span
               v-if="node.expanded && dataRef.children?.length === 0 && !branchStatus.has(dataRef.key)"
               class="tree-node-empty"
-            >Empty</span>
+            >{{ t('tableExplorerEmptyBranch') }}</span>
             <el-button
               v-if="dataRef.nodeType !== 'table' && branchStatus.get(dataRef.key) === 'error'"
               link
               type="danger"
               size="small"
-              :aria-label="`Retry loading ${dataRef.title}`"
+              :aria-label="t('tableExplorerRetryBranch', { name: dataRef.title })"
               @click.stop="retryBranch(dataRef)"
             >
-              Retry
+              {{ t('retry') }}
             </el-button>
           </div>
         </template>
       </el-tree>
       <div v-else class="explorer-status" role="status">
-        <span v-if="rootStatus === 'loading' && !state.treeData.length">Loading catalogs…</span>
-        <span v-else-if="searchStatus === 'loading'">Searching…</span>
-        <span v-else-if="state.filterKey && searchStatus !== 'error'">No results</span>
-        <span v-else-if="rootStatus === 'ready' && !state.treeData.length">No catalogs</span>
+        <span v-if="rootStatus === 'loading' && !state.treeData.length">{{ t('tableExplorerLoadingCatalogs') }}</span>
+        <span v-else-if="searchStatus === 'loading'">{{ t('tableExplorerSearching') }}</span>
+        <span v-else-if="state.filterKey && searchStatus !== 'error'">{{ t('tableExplorerNoResults') }}</span>
+        <span v-else-if="rootStatus === 'ready' && !state.treeData.length">{{ t('tableExplorerNoCatalogs') }}</span>
       </div>
     </div>
   </div>

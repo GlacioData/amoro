@@ -75,6 +75,7 @@ export default defineComponent({
         resourceOccupation: '',
       },
       groupKeyCount: 1,
+      optimizerKeyCount: 1,
       showTab: false as boolean,
       showCreateOptimizer: false as boolean,
       optimizerEdit: false,
@@ -168,7 +169,7 @@ export default defineComponent({
                 <el-button v-if="writable" type="primary" class="g-mb-16" @click="createOptimizer(null)">
                   {{ t("createOptimizer") }}
                 </el-button>
-                <List type="optimizers" />
+                <List :key="optimizerKeyCount" type="optimizers" />
               </template>
             </el-tab-pane>
             <el-tab-pane
@@ -204,7 +205,10 @@ export default defineComponent({
       <CreateOptimizerModal
         v-if="showCreateOptimizer"
         @cancel="showCreateOptimizer = false"
-        @refresh="showCreateOptimizer = false"
+        @refresh="
+          optimizerKeyCount++;
+          showCreateOptimizer = false;
+        "
       />
     </div>
   </div>

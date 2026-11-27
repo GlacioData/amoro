@@ -15,10 +15,6 @@
   See the License for the specific language governing permissions and
   limitations under the License.
  / -->
-<template>
-  <div id="swagger-ui" />
-</template>
-
 <script>
 import SwaggerUI from 'swagger-ui'
 import 'swagger-ui/dist/swagger-ui.css'
@@ -33,6 +29,10 @@ export default {
   },
 }
 </script>
+
+<template>
+  <div id="swagger-ui" />
+</template>
 
 <style scoped>
 #swagger-ui {

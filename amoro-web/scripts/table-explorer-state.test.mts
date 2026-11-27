@@ -23,10 +23,34 @@ import test from 'node:test'
 import {
   createBranchLoader,
   createTableSearchPlan,
+  getRevealScrollKey,
+  getSelectedPathExpandedKeys,
   getStoredCatalogExpandedKeys,
   mergeExpandedKeys,
   reconcileTreeNodes,
 } from '../src/views/tables/components/table-explorer-state.ts'
+
+test('selected detail path expands only its catalog without expanding the database', () => {
+  const expandedKeys = getSelectedPathExpandedKeys(['catalog:another'], 'sl')
+  assert.deepEqual(expandedKeys, ['catalog:another', 'catalog:sl'])
+  assert.equal(expandedKeys.some(key => key.includes('/db:')), false)
+
+  // Already-expanded catalog is preserved without duplication; blank catalog is a no-op.
+  assert.deepEqual(getSelectedPathExpandedKeys(expandedKeys, 'sl'), expandedKeys)
+  assert.deepEqual(getSelectedPathExpandedKeys(expandedKeys, '   '), expandedKeys)
+})
+
+test('getRevealScrollKey targets database row when collapsed and table row only when database is already expanded', () => {
+  assert.equal(
+    getRevealScrollKey(['catalog:sl'], 'sl', 'sl_oki_test', 'orders'),
+    'catalog:sl/db:sl_oki_test',
+  )
+  assert.equal(
+    getRevealScrollKey(['catalog:sl', 'catalog:sl/db:sl_oki_test'], 'sl', 'sl_oki_test', 'orders'),
+    'catalog:sl/db:sl_oki_test/table:orders',
+  )
+  assert.equal(getRevealScrollKey(['catalog:sl'], 'sl', '', 'orders'), null)
+})
 
 test('restores catalog expansion and leaves unrelated databases unloaded', () => {
   const expandedKeys = getStoredCatalogExpandedKeys([

@@ -17,8 +17,9 @@ limitations under the License.
 / -->
 
 <script lang="ts" setup>
+import { computed, onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { onMounted, ref } from 'vue'
+import { buildDataSizeOption } from '../overview-state'
 import { getDataSizeList } from '@/services/overview.service'
 import { bytesToSize, dateFormat } from '@/utils'
 import type { DataSizeItem } from '@/types/common.type'
@@ -27,37 +28,16 @@ import Chart from '@/components/echarts/Chart.vue'
 const { t } = useI18n()
 const timeRange = ref('24')
 const loading = ref<boolean>(false)
-
-function dataSizeFormatter(params: any[]): string {
-  const dataParam = params[0]
-  const dataSize = bytesToSize(dataParam.value)
-  let str = `<span style="font-size: 12px">${params[0].axisValue}</span><br/>`
-  str += `<span style="display: inline-block;background-color:${dataParam.color}; margin-right: 6px; width: 6px;height: 6px;"></span>${t('dataSize')}: ${dataSize}<br/>`
-  return str
-}
-
-const dataSizeChartOption = ref({
-  tooltip: {
-    trigger: 'axis',
-    formatter: dataSizeFormatter,
-  },
-  legend: { data: [t('dataSize')] },
-  xAxis: {
-    type: 'category',
-    data: [''],
-  },
-  yAxis: {
-    type: 'value',
-    axisLabel: { formatter: (value: number) => { return `${bytesToSize(value)}` } },
-  },
-  series: [
-    {
-      name: t('dataSize'),
-      type: 'line',
-      data: [-1],
-    },
-  ],
+const seriesData = reactive({
+  times: [] as string[],
+  values: [] as number[],
 })
+
+const dataSizeChartOption = computed(() => buildDataSizeOption(
+  seriesData,
+  t('dataSize'),
+  bytesToSize,
+))
 
 async function updateData() {
   try {
@@ -67,12 +47,12 @@ async function updateData() {
 
     const startTime = Date.now() - Number.parseFloat(timeRange.value) * 60 * 60 * 1000
     const result: DataSizeItem[] = await getDataSizeList(startTime)
-    result.forEach((item) => {
+    ;(result || []).forEach((item) => {
       times.push(dateFormat(item.ts))
       dataSizeList.push(item.dataSize)
     })
-    dataSizeChartOption.value.xAxis.data = times
-    dataSizeChartOption.value.series[0].data = dataSizeList
+    seriesData.times = times
+    seriesData.values = dataSizeList
   }
   catch (error) {
   }

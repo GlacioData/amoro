@@ -17,9 +17,9 @@
   */
 
 // import { IOptions } from '@/types/common.type'
+import { deletedTag, savedTag, tagMutation, updatedTag } from './tag-mutation'
 import type { ICatalogItem, IMap, SnapshotItem } from '@/types/common.type'
 import request from '@/utils/request'
-import { deletedTag, savedTag, updatedTag, tagMutation } from './tag-mutation'
 
 interface ListingOptions {
   handleError?: boolean
@@ -146,8 +146,16 @@ export function getDetailBySnapshotId(
 }
 // The bounded protocol deliberately has no page/offset field.
 export function getSnapshotDetailPage(params: {
-  catalog: string, db: string, table: string, ref: string, snapshotId: string,
-  pageSize: number, cursor?: string, refType?: string, scopeKind?: string, branch?: string,
+  catalog: string
+  db: string
+  table: string
+  ref: string
+  snapshotId: string
+  pageSize: number
+  cursor?: string
+  refType?: string
+  scopeKind?: string
+  branch?: string
 }): Promise<{ list: any[], nextCursor: string | null }> {
   const { catalog, db, table, snapshotId, ...query } = params
   return request.get(`${tagTablePath({ catalog, db, table })}/snapshots/${encodeURIComponent(snapshotId)}/detail`, { handleError: false, params: query })

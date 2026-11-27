@@ -59,3 +59,9 @@ export function snapshotTableKey(query: Record<string, unknown>) {
 export function sameSnapshotSelection(left: { type: string, value: string }, right: { type: string, value: string }) {
   return left.type === right.type && left.value === right.value
 }
+
+/** Always resolve a non-empty tab key so missing ?tab never blanks the tab panel. */
+export function resolveTableActiveTab(tab: unknown): string {
+  const raw = Array.isArray(tab) ? tab[0] : tab
+  return typeof raw === 'string' && raw.trim() ? raw.trim() : 'Details'
+}

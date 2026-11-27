@@ -17,17 +17,20 @@ limitations under the License.
 / -->
 
 <script lang="ts" setup>
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
+import { useI18n } from 'vue-i18n'
+import { isValidParallelism, runExclusiveSubmit } from '../resource-state'
 import { usePlaceholder } from '@/hooks/usePlaceholder'
 import { createOptimizerResource, getOptimizerGroups } from '@/services/optimize.service'
 
 interface FormState {
   resourceGroup: string
-  parallelism: number
+  parallelism: number | undefined
 }
 
 const emit = defineEmits<{ (e: 'cancel'): void, (e: 'refresh'): void }>()
 
+const { t } = useI18n()
 const confirmLoading = ref<boolean>(false)
 const placeholder = reactive(usePlaceholder())
 const formRef = ref()
@@ -36,12 +39,26 @@ const formState: FormState = reactive({
   parallelism: 1,
 })
 
+const parallelismRules = computed(() => [
+  { required: true, message: `${placeholder.parallelismPh}` },
+  {
+    validator: (_rule: unknown, value: unknown, callback: (error?: Error) => void) => {
+      if (!isValidParallelism(value)) {
+        callback(new Error(t('parallelismPositiveIntTip')))
+        return
+      }
+      callback()
+    },
+    trigger: ['blur', 'change'],
+  },
+])
+
 const resourceGroupOptions = ref<{ label: string, value: string }[]>([])
 
 async function loadResourceGroups() {
   try {
     const response = await getOptimizerGroups()
-    resourceGroupOptions.value = response.map((group: any) => ({
+    resourceGroupOptions.value = (response || []).map((group: any) => ({
       label: group.optimizerGroupName,
       value: group.optimizerGroupName,
     }))
@@ -51,27 +68,35 @@ async function loadResourceGroups() {
   }
 }
 
-function handleOk() {
-  formRef.value
-    .validate()
-    .then(async () => {
-      confirmLoading.value = true
-      await createOptimizerResource({
-        optimizerGroup: formState.resourceGroup || '',
-        parallelism: Number(formState.parallelism),
-      })
-      formRef.value.resetFields()
-      emit('cancel')
-      emit('refresh')
-      confirmLoading.value = false
-    })
-    .catch(() => {
-      confirmLoading.value = false
-    })
+async function handleOk() {
+  await runExclusiveSubmit(
+    () => confirmLoading.value,
+    (busy) => { confirmLoading.value = busy },
+    async () => {
+      try {
+        await formRef.value.validate()
+      }
+      catch {
+        return
+      }
+
+      try {
+        await createOptimizerResource({
+          optimizerGroup: formState.resourceGroup || '',
+          parallelism: Number(formState.parallelism),
+        })
+        formRef.value?.resetFields()
+        emit('refresh')
+      }
+      catch {
+        // Error feedback is handled by the request interceptor.
+      }
+    },
+  )
 }
 
 function handleCancel() {
-  formRef.value.resetFields()
+  formRef.value?.resetFields()
   emit('cancel')
 }
 
@@ -102,18 +127,23 @@ onMounted(() => {
             v-for="option in resourceGroupOptions"
             :key="option.value"
             :label="option.label"
-            :value="option.value" />
+            :value="option.value"
+          />
         </el-select>
       </el-form-item>
       <el-form-item
         prop="parallelism"
         :label="$t('parallelism')"
-        :rules="[{ required: true, message: `${placeholder.parallelismPh}` }]"
+        :rules="parallelismRules"
       >
-        <el-input
+        <el-input-number
           v-model="formState.parallelism"
-          type="number"
+          :min="1"
+          :step="1"
+          :precision="0"
+          controls-position="right"
           :placeholder="placeholder.parallelismPh"
+          style="width: 100%"
         />
       </el-form-item>
     </el-form>

@@ -78,7 +78,7 @@ async function handleLogout() {
 }
 
 function goDocs() {
-  window.open('https://amoro.apache.org/docs/latest/')
+  window.open('https://amoro.apache.org/docs/latest/', '_blank', 'noopener,noreferrer')
 }
 
 function setLocale() {
@@ -135,7 +135,7 @@ onMounted(() => {
     background: #fff;
     border-bottom: 1px solid #e8e8e8;
     box-shadow: 0 1px 2px rgb(0 21 41 / 5%);
-    padding: 0 12px 0 0;
+    padding: 0 12px 0 56px;
     font-size: 12px;
     gap: 8px;
 
@@ -165,6 +165,10 @@ onMounted(() => {
       white-space: nowrap;
     }
 
+    @media (max-width: 1024px) {
+      padding-left: 12px;
+    }
+
     @media (max-width: 760px) {
       padding-inline: 8px;
       .version-commit-time { display: none; }
@@ -174,9 +178,6 @@ onMounted(() => {
       font-size: 12px;
       margin-top: -2px;
     }
-  }
-  .topbar-tooltip .el-popper {
-    font-size: 12px;
   }
   .logout-button.el-button {
     border: none;

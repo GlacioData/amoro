@@ -48,7 +48,7 @@ export default defineComponent({
       () => props.options,
       (value) => {
         if (value)
-          chart?.setOption(value)
+          chart?.setOption(value, { notMerge: true })
       },
       {
         deep: true,

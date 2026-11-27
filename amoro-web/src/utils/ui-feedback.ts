@@ -27,6 +27,7 @@ interface Confirmation {
   content?: string
   okText?: string
   onOk?: () => unknown
+  onCancel?: () => void
 }
 
 function confirmationButtons(okText?: string) {
@@ -46,7 +47,8 @@ async function messageBox() {
 
 // The confirmation stays open while its handler saves. Cancel and close never call onOk.
 // https://github.com/element-plus/element-plus/blob/2.14.8/docs/en-US/component/message-box.md
-export function confirmAction({ title, content = '', okText, onOk }: Confirmation): void {
+export function confirmAction({ title, content = '', okText, onOk, onCancel }: Confirmation): void {
+  let settled = false
   void messageBox().then(box => box.confirm(content, title, {
     ...confirmationButtons(okText),
     type: 'warning',
@@ -55,12 +57,15 @@ export function confirmAction({ title, content = '', okText, onOk }: Confirmatio
       if (instance.confirmButtonLoading)
         return
       if (action !== 'confirm') {
+        settled = true
+        onCancel?.()
         done()
         return
       }
       instance.confirmButtonLoading = true
       try {
         await onOk?.()
+        settled = true
         done()
       }
       catch {
@@ -70,7 +75,10 @@ export function confirmAction({ title, content = '', okText, onOk }: Confirmatio
         instance.confirmButtonLoading = false
       }
     },
-  })).catch(() => {})
+  })).catch(() => {
+    if (!settled)
+      onCancel?.()
+  })
 }
 
 export function warnAction({ title, content = '', okText }: Confirmation): void {

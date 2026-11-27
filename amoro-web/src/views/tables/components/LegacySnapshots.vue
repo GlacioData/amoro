@@ -211,18 +211,19 @@ async function getBreadcrumbTable() {
   }
 }
 
-function toggleBreadcrumb(record: SnapshotItem) {
+function openSnapshotDetail(record: SnapshotItem) {
   snapshotId.value = record.snapshotId
-  hasBreadcrumb.value = !hasBreadcrumb.value
-  if (hasBreadcrumb.value) {
-    breadcrumbPagination.current = 1
-    getBreadcrumbTable()
-  }
-  else {
-    // Reset cursor-based pagination when returning to main view
-    lastSnapshot.value = null
-    pagination.current = 1
-  }
+  hasBreadcrumb.value = true
+  breadcrumbPagination.current = 1
+  getBreadcrumbTable()
+}
+
+function returnToList() {
+  snapshotId.value = ''
+  hasBreadcrumb.value = false
+  // Reset cursor-based pagination when returning to main view
+  lastSnapshot.value = null
+  pagination.current = 1
 }
 
 function toggleCharts() {
@@ -270,7 +271,7 @@ onMounted(() => {
         <el-table-column v-for="column in columns" :key="column.dataIndex" v-bind="tableColumnProps(column, columns)">
           <template v-if="column.dataIndex === 'snapshotId'" #default="{ row: record }">
             <template v-if="column.dataIndex === 'snapshotId'">
-              <el-button link type="primary" @click="toggleBreadcrumb(record)">
+              <el-button link type="primary" @click="openSnapshotDetail(record)">
                 {{ record.snapshotId }}
               </el-button>
             </template>
@@ -281,7 +282,7 @@ onMounted(() => {
     </template>
     <template v-else>
       <el-breadcrumb separator=">">
-        <el-breadcrumb-item class="text-active" @click="toggleBreadcrumb">
+        <el-breadcrumb-item class="text-active" @click="returnToList">
           {{ $t('all') }}
         </el-breadcrumb-item>
         <el-breadcrumb-item>{{ `${$t('snapshotId')} ${snapshotId}` }}</el-breadcrumb-item>

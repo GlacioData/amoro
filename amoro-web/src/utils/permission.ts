@@ -89,3 +89,81 @@ export function getDefaultRoute(): string {
   }
   return '/login'
 }
+
+export interface RedirectTarget {
+  path: string
+  query: Record<string, any>
+}
+
+function hasControlChar(value: string): boolean {
+  for (let i = 0; i < value.length; i += 1) {
+    const code = value.charCodeAt(i)
+    if (code <= 0x1F || code === 0x7F)
+      return true
+  }
+  return false
+}
+
+export function normalizeRoutePath(path: string): string {
+  const trimmed = path.replace(/\/+$/, '')
+  return (trimmed || '/').toLowerCase()
+}
+
+export function isSafeRedirectPath(path: unknown): path is string {
+  if (typeof path !== 'string' || !path.startsWith('/')) {
+    return false
+  }
+  if (path.startsWith('//') || path.includes('://') || path.includes('\\') || hasControlChar(path)) {
+    return false
+  }
+  const normalized = normalizeRoutePath(path)
+  if (normalized === '/' || normalized === '/login' || normalized === '/404') {
+    return false
+  }
+  return true
+}
+
+export function canAccessRoute(path: string): boolean {
+  const normalized = normalizeRoutePath(path)
+  if (normalized === '/hive-tables/upgrade' || normalized === '/tables/hive-upgrade') {
+    return canManageTable()
+  }
+  if (normalized === '/overview') {
+    return canViewSystem()
+  }
+  if (normalized === '/catalogs') {
+    return canViewCatalog()
+  }
+  if (normalized === '/optimizing') {
+    return canViewOptimizer()
+  }
+  if (normalized === '/tables' || normalized.startsWith('/tables/') || normalized === '/hive-tables' || normalized.startsWith('/hive-tables/')) {
+    return canViewTable()
+  }
+  return true
+}
+
+export function capturePreLoginTarget(
+  to: { path: string, query?: Record<string, any> },
+  from: { path: string, query?: Record<string, any> },
+  isAuthenticated: boolean,
+): RedirectTarget | null {
+  const normalizedTo = normalizeRoutePath(to.path)
+  if (!isAuthenticated && normalizedTo !== '/login' && isSafeRedirectPath(to.path)) {
+    return { path: to.path, query: { ...(to.query || {}) } }
+  }
+  if (normalizedTo === '/login' && isSafeRedirectPath(from.path)) {
+    return { path: from.path, query: { ...(from.query || {}) } }
+  }
+  return null
+}
+
+export function resolvePostLoginTarget(
+  historyPathInfo: { path?: string, query?: Record<string, any> } | null | undefined,
+): RedirectTarget {
+  const path = historyPathInfo?.path
+  if (isSafeRedirectPath(path) && canAccessRoute(path)) {
+    return { path, query: { ...(historyPathInfo?.query || {}) } }
+  }
+  return { path: getDefaultRoute(), query: {} }
+}
