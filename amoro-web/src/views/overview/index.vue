@@ -25,6 +25,8 @@ import Top10TablesCard from './components/Top10TablesCard.vue'
 import ResourceUsageCard from './components/ResourceUsageCard.vue'
 import DataSizeCard from './components/DataSizeCard.vue'
 import PieChartCard from './components/PieChartCard.vue'
+import { loadOverviewSections } from './overview-state'
+import type { OverviewOptimizingStatusItem, OverviewSummary } from './overview-state'
 import { usePageScroll } from '@/hooks/usePageScroll'
 import { getOverviewOptimizingStatus, getOverviewSummary } from '@/services/overview.service'
 import { bytesToSize } from '@/utils'
@@ -33,21 +35,53 @@ import type { IKeyAndValue } from '@/types/common.type'
 const { t } = useI18n()
 const { pageScrollRef } = usePageScroll()
 
-const singleData = ref<IKeyAndValue<string | number>[]>([])
-const multipleData = ref<IKeyAndValue<string | number>[]>([])
+const loading = ref(false)
+const loadError = ref('')
+const singleData = ref<IKeyAndValue<string | number>[]>([
+  { key: 'catalog', value: '—' },
+  { key: 'table', value: '—' },
+  { key: 'data', value: '—' },
+])
+const multipleData = ref<IKeyAndValue<string | number>[]>([
+  { key: 'cpu', value: '—' },
+  { key: 'memory', value: '—' },
+])
 const optimizingStatusData = ref<{ value: number, name: string }[]>([])
 
 async function getCurOverviewData() {
-  const summaryResult = await getOverviewSummary()
-  const tableSize = bytesToSize(summaryResult.tableTotalSize)
-  const memorySize = bytesToSize(summaryResult.totalMemory)
-  singleData.value.push({ key: 'catalog', value: summaryResult.catalogCnt })
-  singleData.value.push({ key: 'table', value: summaryResult.tableCnt })
-  singleData.value.push({ key: 'data', value: tableSize })
-  multipleData.value.push({ key: 'cpu', value: summaryResult.totalCpu })
-  multipleData.value.push({ key: 'memory', value: memorySize })
-
-  optimizingStatusData.value = await getOverviewOptimizingStatus()
+  loading.value = true
+  loadError.value = ''
+  try {
+    const { summary, summaryError, optimizingStatus, statusError } = await loadOverviewSections<
+      OverviewSummary,
+      OverviewOptimizingStatusItem
+    >(
+      getOverviewSummary,
+      getOverviewOptimizingStatus,
+    )
+    if (summary) {
+      const tableSize = bytesToSize(summary.tableTotalSize)
+      const memorySize = bytesToSize(summary.totalMemory)
+      singleData.value = [
+        { key: 'catalog', value: summary.catalogCnt },
+        { key: 'table', value: summary.tableCnt },
+        { key: 'data', value: tableSize },
+      ]
+      multipleData.value = [
+        { key: 'cpu', value: summary.totalCpu },
+        { key: 'memory', value: memorySize },
+      ]
+    }
+    if (!statusError) {
+      optimizingStatusData.value = optimizingStatus
+    }
+    if (summaryError || statusError) {
+      loadError.value = t('overviewLoadFailed')
+    }
+  }
+  finally {
+    loading.value = false
+  }
 }
 
 onMounted(() => {
@@ -58,14 +92,21 @@ onMounted(() => {
 <template>
   <div :ref="el => { pageScrollRef = el as HTMLElement | null }" class="page-scroll">
     <div class="overview-content">
-      <div class="overview-summary">
+      <el-alert v-if="loadError" type="error" :title="loadError" show-icon :closable="false" class="g-mb-16">
+        <template #default>
+          <el-button size="small" :disabled="loading" @click="getCurOverviewData">
+            {{ t('retry') }}
+          </el-button>
+        </template>
+      </el-alert>
+      <div v-loading="loading" class="overview-summary">
         <SingleDataCard v-for="card in singleData" :key="card.key" :title="t(card.key)" :value="card.value" />
         <MultipleDataCard :title="t('resource')" :data="multipleData" />
       </div>
       <div class="overview-panels">
         <ResourceUsageCard />
         <DataSizeCard />
-        <PieChartCard :title="t('optimizingStatus')" :data="optimizingStatusData" />
+        <PieChartCard :title="t('optimizingStatus')" :loading="loading" :data="optimizingStatusData" />
         <Top10TablesCard />
       </div>
     </div>

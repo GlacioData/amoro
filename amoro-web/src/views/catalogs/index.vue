@@ -150,7 +150,7 @@ onMounted(async () => {
   await getCatalogs()
   initSelectCatalog()
 })
-function leaveConfirm(cb?: () => void) {
+function leaveConfirm(cb?: () => void, onCancel?: () => void) {
   confirmAction({
     title: t('leavePageModalTitle'),
     content: t('leavePageModalContent'),
@@ -158,17 +158,16 @@ function leaveConfirm(cb?: () => void) {
     onOk: async () => {
       cb && await cb()
     },
+    onCancel,
   })
 }
-onBeforeRouteLeave((_to, _form, next) => {
-  if (isEdit.value) {
-    leaveConfirm(() => {
-      next()
-    })
+onBeforeRouteLeave(() => {
+  if (!isEdit.value) {
+    return true
   }
-  else {
-    next()
-  }
+  return new Promise<boolean>((resolve) => {
+    leaveConfirm(() => resolve(true), () => resolve(false))
+  })
 })
 </script>
 
@@ -180,7 +179,7 @@ onBeforeRouteLeave((_to, _form, next) => {
           {{ `${$t('catalog')} ${$t('list')}` }}
         </div>
         <ul v-if="catalogs.length && !loading" class="catalog-list">
-          <li v-for="item in catalogs" :key="item.catalogName" class="catalog-item g-text-nowrap" :class="{ active: item.catalogName === curCatalog.catalogName }" @click="handleClick(item)">
+          <li v-for="item in catalogs" :key="item.catalogName" :title="item.catalogName" class="catalog-item g-text-nowrap" :class="{ active: item.catalogName === curCatalog.catalogName }" @click="handleClick(item)">
             {{ item.catalogName }}
           </li>
         </ul>

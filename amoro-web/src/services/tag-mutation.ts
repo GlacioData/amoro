@@ -3,7 +3,7 @@
  * https://www.apache.org/licenses/LICENSE-2.0
  */
 import axios from 'axios'
-import type { TableTag, TagDeleteResult, TagScope, TagRetention } from '../types/tag.type'
+import type { TableTag, TagDeleteResult, TagRetention, TagScope } from '../types/tag.type'
 
 export class TagMutationError extends Error {
   readonly outcome: string
@@ -38,8 +38,10 @@ function matchesRetention(value: unknown, expected: TagRetention): value is TagR
 }
 
 function failureOutcome(response: Record<string, unknown>): string {
-  if (typeof response.outcome === 'string') return response.outcome
-  if (response.code === 403 || response.code === 401) return 'NOT_APPLIED'
+  if (typeof response.outcome === 'string')
+    return response.outcome
+  if (response.code === 403 || response.code === 401)
+    return 'NOT_APPLIED'
   return 'UNKNOWN'
 }
 
@@ -50,11 +52,13 @@ function failureOutcome(response: Record<string, unknown>): string {
 // Callers use the existing returnCode option, so login redirects cannot masquerade as success.
 export async function tagMutation<T>(send: () => Promise<unknown>, valid: (value: unknown) => value is T): Promise<T> {
   const response = await send() // Exactly one attempt; an unknown outcome must never be retried.
-  if (!record(response)) throw new TagMutationError('Invalid Tag operation response', 'UNKNOWN')
+  if (!record(response))
+    throw new TagMutationError('Invalid Tag operation response', 'UNKNOWN')
   if (response.code !== 0 && response.code !== 200) {
     throw new TagMutationError(typeof response.message === 'string' ? response.message : 'Tag operation failed', failureOutcome(response))
   }
-  if (!valid(response.result)) throw new TagMutationError('Invalid Tag operation receipt; refresh before trying again', 'UNKNOWN')
+  if (!valid(response.result))
+    throw new TagMutationError('Invalid Tag operation receipt; refresh before trying again', 'UNKNOWN')
   return response.result
 }
 
@@ -74,10 +78,12 @@ export function deletedTag(name: string, expectedScope: TagScope): (value: unkno
 
 // Only an explicit rejection proves that no mutation was applied. Lost/partial responses do not.
 export function tagMutationFailureMessage(failure: unknown, unknownMessage: string): string {
-  if (failure instanceof TagMutationError) return failure.outcome === 'NOT_APPLIED' ? failure.message : unknownMessage
+  if (failure instanceof TagMutationError)
+    return failure.outcome === 'NOT_APPLIED' ? failure.message : unknownMessage
   if (axios.isAxiosError(failure)) {
     const body: unknown = failure.response?.data
-    if (record(body) && body.outcome === 'NOT_APPLIED' && typeof body.message === 'string') return body.message
+    if (record(body) && body.outcome === 'NOT_APPLIED' && typeof body.message === 'string')
+      return body.message
   }
   return unknownMessage
 }

@@ -195,7 +195,7 @@ function initData() {
 }
 async function getOptimizerGroupList() {
   const res = await getResourceGroupsListAPI()
-  const list = (res || []).map((item: IIOptimizeGroupItem) => ({ lable: item.resourceGroup.name, value: item.resourceGroup.name }))
+  const list = (res || []).map((item: IIOptimizeGroupItem) => ({ label: item.resourceGroup.name, value: item.resourceGroup.name }))
 
   if (list.length === 0) {
     confirmAction({
@@ -379,7 +379,7 @@ const authTypeOptions = computed(() => {
     return ossConfigTypeOps
   }
 
-  return null
+  return []
 })
 
 const isAuthDisabled = computed(() => formState.storageConfig['storage.type'] === 'Local')
@@ -679,7 +679,7 @@ onMounted(() => {
                 v-model:file-list="config.fileList"
                 name="file"
                 accept=".xml"
-                :show-upload-list="false"
+                :show-file-list="false"
                 :action="uploadUrl"
                 :disabled="config.uploadLoading"
                 :headers="uploadHeaders"
@@ -740,7 +740,7 @@ onMounted(() => {
                 v-model:file-list="config.fileList"
                 name="file"
                 :accept="config.key === 'auth.kerberos.keytab' ? '.keytab' : '.conf'"
-                :show-upload-list="false"
+                :show-file-list="false"
                 :action="uploadUrl"
                 :disabled="config.uploadLoading"
                 :headers="uploadHeaders"

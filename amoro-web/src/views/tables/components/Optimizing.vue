@@ -21,6 +21,11 @@ import { QuestionFilled } from '@element-plus/icons-vue'
 import { computed, onMounted, reactive, ref, shallowReactive } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute } from 'vue-router'
+import {
+  TABLE_EXPAND_COLUMN_WIDTH,
+  buildOptimizingProcessColumns,
+  buildOptimizingTaskColumns,
+} from './table-subviews-state'
 import DashboardPagination from '@/components/DashboardPagination.vue'
 import { copyText } from '@/utils/clipboard'
 import { tableColumnProps } from '@/utils/table'
@@ -53,28 +58,9 @@ const TASK_STATUS_CONFIG = shallowReactive({
 })
 
 const { t } = useI18n()
-const columns = computed<IColumns[]>(() => [
-  { title: t('processId'), dataIndex: 'processId' },
-  { title: t('startTime'), dataIndex: 'startTime', width: 172 },
-  { title: t('type'), dataIndex: 'optimizingType' },
-  { title: t('status'), dataIndex: 'status' },
-  { title: t('duration'), dataIndex: 'duration', width: 120 },
-  { title: t('tasks'), dataIndex: 'tasks' },
-  { title: t('finishTime'), dataIndex: 'finishTime', width: 172 },
-  { title: t('input'), dataIndex: 'inputFiles' },
-  { title: t('output'), dataIndex: 'outputFiles' },
-])
+const columns = computed<IColumns[]>(() => buildOptimizingProcessColumns(t))
 
-const breadcrumbColumns = computed(() => [
-  { title: t('taskId'), dataIndex: 'taskId', width: 82 },
-  { title: t('partition'), dataIndex: 'partitionData', ellipsis: true },
-  { title: t('startTime'), dataIndex: 'startTime', width: 172 },
-  { title: t('status'), dataIndex: 'status', width: 124 },
-  { title: t('costTime'), dataIndex: 'formatCostTime', width: 120 },
-  { title: t('finishTime'), dataIndex: 'endTime', width: 172 },
-  { title: t('input'), dataIndex: 'inputFilesDesc' },
-  { title: t('output'), dataIndex: 'outputFilesDesc' },
-])
+const breadcrumbColumns = computed<IColumns[]>(() => buildOptimizingTaskColumns(t))
 
 const dataSource = reactive<any[]>([])
 const processId = ref<string>('')
@@ -267,18 +253,21 @@ function handleFilterChange() {
   refresh()
 }
 
-function toggleBreadcrumb(rowProcessId: string, status: string) {
+function openProcessDetail(rowProcessId: string, status: string) {
   processId.value = rowProcessId
   cancelDisabled.value = status !== 'RUNNING'
-  hasBreadcrumb.value = !hasBreadcrumb.value
-  if (hasBreadcrumb.value) {
-    breadcrumbPagination.current = 1
-  }
-  else {
-    // Reset cursor-based pagination when returning to main view
-    lastSnapshot.value = null
-    pagination.current = 1
-  }
+  hasBreadcrumb.value = true
+  breadcrumbPagination.current = 1
+  refresh()
+}
+
+function returnToList() {
+  processId.value = ''
+  cancelDisabled.value = true
+  hasBreadcrumb.value = false
+  // Reset cursor-based pagination when returning to main view
+  lastSnapshot.value = null
+  pagination.current = 1
   refresh()
 }
 
@@ -378,17 +367,15 @@ onMounted(() => {
           @change="handleFilterChange"
         />
       </el-space>
-      <el-table v-loading="loading" row-key="processId" :data="dataSource">
-        <el-table-column type="expand">
+      <el-table v-loading="loading" table-layout="auto" scrollbar-always-on row-key="processId" :data="dataSource">
+        <el-table-column type="expand" :width="TABLE_EXPAND_COLUMN_WIDTH">
           <template #default="{ row: record }">
-            <el-row v-for="(value, key) in record.summary" :key="key" :gutter="16">
-              <el-col :style="{ flex: '0 0 420px' }" style="text-align: right;">
-                {{ key }} :
-              </el-col>
-              <el-col :style="{ flex: '1 1 auto' }">
-                {{ value }}
-              </el-col>
-            </el-row>
+            <dl class="optimizing-summary">
+              <template v-for="(value, key) in record.summary" :key="key">
+                <dt>{{ key }} :</dt>
+                <dd>{{ value ?? '—' }}</dd>
+              </template>
+            </dl>
           </template>
         </el-table-column>
         <el-table-column v-for="column in columns" :key="column.dataIndex" v-bind="tableColumnProps(column, columns)">
@@ -420,12 +407,12 @@ onMounted(() => {
           </template>
           <template v-if="column.dataIndex === 'processId' || column.dataIndex === 'status'" #default="{ row: record }">
             <template v-if="column.dataIndex === 'processId'">
-              <el-button link type="primary" @click="toggleBreadcrumb(record.processId, record.status)">
+              <el-button link type="primary" @click="openProcessDetail(record.processId, record.status)">
                 {{ record.processId }}
               </el-button>
             </template>
             <template v-if="column.dataIndex === 'status'">
-              <div class="g-flex-ac">
+              <div class="g-flex-ac status-cell">
                 <span
                   :style="{ 'background-color': (STATUS_CONFIG[record.status as keyof typeof STATUS_CONFIG] || {} as any).color }"
                   class="status-icon"
@@ -452,7 +439,7 @@ onMounted(() => {
       <el-row>
         <el-col :span="18">
           <el-breadcrumb separator=">">
-            <el-breadcrumb-item class="text-active" @click="toggleBreadcrumb">
+            <el-breadcrumb-item class="text-active" @click="returnToList">
               {{ t('all') }}
             </el-breadcrumb-item>
             <el-breadcrumb-item>{{ `${$t('processId')} ${processId}` }}</el-breadcrumb-item>
@@ -471,17 +458,15 @@ onMounted(() => {
           </el-button>
         </el-col>
       </el-row>
-      <el-table v-loading="loading" row-key="taskId" class="g-mt-8" :data="breadcrumbDataSource">
-        <el-table-column type="expand">
+      <el-table v-loading="loading" scrollbar-always-on row-key="taskId" class="g-mt-8" :data="breadcrumbDataSource">
+        <el-table-column type="expand" :width="TABLE_EXPAND_COLUMN_WIDTH">
           <template #default="{ row: record }">
-            <el-row v-for="(value, key) in record.summary" :key="key" :gutter="16">
-              <el-col :style="{ flex: '0 0 420px' }" style="text-align: right;">
-                {{ key }} :
-              </el-col>
-              <el-col :style="{ flex: '1 1 auto' }">
-                {{ value }}
-              </el-col>
-            </el-row>
+            <dl class="optimizing-summary">
+              <template v-for="(value, key) in record.summary" :key="key">
+                <dt>{{ key }} :</dt>
+                <dd>{{ value ?? '—' }}</dd>
+              </template>
+            </dl>
           </template>
         </el-table-column>
         <el-table-column v-for="column in breadcrumbColumns" :key="column.dataIndex" v-bind="tableColumnProps(column, breadcrumbColumns)">
@@ -505,15 +490,10 @@ onMounted(() => {
           </template>
           <template v-if="column.dataIndex === 'partitionData' || column.dataIndex === 'status'" #default="{ row: record }">
             <template v-if="column.dataIndex === 'partitionData'">
-              <el-tooltip>
-                <template #content>
-                  {{ formatPartition(record.partitionData) }}
-                </template>
-                <span>{{ formatPartition(record.partitionData) }}</span>
-              </el-tooltip>
+              <span>{{ formatPartition(record.partitionData) }}</span>
             </template>
             <template v-if="column.dataIndex === 'status'">
-              <div class="g-flex-ac">
+              <div class="g-flex-ac status-cell">
                 <span
                   :style="{ 'background-color': (TASK_STATUS_CONFIG[record.status as keyof typeof TASK_STATUS_CONFIG] || {} as any).color }"
                   class="status-icon"
@@ -556,20 +536,13 @@ onMounted(() => {
 .table-optimizing {
   padding: 18px 0;
 
-  :deep(.el-table__header > tr > th:not(:last-child):not(.el-table-column--selection):not(.el-table__expand-column):not([colspan])::before) {
-    height: 100% !important;
+  :deep(.el-table .cell) {
+    padding-inline: 8px;
   }
 
-  :deep(.el-table__header > tr:not(:last-child) > th[colspan]) {
-    border-bottom: 1px solid #e8e8f0;
-  }
-
-  :deep(.el-table__header > tr > th) {
-    padding: 4px 16px !important;
-  }
-
-  :deep(.el-table__header > tr > th) {
-    padding: 4px 16px !important;
+  :deep(.el-table__expand-column .cell) {
+    padding-inline: 4px;
+    text-align: center;
   }
 
   :deep(.el-table__expand-icon) {
@@ -577,13 +550,49 @@ onMounted(() => {
   }
 }
 
+.optimizing-summary {
+  display: grid;
+  grid-template-columns: minmax(0, min(38%, 260px)) minmax(0, 1fr);
+  gap: 6px 16px;
+  margin: 0;
+  padding: 8px 16px;
+
+  dt {
+    margin: 0;
+    text-align: right;
+    color: #5a6577;
+    overflow-wrap: anywhere;
+  }
+
+  dd {
+    margin: 0;
+    overflow-wrap: anywhere;
+  }
+}
+
+@media (max-width: 760px) {
+  .optimizing-summary {
+    grid-template-columns: minmax(0, 1fr);
+
+    dt {
+      text-align: left;
+      font-weight: 500;
+    }
+  }
+}
+
+.status-cell {
+  white-space: nowrap;
+}
+
 .status-icon {
+  flex: none;
   width: 8px;
   height: 8px;
   border-radius: 8px;
   background-color: #c9cdd4;
   display: inline-block;
-  margin-right: 8px;
+  margin-right: 6px;
 }
 
 .error-detail-button {

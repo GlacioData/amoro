@@ -19,7 +19,7 @@
 import assert from 'node:assert/strict'
 // eslint-disable-next-line test/no-import-node-test
 import test from 'node:test'
-import { cursorPages, requestEpoch, sameSnapshotSelection, snapshotRowKey, snapshotTableKey } from '../src/views/tables/components/snapshot-page-state.ts'
+import { cursorPages, requestEpoch, resolveTableActiveTab, sameSnapshotSelection, snapshotRowKey, snapshotTableKey } from '../src/views/tables/components/snapshot-page-state.ts'
 
 test('new table request is independent of old loading and old finally', () => {
   const requests = requestEpoch()
@@ -73,4 +73,13 @@ test('same-named branch and consumer remain independently selectable', () => {
   assert.equal(sameSnapshotSelection(branch, { ...branch }), true)
   assert.equal(sameSnapshotSelection(branch, { ...branch, type: 'consumer' }), false)
   assert.equal(sameSnapshotSelection(branch, { ...branch, type: 'tag' }), false)
+})
+
+test('missing or empty tab query falls back to Details instead of blanking the tab view', () => {
+  assert.equal(resolveTableActiveTab(undefined), 'Details')
+  assert.equal(resolveTableActiveTab(null), 'Details')
+  assert.equal(resolveTableActiveTab(''), 'Details')
+  assert.equal(resolveTableActiveTab('   '), 'Details')
+  assert.equal(resolveTableActiveTab('Optimizing'), 'Optimizing')
+  assert.equal(resolveTableActiveTab(['Snapshots', 'Details']), 'Snapshots')
 })

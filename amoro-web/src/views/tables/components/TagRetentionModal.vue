@@ -32,7 +32,13 @@ const confirmation = ref<{ row: TableTag, body: TagRetentionUpdateRequest, expec
 const modes = computed(() => props.capabilities?.retention.supportedModes || [])
 const expected = computed(() => resolvedTagRetention(form.mode, form.hours, props.capabilities))
 const valid = computed(() => !!props.row && canUpdateTagRetention(props.row, props.capabilities, busy.value) && !!expected.value)
-watch(() => props.row, () => { if (!busy.value) { form.mode = ''; form.hours = null; confirmation.value = null } })
+watch(() => props.row, () => {
+  if (!busy.value) {
+    form.mode = ''
+    form.hours = null
+    confirmation.value = null
+  }
+})
 function policyText(value?: TagRetention) {
   if (!value || value.state !== 'KNOWN')
     return t('tagUnknown')
@@ -62,10 +68,21 @@ async function submit() {
   const confirmed = confirmation.value
   if (busy.value || !confirmed || !valid.value)
     return
-  busy.value = true; emit('pending', true); emit('start')
-  try { await updateTagRetention(props.source, confirmed.row, confirmed.body, confirmed.expected); emit('saved') }
-  catch (failure) { emit('failure', failure) }
-  finally { busy.value = false; emit('pending', false); emit('close') }
+  busy.value = true
+  emit('pending', true)
+  emit('start')
+  try {
+    await updateTagRetention(props.source, confirmed.row, confirmed.body, confirmed.expected)
+    emit('saved')
+  }
+  catch (failure) {
+    emit('failure', failure)
+  }
+  finally {
+    busy.value = false
+    emit('pending', false)
+    emit('close')
+  }
 }
 </script>
 

@@ -333,7 +333,6 @@ export interface IHistoryPathInfoItem {
 
 export interface GlobalState {
   userInfo: UserInfo
-  isShowTablesMenu: boolean
   historyPathInfo: IHistoryPathInfoItem
 }
 

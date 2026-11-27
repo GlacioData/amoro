@@ -62,6 +62,12 @@ test('removed Terminal and Settings URLs resolve to the existing not-found page'
   }
 })
 
+test('removed unfinished Create table route resolves to the existing not-found page', () => {
+  assert.equal(router.resolve('/tables/create').name, 'Page404')
+  assert.equal(router.resolve('/tables/create/').name, 'Page404')
+  assert.equal(router.hasRoute('Create'), false)
+})
+
 test('retained management routes preserve their route names', () => {
   for (const [path, name] of Object.entries({
     '/tables': 'Tables', '/catalogs': 'Catalogs', '/optimizing': 'Optimizing',
@@ -92,4 +98,82 @@ test('legacy SQL privilege cannot restore a removed default route', () => {
   assert.equal(permissions.getDefaultRoute(), '/login')
   store.userInfo.privileges = ['EXECUTE_SQL', 'MANAGE_PLATFORM']
   assert.equal(permissions.getDefaultRoute(), '/login')
+})
+
+test('capturePreLoginTarget captures unauthenticated hash deep links and 403 origin without clobbering', () => {
+  const deepLink = permissions.capturePreLoginTarget(
+    { path: '/catalogs', query: { catalogname: 'test', type: 'hive' } },
+    { path: '/', query: {} },
+    false,
+  )
+  assert.equal(deepLink?.path, '/catalogs')
+  assert.equal(deepLink?.query?.catalogname, 'test')
+  assert.equal(deepLink?.query?.type, 'hive')
+
+  // Redirecting to /login from START_LOCATION ('/') must return null so deepLink is preserved.
+  assert.equal(
+    permissions.capturePreLoginTarget({ path: '/login', query: {} }, { path: '/', query: {} }, false),
+    null,
+  )
+
+  // Session expiry (403) pushing to /login from an active page captures the active page and query.
+  const expiredFrom = permissions.capturePreLoginTarget(
+    { path: '/login', query: {} },
+    { path: '/tables', query: { catalog: 'c1', db: 'd1', table: 't1', tab: 'Files' } },
+    false,
+  )
+  assert.equal(expiredFrom?.path, '/tables')
+  assert.equal(expiredFrom?.query?.tab, 'Files')
+
+  // Normal authenticated navigation does not record a pre-login target.
+  assert.equal(
+    permissions.capturePreLoginTarget({ path: '/overview', query: {} }, { path: '/tables', query: {} }, true),
+    null,
+  )
+})
+
+test('resolvePostLoginTarget restores permitted internal routes and rejects open redirects', () => {
+  store.userInfo.privileges = ['VIEW_TABLE', 'VIEW_CATALOG', 'VIEW_SYSTEM']
+  const restored = permissions.resolvePostLoginTarget({
+    path: '/catalogs',
+    query: { catalogname: 'lake' },
+  })
+  assert.equal(restored.path, '/catalogs')
+  assert.equal(restored.query.catalogname, 'lake')
+
+  // User without VIEW_CATALOG falls back to default permitted route (/tables).
+  store.userInfo.privileges = ['VIEW_TABLE']
+  const fallbackNoPerm = permissions.resolvePostLoginTarget({
+    path: '/catalogs',
+    query: { catalogname: 'lake' },
+  })
+  assert.equal(fallbackNoPerm.path, '/tables')
+
+  // Open redirect payloads and /login must always fall back to default route.
+  store.userInfo.privileges = ['VIEW_TABLE', 'VIEW_CATALOG']
+  for (const unsafe of ['//evil.com', 'https://evil.com/x', 'http://evil.com', '/\\evil.com', '/login', '/login/', '/LOGIN', '/', '/404/']) {
+    const resolved = permissions.resolvePostLoginTarget({ path: unsafe, query: { a: '1' } })
+    assert.equal(resolved.path, '/tables', `Unsafe target should be rejected: ${unsafe}`)
+  }
+})
+
+test('canAccessRoute enforces per-route privileges including trailing-slash and mixed-case paths', () => {
+  // VIEW_TABLE alone cannot access hive-upgrade (requires MANAGE_TABLE) or catalogs/overview/optimizing
+  store.userInfo.privileges = ['VIEW_TABLE']
+  assert.equal(permissions.canAccessRoute('/tables'), true)
+  assert.equal(permissions.canAccessRoute('/tables/'), true)
+  assert.equal(permissions.canAccessRoute('/tables/hive-upgrade'), false)
+  assert.equal(permissions.canAccessRoute('/tables/hive-upgrade/'), false)
+  assert.equal(permissions.canAccessRoute('/Tables/Hive-Upgrade/'), false)
+  assert.equal(permissions.canAccessRoute('/hive-tables/upgrade/'), false)
+  assert.equal(permissions.canAccessRoute('/catalogs/'), false)
+  assert.equal(permissions.canAccessRoute('/CATALOGS'), false)
+  assert.equal(permissions.canAccessRoute('/overview/'), false)
+  assert.equal(permissions.canAccessRoute('/optimizing/'), false)
+
+  // Granting MANAGE_TABLE permits hive-upgrade
+  store.userInfo.privileges = ['VIEW_TABLE', 'MANAGE_TABLE']
+  assert.equal(permissions.canAccessRoute('/tables/hive-upgrade'), true)
+  assert.equal(permissions.canAccessRoute('/tables/hive-upgrade/'), true)
+  assert.equal(permissions.canAccessRoute('/hive-tables/upgrade/'), true)
 })

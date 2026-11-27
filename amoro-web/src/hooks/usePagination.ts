@@ -32,6 +32,6 @@ export function usePagination() {
     showQuickJumper: true,
     showSizeChanger: true,
     hideOnSinglePage: false,
-    showTotal: (total: number) => { return t('totalCount', { total }) }
+    showTotal: (total: number) => { return t('totalCount', { total }) },
   }
 }

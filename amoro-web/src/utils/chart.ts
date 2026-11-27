@@ -83,7 +83,7 @@ export function generateLineChartOption(_titleText: string, data: ILineChartOrig
   Object.values(data).forEach((val) => {
     const keys = Object.keys(val)
     keys.forEach((key) => {
-      const tKey = i18n.global.t(key)
+      const tKey = i18n.global.te(key) ? i18n.global.t(key) : key
       if (!legendMap[tKey]) {
         legendMap[tKey] = []
       }

@@ -61,7 +61,7 @@ export default defineConfig({
         // node_modules module paths
         codeSplitting: {
           groups: [
-            { name: 'vue', test: /node_modules[\\/](?:@vue|vue|vue-i18n|vue-router|vue-virtual-scroller)[\\/]/ },
+            { name: 'vue', test: /node_modules[\\/](?:@vue|vue|vue-i18n|vue-router)[\\/]/ },
             { name: 'dayjs', test: /node_modules[\\/]dayjs[\\/]/ },
             { name: 'axios', test: /node_modules[\\/]axios[\\/]/ },
             { name: 'pinia', test: /node_modules[\\/]pinia[\\/]/ },

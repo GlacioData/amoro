@@ -27,7 +27,7 @@ Apache Amoro is a **Lakehouse management system** (Java 8, Maven, Vue 3 frontend
 
 - **`amoro-common`** — Core abstractions (`FormatCatalog`, `AmoroTable`, `TableFormat`), Thrift IDL definitions (`src/main/thrift/*.thrift`), and shared client code. All other modules depend on this.
 - **`amoro-ams`** — The AMS server. Entry point: `AmoroServiceContainer.main()`. Exposes Thrift services (table metastore on port 1260, optimizer service on port 1261) and an HTTP/REST API via Javalin (port 1630). Routes are registered in `DashboardServer.java`.
-- **`amoro-web`** — Vue 3 + TypeScript dashboard (Vite, Ant Design Vue, pnpm). API calls in `src/services/`. Built into AMS static resources during Maven build.
+- **`amoro-web`** — Vue 3 + TypeScript dashboard (Vite, Element Plus, pnpm). API calls in `src/services/`. Built into AMS static resources during Maven build.
 - **`amoro-format-{iceberg,mixed,paimon,hudi}`** — Table format integrations loaded via **Java SPI** (`ServiceLoader<FormatCatalogFactory>`). See `CommonUnifiedCatalog.initializeFormatCatalogs()`.
 - **`amoro-optimizer`** — Self-optimizing executor with standalone/Flink/Spark implementations. Communicates with AMS via Thrift (`OptimizingService`).
 - **`amoro-metrics`** — Metrics subsystem with pluggable reporters (e.g., Prometheus).

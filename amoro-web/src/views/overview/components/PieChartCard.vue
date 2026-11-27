@@ -17,48 +17,42 @@ limitations under the License.
 / -->
 
 <script lang="ts" setup>
-import { onMounted, ref, watch } from 'vue'
+import { computed } from 'vue'
 import Chart from '@/components/echarts/Chart.vue'
 
 const props = defineProps<{
   title: string
+  loading?: boolean
   data: {
     value: number
     name: string
   }[]
 }>()
 
-const pieChartOption = ref({})
-
-function renderChart() {
-  pieChartOption.value = {
-    tooltip: {
-      trigger: 'item',
-    },
-    legend: {
-      orient: 'vertical',
-      left: 'left',
-    },
-    series: [
-      {
-        name: props.title,
-        type: 'pie',
-        radius: '50%',
-        data: props.data,
-        emphasis: {
-          itemStyle: {
-            shadowBlur: 10,
-            shadowOffsetX: 0,
-            shadowColor: 'rgba(0, 0, 0, 0.5)',
-          },
+const pieChartOption = computed(() => ({
+  tooltip: {
+    trigger: 'item',
+  },
+  legend: {
+    orient: 'vertical',
+    left: 'left',
+  },
+  series: [
+    {
+      name: props.title,
+      type: 'pie',
+      radius: '50%',
+      data: props.data,
+      emphasis: {
+        itemStyle: {
+          shadowBlur: 10,
+          shadowOffsetX: 0,
+          shadowColor: 'rgba(0, 0, 0, 0.5)',
         },
       },
-    ],
-  }
-}
-
-onMounted(renderChart)
-watch(() => props.data, renderChart)
+    },
+  ],
+}))
 </script>
 
 <template>
@@ -66,7 +60,7 @@ watch(() => props.data, renderChart)
     <template #header>
       <span class="card-title" v-text="title" />
     </template>
-    <Chart :options="pieChartOption" />
+    <Chart :loading="loading" :options="pieChartOption" />
   </el-card>
 </template>
 

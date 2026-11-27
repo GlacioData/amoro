@@ -33,11 +33,10 @@ const dashboardEn = {
 }
 
 const { locale } = useI18n()
-dayjs.locale('en')
 
 watch(locale, (val) => {
   dayjs.locale(val === 'en' ? 'en' : 'zh-cn')
-})
+}, { immediate: true })
 </script>
 
 <template>

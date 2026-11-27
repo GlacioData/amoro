@@ -191,7 +191,7 @@ export default defineComponent({
       </div>
       <div class="content">
         <el-tabs v-model="activeKey">
-          <el-tab-pane lazy key="Details" name="Details" label="Details">
+          <el-tab-pane key="Details" lazy name="Details" label="Details">
             <UDetails :partition-column-list="partitionColumnList" :schema="schema" />
           </el-tab-pane>
         </el-tabs>

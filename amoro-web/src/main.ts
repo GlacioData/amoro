@@ -31,12 +31,10 @@ import loginService from './services/login.service'
 import { getQueryString } from './utils'
 import { resetLoginTip } from './utils/request'
 import {
-  canManageTable,
-  canViewCatalog,
-  canViewOptimizer,
-  canViewSystem,
-  canViewTable,
+  canAccessRoute,
+  capturePreLoginTarget,
   getDefaultRoute,
+  normalizeRoutePath,
 } from './utils/permission'
 import SvgIcon from '@/components/svg-icon.vue'
 
@@ -50,21 +48,6 @@ RegisterComponents(app);
 (async () => {
   try {
     const store = useStore()
-
-    const fromPath = window.location.pathname
-    const fromQuery = window.location.search
-    if (!store.historyPathInfo.path && fromPath !== '/login') {
-      const queryParams = new URLSearchParams(fromQuery)
-      const queryObj: Record<string, string> = {}
-      for (const [key, value] of queryParams.entries()) {
-        queryObj[key as string] = value
-      }
-      store.setHistoryPath({
-        path: fromPath,
-        query: queryObj,
-      })
-    }
-
     const token = getQueryString('token') || ''
     const res = await loginService.getCurUserInfo(token)
     if (res) {
@@ -81,45 +64,21 @@ RegisterComponents(app);
   finally {
     const store = useStore()
     router.beforeEach((to, from) => {
-      store.setHistoryPath({
-        path: from.path,
-        query: from.query,
-      })
-      if (to.path === '/login') {
+      const isAuthenticated = Boolean(store.userInfo.userName)
+      const preLoginTarget = capturePreLoginTarget(to, from, isAuthenticated)
+      if (preLoginTarget) {
+        store.setHistoryPath(preLoginTarget)
+      }
+      if (normalizeRoutePath(to.path) === '/login') {
         resetLoginTip()
         return true
       }
-      if (!store.userInfo.userName && to.path !== '/login') {
+      if (!isAuthenticated) {
         return {
           path: '/login',
         }
       }
-      if ((to.path === '/hive-tables/upgrade' || to.path === '/tables/hive-upgrade') && !canManageTable()) {
-        return {
-          path: getDefaultRoute(),
-        }
-      }
-      if (to.path === '/overview' && !canViewSystem()) {
-        return {
-          path: getDefaultRoute(),
-        }
-      }
-      if (to.path === '/catalogs' && !canViewCatalog()) {
-        return {
-          path: getDefaultRoute(),
-        }
-      }
-      if (to.path === '/optimizing' && !canViewOptimizer()) {
-        return {
-          path: getDefaultRoute(),
-        }
-      }
-      if ((to.path === '/tables' || to.path.startsWith('/tables/')) && !canViewTable()) {
-        return {
-          path: getDefaultRoute(),
-        }
-      }
-      if (to.path.startsWith('/hive-tables') && !canViewTable()) {
+      if (!canAccessRoute(to.path)) {
         return {
           path: getDefaultRoute(),
         }

@@ -114,12 +114,19 @@ async function reloadTags(page = 1) {
   tagPage.value = page
   pending.value = true
   emit('loadingChange', true)
-  try { await getTagList() }
+  try {
+    await getTagList()
+  }
   catch {
     if (alive)
       loadError.value = true
   }
-  finally { if (alive) { pending.value = false; emit('loadingChange', false) } }
+  finally {
+    if (alive) {
+      pending.value = false
+      emit('loadingChange', false)
+    }
+  }
 }
 async function getConsumerList() {
   const result = await getConsumers(props as any)
@@ -209,9 +216,9 @@ onMounted(() => {
         </el-button>
         <div v-loading="pending">
           <el-tabs v-model="tabActiveKey" type="card" @tab-change="(name: string | number) => { const $event = String(name); loadTab(String($event)) }">
-            <el-tab-pane lazy :key="branchTypeMap.BRANCH" :name="branchTypeMap.BRANCH" :label="$t('branches')" :disabled="pending">
+            <el-tab-pane :key="branchTypeMap.BRANCH" lazy :name="branchTypeMap.BRANCH" :label="$t('branches')" :disabled="pending">
               <template v-if="!!actualBranchList.length">
-                <button v-for="(item, key) in actualBranchList" :key="key" type="button" class="branch-selector-item" @click="selectObject(item)">
+                <button v-for="item in actualBranchList" :key="item.value" type="button" class="branch-selector-item" @click="selectObject(item)">
                   <div class="item-icon">
                     <Check v-if="sameSnapshotSelection(item, selectedObj)" class="amoro-icon" />
                   </div>
@@ -220,9 +227,9 @@ onMounted(() => {
               </template>
               <span v-else class="empty-tips">{{ $t('nothingToShow') }}</span>
             </el-tab-pane>
-            <el-tab-pane lazy :key="branchTypeMap.TAG" :name="branchTypeMap.TAG" :label="$t('tags')" :disabled="pending">
+            <el-tab-pane :key="branchTypeMap.TAG" lazy :name="branchTypeMap.TAG" :label="$t('tags')" :disabled="pending">
               <template v-if="!!actualTagList.length">
-                <button v-for="(item, key) in actualTagList" :key="key" type="button" class="branch-selector-item" @click="selectObject(item)">
+                <button v-for="item in actualTagList" :key="item.value" type="button" class="branch-selector-item" @click="selectObject(item)">
                   <div class="item-icon">
                     <Check v-if="sameSnapshotSelection(item, selectedObj)" class="amoro-icon" />
                   </div>
@@ -230,11 +237,11 @@ onMounted(() => {
                 </button>
               </template>
               <span v-else class="empty-tips">{{ $t('nothingToShow') }}</span>
-              <el-pagination :current-page="tagPage" :total="tagTotal" :page-size="20" :disabled="pending" size="small" layout="prev, pager, next, jumper" @update:current-page="reloadTags" />
+              <el-pagination :current-page="tagPage" :total="tagTotal" :page-size="20" :pager-count="5" :disabled="pending" size="small" layout="prev, pager, next" @update:current-page="reloadTags" />
             </el-tab-pane>
-            <el-tab-pane lazy v-if="props.bounded || consumerList.length !== 0" :key="branchTypeMap.CONSUMER" :name="branchTypeMap.CONSUMER" :label="$t('consumers')" :disabled="pending">
+            <el-tab-pane v-if="props.bounded || consumerList.length !== 0" :key="branchTypeMap.CONSUMER" lazy :name="branchTypeMap.CONSUMER" :label="$t('consumers')" :disabled="pending">
               <template v-if="!!actualConsumerList.length">
-                <div v-for="(item, key) in actualConsumerList" :key="key" class="branch-selector-item" role="button" :tabindex="item.amoroCurrentSnapshotsOfTable ? 0 : -1" :aria-disabled="!item.amoroCurrentSnapshotsOfTable" @click="selectConsumer(item)" @keydown.enter.prevent="selectConsumer(item)" @keydown.space.prevent="selectConsumer(item)">
+                <div v-for="item in actualConsumerList" :key="item.value" class="branch-selector-item" role="button" :tabindex="item.amoroCurrentSnapshotsOfTable ? 0 : -1" :aria-disabled="!item.amoroCurrentSnapshotsOfTable" @click="selectConsumer(item)" @keydown.enter.prevent="selectConsumer(item)" @keydown.space.prevent="selectConsumer(item)">
                   <div class="item-icon">
                     <Check v-if="sameSnapshotSelection(item, selectedObj)" class="amoro-icon" />
                   </div>

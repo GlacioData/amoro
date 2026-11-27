@@ -21,6 +21,7 @@ import { QuestionFilled } from '@element-plus/icons-vue'
 import { computed, onMounted, reactive, ref, shallowReactive } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute } from 'vue-router'
+import { TABLE_EXPAND_COLUMN_WIDTH, buildProcessColumns } from './table-subviews-state'
 import DashboardPagination from '@/components/DashboardPagination.vue'
 import { tableColumnProps } from '@/utils/table'
 import { usePagination } from '@/hooks/usePagination'
@@ -43,17 +44,7 @@ const statusMap = {
 const STATUS_CONFIG = shallowReactive(statusMap)
 
 const { t } = useI18n()
-const columns = computed<IColumns[]>(() => [
-  { title: t('processId'), dataIndex: 'processId' },
-  { title: t('status'), dataIndex: 'status', width: 140 },
-  { title: t('processType'), dataIndex: 'processType' },
-  { title: t('processStage'), dataIndex: 'processStage' },
-  { title: t('executionEngine'), dataIndex: 'executionEngine' },
-  { title: t('externalProcessId'), dataIndex: 'externalProcessIdentifier', ellipsis: true },
-  { title: t('retry'), dataIndex: 'retryNumber', width: 80 },
-  { title: t('startTime'), dataIndex: 'createTimeFormatted', width: 172 },
-  { title: t('finishTime'), dataIndex: 'finishTimeFormatted', width: 172 },
-])
+const columns = computed<IColumns[]>(() => buildProcessColumns(t))
 
 const dataSource = reactive<any[]>([])
 const loading = ref<boolean>(false)
@@ -162,8 +153,8 @@ onMounted(() => {
         @change="handleFilterChange"
       />
     </el-space>
-    <el-table v-loading="loading" row-key="processId" :data="dataSource">
-      <el-table-column type="expand">
+    <el-table v-loading="loading" scrollbar-always-on row-key="processId" :data="dataSource">
+      <el-table-column type="expand" :width="TABLE_EXPAND_COLUMN_WIDTH">
         <template #default="{ row: record }">
           <div class="expanded-content">
             <template v-if="record.processParameters && Object.keys(record.processParameters).length">
@@ -202,7 +193,7 @@ onMounted(() => {
       <el-table-column v-for="column in columns" :key="column.dataIndex" v-bind="tableColumnProps(column, columns)">
         <template v-if="column.dataIndex === 'status'" #default="{ row: record }">
           <template v-if="column.dataIndex === 'status'">
-            <div class="g-flex-ac">
+            <div class="g-flex-ac status-cell">
               <span
                 :style="{ 'background-color': (STATUS_CONFIG[record.status as keyof typeof STATUS_CONFIG] || {} as any).color }"
                 class="status-icon"
@@ -210,8 +201,7 @@ onMounted(() => {
               <span>{{ record.status }}</span>
               <el-tooltip
                 v-if="record.status === 'FAILED' && record.failMessage"
-                placement="topRight"
-                class="g-ml-4"
+                placement="top-end"
                 popper-class="table-failed-tip"
               >
                 <template #content>
@@ -219,7 +209,7 @@ onMounted(() => {
                     {{ record.failMessage }}
                   </div>
                 </template>
-                <QuestionFilled class="amoro-icon" />
+                <QuestionFilled class="amoro-icon g-ml-4" />
               </el-tooltip>
             </div>
           </template>
@@ -234,16 +224,13 @@ onMounted(() => {
 .table-process {
   padding: 18px 0;
 
-  :deep(.el-table__header > tr > th:not(:last-child):not(.el-table-column--selection):not(.el-table__expand-column):not([colspan])::before) {
-    height: 100% !important;
+  :deep(.el-table .cell) {
+    padding-inline: 8px;
   }
 
-  :deep(.el-table__header > tr:not(:last-child) > th[colspan]) {
-    border-bottom: 1px solid #e8e8f0;
-  }
-
-  :deep(.el-table__header > tr > th) {
-    padding: 4px 16px !important;
+  :deep(.el-table__expand-column .cell) {
+    padding-inline: 4px;
+    text-align: center;
   }
 
   :deep(.el-table__expand-icon) {
@@ -251,13 +238,18 @@ onMounted(() => {
   }
 }
 
+.status-cell {
+  white-space: nowrap;
+}
+
 .status-icon {
+  flex: none;
   width: 8px;
   height: 8px;
   border-radius: 8px;
   background-color: #c9cdd4;
   display: inline-block;
-  margin-right: 8px;
+  margin-right: 6px;
 }
 
 .expanded-content {
@@ -314,16 +306,15 @@ onMounted(() => {
   }
 }
 
-.table-failed-tip {
-  .el-popper {
-    width: 800px;
-  }
+.el-popper.table-failed-tip {
+  max-width: min(800px, calc(100vw - 32px));
 
   .tip-title {
     display: block;
-    max-height: 700px;
+    max-height: min(700px, 70dvh);
     overflow: auto;
     white-space: pre-wrap;
+    overflow-wrap: anywhere;
   }
 }
 </style>

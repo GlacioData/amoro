@@ -1,6 +1,6 @@
 Amoro Dashboard 第三方许可声明
 
-本文件保留正式前端输出模块及 Swagger UI 5.33.2 预打包嵌入模块的上游许可和声明。
+本文件保留正式前端输出模块及 Swagger UI 5.36.0 预打包嵌入模块的上游许可和声明。
 版本来源为冻结的 pnpm 依赖图、Vite 输出模块以及 Swagger 官方发布锁文件。
 上游文本仅统一 LF 换行并去除行尾空白，未修改许可条款。
 未随 npm 包发布的许可文件按对应 gitHead 的声明补齐；toggle-selection 的版本仅声明 MIT，未提供版权年份/权利人声明，保留其原始 author/README credits，不编造版权信息。
@@ -117,13 +117,13 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ================================================================================
-@intlify/core-base 11.4.14
+@intlify/core-base 11.4.24
 许可: MIT
 来源: Vite output chunk module
 
 
 上游材料: LICENSE
-出处: npm:@intlify/core-base@11.4.14
+出处: npm:@intlify/core-base@11.4.24
 
 The MIT License (MIT)
 
@@ -147,13 +147,13 @@ IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ================================================================================
-@intlify/message-compiler 11.4.14
+@intlify/message-compiler 11.4.24
 许可: MIT
 来源: Vite output chunk module
 
 
 上游材料: LICENSE
-出处: npm:@intlify/message-compiler@11.4.14
+出处: npm:@intlify/message-compiler@11.4.24
 
 The MIT License (MIT)
 
@@ -177,13 +177,13 @@ IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ================================================================================
-@intlify/shared 11.4.14
+@intlify/shared 11.4.24
 许可: MIT
 来源: Vite output chunk module
 
 
 上游材料: LICENSE
-出处: npm:@intlify/shared@11.4.14
+出处: npm:@intlify/shared@11.4.24
 
 The MIT License (MIT)
 
@@ -207,106 +207,78 @@ IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ================================================================================
-@swagger-api/apidom-ast 1.11.6
-许可: Apache-2.0
+@isaacs/nonrecursive-glob-match 1.1.0
+许可: BlueOak-1.0.0
 来源: Vite output chunk module
 
 
-上游材料: NOTICE
-出处: npm:@swagger-api/apidom-ast@1.11.6
+上游材料: LICENSE.md
+出处: npm:@isaacs/nonrecursive-glob-match@1.1.0
 
-ApiDOM
-Copyright 2020 SmartBear Software Inc.
-ApiDOM is licensed under Apache 2.0 license.
-Copy of the Apache 2.0 license can be found in `LICENSES/Apache-2.0.txt` file.
+# Blue Oak Model License
 
-json-schema-ref-parser
-Copyright (c) 2015 James Messinger
-File packages/apidom-reference/src/util/url.ts (the file) was originally created under MIT license in https://github.com/APIDevTools/json-schema-ref-parser repository.
-The file has been copied into this project and modified. All modifications are licensed under Apache 2.0 License.
-Copy of the MIT license can be found in `LICENSES/MIT.txt` file.
+Version 1.0.0
 
-graphql-js
-Copyright (c) GraphQL Contributors
-File packages/apidom-ast/src/traversal/visitor.ts (the file) was originally created under MIT license in https://github.com/graphql/graphql-js repository.
-The file has been copied into this project and modified. All modifications are licensed under Apache 2.0 License.
-Copy of the MIT license can be found in `LICENSES/MIT.txt` file.
+## Purpose
 
-babel-plugin-add-import-extension
-Copyright (c) 2019 Karl Prieb
-File scripts/babel-plugin-add-import-extension.cjs (the file) was originally created under MIT license in https://codeberg.org/karl/babel-plugin-add-import-extension.
-The file has been copied into this project and modified. All modifications are licensed under Apache 2.0 License.
-Copy of the MIT license can be found in `LICENSES/MIT.txt` file.
+This license gives everyone as much permission to work with
+this software as possible, while protecting contributors
+from liability.
 
-refract-spec
-Copyright (c) 2015 refractproject
-Specific texts in README.md (the file) were originally created under MIT license in https://github.com/refractproject/refract-spec repository.
-Specific texts have been copied into this project and modified. All modifications are licensed under Apache 2.0 License.
-Copy of the MIT license can be found in `LICENSES/MIT.txt` file.
+## Acceptance
 
-api-elements
-Copyright (c) 2015 Apiary Inc.
-Specific texts in README.md (the file) were originally created under MIT license in https://github.com/refractproject/refract-spec repository.
-Specific texts have been copied into this project and modified. All modifications are licensed under Apache 2.0 License.
-Copy of the MIT license can be found in `LICENSES/MIT.txt` file.
+In order to receive this license, you must agree to its
+rules.  The rules of this license are both obligations
+under that agreement and conditions to your license.
+You must not do anything with this software that triggers
+a rule that you cannot or will not follow.
 
-deepmerge
-Copyright (c) 2012 James Halliday, Josh Duff, and other contributors
-- File packages/apidom-core/src/deepmerge.ts contains algorithms that we originally created
-  in https://github.com/TehShrike/deepmerge/blob/master/index.js to handle deep merging of JavaScript Objects and Arrays.
-  These algorithms have been reverse engineered and adapted to support deep merging of ApiDOM structures.
-- File packages/apidom-core/test/deepmerge.ts contains tests and fixtures that were originally created
-  in https://github.com/TehShrike/deepmerge/blob/master/test/merge.js to test deep merging of JavaScript Objects and Arrays.
-  These tests have been adapted to support testing deep merging of ApiDOM structures.
-- File packages/apidom-core/README.md contains text fragments that were originally created
-  in https://github.com/TehShrike/deepmerge/blob/master/readme.md to document deepmerge library.
-  These text fragments have been amended to describe merging of ApiDOM structures.
-Copy of the MIT license can be found in `LICENSES/MIT.txt` file.
-All modifications are licensed under Apache 2.0 License.
+## Copyright
 
-OpenAPI Specification 2.0
-Copyright The Linux Foundation
-Fragments of the specification text are embedded in packages/apidom-ls/src/config/openapi.
-Copy of the Apache 2.0 license can be found in `LICENSES/Apache-2.0.txt` file.
+Each contributor licenses you to do everything with this
+software that would otherwise infringe that contributor's
+copyright in it.
 
-OpenAPI Specification 3.0.x
-Copyright The Linux Foundation
-Fragments of the specification text are embedded in packages/apidom-ls/src/config/openapi.
-Copy of the Apache 2.0 license can be found in `LICENSES/Apache-2.0.txt` file.
+## Notices
 
-OpenAPI Specification 3.1.x
-Copyright The Linux Foundation
-Fragments of the specification text are embedded in packages/apidom-ls/src/config/openapi.
-Copy of the Apache 2.0 license can be found in `LICENSES/Apache-2.0.txt` file.
+You must ensure that everyone who gets a copy of
+any part of this software from you, with or without
+changes, also gets the text of this license or a link to
+<https://blueoakcouncil.org/license/1.0.0>.
 
-AsyncAPI Specification 2.x / AsyncAPI Initiative
-Copyright The Linux Foundation
-Fragments of the specification text are embedded in packages/apidom-ls/src/config/asyncapi.
-Copy of the Apache 2.0 license can be found in `LICENSES/Apache-2.0.txt` file.
+## Excuse
 
-JSON Schema Specification (Draft 4/5 -> 2020-12)
-Copyright (c) 2022 JSON Schema Specification Authors
-Fragments of the specification text are embedded in packages/apidom-ls/src/config/common.
-Copy of the BSD 3-Clause "New" or "Revised" License can be found in `LICENSES/BSD-3-Clause.txt` file.
-Copy of the Academic Free License v3.0 can be found in `LICENSES/AFL-3.0.txt` file.
+If anyone notifies you in writing that you have not
+complied with [Notices](#notices), you can keep your
+license by taking all practical steps to comply within 30
+days after the notice.  If you do not do so, your license
+ends immediately.
 
----
+## Patent
 
-If the SPDX-FileCopyrightText and SPDX-License-Identifier tags are not present in the file,
-it is assumed that these tags have following implicit value:
+Each contributor licenses you to do everything with this
+software that would otherwise infringe any patent claims
+they can license or become able to license.
 
-SPDX-FileCopyrightText: Copyright 2020-2021 SmartBear Software Inc.
-SPDX-License-Identifier: Apache-2.0
+## Reliability
 
+No contributor can revoke this license.
+
+## No Liability
+
+***As far as the law allows, this software comes as is,
+without any warranty or condition, and no contributor
+will be liable to anyone for any damages related to this
+software or this license, under any kind of legal claim.***
 
 ================================================================================
-@swagger-api/apidom-core 1.11.6
+@swagger-api/apidom-ast 1.15.0
 许可: Apache-2.0
 来源: Vite output chunk module
 
 
 上游材料: NOTICE
-出处: npm:@swagger-api/apidom-core@1.11.6
+出处: npm:@swagger-api/apidom-ast@1.15.0
 
 ApiDOM
 Copyright 2020 SmartBear Software Inc.
@@ -390,16 +362,15 @@ it is assumed that these tags have following implicit value:
 
 SPDX-FileCopyrightText: Copyright 2020-2021 SmartBear Software Inc.
 SPDX-License-Identifier: Apache-2.0
-
 
 ================================================================================
-@swagger-api/apidom-error 1.11.6
+@swagger-api/apidom-core 1.15.0
 许可: Apache-2.0
 来源: Vite output chunk module
 
 
 上游材料: NOTICE
-出处: npm:@swagger-api/apidom-error@1.11.6
+出处: npm:@swagger-api/apidom-core@1.15.0
 
 ApiDOM
 Copyright 2020 SmartBear Software Inc.
@@ -483,16 +454,15 @@ it is assumed that these tags have following implicit value:
 
 SPDX-FileCopyrightText: Copyright 2020-2021 SmartBear Software Inc.
 SPDX-License-Identifier: Apache-2.0
-
 
 ================================================================================
-@swagger-api/apidom-ns-json-schema-2019-09 1.11.6
+@swagger-api/apidom-error 1.15.0
 许可: Apache-2.0
 来源: Vite output chunk module
 
 
 上游材料: NOTICE
-出处: npm:@swagger-api/apidom-ns-json-schema-2019-09@1.11.6
+出处: npm:@swagger-api/apidom-error@1.15.0
 
 ApiDOM
 Copyright 2020 SmartBear Software Inc.
@@ -576,16 +546,15 @@ it is assumed that these tags have following implicit value:
 
 SPDX-FileCopyrightText: Copyright 2020-2021 SmartBear Software Inc.
 SPDX-License-Identifier: Apache-2.0
-
 
 ================================================================================
-@swagger-api/apidom-ns-json-schema-2020-12 1.11.6
+@swagger-api/apidom-ns-json-schema-2019-09 1.15.0
 许可: Apache-2.0
 来源: Vite output chunk module
 
 
 上游材料: NOTICE
-出处: npm:@swagger-api/apidom-ns-json-schema-2020-12@1.11.6
+出处: npm:@swagger-api/apidom-ns-json-schema-2019-09@1.15.0
 
 ApiDOM
 Copyright 2020 SmartBear Software Inc.
@@ -669,16 +638,15 @@ it is assumed that these tags have following implicit value:
 
 SPDX-FileCopyrightText: Copyright 2020-2021 SmartBear Software Inc.
 SPDX-License-Identifier: Apache-2.0
-
 
 ================================================================================
-@swagger-api/apidom-ns-json-schema-draft-4 1.11.6
+@swagger-api/apidom-ns-json-schema-2020-12 1.15.0
 许可: Apache-2.0
 来源: Vite output chunk module
 
 
 上游材料: NOTICE
-出处: npm:@swagger-api/apidom-ns-json-schema-draft-4@1.11.6
+出处: npm:@swagger-api/apidom-ns-json-schema-2020-12@1.15.0
 
 ApiDOM
 Copyright 2020 SmartBear Software Inc.
@@ -762,16 +730,15 @@ it is assumed that these tags have following implicit value:
 
 SPDX-FileCopyrightText: Copyright 2020-2021 SmartBear Software Inc.
 SPDX-License-Identifier: Apache-2.0
-
 
 ================================================================================
-@swagger-api/apidom-ns-json-schema-draft-6 1.11.6
+@swagger-api/apidom-ns-json-schema-draft-4 1.15.0
 许可: Apache-2.0
 来源: Vite output chunk module
 
 
 上游材料: NOTICE
-出处: npm:@swagger-api/apidom-ns-json-schema-draft-6@1.11.6
+出处: npm:@swagger-api/apidom-ns-json-schema-draft-4@1.15.0
 
 ApiDOM
 Copyright 2020 SmartBear Software Inc.
@@ -855,16 +822,15 @@ it is assumed that these tags have following implicit value:
 
 SPDX-FileCopyrightText: Copyright 2020-2021 SmartBear Software Inc.
 SPDX-License-Identifier: Apache-2.0
-
 
 ================================================================================
-@swagger-api/apidom-ns-json-schema-draft-7 1.11.6
+@swagger-api/apidom-ns-json-schema-draft-6 1.15.0
 许可: Apache-2.0
 来源: Vite output chunk module
 
 
 上游材料: NOTICE
-出处: npm:@swagger-api/apidom-ns-json-schema-draft-7@1.11.6
+出处: npm:@swagger-api/apidom-ns-json-schema-draft-6@1.15.0
 
 ApiDOM
 Copyright 2020 SmartBear Software Inc.
@@ -948,16 +914,15 @@ it is assumed that these tags have following implicit value:
 
 SPDX-FileCopyrightText: Copyright 2020-2021 SmartBear Software Inc.
 SPDX-License-Identifier: Apache-2.0
-
 
 ================================================================================
-@swagger-api/apidom-ns-openapi-3-0 1.11.6
+@swagger-api/apidom-ns-json-schema-draft-7 1.15.0
 许可: Apache-2.0
 来源: Vite output chunk module
 
 
 上游材料: NOTICE
-出处: npm:@swagger-api/apidom-ns-openapi-3-0@1.11.6
+出处: npm:@swagger-api/apidom-ns-json-schema-draft-7@1.15.0
 
 ApiDOM
 Copyright 2020 SmartBear Software Inc.
@@ -1041,16 +1006,15 @@ it is assumed that these tags have following implicit value:
 
 SPDX-FileCopyrightText: Copyright 2020-2021 SmartBear Software Inc.
 SPDX-License-Identifier: Apache-2.0
-
 
 ================================================================================
-@swagger-api/apidom-ns-openapi-3-1 1.11.6
+@swagger-api/apidom-ns-openapi-3-0 1.15.0
 许可: Apache-2.0
 来源: Vite output chunk module
 
 
 上游材料: NOTICE
-出处: npm:@swagger-api/apidom-ns-openapi-3-1@1.11.6
+出处: npm:@swagger-api/apidom-ns-openapi-3-0@1.15.0
 
 ApiDOM
 Copyright 2020 SmartBear Software Inc.
@@ -1134,16 +1098,15 @@ it is assumed that these tags have following implicit value:
 
 SPDX-FileCopyrightText: Copyright 2020-2021 SmartBear Software Inc.
 SPDX-License-Identifier: Apache-2.0
-
 
 ================================================================================
-@swagger-api/apidom-reference 1.11.6
+@swagger-api/apidom-ns-openapi-3-1 1.15.0
 许可: Apache-2.0
 来源: Vite output chunk module
 
 
 上游材料: NOTICE
-出处: npm:@swagger-api/apidom-reference@1.11.6
+出处: npm:@swagger-api/apidom-ns-openapi-3-1@1.15.0
 
 ApiDOM
 Copyright 2020 SmartBear Software Inc.
@@ -1228,6 +1191,189 @@ it is assumed that these tags have following implicit value:
 SPDX-FileCopyrightText: Copyright 2020-2021 SmartBear Software Inc.
 SPDX-License-Identifier: Apache-2.0
 
+================================================================================
+@swagger-api/apidom-ns-openapi-3-2 1.15.0
+许可: Apache-2.0
+来源: Vite output chunk module
+
+
+上游材料: NOTICE
+出处: npm:@swagger-api/apidom-ns-openapi-3-2@1.15.0
+
+ApiDOM
+Copyright 2020 SmartBear Software Inc.
+ApiDOM is licensed under Apache 2.0 license.
+Copy of the Apache 2.0 license can be found in `LICENSES/Apache-2.0.txt` file.
+
+json-schema-ref-parser
+Copyright (c) 2015 James Messinger
+File packages/apidom-reference/src/util/url.ts (the file) was originally created under MIT license in https://github.com/APIDevTools/json-schema-ref-parser repository.
+The file has been copied into this project and modified. All modifications are licensed under Apache 2.0 License.
+Copy of the MIT license can be found in `LICENSES/MIT.txt` file.
+
+graphql-js
+Copyright (c) GraphQL Contributors
+File packages/apidom-ast/src/traversal/visitor.ts (the file) was originally created under MIT license in https://github.com/graphql/graphql-js repository.
+The file has been copied into this project and modified. All modifications are licensed under Apache 2.0 License.
+Copy of the MIT license can be found in `LICENSES/MIT.txt` file.
+
+babel-plugin-add-import-extension
+Copyright (c) 2019 Karl Prieb
+File scripts/babel-plugin-add-import-extension.cjs (the file) was originally created under MIT license in https://codeberg.org/karl/babel-plugin-add-import-extension.
+The file has been copied into this project and modified. All modifications are licensed under Apache 2.0 License.
+Copy of the MIT license can be found in `LICENSES/MIT.txt` file.
+
+refract-spec
+Copyright (c) 2015 refractproject
+Specific texts in README.md (the file) were originally created under MIT license in https://github.com/refractproject/refract-spec repository.
+Specific texts have been copied into this project and modified. All modifications are licensed under Apache 2.0 License.
+Copy of the MIT license can be found in `LICENSES/MIT.txt` file.
+
+api-elements
+Copyright (c) 2015 Apiary Inc.
+Specific texts in README.md (the file) were originally created under MIT license in https://github.com/refractproject/refract-spec repository.
+Specific texts have been copied into this project and modified. All modifications are licensed under Apache 2.0 License.
+Copy of the MIT license can be found in `LICENSES/MIT.txt` file.
+
+deepmerge
+Copyright (c) 2012 James Halliday, Josh Duff, and other contributors
+- File packages/apidom-core/src/deepmerge.ts contains algorithms that we originally created
+  in https://github.com/TehShrike/deepmerge/blob/master/index.js to handle deep merging of JavaScript Objects and Arrays.
+  These algorithms have been reverse engineered and adapted to support deep merging of ApiDOM structures.
+- File packages/apidom-core/test/deepmerge.ts contains tests and fixtures that were originally created
+  in https://github.com/TehShrike/deepmerge/blob/master/test/merge.js to test deep merging of JavaScript Objects and Arrays.
+  These tests have been adapted to support testing deep merging of ApiDOM structures.
+- File packages/apidom-core/README.md contains text fragments that were originally created
+  in https://github.com/TehShrike/deepmerge/blob/master/readme.md to document deepmerge library.
+  These text fragments have been amended to describe merging of ApiDOM structures.
+Copy of the MIT license can be found in `LICENSES/MIT.txt` file.
+All modifications are licensed under Apache 2.0 License.
+
+OpenAPI Specification 2.0
+Copyright The Linux Foundation
+Fragments of the specification text are embedded in packages/apidom-ls/src/config/openapi.
+Copy of the Apache 2.0 license can be found in `LICENSES/Apache-2.0.txt` file.
+
+OpenAPI Specification 3.0.x
+Copyright The Linux Foundation
+Fragments of the specification text are embedded in packages/apidom-ls/src/config/openapi.
+Copy of the Apache 2.0 license can be found in `LICENSES/Apache-2.0.txt` file.
+
+OpenAPI Specification 3.1.x
+Copyright The Linux Foundation
+Fragments of the specification text are embedded in packages/apidom-ls/src/config/openapi.
+Copy of the Apache 2.0 license can be found in `LICENSES/Apache-2.0.txt` file.
+
+AsyncAPI Specification 2.x / AsyncAPI Initiative
+Copyright The Linux Foundation
+Fragments of the specification text are embedded in packages/apidom-ls/src/config/asyncapi.
+Copy of the Apache 2.0 license can be found in `LICENSES/Apache-2.0.txt` file.
+
+JSON Schema Specification (Draft 4/5 -> 2020-12)
+Copyright (c) 2022 JSON Schema Specification Authors
+Fragments of the specification text are embedded in packages/apidom-ls/src/config/common.
+Copy of the BSD 3-Clause "New" or "Revised" License can be found in `LICENSES/BSD-3-Clause.txt` file.
+Copy of the Academic Free License v3.0 can be found in `LICENSES/AFL-3.0.txt` file.
+
+---
+
+If the SPDX-FileCopyrightText and SPDX-License-Identifier tags are not present in the file,
+it is assumed that these tags have following implicit value:
+
+SPDX-FileCopyrightText: Copyright 2020-2021 SmartBear Software Inc.
+SPDX-License-Identifier: Apache-2.0
+
+================================================================================
+@swagger-api/apidom-reference 1.15.0
+许可: Apache-2.0
+来源: Vite output chunk module
+
+
+上游材料: NOTICE
+出处: npm:@swagger-api/apidom-reference@1.15.0
+
+ApiDOM
+Copyright 2020 SmartBear Software Inc.
+ApiDOM is licensed under Apache 2.0 license.
+Copy of the Apache 2.0 license can be found in `LICENSES/Apache-2.0.txt` file.
+
+json-schema-ref-parser
+Copyright (c) 2015 James Messinger
+File packages/apidom-reference/src/util/url.ts (the file) was originally created under MIT license in https://github.com/APIDevTools/json-schema-ref-parser repository.
+The file has been copied into this project and modified. All modifications are licensed under Apache 2.0 License.
+Copy of the MIT license can be found in `LICENSES/MIT.txt` file.
+
+graphql-js
+Copyright (c) GraphQL Contributors
+File packages/apidom-ast/src/traversal/visitor.ts (the file) was originally created under MIT license in https://github.com/graphql/graphql-js repository.
+The file has been copied into this project and modified. All modifications are licensed under Apache 2.0 License.
+Copy of the MIT license can be found in `LICENSES/MIT.txt` file.
+
+babel-plugin-add-import-extension
+Copyright (c) 2019 Karl Prieb
+File scripts/babel-plugin-add-import-extension.cjs (the file) was originally created under MIT license in https://codeberg.org/karl/babel-plugin-add-import-extension.
+The file has been copied into this project and modified. All modifications are licensed under Apache 2.0 License.
+Copy of the MIT license can be found in `LICENSES/MIT.txt` file.
+
+refract-spec
+Copyright (c) 2015 refractproject
+Specific texts in README.md (the file) were originally created under MIT license in https://github.com/refractproject/refract-spec repository.
+Specific texts have been copied into this project and modified. All modifications are licensed under Apache 2.0 License.
+Copy of the MIT license can be found in `LICENSES/MIT.txt` file.
+
+api-elements
+Copyright (c) 2015 Apiary Inc.
+Specific texts in README.md (the file) were originally created under MIT license in https://github.com/refractproject/refract-spec repository.
+Specific texts have been copied into this project and modified. All modifications are licensed under Apache 2.0 License.
+Copy of the MIT license can be found in `LICENSES/MIT.txt` file.
+
+deepmerge
+Copyright (c) 2012 James Halliday, Josh Duff, and other contributors
+- File packages/apidom-core/src/deepmerge.ts contains algorithms that we originally created
+  in https://github.com/TehShrike/deepmerge/blob/master/index.js to handle deep merging of JavaScript Objects and Arrays.
+  These algorithms have been reverse engineered and adapted to support deep merging of ApiDOM structures.
+- File packages/apidom-core/test/deepmerge.ts contains tests and fixtures that were originally created
+  in https://github.com/TehShrike/deepmerge/blob/master/test/merge.js to test deep merging of JavaScript Objects and Arrays.
+  These tests have been adapted to support testing deep merging of ApiDOM structures.
+- File packages/apidom-core/README.md contains text fragments that were originally created
+  in https://github.com/TehShrike/deepmerge/blob/master/readme.md to document deepmerge library.
+  These text fragments have been amended to describe merging of ApiDOM structures.
+Copy of the MIT license can be found in `LICENSES/MIT.txt` file.
+All modifications are licensed under Apache 2.0 License.
+
+OpenAPI Specification 2.0
+Copyright The Linux Foundation
+Fragments of the specification text are embedded in packages/apidom-ls/src/config/openapi.
+Copy of the Apache 2.0 license can be found in `LICENSES/Apache-2.0.txt` file.
+
+OpenAPI Specification 3.0.x
+Copyright The Linux Foundation
+Fragments of the specification text are embedded in packages/apidom-ls/src/config/openapi.
+Copy of the Apache 2.0 license can be found in `LICENSES/Apache-2.0.txt` file.
+
+OpenAPI Specification 3.1.x
+Copyright The Linux Foundation
+Fragments of the specification text are embedded in packages/apidom-ls/src/config/openapi.
+Copy of the Apache 2.0 license can be found in `LICENSES/Apache-2.0.txt` file.
+
+AsyncAPI Specification 2.x / AsyncAPI Initiative
+Copyright The Linux Foundation
+Fragments of the specification text are embedded in packages/apidom-ls/src/config/asyncapi.
+Copy of the Apache 2.0 license can be found in `LICENSES/Apache-2.0.txt` file.
+
+JSON Schema Specification (Draft 4/5 -> 2020-12)
+Copyright (c) 2022 JSON Schema Specification Authors
+Fragments of the specification text are embedded in packages/apidom-ls/src/config/common.
+Copy of the BSD 3-Clause "New" or "Revised" License can be found in `LICENSES/BSD-3-Clause.txt` file.
+Copy of the Academic Free License v3.0 can be found in `LICENSES/AFL-3.0.txt` file.
+
+---
+
+If the SPDX-FileCopyrightText and SPDX-License-Identifier tags are not present in the file,
+it is assumed that these tags have following implicit value:
+
+SPDX-FileCopyrightText: Copyright 2020-2021 SmartBear Software Inc.
+SPDX-License-Identifier: Apache-2.0
 
 ================================================================================
 @swaggerexpert/cookie 2.0.2
@@ -1684,7 +1830,6 @@ https://datatracker.ietf.org/doc/html/rfc6901
 Majority of ABNF grammar (grammar.bnf) and certain texts within the README.md file
 are licensed under Simplified BSD License - https://spdx.org/licenses/BSD-2-Clause.html.
 
-
 ================================================================================
 @sxzz/popperjs-es 2.11.8
 许可: MIT
@@ -1777,13 +1922,13 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ================================================================================
-@vue/reactivity 3.5.44
+@vue/reactivity 3.5.46
 许可: MIT
 来源: Vite output chunk module
 
 
 上游材料: LICENSE
-出处: npm:@vue/reactivity@3.5.44
+出处: npm:@vue/reactivity@3.5.46
 
 The MIT License (MIT)
 
@@ -1808,13 +1953,13 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
 ================================================================================
-@vue/runtime-core 3.5.44
+@vue/runtime-core 3.5.46
 许可: MIT
 来源: Vite output chunk module
 
 
 上游材料: LICENSE
-出处: npm:@vue/runtime-core@3.5.44
+出处: npm:@vue/runtime-core@3.5.46
 
 The MIT License (MIT)
 
@@ -1839,13 +1984,13 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
 ================================================================================
-@vue/runtime-dom 3.5.44
+@vue/runtime-dom 3.5.46
 许可: MIT
 来源: Vite output chunk module
 
 
 上游材料: LICENSE
-出处: npm:@vue/runtime-dom@3.5.44
+出处: npm:@vue/runtime-dom@3.5.46
 
 The MIT License (MIT)
 
@@ -1870,13 +2015,13 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
 ================================================================================
-@vue/shared 3.5.44
+@vue/shared 3.5.46
 许可: MIT
 来源: Vite output chunk module
 
 
 上游材料: LICENSE
-出处: npm:@vue/shared@3.5.44
+出处: npm:@vue/shared@3.5.46
 
 The MIT License (MIT)
 
@@ -2081,13 +2226,13 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ================================================================================
-axios 1.20.0
+axios 1.21.1
 许可: MIT
 来源: Vite output chunk module
 
 
 上游材料: LICENSE
-出处: npm:axios@1.20.0
+出处: npm:axios@1.21.1
 
 # Copyright (c) 2014-present Matt Zabriskie & Collaborators
 
@@ -2096,6 +2241,39 @@ Permission is hereby granted, free of charge, to any person obtaining a copy of 
 The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+================================================================================
+balanced-match 4.0.4
+许可: MIT
+来源: Vite output chunk module
+
+
+上游材料: LICENSE.md
+出处: npm:balanced-match@4.0.4
+
+(MIT)
+
+Original code Copyright Julian Gruber <julian@juliangruber.com>
+
+Port to TypeScript Copyright Isaac Z. Schlueter <i@izs.me>
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 
 ================================================================================
 base64-js 1.5.1
@@ -2129,12 +2307,45 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
 ================================================================================
+brace-expansion 5.1.0
+许可: MIT
+来源: Vite output chunk module
+
+
+上游材料: LICENSE
+出处: npm:brace-expansion@5.1.0
+
+MIT License
+
+Copyright Julian Gruber <julian@juliangruber.com>
+
+TypeScript port Copyright Isaac Z. Schlueter <i@izs.me>
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+================================================================================
 buffer 6.0.3
 许可: MIT
-来源: Swagger UI 5.33.2 embedded source, exact sourcemap/tarball match
+来源: Vite output chunk module
 
 
-上游材料: package/LICENSE
+上游材料: LICENSE
 出处: npm:buffer@6.0.3
 
 The MIT License (MIT)
@@ -2162,10 +2373,10 @@ THE SOFTWARE.
 ================================================================================
 buffer 6.0.3
 许可: MIT
-来源: Vite output chunk module
+来源: Swagger UI 5.36.0 embedded source, exact sourcemap/tarball match
 
 
-上游材料: LICENSE
+上游材料: package/LICENSE
 出处: npm:buffer@6.0.3
 
 The MIT License (MIT)
@@ -2439,7 +2650,7 @@ SOFTWARE.
 ================================================================================
 deep-extend 0.6.0
 许可: MIT
-来源: Swagger UI 5.33.2 embedded source, exact sourcemap/tarball match
+来源: Swagger UI 5.36.0 embedded source, exact sourcemap/tarball match
 
 
 上游材料: package/LICENSE
@@ -3453,37 +3664,6 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ================================================================================
-es-define-property 1.0.0
-许可: MIT
-来源: Vite output chunk module
-
-
-上游材料: LICENSE
-出处: npm:es-define-property@1.0.0
-
-MIT License
-
-Copyright (c) 2024 Jordan Harband
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
-================================================================================
 es-define-property 1.0.1
 许可: MIT
 来源: Vite output chunk module
@@ -3579,7 +3759,7 @@ SOFTWARE.
 ================================================================================
 events 3.3.0
 许可: MIT
-来源: Swagger UI 5.33.2 embedded source, exact sourcemap/tarball match
+来源: Swagger UI 5.36.0 embedded source, exact sourcemap/tarball match
 
 
 上游材料: package/LICENSE
@@ -3703,7 +3883,6 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-
 ================================================================================
 format 0.2.2
 许可: MIT
@@ -3762,38 +3941,6 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
-
-================================================================================
-get-intrinsic 1.2.4
-许可: MIT
-来源: Vite output chunk module
-
-
-上游材料: LICENSE
-出处: npm:get-intrinsic@1.2.4
-
-MIT License
-
-Copyright (c) 2020 Jordan Harband
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
 ================================================================================
 get-intrinsic 1.3.0
 许可: MIT
@@ -3837,37 +3984,6 @@ get-proto 1.0.1
 MIT License
 
 Copyright (c) 2025 Jordan Harband
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
-================================================================================
-gopd 1.0.1
-许可: MIT
-来源: Vite output chunk module
-
-
-上游材料: LICENSE
-出处: npm:gopd@1.0.1
-
-MIT License
-
-Copyright (c) 2022 Jordan Harband
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -3950,68 +4066,6 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ================================================================================
-has-proto 1.0.3
-许可: MIT
-来源: Vite output chunk module
-
-
-上游材料: LICENSE
-出处: npm:has-proto@1.0.3
-
-MIT License
-
-Copyright (c) 2022 Inspect JS
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
-================================================================================
-has-symbols 1.0.3
-许可: MIT
-来源: Vite output chunk module
-
-
-上游材料: LICENSE
-出处: npm:has-symbols@1.0.3
-
-MIT License
-
-Copyright (c) 2016 Jordan Harband
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
-================================================================================
 has-symbols 1.1.0
 许可: MIT
 来源: Vite output chunk module
@@ -4054,37 +4108,6 @@ has-tostringtag 1.0.2
 MIT License
 
 Copyright (c) 2021 Inspect JS
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
-================================================================================
-hasown 2.0.2
-许可: MIT
-来源: Vite output chunk module
-
-
-上游材料: LICENSE
-出处: npm:hasown@2.0.2
-
-MIT License
-
-Copyright (c) Jordan Harband and contributors
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -4229,7 +4252,7 @@ SOFTWARE.
 ================================================================================
 inherits 2.0.4
 许可: ISC
-来源: Swagger UI 5.33.2 embedded source, exact sourcemap/tarball match
+来源: Swagger UI 5.36.0 embedded source, exact sourcemap/tarball match
 
 
 上游材料: package/LICENSE
@@ -4250,7 +4273,6 @@ INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM
 LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR
 OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
 PERFORMANCE OF THIS SOFTWARE.
-
 
 ================================================================================
 is-callable 1.2.7
@@ -4283,7 +4305,6 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-
 ================================================================================
 is-typed-array 1.1.15
 许可: MIT
@@ -4314,7 +4335,6 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
 
 ================================================================================
 isarray 2.0.5
@@ -4657,6 +4677,71 @@ FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
 COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
 IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+================================================================================
+minimatch 11.0.9
+许可: BlueOak-1.0.0
+来源: Vite output chunk module
+
+
+上游材料: LICENSE.md
+出处: npm:minimatch@11.0.9
+
+# Blue Oak Model License
+
+Version 1.0.0
+
+## Purpose
+
+This license gives everyone as much permission to work with
+this software as possible, while protecting contributors
+from liability.
+
+## Acceptance
+
+In order to receive this license, you must agree to its
+rules. The rules of this license are both obligations
+under that agreement and conditions to your license.
+You must not do anything with this software that triggers
+a rule that you cannot or will not follow.
+
+## Copyright
+
+Each contributor licenses you to do everything with this
+software that would otherwise infringe that contributor's
+copyright in it.
+
+## Notices
+
+You must ensure that everyone who gets a copy of
+any part of this software from you, with or without
+changes, also gets the text of this license or a link to
+<https://blueoakcouncil.org/license/1.0.0>.
+
+## Excuse
+
+If anyone notifies you in writing that you have not
+complied with [Notices](#notices), you can keep your
+license by taking all practical steps to comply within 30
+days after the notice. If you do not do so, your license
+ends immediately.
+
+## Patent
+
+Each contributor licenses you to do everything with this
+software that would otherwise infringe any patent claims
+they can license or become able to license.
+
+## Reliability
+
+No contributor can revoke this license.
+
+## No Liability
+
+**_As far as the law allows, this software comes as is,
+without any warranty or condition, and no contributor
+will be liable to anyone for any damages related to this
+software or this license, under any kind of legal claim._**
 
 ================================================================================
 neotraverse 1.0.1
@@ -5247,7 +5332,7 @@ SOFTWARE.
 ================================================================================
 process 0.11.10
 许可: MIT
-来源: Swagger UI 5.33.2 embedded source, exact sourcemap/tarball match
+来源: Swagger UI 5.36.0 embedded source, exact sourcemap/tarball match
 
 
 上游材料: package/LICENSE
@@ -5337,7 +5422,6 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
 
 ================================================================================
 ramda 0.30.1
@@ -5439,7 +5523,7 @@ THE SOFTWARE.
 ================================================================================
 randombytes 2.1.0
 许可: MIT
-来源: Swagger UI 5.33.2 embedded source, exact sourcemap/tarball match
+来源: Swagger UI 5.36.0 embedded source, exact sourcemap/tarball match
 
 
 上游材料: package/LICENSE
@@ -5529,7 +5613,6 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-
 ================================================================================
 react-debounce-input 3.3.0
 许可: MIT
@@ -5560,7 +5643,6 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
 
 ================================================================================
 react-dom 18.3.1
@@ -5623,7 +5705,6 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
 
 ================================================================================
 react-immutable-pure-component 2.2.2
@@ -5721,7 +5802,7 @@ SOFTWARE.
 ================================================================================
 readable-stream 3.6.2
 许可: MIT
-来源: Swagger UI 5.33.2 embedded source, exact sourcemap/tarball match
+来源: Swagger UI 5.36.0 embedded source, exact sourcemap/tarball match
 
 
 上游材料: package/LICENSE
@@ -5900,7 +5981,6 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-
 ================================================================================
 reselect 5.1.1
 许可: MIT
@@ -5966,10 +6046,10 @@ THE SOFTWARE.
 ================================================================================
 safe-buffer 5.2.1
 许可: MIT
-来源: Swagger UI 5.33.2 embedded source, exact sourcemap/tarball match
+来源: Vite output chunk module
 
 
-上游材料: package/LICENSE
+上游材料: LICENSE
 出处: npm:safe-buffer@5.2.1
 
 The MIT License (MIT)
@@ -5997,10 +6077,10 @@ THE SOFTWARE.
 ================================================================================
 safe-buffer 5.2.1
 许可: MIT
-来源: Vite output chunk module
+来源: Swagger UI 5.36.0 embedded source, exact sourcemap/tarball match
 
 
-上游材料: LICENSE
+上游材料: package/LICENSE
 出处: npm:safe-buffer@5.2.1
 
 The MIT License (MIT)
@@ -6109,7 +6189,7 @@ SOFTWARE.
 ================================================================================
 sha.js 2.4.12
 许可: (MIT AND BSD-3-Clause)
-来源: Swagger UI 5.33.2 embedded source, exact sourcemap/tarball match
+来源: Swagger UI 5.36.0 embedded source, exact sourcemap/tarball match
 
 
 上游材料: package/LICENSE
@@ -6163,7 +6243,6 @@ LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
 ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
 
 ================================================================================
 short-unique-id 5.3.2
@@ -6400,11 +6479,10 @@ https://github.com/jeanlescure/short-unique-id/#contributors-
    amoro-format-mixed/amoro-mixed-flink/amoro-mixed-flink-common/src/main/java/org/apache/amoro/flink/util/Projection.java
    from Apache Flink(https://github.com/apache/flink/) version 1.18.1
 
-
 ================================================================================
 stream-browserify 3.0.0
 许可: MIT
-来源: Swagger UI 5.33.2 embedded source, exact sourcemap/tarball match
+来源: Swagger UI 5.36.0 embedded source, exact sourcemap/tarball match
 
 
 上游材料: package/LICENSE
@@ -6434,7 +6512,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ================================================================================
 string_decoder 1.3.0
 许可: MIT
-来源: Swagger UI 5.33.2 embedded source, exact sourcemap/tarball match
+来源: Swagger UI 5.36.0 embedded source, exact sourcemap/tarball match
 
 
 上游材料: package/LICENSE
@@ -6488,16 +6566,14 @@ FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
 IN THE SOFTWARE.
 """
 
-
 ================================================================================
-swagger-client 3.38.2
+swagger-client 3.39.0
 许可: Apache-2.0
 来源: Vite output chunk module
 
 
 上游材料: LICENSE
-出处: npm:swagger-client@3.38.2
-
+出处: npm:swagger-client@3.39.0
 
                                  Apache License
                            Version 2.0, January 2004
@@ -6703,20 +6779,19 @@ swagger-client 3.38.2
 
 
 上游材料: NOTICE
-出处: npm:swagger-client@3.38.2
+出处: npm:swagger-client@3.39.0
 
 swagger-client
 Copyright 2020-2021 SmartBear Software Inc.
 
 ================================================================================
-swagger-ui 5.33.2
+swagger-ui 5.36.0
 许可: Apache-2.0
 来源: Vite output chunk module
 
 
 上游材料: LICENSE
-出处: npm:swagger-ui@5.33.2
-
+出处: npm:swagger-ui@5.36.0
 
                                  Apache License
                            Version 2.0, January 2004
@@ -6922,7 +6997,7 @@ swagger-ui 5.33.2
 
 
 上游材料: NOTICE
-出处: npm:swagger-ui@5.33.2
+出处: npm:swagger-ui@5.36.0
 
 swagger-ui
 Copyright 2020-2021 SmartBear Software Inc.
@@ -7128,7 +7203,6 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-
 ================================================================================
 use-sync-external-store 1.6.0
 许可: MIT
@@ -7163,7 +7237,7 @@ SOFTWARE.
 ================================================================================
 util-deprecate 1.0.2
 许可: MIT
-来源: Swagger UI 5.33.2 embedded source, exact sourcemap/tarball match
+来源: Swagger UI 5.36.0 embedded source, exact sourcemap/tarball match
 
 
 上游材料: package/LICENSE
@@ -7195,13 +7269,13 @@ FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
 OTHER DEALINGS IN THE SOFTWARE.
 
 ================================================================================
-vue-i18n 11.4.14
+vue-i18n 11.4.24
 许可: MIT
 来源: Vite output chunk module
 
 
 上游材料: LICENSE
-出处: npm:vue-i18n@11.4.14
+出处: npm:vue-i18n@11.4.24
 
 The MIT License (MIT)
 
@@ -7225,13 +7299,13 @@ IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ================================================================================
-vue-router 5.4.0
+vue-router 5.5.3
 许可: MIT
 来源: Vite output chunk module
 
 
 上游材料: LICENSE
-出处: npm:vue-router@5.4.0
+出处: npm:vue-router@5.5.3
 
 The MIT License (MIT)
 
@@ -7286,11 +7360,10 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-
 ================================================================================
 xml 1.0.1
 许可: MIT
-来源: Swagger UI 5.33.2 embedded source, exact sourcemap/tarball match
+来源: Swagger UI 5.36.0 embedded source, exact sourcemap/tarball match
 
 
 上游材料: package/LICENSE
@@ -7383,7 +7456,6 @@ ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
 OTHER DEALINGS IN THE SOFTWARE.
 
 For more information, please refer to <http://unlicense.org>
-
 
 ================================================================================
 zrender 6.1.0

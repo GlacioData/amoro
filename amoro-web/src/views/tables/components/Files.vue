@@ -21,6 +21,7 @@ import { CircleClose, Search } from '@element-plus/icons-vue'
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute } from 'vue-router'
+import { applyPartitionSearch } from './table-subviews-state'
 import DashboardPagination from '@/components/DashboardPagination.vue'
 import { tableColumnProps } from '@/utils/table'
 import { usePagination } from '@/hooks/usePagination'
@@ -73,7 +74,9 @@ const sourceData = reactive({
 const searchKey = ref<string>('')
 
 async function handleSearch(val: string) {
-  searchKey.value = val
+  const next = applyPartitionSearch(val)
+  searchKey.value = next.searchKey
+  pagination.current = next.current
   await getTableInfo()
 }
 
@@ -301,10 +304,6 @@ onMounted(() => {
 
   :deep(.el-table .cell) {
     padding-inline: 8px;
-  }
-
-  :deep(.el-input-group__append) {
-    display: none;
   }
 }
 </style>

@@ -185,7 +185,7 @@ onMounted(() => {
         <el-button type="primary" :loading="loading" class="btn g-mr-12" @click="onConfirm">
           {{ $t('ok') }}
         </el-button>
-        <el-button type="ghost" class="btn" @click="cancel">
+        <el-button class="btn" @click="cancel">
           {{ $t('cancel') }}
         </el-button>
       </div>

@@ -56,22 +56,6 @@ export function getOptimizerResourceList(
   return request.get(`api/ams/v1/optimize/optimizerGroups/${optimizerGroup}/optimizers`, { params: { page, pageSize } })
 }
 
-export function getQueueResourceInfo(
-  optimizerGroup: string,
-) {
-  return request.get(`api/ams/v1/optimize/optimizerGroups/${optimizerGroup}/info`)
-}
-
-export function scaleoutResource(
-  params: {
-    optimizerGroup: string
-    parallelism: number
-  },
-) {
-  const { optimizerGroup, parallelism } = params
-  return request.post(`api/ams/v1/optimize/optimizerGroups/${optimizerGroup}/optimizers`, { parallelism })
-}
-
 export function createOptimizerResource(
   params: {
     optimizerGroup: string

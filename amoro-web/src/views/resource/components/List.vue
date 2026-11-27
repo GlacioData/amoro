@@ -19,6 +19,7 @@ limitations under the License.
 <script lang="ts" setup>
 import { computed, onMounted, reactive, ref, shallowReactive } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { clampPage, paginateItems } from '../resource-state'
 import DashboardPagination from '@/components/DashboardPagination.vue'
 import { tableColumnProps } from '@/utils/table'
 import { confirmAction, message, warnAction } from '@/utils/ui-feedback'
@@ -77,7 +78,9 @@ const columns = computed(() => {
 })
 
 const dataSource = computed(() => {
-  return props.type === 'optimizers' ? optimizersList : groupList
+  return props.type === 'optimizers'
+    ? optimizersList
+    : paginateItems(groupList, pagination.current, pagination.pageSize)
 })
 
 function refresh(resetPage?: boolean) {
@@ -98,9 +101,7 @@ function releaseModal(record: any) {
   }
   confirmAction({
     title: t('releaseOptModalTitle'),
-    onOk: () => {
-      releaseJob(record)
-    },
+    onOk: () => releaseJob(record),
   })
 }
 async function releaseJob(record: IOptimizeResourceTableItem) {
@@ -150,13 +151,15 @@ async function getResourceGroupsList() {
     groupList.length = 0
     loading.value = true
     const result = await getResourceGroupsListAPI()
-    pagination.total = result.length;
-    (result || []).forEach((p: IIOptimizeGroupItem) => {
+    const list = result || []
+    pagination.total = list.length
+    list.forEach((p: IIOptimizeGroupItem) => {
       p.name = p.resourceGroup.name
       p.container = p.resourceGroup.container
       p.resourceOccupation = `${p.occupationCore} ${t('core')} ${mbToSize(p.occupationMemory)}`
       groupList.push(p)
     })
+    pagination.current = clampPage(pagination.current, groupList.length, pagination.pageSize)
   }
   catch (error) {
   }
@@ -188,10 +191,14 @@ async function removeGroup(record: IIOptimizeGroupItem) {
 }
 
 function changeTable({ current = pagination.current, pageSize = pagination.pageSize }) {
-  pagination.current = current
   const resetPage = pageSize !== pagination.pageSize
   pagination.pageSize = pageSize
-  refresh(resetPage)
+  if (props.type === 'optimizers') {
+    pagination.current = current
+    refresh(resetPage)
+    return
+  }
+  pagination.current = resetPage ? 1 : clampPage(current, groupList.length, pageSize)
 }
 
 onMounted(() => {
@@ -201,7 +208,7 @@ onMounted(() => {
 
 <template>
   <div class="list-wrap">
-    <el-table v-loading="loading" class="dashboard-table" :data="dataSource">
+    <el-table v-loading="loading" class="dashboard-table" :data="dataSource" scrollbar-always-on>
       <el-table-column v-for="column in columns" :key="column.dataIndex" v-bind="tableColumnProps(column, columns)">
         <template v-if="column.dataIndex === 'durationDisplay' || column.dataIndex === 'operation' || column.dataIndex === 'operationGroup' || column.dataIndex === 'optimizeStatus'" #default="{ row: record }">
           <template v-if="column.dataIndex === 'durationDisplay'">

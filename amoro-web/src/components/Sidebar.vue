@@ -21,7 +21,6 @@ import { Expand, Fold } from '@element-plus/icons-vue'
 import { computed, defineComponent, nextTick, reactive, ref, toRefs, watchEffect } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
-import useStore from '@/store/index'
 import { getQueryString } from '@/utils'
 import { useMediaQuery } from '@/hooks/useMediaQuery'
 import {
@@ -45,7 +44,6 @@ export default defineComponent({
     const { t } = useI18n()
     const router = useRouter()
     const route = useRoute()
-    const store = useStore()
 
     const state = reactive({
       selectedKeys: [] as string[],
@@ -65,7 +63,7 @@ export default defineComponent({
         {
           key: 'tables',
           title: t('tables'),
-          icon: 'TableOutlined',
+          icon: 'tables',
         },
       ]
       const allMenu: MenuItem[] = [
@@ -202,7 +200,6 @@ export default defineComponent({
       menuList,
       toggleCollapsed,
       navClick,
-      store,
       viewOverview,
     }
   },
@@ -220,7 +217,7 @@ export default defineComponent({
       :collapse="collapsed"
       :collapse-transition="false"
     >
-      <el-menu-item v-for="item in menuList" :key="item.key" :index="item.key" :aria-label="item.title" :class="{ 'active-color': (store.isShowTablesMenu && item.key === 'tables'), 'table-item-tab': item.key === 'tables' }" @click="navClick(item)">
+      <el-menu-item v-for="item in menuList" :key="item.key" :index="item.key" :aria-label="item.title" :class="{ 'table-item-tab': item.key === 'tables' }" @click="navClick(item)">
         <svg-icon :icon-class="item.icon" class="svg-icon" />
         <template #title>
           <span class="menu-title">{{ item.title }}</span>
@@ -256,16 +253,11 @@ export default defineComponent({
         .el-menu-item {
           width: 100%;
         }
-        .logo {
-          padding-left: 14px;
-        }
-        .toggle-btn {
-          position: absolute;
-          right: -68px;
-          top: 8px;
-          font-size: 18px;
-          padding: 0 24px;
-        }
+      }
+    }
+    &.side-bar-collapsed {
+      .logo {
+        padding-inline: 20px;
       }
     }
     :deep(.el-menu-item) {
@@ -281,10 +273,6 @@ export default defineComponent({
         background-color: @primary-color;
         color: #fff;
       }
-      &.active-color {
-        color: #fff;
-        background-color: @dark-bg-color;
-      }
       &:hover {
         color: #fff;
       }
@@ -293,11 +281,10 @@ export default defineComponent({
       }
     }
     .logo {
-      padding: 12px 0 12px 16px;
+      padding: 12px 20px;
       overflow: hidden;
       background-color: #001529;
       cursor: pointer;
-      padding: 12px 20px;
     }
     .logo-img {
       width: 24px;
@@ -310,10 +297,10 @@ export default defineComponent({
     .toggle-btn {
       position: absolute;
       z-index: 1;
-      right: -68px;
+      right: -48px;
       top: 8px;
       font-size: 18px;
-      padding: 0 24px;
+      padding: 0 14px;
     }
     .svg-icon {
       font-size: 16px;
@@ -323,16 +310,5 @@ export default defineComponent({
     .side-bar :deep(.el-menu.el-menu--collapse) { width: 52px; --el-menu-item-height: 44px; }
     .side-bar .logo { padding-inline: 14px; }
     .side-bar :deep(.el-menu--collapse .el-menu-item) { padding-left: 16px !important; }
-  }
-  .tables-menu-wrap {
-    position: absolute;
-    top: 0;
-    left: 200px;
-    right: 0;
-    bottom: 0;
-    z-index: 1100;
-    &.collapsed-sub-menu {
-      left: 64px;
-    }
   }
 </style>

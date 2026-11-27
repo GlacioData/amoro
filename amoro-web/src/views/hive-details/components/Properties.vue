@@ -153,7 +153,7 @@ onMounted(() => {
           :prop="['data', index, 'key']"
           :rules="[{
             required: true,
-            message: `${$t(placeholder.selectPh)}`,
+            message: `${placeholder.selectPh}`,
           }]"
           class="g-mr-8"
         >
@@ -173,7 +173,7 @@ onMounted(() => {
           :prop="['data', index, 'value']"
           :rules="[{
             required: true,
-            message: `${$t(placeholder.inputPh)}`,
+            message: `${placeholder.inputPh}`,
           }]"
         >
           <el-input
@@ -191,13 +191,14 @@ onMounted(() => {
   </div>
 </template>
 
-<style lang="less">
+<style lang="less" scoped>
   .config-properties {
     width: 100%;
     display: flex;
     flex-direction: column;
     line-height: 32px;
     .config-header {
+      box-sizing: border-box;
       width: 100%;
       padding-right: 32px;
       background: #fafafa;
@@ -225,23 +226,22 @@ onMounted(() => {
       }
     }
     .config-row {
+      box-sizing: border-box;
       gap: 10px;
       display: flex;
-      // height: 40px;
       position: relative;
       padding-right: 32px;
       width: 100%;
-      .el-form-item {
-        width: 50%;
+      align-items: center;
+      :deep(.el-form-item) {
+        flex: 1;
+        min-width: 0;
       }
-      .el-autocomplete {
-        width: 50%;
+      :deep(.el-autocomplete) {
+        width: 100%;
         input {
           color: #79809a;
         }
-      }
-      .el-input__inner {
-        width: 50%;
       }
       .icon-close {
         cursor: pointer;

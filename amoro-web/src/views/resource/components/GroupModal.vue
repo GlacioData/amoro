@@ -19,6 +19,7 @@ limitations under the License.
 <script lang="ts" setup>
 import { onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { buildGroupSubmitPayload, runExclusiveSubmit } from '../resource-state'
 import { message } from '@/utils/ui-feedback'
 import { usePlaceholder } from '@/hooks/usePlaceholder'
 import type { IIOptimizeGroupItem } from '@/types/common.type'
@@ -71,28 +72,42 @@ function handleCancel() {
 
 const formRef = ref()
 const propertiesRef = ref()
-function handleOk() {
-  formRef.value.validate().then(async () => {
-    try {
+async function handleOk() {
+  await runExclusiveSubmit(
+    () => confirmLoading.value,
+    (busy) => { confirmLoading.value = busy },
+    async () => {
+      try {
+        await formRef.value.validate()
+      }
+      catch {
+        return
+      }
+
       const properties = await propertiesRef.value.getProperties()
-      const params = {
+      const params = buildGroupSubmitPayload({
         name: formState.name,
         container: formState.container as string,
         properties,
+      })
+      if (!params)
+        return
+
+      try {
+        if (props.edit) {
+          await updateResourceGroupsAPI(params)
+        }
+        else {
+          await addResourceGroupsAPI(params)
+        }
+        message.success(`${t('save')} ${t('success')}`)
+        emit('refresh')
       }
-      if (props.edit) {
-        await updateResourceGroupsAPI(params)
+      catch {
+        message.error(`${t('save')} ${t('failed')}`)
       }
-      else {
-        await addResourceGroupsAPI(params)
-      }
-      message.success(`${t('save')} ${t('success')}`)
-      emit('refresh')
-    }
-    catch (error) {
-      message.error(`${t('save')} ${t('failed')}`)
-    }
-  })
+    },
+  )
 }
 
 onMounted(() => {
