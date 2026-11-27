@@ -47,14 +47,23 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.TreeMap;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Shares native manifest caches by catalog context for Optimizer primary-key restore scans only.
  */
 final class PaimonPrimaryKeyManifestCache {
+  private static final int MAX_SHARED_CACHES = 16;
+  private static final long SHARED_CACHE_IDLE_EXPIRE_MINUTES = 30L;
   private static final Cache<String, SharedCache> CACHES =
-      Caffeine.newBuilder().softValues().executor(Runnable::run).build();
+      Caffeine.newBuilder()
+          .maximumSize(MAX_SHARED_CACHES)
+          .expireAfterAccess(SHARED_CACHE_IDLE_EXPIRE_MINUTES, TimeUnit.MINUTES)
+          .softValues()
+          .executor(Runnable::run)
+          .build();
   private static final Semaphore CACHE_LOADER = new Semaphore(1);
 
   private PaimonPrimaryKeyManifestCache() {}
@@ -149,7 +158,7 @@ final class PaimonPrimaryKeyManifestCache {
   /** Loads synchronously in native workers and retains the permit until actual loading finishes. */
   private static final class LoadingCache extends ReadOnlyCache {
     private final ScanLease lease;
-    private final Map<String, Long> fileSizes = new HashMap<>();
+    private final Map<String, Long> fileSizes = new ConcurrentHashMap<>();
 
     private LoadingCache(ScanLease lease, SegmentsCache<Path> delegate) {
       super(delegate);

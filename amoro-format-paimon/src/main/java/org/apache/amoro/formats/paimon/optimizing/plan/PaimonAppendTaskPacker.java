@@ -148,7 +148,7 @@ final class PaimonAppendTaskPacker {
         // Paimon 1.4.2 packs dozens of data files' DVs into one 2MB index file; an indivisible
         // dvGroup exceeding the per-task target limit must run as its own standalone task without
         // merging into or clearing reserved regular partners in MajorFullBin:
-        // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/deletionvectors/append/AppendDeleteFileMaintainer.java#L315-L348
+        // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/deletionvectors/append/AppendDeleteFileMaintainer.java#L127-L168
         addTask(tasks, evaluation, unit.files());
         continue;
       }

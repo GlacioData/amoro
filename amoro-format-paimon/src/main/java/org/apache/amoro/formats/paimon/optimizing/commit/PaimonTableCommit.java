@@ -287,11 +287,12 @@ public class PaimonTableCommit implements TableOptimizingCommitter {
     if (table.bucketMode() != org.apache.paimon.table.BucketMode.BUCKET_UNAWARE) {
       return;
     }
-    // Paimon 1.4.2 IndexManifestFileHandler.GlobalCombiner fails with IllegalStateException if two
-    // CommitMessages in the same batch delete the same unaware DV index file:
-    // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/index/IndexManifestFileHandler.java#L535-L548
-    java.util.Map<org.apache.paimon.data.BinaryRow, java.util.Set<String>> deletedByPartition =
-        new java.util.HashMap<>();
+    // Paimon 1.4.2 IndexManifestFileHandler.GlobalCombiner and ConflictDetection combine unaware
+    // index entries globally by fileName and fail with IllegalStateException if two CommitMessages
+    // in the same batch delete the same DV index file:
+    // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/manifest/IndexManifestFileHandler.java#L117-L165
+    // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/operation/commit/ConflictDetection.java#L525-L586
+    java.util.Set<String> seenDeletedIndexFiles = new java.util.HashSet<>();
     for (CommitMessage message : messages) {
       if (!(message instanceof org.apache.paimon.table.sink.CommitMessageImpl)) {
         continue;
@@ -303,11 +304,8 @@ public class PaimonTableCommit implements TableOptimizingCommitter {
       if (deleted.isEmpty()) {
         continue;
       }
-      java.util.Set<String> seen =
-          deletedByPartition.computeIfAbsent(
-              nativeMessage.partition().copy(), ignored -> new java.util.HashSet<>());
       for (org.apache.paimon.index.IndexFileMeta indexFile : deleted) {
-        if (!seen.add(indexFile.fileName())) {
+        if (!seenDeletedIndexFiles.add(indexFile.fileName())) {
           throw new OptimizingCommitException(
               "Duplicate deleted deletion-vector index file '"
                   + indexFile.fileName()

@@ -1053,4 +1053,112 @@ class TestPaimonPrimaryKeyOptimizingPlanner {
       assertEquals(result.getTargetSnapshotId(), task.getInput().getTargetSnapshotId());
     }
   }
+
+  @Test
+  @DisplayName("DATE partition path honors CoreOptions.legacyPartitionName across planners")
+  void datePartitionPathHonorsLegacyPartitionNameAcrossPlanners(@TempDir Path warehouse)
+      throws Exception {
+    Catalog catalog = fsCatalog(warehouse);
+    catalog.createDatabase("db1", true);
+    int day = 18985; // 2021-12-24
+
+    // 1. Default partition.legacy-name=true -> "dt=18985/" on both PK and Append planners
+    Identifier pkLegacy = Identifier.create("db1", "t_pk_date_legacy");
+    catalog.createTable(
+        pkLegacy,
+        Schema.newBuilder()
+            .column("dt", DataTypes.DATE())
+            .column("id", DataTypes.INT())
+            .column("v", DataTypes.STRING())
+            .partitionKeys("dt")
+            .primaryKey("dt", "id")
+            .option("bucket", "1")
+            .option("write-only", "true")
+            .option(PaimonOptimizingEligibility.SELF_OPTIMIZING_ENABLED, "true")
+            .option("num-sorted-run.compaction-trigger", "2")
+            .build(),
+        false);
+    for (int i = 0; i < 2; i++) {
+      Table t = catalog.getTable(pkLegacy);
+      org.apache.paimon.table.sink.StreamWriteBuilder wb = t.newStreamWriteBuilder();
+      try (org.apache.paimon.table.sink.StreamTableWrite w = wb.newWrite();
+          org.apache.paimon.table.sink.StreamTableCommit c = wb.newCommit()) {
+        w.write(GenericRow.of(day, i, BinaryString.fromString("v" + i)));
+        c.commit(i, w.prepareCommit(true, i));
+      }
+    }
+    OptimizingPlanResult<PaimonPrimaryKeyCompactionTask> pkLegacyPlan =
+        planner(catalog, pkLegacy, defaultConfig()).plan();
+    assertEquals(1, pkLegacyPlan.getTasks().size());
+    assertEquals("dt=18985/ [bucket=0]", pkLegacyPlan.getTasks().get(0).getPartition());
+
+    Identifier appendLegacy = Identifier.create("db1", "t_append_date_legacy");
+    catalog.createTable(
+        appendLegacy,
+        Schema.newBuilder()
+            .column("dt", DataTypes.DATE())
+            .column("id", DataTypes.INT())
+            .partitionKeys("dt")
+            .option("bucket", "-1")
+            .option("write-only", "true")
+            .option(PaimonOptimizingEligibility.SELF_OPTIMIZING_ENABLED, "true")
+            .build(),
+        false);
+    for (int i = 0; i < 2; i++) {
+      Table t = catalog.getTable(appendLegacy);
+      org.apache.paimon.table.sink.StreamWriteBuilder wb = t.newStreamWriteBuilder();
+      try (org.apache.paimon.table.sink.StreamTableWrite w = wb.newWrite();
+          org.apache.paimon.table.sink.StreamTableCommit c = wb.newCommit()) {
+        w.write(GenericRow.of(day, i));
+        c.commit(i, w.prepareCommit(true, i));
+      }
+    }
+    PaimonOptimizingPlanner appendPlanner =
+        new PaimonOptimizingPlanner(
+            wrap(catalog.getTable(appendLegacy), "t_append_date_legacy"),
+            100L,
+            8L,
+            4.0,
+            64L * 1024 * 1024,
+            defaultConfig(),
+            0L,
+            0L,
+            0L,
+            null);
+    OptimizingPlanResult<org.apache.amoro.formats.paimon.optimizing.PaimonCompactionTask>
+        appendLegacyPlan = appendPlanner.plan();
+    assertEquals(1, appendLegacyPlan.getTasks().size());
+    assertEquals("dt=18985/", appendLegacyPlan.getTasks().get(0).getPartition());
+
+    // 2. Explicit partition.legacy-name=false -> "dt=2021-12-24/"
+    Identifier pkIso = Identifier.create("db1", "t_pk_date_iso");
+    catalog.createTable(
+        pkIso,
+        Schema.newBuilder()
+            .column("dt", DataTypes.DATE())
+            .column("id", DataTypes.INT())
+            .column("v", DataTypes.STRING())
+            .partitionKeys("dt")
+            .primaryKey("dt", "id")
+            .option("bucket", "1")
+            .option("write-only", "true")
+            .option("partition.legacy-name", "false")
+            .option(PaimonOptimizingEligibility.SELF_OPTIMIZING_ENABLED, "true")
+            .option("num-sorted-run.compaction-trigger", "2")
+            .build(),
+        false);
+    for (int i = 0; i < 2; i++) {
+      Table t = catalog.getTable(pkIso);
+      org.apache.paimon.table.sink.StreamWriteBuilder wb = t.newStreamWriteBuilder();
+      try (org.apache.paimon.table.sink.StreamTableWrite w = wb.newWrite();
+          org.apache.paimon.table.sink.StreamTableCommit c = wb.newCommit()) {
+        w.write(GenericRow.of(day, i, BinaryString.fromString("v" + i)));
+        c.commit(i, w.prepareCommit(true, i));
+      }
+    }
+    OptimizingPlanResult<PaimonPrimaryKeyCompactionTask> pkIsoPlan =
+        planner(catalog, pkIso, defaultConfig()).plan();
+    assertEquals(1, pkIsoPlan.getTasks().size());
+    assertEquals("dt=2021-12-24/ [bucket=0]", pkIsoPlan.getTasks().get(0).getPartition());
+  }
 }

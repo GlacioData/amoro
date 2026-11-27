@@ -530,4 +530,94 @@ class TestPaimonPrimaryKeyManifestCache {
       return super.newInputStream(path);
     }
   }
+
+  @Test
+  void loadingCacheFileSizesUsesConcurrentMapAndStaticCacheBoundsEvictOldContexts(@TempDir Path dir)
+      throws Exception {
+    try (Fixture fixture = new Fixture(dir, 2)) {
+      PaimonTable wrapper = fixture.taskTable(Collections.emptyMap());
+      FileStoreTable table = (FileStoreTable) wrapper.originalTable();
+      try (PaimonPrimaryKeyManifestCache.ScanLease lease =
+          PaimonPrimaryKeyManifestCache.acquire(wrapper, table)) {
+        java.lang.reflect.Field lcField =
+            PaimonPrimaryKeyManifestCache.ScanLease.class.getDeclaredField("loadingCache");
+        lcField.setAccessible(true);
+        Object loadingCache = lcField.get(lease);
+        org.junit.jupiter.api.Assertions.assertNotNull(
+            loadingCache, "First lease must hold the LoadingCache instance");
+        java.lang.reflect.Field fileSizesField =
+            loadingCache.getClass().getDeclaredField("fileSizes");
+        fileSizesField.setAccessible(true);
+        Object fileSizes = fileSizesField.get(loadingCache);
+        assertTrue(
+            fileSizes instanceof java.util.concurrent.ConcurrentMap,
+            "LoadingCache.fileSizes must be a ConcurrentMap to avoid data races with ManifestReadThreadPool");
+
+        // Exercise concurrent readFiles() + worker getIfPresents() lookups without race errors.
+        Snapshot latest = fixture.raw.latestSnapshot().get();
+        org.apache.paimon.utils.SegmentsCache<org.apache.paimon.fs.Path> cacheRef =
+            (org.apache.paimon.utils.SegmentsCache<org.apache.paimon.fs.Path>) loadingCache;
+        org.apache.paimon.fs.Path probePath =
+            new org.apache.paimon.fs.Path(
+                fixture.raw.location(), "manifest/" + fixture.manifests().get(0).fileName());
+        ExecutorService workers = Executors.newFixedThreadPool(4);
+        try {
+          List<Future<?>> futures = new ArrayList<>();
+          for (int t = 0; t < 3; t++) {
+            futures.add(
+                workers.submit(
+                    () -> {
+                      for (int i = 0; i < 40; i++) {
+                        cacheRef.getIfPresents(probePath);
+                      }
+                      return null;
+                    }));
+          }
+          for (int i = 0; i < 20; i++) {
+            java.util.Iterator<ManifestEntry> it = lease.readFiles(latest, BinaryRow.EMPTY_ROW, 0);
+            while (it.hasNext()) {
+              it.next();
+            }
+          }
+          for (Future<?> f : futures) {
+            f.get(10, TimeUnit.SECONDS);
+          }
+        } finally {
+          workers.shutdownNow();
+          assertTrue(workers.awaitTermination(10, TimeUnit.SECONDS));
+        }
+      }
+
+      // Create 24 distinct rotating-FileIO contexts; CACHES must bound retention to <= 16 entries.
+      for (int i = 0; i < 24; i++) {
+        CountingFileIO rotatingIo = new CountingFileIO();
+        FileStoreTable rotatingTable =
+            new PrimaryKeyFileStoreTable(
+                rotatingIo,
+                fixture.raw.location(),
+                fixture.raw.schema(),
+                CatalogEnvironment.empty());
+        PaimonTable rotatingWrapper =
+            new PaimonTable(
+                TableIdentifier.of("rotating-" + i, "db", "t"),
+                rotatingTable,
+                Collections.singletonMap("token-gen", String.valueOf(i)));
+        try (PaimonPrimaryKeyManifestCache.ScanLease ignored =
+            PaimonPrimaryKeyManifestCache.acquire(rotatingWrapper, rotatingTable)) {
+          org.junit.jupiter.api.Assertions.assertNotNull(ignored.scan());
+        }
+      }
+      java.lang.reflect.Field cachesField =
+          PaimonPrimaryKeyManifestCache.class.getDeclaredField("CACHES");
+      cachesField.setAccessible(true);
+      org.apache.paimon.shade.caffeine2.com.github.benmanes.caffeine.cache.Cache<?, ?> caches =
+          (org.apache.paimon.shade.caffeine2.com.github.benmanes.caffeine.cache.Cache<?, ?>)
+              cachesField.get(null);
+      caches.cleanUp();
+      assertTrue(
+          caches.estimatedSize() <= 16L,
+          "Static CACHES must bound retained contexts to maximumSize(16), actual="
+              + caches.estimatedSize());
+    }
+  }
 }
