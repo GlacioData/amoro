@@ -374,6 +374,7 @@ class TestPaimonPrimaryKeyTableCommit {
     TableCommitImpl directCommit = mock(TableCommitImpl.class);
     List<CommitMessage> messages = Collections.singletonList(mock(CommitMessage.class));
     when(sourceTable.copy(anyMap())).thenReturn(commitTable);
+    when(sourceTable.copyWithoutTimeTravel(anyMap())).thenReturn(commitTable);
     when(commitTable.name()).thenReturn("direct-primary-key-table");
     when(commitTable.newCommit("direct-user")).thenReturn(directCommit);
 
@@ -396,6 +397,7 @@ class TestPaimonPrimaryKeyTableCommit {
     List<CommitMessage> messages = Collections.singletonList(mock(CommitMessage.class));
     RuntimeException directFailure = new RuntimeException("direct-failure");
     when(sourceTable.copy(anyMap())).thenReturn(commitTable);
+    when(sourceTable.copyWithoutTimeTravel(anyMap())).thenReturn(commitTable);
     when(commitTable.name()).thenReturn("fallback-primary-key-table");
     when(commitTable.newCommit("fallback-user")).thenReturn(directCommit, fallbackCommit);
     doThrow(directFailure).when(directCommit).commit(202L, messages);
@@ -422,6 +424,7 @@ class TestPaimonPrimaryKeyTableCommit {
     TableCommitImpl replayCommit = mock(TableCommitImpl.class);
     List<CommitMessage> messages = Collections.singletonList(mock(CommitMessage.class));
     when(sourceTable.copy(anyMap())).thenReturn(commitTable);
+    when(sourceTable.copyWithoutTimeTravel(anyMap())).thenReturn(commitTable);
     when(commitTable.name()).thenReturn("replay-primary-key-table");
     when(commitTable.newCommit("replay-user")).thenReturn(replayCommit);
     when(replayCommit.filterAndCommit(Collections.singletonMap(203L, messages))).thenReturn(0);
@@ -445,6 +448,7 @@ class TestPaimonPrimaryKeyTableCommit {
     List<CommitMessage> messages = Collections.singletonList(mock(CommitMessage.class));
     Exception closeFailure = new Exception("direct-close-failure");
     when(sourceTable.copy(anyMap())).thenReturn(commitTable);
+    when(sourceTable.copyWithoutTimeTravel(anyMap())).thenReturn(commitTable);
     when(commitTable.name()).thenReturn("close-failure-primary-key-table");
     when(commitTable.newCommit("close-failure-user")).thenReturn(directCommit, fallbackCommit);
     doThrow(closeFailure).when(directCommit).close();
@@ -467,6 +471,7 @@ class TestPaimonPrimaryKeyTableCommit {
     List<CommitMessage> messages = Collections.singletonList(mock(CommitMessage.class));
     AssertionError directError = new AssertionError("direct-error");
     when(sourceTable.copy(anyMap())).thenReturn(commitTable);
+    when(sourceTable.copyWithoutTimeTravel(anyMap())).thenReturn(commitTable);
     when(commitTable.name()).thenReturn("error-primary-key-table");
     when(commitTable.newCommit("error-user")).thenReturn(directCommit);
     doThrow(directError).when(directCommit).commit(207L, messages);
@@ -490,6 +495,7 @@ class TestPaimonPrimaryKeyTableCommit {
     TableCommitImpl replayCommit = mock(TableCommitImpl.class);
     List<CommitMessage> messages = Collections.singletonList(mock(CommitMessage.class));
     when(sourceTable.copy(anyMap())).thenReturn(commitTable);
+    when(sourceTable.copyWithoutTimeTravel(anyMap())).thenReturn(commitTable);
     when(commitTable.name()).thenReturn("invalid-count-primary-key-table");
     when(commitTable.newCommit("invalid-count-user")).thenReturn(replayCommit);
     when(replayCommit.filterAndCommit(Collections.singletonMap(204L, messages))).thenReturn(-1);
@@ -517,6 +523,7 @@ class TestPaimonPrimaryKeyTableCommit {
     RuntimeException directFailure = new RuntimeException("direct-failure");
     RuntimeException fallbackFailure = new RuntimeException("fallback-failure");
     when(sourceTable.copy(anyMap())).thenReturn(commitTable);
+    when(sourceTable.copyWithoutTimeTravel(anyMap())).thenReturn(commitTable);
     when(commitTable.name()).thenReturn("dual-failure-primary-key-table");
     when(commitTable.newCommit("dual-failure-user")).thenReturn(directCommit, fallbackCommit);
     doThrow(directFailure).when(directCommit).commit(205L, messages);
@@ -533,6 +540,85 @@ class TestPaimonPrimaryKeyTableCommit {
     assertSame(fallbackFailure, failure.getCause());
     assertEquals(1, failure.getSuppressed().length);
     assertSame(directFailure, failure.getSuppressed()[0]);
+  }
+
+  @Test
+  @DisplayName(
+      "constructor avoids time-travel snapshot I/O and commitMessages executes inside doAs")
+  void constructorAvoidsTimeTravelSnapshotIoAndCommitMessagesRunsInDoAs(@TempDir Path warehouse)
+      throws Exception {
+    try (Catalog catalog = fsCatalog(warehouse)) {
+      Map<String, String> options = primaryKeyOptions();
+      options.put("scan.tag-name", "missing-tag");
+      Identifier id = createPrimaryKeyTable(catalog, "t_commit_no_time_travel", options);
+      FileStoreTable realTable = (FileStoreTable) catalog.getTable(id);
+      FileStoreTable spyTable = org.mockito.Mockito.spy(realTable);
+      AtomicBoolean insideDoAs = new AtomicBoolean(false);
+      org.apache.amoro.table.TableMetaStore metaStore =
+          mock(org.apache.amoro.table.TableMetaStore.class);
+      when(metaStore.doAs(any(Callable.class)))
+          .thenAnswer(
+              invocation -> {
+                Callable<?> callable = invocation.getArgument(0);
+                boolean previous = insideDoAs.getAndSet(true);
+                try {
+                  return callable.call();
+                } finally {
+                  insideDoAs.set(previous);
+                }
+              });
+      org.mockito.Mockito.doAnswer(
+              invocation -> {
+                assertTrue(insideDoAs.get(), "snapshotManager must not be accessed outside doAs");
+                return invocation.callRealMethod();
+              })
+          .when(spyTable)
+          .snapshotManager();
+      org.mockito.Mockito.doAnswer(
+              invocation -> {
+                assertTrue(insideDoAs.get(), "tagManager must not be accessed outside doAs");
+                return invocation.callRealMethod();
+              })
+          .when(spyTable)
+          .tagManager();
+
+      PaimonTable wrapper =
+          new PaimonTable(
+              TableIdentifier.of("test_catalog", "db1", "t_commit_no_time_travel"),
+              spyTable,
+              Collections.emptyMap(),
+              metaStore);
+      PaimonPrimaryKeyTableCommit committer =
+          new PaimonPrimaryKeyTableCommit(wrapper, spyTable, Collections.emptyList());
+      verify(spyTable).copyWithoutTimeTravel(anyMap());
+      verify(spyTable, never()).copy(anyMap());
+
+      AtomicBoolean commitRanInsideDoAs = new AtomicBoolean(false);
+      FileStoreTable mockSource = mock(FileStoreTable.class);
+      FileStoreTable mockCommitTable = mock(FileStoreTable.class);
+      TableCommitImpl directCommit = mock(TableCommitImpl.class);
+      when(mockSource.copyWithoutTimeTravel(anyMap())).thenReturn(mockCommitTable);
+      when(mockCommitTable.name()).thenReturn("doas-commit-table");
+      when(mockCommitTable.newCommit("doas-user"))
+          .thenAnswer(
+              invocation -> {
+                commitRanInsideDoAs.set(insideDoAs.get());
+                return directCommit;
+              });
+      PaimonTable mockWrapper =
+          new PaimonTable(
+              TableIdentifier.of("test_catalog", "db1", "doas-commit-table"),
+              mockSource,
+              Collections.emptyMap(),
+              metaStore);
+      new PaimonPrimaryKeyTableCommit(mockWrapper, mockSource, Collections.emptyList())
+          .commitMessages(
+              Collections.singletonList(mock(CommitMessage.class)),
+              "doas-user",
+              301L,
+              CommitMode.NORMAL);
+      assertTrue(commitRanInsideDoAs.get(), "commitMessages must run inside paimonTable.doAs");
+    }
   }
 
   @Test
@@ -882,6 +968,7 @@ class TestPaimonPrimaryKeyTableCommit {
       FileStoreTable real = (FileStoreTable) catalog.getTable(id);
       FileStoreTable guarded = org.mockito.Mockito.spy(real);
       when(guarded.copy(anyMap())).thenReturn(guarded);
+      when(guarded.copyWithoutTimeTravel(anyMap())).thenReturn(guarded);
       TableCommitImpl direct = mock(TableCommitImpl.class);
       org.mockito.Mockito.doAnswer(
               call -> {
@@ -933,6 +1020,7 @@ class TestPaimonPrimaryKeyTableCommit {
   private static FileStoreTable mockCommitTable() {
     FileStoreTable table = mock(FileStoreTable.class);
     when(table.copy(anyMap())).thenReturn(table);
+    when(table.copyWithoutTimeTravel(anyMap())).thenReturn(table);
     return table;
   }
 

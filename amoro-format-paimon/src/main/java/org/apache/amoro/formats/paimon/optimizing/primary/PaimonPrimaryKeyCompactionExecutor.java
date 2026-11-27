@@ -111,9 +111,14 @@ public class PaimonPrimaryKeyCompactionExecutor
     // paimon-core/src/main/java/org/apache/paimon/mergetree/compact/MergeTreeCompactManagerFactory.java
     // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/mergetree/compact/MergeTreeCompactManagerFactory.java#L190-L224
     // See compactionWriteOverrides for native null-removal semantics; preserve original table
-    // options and the explicit FULL argument.
+    // options and the explicit FULL argument. Use copyWithoutTimeTravel so scan.* options never
+    // roll the refreshed schema back to an older snapshot schema via tryTimeTravel.
+    // Source:
+    // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/table/AbstractFileStoreTable.java#L328-L379
+    // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/table/AbstractFileStoreTable.java#L511-L524
     FileStoreTable compactTable =
-        refreshed.copy(PaimonPrimaryKeyOptions.compactionWriteOverrides(table.options()));
+        refreshed.copyWithoutTimeTravel(
+            PaimonPrimaryKeyOptions.compactionWriteOverrides(table.options()));
     try (IOManager ioManager = IOManager.create(System.getProperty("java.io.tmpdir"));
         BatchTableWrite write =
             compactTable.newBatchWriteBuilder().newWrite().withIOManager(ioManager)) {

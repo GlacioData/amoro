@@ -98,12 +98,16 @@ public class PaimonPrimaryKeyTableCommit implements TableOptimizingCommitter {
     this.paimonTable = paimonTable;
     // This copy only publishes prepared messages. Keep compaction enabled on the executor copy.
     // Paimon 1.4.2 skips snapshot/changelog, tag, partition and consumer maintenance when
-    // write-only.
+    // write-only. Use copyWithoutTimeTravel so constructor option overrides never perform
+    // unauthenticated snapshot/tag I/O outside paimonTable.doAs.
+    // Source:
+    // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/table/AbstractFileStoreTable.java#L328-L379
     // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/table/AbstractFileStoreTable.java#L469-L508
     this.table =
         table == null
             ? null
-            : table.copy(Collections.singletonMap(CoreOptions.WRITE_ONLY.key(), "true"));
+            : table.copyWithoutTimeTravel(
+                Collections.singletonMap(CoreOptions.WRITE_ONLY.key(), "true"));
     this.successTasks = successTasks;
   }
 
@@ -709,7 +713,23 @@ public class PaimonPrimaryKeyTableCommit implements TableOptimizingCommitter {
     observation.user = commitUser;
     observation.identifier = commitIdentifier;
     observation.messageCount = messages.size();
-    commitMessages(messages, commitUser, commitIdentifier, mode, null, observation);
+    if (paimonTable == null) {
+      commitMessages(messages, commitUser, commitIdentifier, mode, null, observation);
+      return;
+    }
+    try {
+      paimonTable.doAs(
+          () -> {
+            commitMessages(messages, commitUser, commitIdentifier, mode, null, observation);
+            return null;
+          });
+    } catch (RuntimeException e) {
+      if (e.getCause() instanceof OptimizingCommitException) {
+        throw (OptimizingCommitException) e.getCause();
+      }
+      throw new OptimizingCommitException(
+          "Paimon primary-key commit failed for table=" + name(), e);
+    }
   }
 
   private void commitMessages(
