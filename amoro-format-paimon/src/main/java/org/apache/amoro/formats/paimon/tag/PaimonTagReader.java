@@ -38,11 +38,13 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
+import java.util.Optional;
 import java.util.SortedMap;
 import java.util.stream.Collectors;
 
 /** Native Tag reads and observation projection. */
 public final class PaimonTagReader {
+  private static final int MAX_PAGE_ATTEMPTS = 3;
   private static final long JSON_SAFE_INTEGER = 9007199254740991L;
 
   private PaimonTagReader() {}
@@ -52,33 +54,39 @@ public final class PaimonTagReader {
     int offset = query.offset();
     validateScope(query.getScope());
     TagManager manager = manager(table);
-    List<String> names =
-        manager.tagPaths(path -> true).stream()
-            .map(path -> path.getName().substring("tag-".length()))
-            .filter(name -> query.getKeyword() == null || name.contains(query.getKeyword()))
-            .sorted()
-            .collect(Collectors.toList());
-    // Concurrent auto-tag expiration may remove tag files between tagPaths() listing and Tag JSON
-    // loading; materialize the surviving (name, Tag) list first just like Paimon 1.4.2
-    // TagManager#tagObjects (TagManager.java#L406-L431) so both page offset slicing and total
-    // count operate on the exact same live tag set while projecting views only for the active page.
-    // https://github.com/apache/paimon/blob/ac223f47d916f4c8e9c07fd1745db448e4e7d0d8/paimon-core/src/main/java/org/apache/paimon/utils/TagManager.java#L406-L431
-    List<Pair<String, Tag>> surviving = new ArrayList<>(names.size());
-    for (String name : names) {
-      java.util.Optional<Tag> tag = manager.get(name);
-      if (tag.isPresent()) {
-        surviving.add(Pair.of(name, tag.get()));
+    List<String> names = listMatchingNames(manager, query.getKeyword());
+    for (int attempt = 0; attempt < MAX_PAGE_ATTEMPTS; attempt++) {
+      int start = Math.min(offset, names.size());
+      int end = (int) Math.min((long) start + query.getPageSize(), names.size());
+      List<TableTagInfo> rows = new ArrayList<>(end - start);
+      for (int i = start; i < end; i++) {
+        String name = names.get(i);
+        Optional<Tag> tag = manager.get(name);
+        if (!tag.isPresent()) {
+          break;
+        }
+        rows.add(view(owner, table, name, tag.get()));
       }
+
+      // Recheck membership even when the page loaded successfully. Expiration outside the page
+      // can shift its offset or change the total without invalidating any of its tag JSON files.
+      List<String> currentNames = listMatchingNames(manager, query.getKeyword());
+      if (rows.size() == end - start && names.equals(currentNames)) {
+        return Pair.of(rows, (long) names.size());
+      }
+      names = currentNames;
     }
-    int start = Math.min(Math.max(0, offset), surviving.size());
-    int end =
-        (int) Math.min((long) surviving.size(), (long) start + Math.max(0, query.getPageSize()));
-    List<TableTagInfo> rows = new ArrayList<>(end - start);
-    for (int i = start; i < end; i++) {
-      Pair<String, Tag> entry = surviving.get(i);
-      rows.add(view(owner, table, entry.getLeft(), entry.getRight()));
-    }
-    return Pair.of(rows, (long) surviving.size());
+    throw new TagOperationException(
+        409, "CAPABILITY_CHANGED", "NOT_APPLIED", "Tag list changed; refresh the page");
+  }
+
+  private static List<String> listMatchingNames(TagManager manager, String keyword)
+      throws java.io.IOException {
+    return manager.tagPaths(path -> true).stream()
+        .map(path -> path.getName().substring("tag-".length()))
+        .filter(name -> keyword == null || name.contains(keyword))
+        .sorted()
+        .collect(Collectors.toList());
   }
 
   public static List<TagOrBranchInfo> legacy(FileStoreTable table) {

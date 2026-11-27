@@ -23,6 +23,8 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -44,11 +46,15 @@ import org.apache.amoro.table.tag.TagRetentionRequest;
 import org.apache.amoro.table.tag.TagScope;
 import org.apache.amoro.table.tag.UpdateTagRetentionRequest;
 import org.apache.amoro.utils.CatalogUtil;
+import org.apache.commons.lang3.tuple.Pair;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.data.GenericRow;
 import org.apache.paimon.data.InternalRow;
+import org.apache.paimon.fs.FileIO;
+import org.apache.paimon.fs.FileStatus;
+import org.apache.paimon.fs.Path;
 import org.apache.paimon.reader.RecordReaderIterator;
 import org.apache.paimon.schema.Schema;
 import org.apache.paimon.schema.SchemaChange;
@@ -63,9 +69,14 @@ import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Collectors;
 
 class TestPaimonTagOperations {
   @TempDir java.nio.file.Path warehouse;
@@ -761,56 +772,103 @@ class TestPaimonTagOperations {
   }
 
   @Test
-  void tagPaginationSkipsConcurrentlyExpiredTagsAndAdjustsSurvivingTotal() throws Exception {
+  void unreadableTagOutsidePageDoesNotBreakHealthyPage() throws Exception {
     try (Catalog catalog = catalog()) {
       PaimonTable owner = table(catalog);
-      FileStoreTable realTable = (FileStoreTable) owner.originalTable();
-      long id = commit(realTable, 1);
-      TableTagOperations ops = owner.tagOperations().get();
-      ops.createTag(create(ops, "tag-a", id));
-      ops.createTag(create(ops, "tag-b", id));
-      ops.createTag(create(ops, "tag-c", id));
-      ops.createTag(create(ops, "tag-d", id));
-      ops.createTag(create(ops, "tag-e", id));
+      FileStoreTable nativeTable = (FileStoreTable) owner.originalTable();
+      long snapshotId = commit(nativeTable, 1);
+      TableTagOperations operations = owner.tagOperations().get();
+      operations.createTag(create(operations, "tag-a", snapshotId));
+      nativeTable.fileIO().overwriteFileUtf8(nativeTable.tagManager().tagPath("tag-z"), "{invalid");
 
-      // Simulate both a pre-window tag (tag-a) and a post-window tag (tag-e) expiring concurrently
-      // right after tagPaths() lists all 5 tag files; surviving set is [tag-b, tag-c, tag-d].
-      java.util.List<org.apache.paimon.fs.FileStatus> fullSnapshotListing =
-          java.util.Arrays.asList(
-              realTable.fileIO().listStatus(realTable.tagManager().tagDirectory()));
-      realTable.fileIO().deleteQuietly(realTable.tagManager().tagPath("tag-a"));
-      realTable.fileIO().deleteQuietly(realTable.tagManager().tagPath("tag-e"));
-      org.apache.paimon.fs.FileIO spiedIo = spy(realTable.fileIO());
-      org.mockito.Mockito.doReturn(
-              fullSnapshotListing.toArray(new org.apache.paimon.fs.FileStatus[0]))
-          .when(spiedIo)
-          .listStatus(realTable.tagManager().tagDirectory());
-      FileStoreTable spiedTable = spy(realTable);
-      org.mockito.Mockito.doReturn(spiedIo).when(spiedTable).fileIO();
+      TagQuery query = new TagQuery();
+      query.setPageSize(1);
+      Pair<List<TableTagInfo>, Long> page = new PaimonTableDescriptor().getTableTags(owner, query);
+      assertEquals(2L, page.getRight());
+      assertEquals("tag-a", page.getLeft().get(0).getName());
+    }
+  }
 
-      TagQuery page1 = new TagQuery();
-      page1.setPage(1);
-      page1.setPageSize(2);
-      org.apache.commons.lang3.tuple.Pair<java.util.List<TableTagInfo>, Long> firstPage =
-          PaimonTagReader.page(owner, spiedTable, page1);
-      assertEquals(3L, firstPage.getRight());
-      assertEquals(
-          java.util.Arrays.asList("tag-b", "tag-c"),
-          firstPage.getLeft().stream()
-              .map(TableTagInfo::getName)
-              .collect(java.util.stream.Collectors.toList()));
+  @ParameterizedTest
+  @CsvSource({"1", "2"})
+  void tagPaginationSkipsConcurrentlyExpiredTagsAndAdjustsSurvivingTotal(int firstRequestedPage)
+      throws Exception {
+    try (Catalog catalog = catalog()) {
+      PaimonTable owner = table(catalog);
+      FileStoreTable nativeTable = (FileStoreTable) owner.originalTable();
+      long snapshotId = commit(nativeTable, 1);
+      TableTagOperations operations = owner.tagOperations().get();
+      for (String name : Arrays.asList("tag-a", "tag-b", "tag-c", "tag-d", "tag-e")) {
+        operations.createTag(create(operations, name, snapshotId));
+      }
 
-      TagQuery page2 = new TagQuery();
-      page2.setPage(2);
-      page2.setPageSize(2);
-      org.apache.commons.lang3.tuple.Pair<java.util.List<TableTagInfo>, Long> secondPage =
-          PaimonTagReader.page(owner, spiedTable, page2);
-      assertEquals(3L, secondPage.getRight());
-      assertEquals(
-          java.util.Collections.singletonList("tag-d"),
-          secondPage.getLeft().stream()
-              .map(TableTagInfo::getName)
-              .collect(java.util.stream.Collectors.toList()));
+      FileIO fileIO = spy(nativeTable.fileIO());
+      Path tagDirectory = nativeTable.tagManager().tagDirectory();
+      AtomicBoolean firstListing = new AtomicBoolean(true);
+      doAnswer(
+              invocation -> {
+                FileStatus[] listing = (FileStatus[]) invocation.callRealMethod();
+                if (firstListing.getAndSet(false)) {
+                  nativeTable.fileIO().delete(nativeTable.tagManager().tagPath("tag-a"), false);
+                  nativeTable.fileIO().delete(nativeTable.tagManager().tagPath("tag-e"), false);
+                }
+                return listing;
+              })
+          .when(fileIO)
+          .listStatus(tagDirectory);
+      FileStoreTable tableWithExpiration = spy(nativeTable);
+      doReturn(fileIO).when(tableWithExpiration).fileIO();
+
+      for (int pageNumber : new int[] {firstRequestedPage, 3 - firstRequestedPage}) {
+        TagQuery query = new TagQuery();
+        query.setPage(pageNumber);
+        query.setPageSize(2);
+        Pair<List<TableTagInfo>, Long> page =
+            PaimonTagReader.page(owner, tableWithExpiration, query);
+        assertEquals(3L, page.getRight());
+        assertEquals(
+            pageNumber == 1 ? Arrays.asList("tag-b", "tag-c") : Collections.singletonList("tag-d"),
+            page.getLeft().stream().map(TableTagInfo::getName).collect(Collectors.toList()));
+      }
+    }
+  }
+
+  @Test
+  void continuouslyChangingTagMembershipReturnsConflictAfterBoundedRetries() throws Exception {
+    try (Catalog catalog = catalog()) {
+      PaimonTable owner = table(catalog);
+      FileStoreTable nativeTable = (FileStoreTable) owner.originalTable();
+      long snapshotId = commit(nativeTable, 1);
+      TableTagOperations operations = owner.tagOperations().get();
+      operations.createTag(create(operations, "tag-a", snapshotId));
+      operations.createTag(create(operations, "tag-b", snapshotId));
+
+      FileIO fileIO = spy(nativeTable.fileIO());
+      Path tagDirectory = nativeTable.tagManager().tagDirectory();
+      FileStatus[] allTags = nativeTable.fileIO().listStatus(tagDirectory);
+      FileStatus[] firstTag =
+          new FileStatus[] {
+            nativeTable.fileIO().getFileStatus(nativeTable.tagManager().tagPath("tag-a"))
+          };
+      AtomicInteger listings = new AtomicInteger();
+      doAnswer(
+              invocation -> {
+                int listing = listings.incrementAndGet();
+                assertTrue(listing <= 4, "Pagination must stop after repeated membership changes");
+                return listing % 2 == 0 ? firstTag : allTags;
+              })
+          .when(fileIO)
+          .listStatus(tagDirectory);
+      FileStoreTable changingTable = spy(nativeTable);
+      doReturn(fileIO).when(changingTable).fileIO();
+      TagQuery query = new TagQuery();
+      query.setPageSize(1);
+
+      TagOperationException conflict =
+          assertThrows(
+              TagOperationException.class, () -> PaimonTagReader.page(owner, changingTable, query));
+      assertEquals(409, conflict.getStatus());
+      assertEquals("NOT_APPLIED", conflict.getOutcome());
     }
   }
 }
