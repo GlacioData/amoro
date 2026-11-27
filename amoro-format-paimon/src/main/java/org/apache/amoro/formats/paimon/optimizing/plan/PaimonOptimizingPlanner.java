@@ -707,7 +707,7 @@ public class PaimonOptimizingPlanner implements TableOptimizingPlanner {
             options.partitionDefaultName(),
             partitionType,
             partitionType.getFieldNames().toArray(new String[0]),
-            false);
+            options.legacyPartitionName());
     return PartitionPathUtils.generatePartitionPath(
         partitionComputer.generatePartValues(partition));
   }

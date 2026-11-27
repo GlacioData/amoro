@@ -732,4 +732,79 @@ public class TestPaimonTableCommit {
         .thenReturn(CoreOptions.fromMap(Collections.singletonMap("bucket", "-1")));
     return table;
   }
+
+  @Test
+  @DisplayName(
+      "Pre-commit guard rejects duplicate deleted DV index files across different partitions")
+  void testRejectsDuplicateDeletedDvIndexAcrossDifferentPartitions(@TempDir Path warehouse)
+      throws Exception {
+    Catalog catalog = fsCatalog(warehouse);
+    catalog.createDatabase("db1", true);
+    Identifier id = Identifier.create("db1", "t_dup_dv_cross_partition");
+    catalog.createTable(
+        id,
+        Schema.newBuilder()
+            .column("dt", DataTypes.STRING())
+            .column("id", DataTypes.INT())
+            .partitionKeys("dt")
+            .option("bucket", "-1")
+            .option("deletion-vectors.enabled", "true")
+            .option("write-only", "true")
+            .option(PaimonOptimizingEligibility.SELF_OPTIMIZING_ENABLED, "true")
+            .build(),
+        true);
+    appendRows(catalog, id, GenericRow.of(BinaryString.fromString("p1"), 1));
+    appendRows(catalog, id, GenericRow.of(BinaryString.fromString("p2"), 2));
+    AppendOnlyFileStoreTable table = (AppendOnlyFileStoreTable) catalog.getTable(id);
+    long snapshotBefore = table.snapshotManager().latestSnapshot().id();
+
+    org.apache.paimon.index.IndexFileMeta sharedDeletedIndex =
+        new org.apache.paimon.index.IndexFileMeta(
+            org.apache.paimon.deletionvectors.DeletionVectorsIndexFile.DELETION_VECTORS_INDEX,
+            "index-cross-partition-dup",
+            64L,
+            1L,
+            new java.util.LinkedHashMap<>(),
+            null);
+    CommitMessageSerializer serializer = new CommitMessageSerializer();
+    List<PaimonCompactionTask> conflictingTasks = new ArrayList<>();
+    for (String part : Arrays.asList("p1", "p2")) {
+      CommitMessageImpl msg =
+          new CommitMessageImpl(
+              org.apache.paimon.data.BinaryRow.singleColumn(BinaryString.fromString(part)),
+              0,
+              -1,
+              org.apache.paimon.io.DataIncrement.emptyIncrement(),
+              new org.apache.paimon.io.CompactIncrement(
+                  Collections.emptyList(),
+                  Collections.emptyList(),
+                  Collections.emptyList(),
+                  Collections.emptyList(),
+                  Collections.singletonList(sharedDeletedIndex)));
+      PaimonCompactionOutput out =
+          new PaimonCompactionOutput(
+              serializer.serialize(msg), serializer.getVersion(), 0L, 0L, 0L, 0L);
+      ByteBuffer buf = SerializationUtil.simpleSerialize(out);
+      byte[] bytes = new byte[buf.remaining()];
+      buf.get(bytes);
+      PaimonCompactionTask task = new PaimonCompactionTask(1L, "dt=" + part, null, new HashMap<>());
+      task.setOutputBytes(bytes);
+      conflictingTasks.add(task);
+    }
+
+    OptimizingCommitException ex =
+        assertThrows(
+            OptimizingCommitException.class,
+            () ->
+                new PaimonTableCommit(table, conflictingTasks, "amoro-user", 89L)
+                    .commit(CommitMode.NORMAL));
+    assertTrue(
+        ex.getMessage().contains("Duplicate deleted deletion-vector index file")
+            && ex.getMessage().contains("index-cross-partition-dup"),
+        "Pre-commit guard must reject duplicate deleted index file globally before native commit: "
+            + ex.getMessage());
+    assertEquals(
+        snapshotBefore,
+        ((AppendOnlyFileStoreTable) catalog.getTable(id)).snapshotManager().latestSnapshot().id());
+  }
 }
